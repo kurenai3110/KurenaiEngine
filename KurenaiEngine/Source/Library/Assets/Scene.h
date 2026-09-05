@@ -620,7 +620,7 @@ namespace Kurenai::Assets
         // ([--- 水面 ---]セクション)の値をリテラルとして複製している(Source/Libraryは
         // Source/Engineに依存できないため、Defaults::を直接参照できない)。
         // シーン読み込み時にKurenaiEngine3D::m_WaterWaveScale等へコピーされ、以降はUIで
-        // 実行時上書きできる(m_ReflectionModeがScene.SSREnabledから初期化されるのと同じ設計)
+        // 実行時上書きできる(m_ReflectionSettings.ModeがScene.SSREnabledから初期化されるのと同じ設計)
         float WaterWaveScale = 12.0f;
         float WaterWaveSpeed = 0.03f;
         float WaterWaveStrength = 0.25f;

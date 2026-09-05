@@ -423,8 +423,8 @@ namespace Kurenai
             DirectX::XMFLOAT4 CloudParams2;
             // CloudParams3: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
             //               同じ周期でstd::fmod済み。m_CirrusScrollOffset参照)、
-            //               z=fBmのUV(U方向)を伸ばす異方性スケール(m_CirrusAnisotropy)、
-            //               w=積雲の種類の偏り(m_CloudTypeBias、C4)。C4より前は未使用だった枠なので
+            //               z=fBmのUV(U方向)を伸ばす異方性スケール(m_CloudSettings.CirrusAnisotropy)、
+            //               w=積雲の種類の偏り(m_CloudSettings.TypeBias、C4)。C4より前は未使用だった枠なので
             //               FrameConstantsは1バイトも増えていない
             DirectX::XMFLOAT4 CloudParams3;
             // 平面反射(さらに末尾に追加)。xyz=水面平面の法線(現状は常に(0,1,0))、
@@ -1286,7 +1286,7 @@ namespace Kurenai
             // xyz=太陽が「ある」向き(正規化済み。光が進む向きとは符号が逆)、w=未使用
             DirectX::XMFLOAT4 SunDirection;
             // x=目標照度[lx](SunLighting::SkyIlluminanceLux)、y=実効プリ露出(effectiveExposure)、
-            // z=タービディティ(m_SkyTurbidity)、w=空の彩度(m_SkySaturation)
+            // z=タービディティ(m_SkySettings.Turbidity)、w=空の彩度(m_SkySettings.Saturation)
             DirectX::XMFLOAT4 IntegrateParams;
 
             // --- 以下はP18の第2段(雲込みの空の照度)専用。**FrameConstantsの同名の枠と
@@ -1481,7 +1481,7 @@ namespace Kurenai
         }
 
         // SSAO.hlsl側のkSSAOKernelSizeMaxと一致させる必要がある。
-        // 定数バッファに確保する数であって、実際に回す段数(m_SSAOKernelSize)ではない
+        // 定数バッファに確保する数であって、実際に回す段数(m_AmbientOcclusionSettings.SSAOKernelSize)ではない
         constexpr uint32_t kSSAOKernelSizeMax = 16;
 
         struct alignas(16) SSAOConstants
@@ -1505,9 +1505,9 @@ namespace Kurenai
             // (手続き空が無効なシーンではDDSは任意の絵でPerezモデルとは無関係なため、
             // このトグルの値に関わらず必ず0にする)
             DirectX::XMFLOAT4 Params0; // x: 最大レイ距離, y: ヒット判定の厚み, z: ラフネスカットオフ, w: 水面の解析空フォールバック
-            // 平面反射(末尾に追加)。x: 平面反射が有効か(1=使う。m_PlanarReflectionEnabled &&
+            // 平面反射(末尾に追加)。x: 平面反射が有効か(1=使う。m_ReflectionSettings.PlanarEnabled &&
             // 水面インスタンスが存在するときのみ1)、y: 波の法線による画面UVのずらし量
-            // (m_PlanarReflectionDistortion)、zw: 未使用
+            // (m_ReflectionSettings.PlanarDistortion)、zw: 未使用
             DirectX::XMFLOAT4 Params1;
         };
 
@@ -2147,7 +2147,7 @@ namespace Kurenai
         // SSAO/SSIL/AOブラーのPSOは出力先(AO/GIバッファ)のフォーマットがバッファ精度に依存するため、
         // この関数の末尾でCreatePrecisionDependentPipelineStates()がまとめて作る
 
-        m_SSAOKernel = GenerateSSAOKernel(m_SSAOKernelSize);
+        m_SSAOKernel = GenerateSSAOKernel(m_AmbientOcclusionSettings.SSAOKernelSize);
 
         RHI::BufferDesc ssaoConstantBufferDesc;
         ssaoConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
@@ -2854,7 +2854,7 @@ namespace Kurenai
 
             // レイトレーシングが使える環境ではDDGIのレイ取得も既定でDXRにする。
             // 更新コストが下がり、カメラから遠いプローブにも影が落ちるようになるため
-            m_DDGIRayMode = DDGIRayModeForCapability(m_DDGIRaytracedTraceAvailable);
+            m_DDGISettings.RayMode = DDGISettings::DDGIRayModeForCapability(m_DDGIRaytracedTraceAvailable);
 
             Core::Logger::Info(
                 "KurenaiEngine3D",
@@ -3700,7 +3700,7 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunRaytracedReflection() const
     {
-        return m_ReflectionMode == ReflectionMode::Raytraced && m_RaytracingScene.IsValid() &&
+        return m_ReflectionSettings.Mode == ReflectionMode::Raytraced && m_RaytracingScene.IsValid() &&
                m_RTReflectionPipelineState != nullptr && m_RTReflectionTexture != nullptr;
     }
 
@@ -3712,19 +3712,19 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunMegaLights() const
     {
-        if (m_MegaLightsMode == MegaLightsMode::Off || !m_RaytracingScene.IsValid() || m_MegaLightsTexture == nullptr)
+        if (m_MegaLightsSettings.Mode == MegaLightsMode::Off || !m_RaytracingScene.IsValid() || m_MegaLightsTexture == nullptr)
         {
             return false;
         }
         // 手法ごとに必要なパイプラインが違う。確率的サンプリングもクアッド共有も
         // 候補プールと初期RIS(リザーバ)を共有し、そのあとの段だけが違う
-        if (m_MegaLightsMode == MegaLightsMode::Stochastic)
+        if (m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic)
         {
             return m_MegaLightsInitialPipelineState != nullptr && m_MegaLightsShadePipelineState != nullptr &&
                    m_MegaLightsTilePoolPipelineState != nullptr && m_MegaLightsTilePoolBuffer != nullptr &&
                    m_MegaLightsReservoirBuffer != nullptr;
         }
-        if (m_MegaLightsMode == MegaLightsMode::QuadShared)
+        if (m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared)
         {
             // Shade ではなく Resolve が色を書く。時間・空間再利用は使わないので、
             // 履歴バッファや空間再利用のping-pongが無くても走れる
@@ -3756,7 +3756,7 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunRaytracedAO() const
     {
-        return m_AOTechnique == AOTechnique::Raytraced && m_RaytracingScene.IsValid() &&
+        return m_AmbientOcclusionSettings.Technique == AOTechnique::Raytraced && m_RaytracingScene.IsValid() &&
                m_RTAOPipelineState != nullptr && m_RTAORawTexture != nullptr && m_RTAOTexture != nullptr;
     }
 
@@ -3887,11 +3887,11 @@ namespace Kurenai
         // 負の値は「既定のまま」。本数側と同じ約束にしてある
         else if (mode >= 0)
         {
-            m_MegaLightsMode = static_cast<MegaLightsMode>(mode);
+            m_MegaLightsSettings.Mode = static_cast<MegaLightsMode>(mode);
             Core::Logger::Info(
                 "KurenaiEngine3D", "MegaLightsの手法を番号で選択しました: " + std::to_string(mode));
 
-            if (m_MegaLightsMode != MegaLightsMode::Off && !m_RaytracingAvailable)
+            if (m_MegaLightsSettings.Mode != MegaLightsMode::Off && !m_RaytracingAvailable)
             {
                 // 黙って何も起きないと「効かないバグ」に見えるので、必ず理由を残す
                 Core::Logger::Warning(
@@ -3904,7 +3904,7 @@ namespace Kurenai
         // 負の値は「既定のまま」。0は恒等テストとして意味のある値なので弾かない
         if (shadowRayCount >= 0)
         {
-            m_MegaLightsShadowRayCount = shadowRayCount;
+            m_MegaLightsSettings.ShadowRayCount = shadowRayCount;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsの1灯あたりの影レイ本数を設定しました: " + std::to_string(shadowRayCount));
@@ -3913,7 +3913,7 @@ namespace Kurenai
         // RISのM。0以下は意味を成さないので1以上に丸める
         if (sampleCount > 0)
         {
-            m_MegaLightsSampleCount = sampleCount;
+            m_MegaLightsSettings.SampleCount = sampleCount;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsの初期候補数Mを設定しました: " + std::to_string(sampleCount));
@@ -3930,7 +3930,7 @@ namespace Kurenai
             return;
         }
 
-        m_MegaLightsAccumTargetFrames = frames;
+        m_MegaLightsSettings.AccumTargetFrames = frames;
         // 枚数を変えたら取り直す。途中まで足した状態に継ぎ足すと、
         // 「何サンプルの平均か」が分からなくなる
         m_MegaLightsAccumFrames = 0;
@@ -3942,34 +3942,34 @@ namespace Kurenai
     {
         if (enabled >= 0)
         {
-            m_MegaLightsSpatialEnabled = (enabled != 0);
+            m_MegaLightsSettings.SpatialEnabled = (enabled != 0);
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsの空間再利用を") + (m_MegaLightsSpatialEnabled ? "有効" : "無効") +
+                std::string("MegaLightsの空間再利用を") + (m_MegaLightsSettings.SpatialEnabled ? "有効" : "無効") +
                     "にしました");
         }
         // 0は「近傍を借りない」= 実質無効として意味があるので弾かない
         if (neighborCount >= 0)
         {
-            m_MegaLightsSpatialNeighborCount = neighborCount;
+            m_MegaLightsSettings.SpatialNeighborCount = neighborCount;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsの空間再利用で借りる近傍の数を設定しました: " + std::to_string(neighborCount));
         }
         if (radius > 0)
         {
-            m_MegaLightsSpatialRadius = radius;
+            m_MegaLightsSettings.SpatialRadius = radius;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsの空間再利用の半径を設定しました: " + std::to_string(radius));
         }
         if (useMIS >= 0)
         {
-            m_MegaLightsSpatialMIS = (useMIS != 0);
+            m_MegaLightsSettings.SpatialMIS = (useMIS != 0);
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 std::string("MegaLightsの空間再利用の結合を") +
-                    (m_MegaLightsSpatialMIS ? "生成化バランスヒューリスティック" : "confidence重み") +
+                    (m_MegaLightsSettings.SpatialMIS ? "生成化バランスヒューリスティック" : "confidence重み") +
                     "にしました");
         }
     }
@@ -4015,7 +4015,7 @@ namespace Kurenai
             Core::Logger::Error("KurenaiEngine3D", "SetAOTechnique: 不正な値です: " + std::to_string(technique));
             return;
         }
-        m_AOTechnique = static_cast<AOTechnique>(technique);
+        m_AmbientOcclusionSettings.Technique = static_cast<AOTechnique>(technique);
         Core::Logger::Info("KurenaiEngine3D", "AO手法を設定しました: " + std::to_string(technique));
     }
 
@@ -4027,7 +4027,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetDDGIHalfResolutionEnabled(bool enabled)
     {
-        m_DDGIHalfResolution = enabled;
+        m_DDGISettings.HalfResolution = enabled;
         Core::Logger::Info("KurenaiEngine3D", std::string("DDGI半解像度を設定しました: ") + (enabled ? "有効" : "無効"));
     }
 
@@ -4038,7 +4038,7 @@ namespace Kurenai
             Core::Logger::Error("KurenaiEngine3D", "SetProbeUpdateMode: 不正な値です: " + std::to_string(mode));
             return;
         }
-        m_ProbeUpdateMode = static_cast<ProbeUpdateMode>(mode);
+        m_ReflectionProbeSettings.UpdateMode = static_cast<ProbeUpdateMode>(mode);
         Core::Logger::Info("KurenaiEngine3D", "反射プローブ更新モードを設定しました: " + std::to_string(mode));
     }
 
@@ -4119,7 +4119,7 @@ namespace Kurenai
                 "MegaLightsの空間再利用の反復回数が上限を超えたため頭打ちにしました: " +
                     std::to_string(iterations) + " -> " + std::to_string(clamped));
         }
-        m_MegaLightsSpatialIterations = clamped;
+        m_MegaLightsSettings.SpatialIterations = clamped;
         Core::Logger::Info(
             "KurenaiEngine3D",
             "MegaLightsの空間再利用の反復回数を設定しました: " + std::to_string(clamped));
@@ -4135,7 +4135,7 @@ namespace Kurenai
                     std::to_string(k));
             return;
         }
-        m_MegaLightsDenoiseFireflyClamp = k;
+        m_MegaLightsSettings.DenoiseFireflyClamp = k;
         Core::Logger::Info(
             "KurenaiEngine3D",
             "MegaLightsのファイアフライのクランプを設定しました: " + std::to_string(k));
@@ -4151,7 +4151,7 @@ namespace Kurenai
                     std::to_string(sigma));
             return;
         }
-        m_MegaLightsDenoiseSigmaLuminance = sigma;
+        m_MegaLightsSettings.DenoiseSigmaLuminance = sigma;
         Core::Logger::Info(
             "KurenaiEngine3D",
             "MegaLightsのデノイザのσ(輝度)を設定しました: " + std::to_string(sigma));
@@ -4162,18 +4162,18 @@ namespace Kurenai
         // 負の値・0は「既定のまま」。他のMegaLightsオプションと同じ約束
         if (enabled >= 0)
         {
-            m_MegaLightsDenoiseEnabled = (enabled != 0);
+            m_MegaLightsSettings.DenoiseEnabled = (enabled != 0);
             // 切り替えた瞬間の履歴は今の設定で作られたものではないので捨てる
             m_MegaLightsDenoiseHistoryValid = false;
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsのデノイザを") + (m_MegaLightsDenoiseEnabled ? "有効" : "無効") +
+                std::string("MegaLightsのデノイザを") + (m_MegaLightsSettings.DenoiseEnabled ? "有効" : "無効") +
                     "にしました");
         }
         // 0段は「時間累積だけ」で意味があるので弾かない
         if (atrousPasses >= 0)
         {
-            m_MegaLightsDenoiseAtrousPasses = atrousPasses;
+            m_MegaLightsSettings.DenoiseAtrousPasses = atrousPasses;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsのデノイザのa-trousの段数を設定しました: " + std::to_string(atrousPasses));
@@ -4182,8 +4182,8 @@ namespace Kurenai
         {
             // 【両方の手法へ入れる】計測用のつまみなので、指定したのに走っている手法の
             // ほうが読まれない、という取りこぼしを作らない
-            m_MegaLightsDenoiseMaxFrames = maxFrames;
-            m_MegaLightsQuadDenoiseMaxFrames = maxFrames;
+            m_MegaLightsSettings.DenoiseMaxFrames = maxFrames;
+            m_MegaLightsSettings.QuadDenoiseMaxFrames = maxFrames;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsのデノイザの時間累積の上限を設定しました: " + std::to_string(maxFrames));
@@ -4199,7 +4199,7 @@ namespace Kurenai
                 "MegaLightsの摂動モードが範囲外のため無視します: " + std::to_string(mode) + " (0〜2)");
             return;
         }
-        m_MegaLightsPerturbMode = mode;
+        m_MegaLightsSettings.PerturbMode = mode;
         m_MegaLightsPerturbApplied = false;
         Core::Logger::Info(
             "KurenaiEngine3D", "MegaLightsの摂動モードを設定しました(検証用): " + std::to_string(mode));
@@ -4210,17 +4210,17 @@ namespace Kurenai
         // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
         if (enabled >= 0)
         {
-            m_MegaLightsTemporalEnabled = (enabled != 0);
+            m_MegaLightsSettings.TemporalEnabled = (enabled != 0);
             // 切り替えた瞬間の履歴は今の設定で作られたものではないので捨てる
             m_MegaLightsHistoryValid = false;
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsの時間再利用を") + (m_MegaLightsTemporalEnabled ? "有効" : "無効") +
+                std::string("MegaLightsの時間再利用を") + (m_MegaLightsSettings.TemporalEnabled ? "有効" : "無効") +
                     "にしました");
         }
         if (mClamp > 0)
         {
-            m_MegaLightsTemporalMClamp = mClamp;
+            m_MegaLightsSettings.TemporalMClamp = mClamp;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsの時間再利用のMの上限を設定しました: " + std::to_string(mClamp));
@@ -4232,10 +4232,10 @@ namespace Kurenai
         // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
         if (enabled >= 0)
         {
-            m_MegaLightsInitialVisibility = (enabled != 0);
+            m_MegaLightsSettings.InitialVisibility = (enabled != 0);
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsの初期可視レイを") + (m_MegaLightsInitialVisibility ? "有効" : "無効") +
+                std::string("MegaLightsの初期可視レイを") + (m_MegaLightsSettings.InitialVisibility ? "有効" : "無効") +
                     "にしました");
         }
     }
@@ -4245,26 +4245,26 @@ namespace Kurenai
         // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
         if (share >= 0)
         {
-            m_MegaLightsQuadShareEnabled = (share != 0);
+            m_MegaLightsSettings.QuadShareEnabled = (share != 0);
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsのクアッド共有を") + (m_MegaLightsQuadShareEnabled ? "有効" : "無効") +
+                std::string("MegaLightsのクアッド共有を") + (m_MegaLightsSettings.QuadShareEnabled ? "有効" : "無効") +
                     "にしました");
         }
         if (stratify >= 0)
         {
-            m_MegaLightsQuadStratify = (stratify != 0);
+            m_MegaLightsSettings.QuadStratify = (stratify != 0);
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsのクアッド層化を") + (m_MegaLightsQuadStratify ? "有効" : "無効") +
+                std::string("MegaLightsのクアッド層化を") + (m_MegaLightsSettings.QuadStratify ? "有効" : "無効") +
                     "にしました");
         }
         if (blockedCache >= 0)
         {
-            m_MegaLightsBlockedCacheEnabled = (blockedCache != 0);
+            m_MegaLightsSettings.BlockedCacheEnabled = (blockedCache != 0);
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsの遮蔽キャッシュを") + (m_MegaLightsBlockedCacheEnabled ? "有効" : "無効") +
+                std::string("MegaLightsの遮蔽キャッシュを") + (m_MegaLightsSettings.BlockedCacheEnabled ? "有効" : "無効") +
                     "にしました");
         }
     }
@@ -4284,17 +4284,17 @@ namespace Kurenai
                     " (1〜" + std::to_string(kMegaLightsMaxSamplesPerPixel) + ")");
             return;
         }
-        if (samples == m_MegaLightsQuadSamplesPerPixel)
+        if (samples == m_MegaLightsSettings.QuadSamplesPerPixel)
         {
             return;
         }
-        m_MegaLightsQuadSamplesPerPixel = samples;
+        m_MegaLightsSettings.QuadSamplesPerPixel = samples;
         // リザーババッファの大きさが変わる。GPUが参照していない状態で作り直す必要があるので、
         // 解像度変更と同じ「フレームの先頭でまとめて作り直す」経路に乗せる
         m_MegaLightsReservoirDirty = true;
         Core::Logger::Info(
             "KurenaiEngine3D",
-            "MegaLightsのクアッド標本数を " + std::to_string(m_MegaLightsQuadSamplesPerPixel) +
+            "MegaLightsのクアッド標本数を " + std::to_string(m_MegaLightsSettings.QuadSamplesPerPixel) +
                 " にしました(影レイの本数も同じ数になります)");
     }
 
@@ -4315,14 +4315,14 @@ namespace Kurenai
                     std::to_string(kMegaLightsTilePoolCapacity) + ")");
             return;
         }
-        if (capacity == m_MegaLightsTilePoolCapacity)
+        if (capacity == m_MegaLightsSettings.TilePoolCapacity)
         {
             return;
         }
-        m_MegaLightsTilePoolCapacity = capacity;
+        m_MegaLightsSettings.TilePoolCapacity = capacity;
         Core::Logger::Info(
             "KurenaiEngine3D",
-            "MegaLightsの候補プールの容量を " + std::to_string(m_MegaLightsTilePoolCapacity) +
+            "MegaLightsの候補プールの容量を " + std::to_string(m_MegaLightsSettings.TilePoolCapacity) +
                 " にしました");
     }
 
@@ -4340,17 +4340,17 @@ namespace Kurenai
             }
             else
             {
-                m_MegaLightsTileJitterMode = mode;
+                m_MegaLightsSettings.TileJitterMode = mode;
             }
         }
 
-        if (m_MegaLightsTileJitterMode == 1)
+        if (m_MegaLightsSettings.TileJitterMode == 1)
         {
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsのタイル格子ジッター: 有効 (m_TAAFrameIndexのHalton(2,3)を16段階へ量子化)");
         }
-        else if (m_MegaLightsTileJitterMode == 2)
+        else if (m_MegaLightsSettings.TileJitterMode == 2)
         {
             Core::Logger::Info(
                 "KurenaiEngine3D", "MegaLightsのタイル格子ジッター: 有効 (検証用オフセット(0,0)固定)");
@@ -4365,11 +4365,11 @@ namespace Kurenai
     {
         // 【手法3以外は必ず1】手法2の時間・空間再利用は「1画素1リザーバ」を前提に
         // 添字を組み立てているので、ここを1より大きくすると別画素の標本を読む
-        if (m_MegaLightsMode != MegaLightsMode::QuadShared)
+        if (m_MegaLightsSettings.Mode != MegaLightsMode::QuadShared)
         {
             return 1;
         }
-        return std::clamp(m_MegaLightsQuadSamplesPerPixel, 1, kMegaLightsMaxSamplesPerPixel);
+        return std::clamp(m_MegaLightsSettings.QuadSamplesPerPixel, 1, kMegaLightsMaxSamplesPerPixel);
     }
 
     void KurenaiEngine3D::SetMegaLightsDumpPath(const wchar_t* path)
@@ -4390,7 +4390,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::ForceDDGIRayModeRaster()
     {
-        m_DDGIRayMode = DDGIRayMode::Raster;
+        m_DDGISettings.RayMode = DDGIRayMode::Raster;
         Core::Logger::Info("KurenaiEngine3D", "DDGIのレイ取得をラスタライズへ固定しました(起動オプション)");
     }
 
@@ -4398,13 +4398,13 @@ namespace Kurenai
     {
         if (threshold <= 0.0f)
         {
-            m_DDGIProbeClassificationEnabled = false;
+            m_DDGISettings.ProbeClassificationEnabled = false;
             Core::Logger::Info("KurenaiEngine3D", "DDGIのプローブ分類を無効にしました(起動オプション)");
             return;
         }
 
-        m_DDGIProbeClassificationEnabled = true;
-        m_DDGIBackfaceThreshold = threshold;
+        m_DDGISettings.ProbeClassificationEnabled = true;
+        m_DDGISettings.BackfaceThreshold = threshold;
         Core::Logger::Info(
             "KurenaiEngine3D",
             "DDGIのプローブ分類のしきい値を設定しました(起動オプション): " + std::to_string(threshold));
@@ -4447,7 +4447,7 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunRaytracedDDGITrace() const
     {
-        return m_DDGIRayMode == DDGIRayMode::Raytraced && m_RaytracingScene.IsValid() &&
+        return m_DDGISettings.RayMode == DDGIRayMode::Raytraced && m_RaytracingScene.IsValid() &&
                m_DDGIProbeTracePipelineState != nullptr && m_DDGITraceConstantBuffer != nullptr;
     }
 
@@ -4591,7 +4591,7 @@ namespace Kurenai
 
     RHI::IRHITexture* KurenaiEngine3D::GetActiveAOTexture() const
     {
-        if (!m_AOEnabled)
+        if (!m_AmbientOcclusionSettings.Enabled)
         {
             return m_AODisabledTexture.get();
         }
@@ -4599,7 +4599,7 @@ namespace Kurenai
         {
             return m_RTAOTexture.get();
         }
-        if (m_AOTechnique == AOTechnique::SSILVisibilityBitmask)
+        if (m_AmbientOcclusionSettings.Technique == AOTechnique::SSILVisibilityBitmask)
         {
             return m_SSILTexture.get();
         }
@@ -4609,7 +4609,7 @@ namespace Kurenai
 
     RHI::IRHITexture* KurenaiEngine3D::GetActiveAORawTexture() const
     {
-        if (!m_AOEnabled)
+        if (!m_AmbientOcclusionSettings.Enabled)
         {
             return m_AODisabledTexture.get();
         }
@@ -4617,7 +4617,7 @@ namespace Kurenai
         {
             return m_RTAORawTexture.get();
         }
-        if (m_AOTechnique == AOTechnique::SSILVisibilityBitmask)
+        if (m_AmbientOcclusionSettings.Technique == AOTechnique::SSILVisibilityBitmask)
         {
             return m_SSILRawTexture.get();
         }
@@ -4626,7 +4626,7 @@ namespace Kurenai
 
     RHI::IRHITexture* KurenaiEngine3D::GetActiveReflectionOutput() const
     {
-        if (m_ReflectionMode == ReflectionMode::ScreenSpace)
+        if (m_ReflectionSettings.Mode == ReflectionMode::ScreenSpace)
         {
             return m_SSRTexture.get();
         }
@@ -4917,7 +4917,7 @@ namespace Kurenai
         // .ksceneが[Scene]Skyboxを明示しているシーンは、そのDDSでなければ意味を成さない
         // (White Furnace Testの一様放射輝度キューブマップが該当する)。手続き空で
         // 上書きしてしまうと検証そのものが壊れるため、明示指定があるときは必ずDDSを使う
-        const bool useProcedural = m_ProceduralSkyEnabled && m_Scene.SkyboxPath.empty();
+        const bool useProcedural = m_SkySettings.ProceduralEnabled && m_Scene.SkyboxPath.empty();
         return useProcedural ? m_ProceduralSkyTexture.get() : m_SkyboxTexture.get();
     }
 
@@ -4927,24 +4927,24 @@ namespace Kurenai
         // 何が0になるかが揃っていないと、「無効にしたのに焼き直しが走らない」取りこぼしが出る。
         // 対応するのはRender()のconstants.CloudParams0〜3・FogParams0の組み立て箇所
         CloudBakeSignature s;
-        s.CumulusCoverage = m_CloudEnabled ? m_CloudCoverage : 0.0f;
-        s.CumulusAltitude = m_CloudAltitude;
-        s.CumulusUvScale = m_CloudUvScale;
-        s.CumulusDensity = m_CloudDensity;
-        s.CumulusForwardG = m_CloudForwardG;
-        s.CumulusThickness = m_CloudVolumetric ? m_CloudThickness : 0.0f;
-        s.CloudTypeBias = m_CloudTypeBias;
-        s.CirrusCoverage = m_CirrusEnabled ? m_CirrusCoverage : 0.0f;
-        s.CirrusAltitude = m_CirrusAltitude;
-        s.CirrusUvScale = m_CirrusUvScale;
-        s.CirrusDensity = m_CirrusDensity;
-        s.CirrusAnisotropy = m_CirrusAnisotropy;
-        s.FogSigma0 = m_FogDensity;
-        s.FogScaleHeight = m_FogScaleHeight;
-        s.FogRefHeight = m_FogRefHeight;
+        s.CumulusCoverage = m_CloudSettings.Enabled ? m_CloudSettings.Coverage : 0.0f;
+        s.CumulusAltitude = m_CloudSettings.Altitude;
+        s.CumulusUvScale = m_CloudSettings.UvScale;
+        s.CumulusDensity = m_CloudSettings.Density;
+        s.CumulusForwardG = m_CloudSettings.ForwardG;
+        s.CumulusThickness = m_CloudSettings.Volumetric ? m_CloudSettings.Thickness : 0.0f;
+        s.CloudTypeBias = m_CloudSettings.TypeBias;
+        s.CirrusCoverage = m_CloudSettings.CirrusEnabled ? m_CloudSettings.CirrusCoverage : 0.0f;
+        s.CirrusAltitude = m_CloudSettings.CirrusAltitude;
+        s.CirrusUvScale = m_CloudSettings.CirrusUvScale;
+        s.CirrusDensity = m_CloudSettings.CirrusDensity;
+        s.CirrusAnisotropy = m_CloudSettings.CirrusAnisotropy;
+        s.FogSigma0 = m_FogSettings.Density;
+        s.FogScaleHeight = m_FogSettings.ScaleHeight;
+        s.FogRefHeight = m_FogSettings.RefHeight;
         // 【usingProceduralSkyを掛けない】FrameConstants側のfogEnabledFlagはそれも見るが、
         // この判定自体が手続き空のときにしか走らない(呼び出し元のifを参照)ので同じ値になる
-        s.FogEnabled = (m_FogEnabled && m_FogDensity > 0.0f) ? 1.0f : 0.0f;
+        s.FogEnabled = (m_FogSettings.Enabled && m_FogSettings.Density > 0.0f) ? 1.0f : 0.0f;
         return s;
     }
 
@@ -5007,7 +5007,7 @@ namespace Kurenai
             m_SkyCloudFogTexture =
                 m_Device->CreateRenderTexture(m_SkyCloudWidth, m_SkyCloudHeight, RHI::Format::R32_Float);
             // DDGIの低解像度解決パスの出力(rgb=イラディアンス、a=insideWeight)。雲と同じく1/2解像度。
-            // 【常に確保する】m_DDGIHalfResolutionが無効でもシェーダーのt19には何かを
+            // 【常に確保する】m_DDGISettings.HalfResolutionが無効でもシェーダーのt19には何かを
             // バインドしておく必要がある(DX12のディスクリプタテーブルを埋め切るため)。
             // フォーマットを雲と揃えているのも同じ理由 ―― イラディアンスはHDRの物理量で、
             // 8bitでは飽和と量子化がそのまま間接光のバンディングになる
@@ -5109,7 +5109,7 @@ namespace Kurenai
                 // 定数バッファへ渡す値(MegaLightsSamplesPerPixel())は手法3以外で1になるので、
                 // **確保 >= 実際に使う本数** が常に成り立つ
                 m_MegaLightsAllocatedSamplesPerPixel =
-                    std::clamp(m_MegaLightsQuadSamplesPerPixel, 1, kMegaLightsMaxSamplesPerPixel);
+                    std::clamp(m_MegaLightsSettings.QuadSamplesPerPixel, 1, kMegaLightsMaxSamplesPerPixel);
                 RHI::BufferDesc reservoirBufferDesc;
                 reservoirBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
                 reservoirBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 4) * width * height *
@@ -5945,9 +5945,9 @@ namespace Kurenai
         // 反射解像度 = レンダー解像度 × 倍率。最低でも1x1は確保する
         // (倍率が非常に小さい・レンダー解像度が非常に小さい場合でもテクスチャ作成自体は失敗させない)
         const uint32_t width = std::max(
-            1u, static_cast<uint32_t>(static_cast<float>(m_RenderWidth) * m_PlanarReflectionResolutionScale));
+            1u, static_cast<uint32_t>(static_cast<float>(m_RenderWidth) * m_ReflectionSettings.PlanarResolutionScale));
         const uint32_t height = std::max(
-            1u, static_cast<uint32_t>(static_cast<float>(m_RenderHeight) * m_PlanarReflectionResolutionScale));
+            1u, static_cast<uint32_t>(static_cast<float>(m_RenderHeight) * m_ReflectionSettings.PlanarResolutionScale));
 
         try
         {
@@ -6346,7 +6346,7 @@ namespace Kurenai
             return;
         }
 
-        if (scale == m_PlanarReflectionResolutionScale)
+        if (scale == m_ReflectionSettings.PlanarResolutionScale)
         {
             return;
         }
@@ -6360,44 +6360,44 @@ namespace Kurenai
     KurenaiEngine3D::QualitySettings KurenaiEngine3D::CaptureQualitySettings() const
     {
         QualitySettings settings;
-        settings.Reflection = m_ReflectionMode;
-        settings.PlanarReflectionEnabled = m_PlanarReflectionEnabled;
-        settings.PlanarReflectionResolutionScale = m_PlanarReflectionResolutionScale;
-        settings.CloudVolumetric = m_CloudVolumetric;
-        settings.CirrusEnabled = m_CirrusEnabled;
-        settings.StarsEnabled = m_StarsEnabled;
+        settings.Reflection = m_ReflectionSettings.Mode;
+        settings.PlanarReflectionEnabled = m_ReflectionSettings.PlanarEnabled;
+        settings.PlanarReflectionResolutionScale = m_ReflectionSettings.PlanarResolutionScale;
+        settings.CloudVolumetric = m_CloudSettings.Volumetric;
+        settings.CirrusEnabled = m_CloudSettings.CirrusEnabled;
+        settings.StarsEnabled = m_StarsSettings.Enabled;
         settings.TAAEnabled = m_TAAEnabled;
         settings.BloomEnabled = m_BloomEnabled;
         settings.ScreenSpaceShadowEnabled = m_ScreenSpaceShadowEnabled;
-        settings.DDGIProbesPerFrame = m_DDGIProbesPerFrame;
-        settings.SSAOKernelSize = m_SSAOKernelSize;
-        settings.CloudRaymarchSteps = m_CloudRaymarchSteps;
-        settings.DDGIUpdate = m_DDGIUpdateMode;
-        settings.DDGIHalfResolution = m_DDGIHalfResolution;
+        settings.DDGIProbesPerFrame = m_DDGISettings.ProbesPerFrame;
+        settings.SSAOKernelSize = m_AmbientOcclusionSettings.SSAOKernelSize;
+        settings.CloudRaymarchSteps = m_CloudSettings.RaymarchSteps;
+        settings.DDGIUpdate = m_DDGISettings.UpdateMode;
+        settings.DDGIHalfResolution = m_DDGISettings.HalfResolution;
         return settings;
     }
 
     void KurenaiEngine3D::ApplyQualitySettings(const QualitySettings& settings)
     {
-        m_ReflectionMode = settings.Reflection;
-        m_PlanarReflectionEnabled = settings.PlanarReflectionEnabled;
-        m_CloudVolumetric = settings.CloudVolumetric;
-        m_CirrusEnabled = settings.CirrusEnabled;
-        m_StarsEnabled = settings.StarsEnabled;
+        m_ReflectionSettings.Mode = settings.Reflection;
+        m_ReflectionSettings.PlanarEnabled = settings.PlanarReflectionEnabled;
+        m_CloudSettings.Volumetric = settings.CloudVolumetric;
+        m_CloudSettings.CirrusEnabled = settings.CirrusEnabled;
+        m_StarsSettings.Enabled = settings.StarsEnabled;
         m_TAAEnabled = settings.TAAEnabled;
         m_BloomEnabled = settings.BloomEnabled;
         m_ScreenSpaceShadowEnabled = settings.ScreenSpaceShadowEnabled;
-        m_DDGIProbesPerFrame = settings.DDGIProbesPerFrame;
+        m_DDGISettings.ProbesPerFrame = settings.DDGIProbesPerFrame;
         // カーネル自体の作り直しはSSAOパスの中で行う(段数が変わったことを見て作り直す)
-        m_SSAOKernelSize = settings.SSAOKernelSize;
-        m_CloudRaymarchSteps = settings.CloudRaymarchSteps;
-        m_DDGIHalfResolution = settings.DDGIHalfResolution;
+        m_AmbientOcclusionSettings.SSAOKernelSize = settings.SSAOKernelSize;
+        m_CloudSettings.RaymarchSteps = settings.CloudRaymarchSteps;
+        m_DDGISettings.HalfResolution = settings.DDGIHalfResolution;
 
         // 更新モードを変えたら停止状態は倒しておく。倒さないと「常時更新へ戻したのに
         // 止まったまま」になる(署名が変わるまで再開しないため)
-        if (m_DDGIUpdateMode != settings.DDGIUpdate)
+        if (m_DDGISettings.UpdateMode != settings.DDGIUpdate)
         {
-            m_DDGIUpdateMode = settings.DDGIUpdate;
+            m_DDGISettings.UpdateMode = settings.DDGIUpdate;
             m_DDGIUpdateSuspended = false;
             m_DDGIStableCycles = 0;
         }
@@ -7861,13 +7861,13 @@ namespace Kurenai
 
         // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
         // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
-        m_TimeOfDay = m_Scene.SunTimeOfDay;
-        m_SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
+        m_SkySettings.TimeOfDay = m_Scene.SunTimeOfDay;
+        m_SkySettings.SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
         // .ksceneが持つのは「影を出すか」の真偽値だけなので、手法の選択はエンジン側で決める
-        // (反射のm_ReflectionModeと同じ扱い)。規則はDefaultShadowModeに1か所だけ置いてある
+        // (反射のm_ReflectionSettings.Modeと同じ扱い)。規則はDefaultShadowModeに1か所だけ置いてある
         m_ShadowMode = m_Scene.ShadowEnabled ? DefaultShadowMode(m_RaytracingAvailable) : ShadowMode::Off;
-        m_SunEnabled = m_Scene.SunEnabled;
-        m_AOEnabled = m_Scene.AOEnabled;
+        m_SkySettings.SunEnabled = m_Scene.SunEnabled;
+        m_AmbientOcclusionSettings.Enabled = m_Scene.AOEnabled;
         // .ksceneが持つのは「反射を使うか」の真偽値だけなので、手法の選択はエンジン側で決める。
         //
         // 【キーを書いたシーンと書いていないシーンを区別する】書いていなければエンジンの既定
@@ -7875,11 +7875,11 @@ namespace Kurenai
         // 優先して手法だけを環境から選ぶ(ReflectionModeForCapability)。
         // 区別せずに「= true」のときもエンジンの既定へ問い合わせ直すと、DX11ではシーンの指定が
         // 握り潰されて反射が出なくなる(両関数のコメント参照)
-        m_ReflectionMode = m_Scene.HasSSREnabledOverride
-            ? (m_Scene.SSREnabled ? ReflectionModeForCapability(m_RaytracingAvailable) : ReflectionMode::Off)
-            : DefaultReflectionMode(m_RaytracingAvailable);
+        m_ReflectionSettings.Mode = m_Scene.HasSSREnabledOverride
+            ? (m_Scene.SSREnabled ? ReflectionSettings::ReflectionModeForCapability(m_RaytracingAvailable) : ReflectionMode::Off)
+            : ReflectionSettings::DefaultReflectionMode(m_RaytracingAvailable);
         // UIの「既定値に戻す」はエンジンの既定ではなくここへ戻す(m_SceneDefaultReflectionMode参照)
-        m_SceneDefaultReflectionMode = m_ReflectionMode;
+        m_SceneDefaultReflectionMode = m_ReflectionSettings.Mode;
         // TAAと内部レンダー解像度。どちらも反射と同じく「キーを書いたシーンだけ」上書きし、
         // 書いていないシーンはエンジンの既定のまま(Assets::Scene の Has〜Override のコメント参照)
         if (m_Scene.HasTAAOverride)
@@ -7909,10 +7909,10 @@ namespace Kurenai
         }
         // 黒の締め。Tonemap/SkySaturationと同じく無条件に反映する(既定0で恒等のため)
         m_TonemapBlackPoint = m_Scene.TonemapBlackPoint;
-        m_SkySaturation = m_Scene.SkySaturation;
+        m_SkySettings.Saturation = m_Scene.SkySaturation;
         // タービディティは指定されたときだけ上書きする(Scene.h の HasSkyTurbidity 参照)。
         // 値が動けばRender()側のturbidityMoved判定が大気LUTを焼き直す
-        if (m_Scene.HasSkyTurbidity) { m_SkyTurbidity = m_Scene.SkyTurbidity; }
+        if (m_Scene.HasSkyTurbidity) { m_SkySettings.Turbidity = m_Scene.SkyTurbidity; }
         if (m_Scene.HasIBLIntensityOverride)
         {
             m_IBLIntensity = m_Scene.IBLIntensity;
@@ -7927,36 +7927,36 @@ namespace Kurenai
         // 雲。天候はシーンの性質なので[Cloud]セクションで持てるようにした。
         // 露出と同じく指定されたキーだけを上書きする。CellSizeだけは.kscene側が「雲の塊1つの
         // 大きさ[m]」で持ち、エンジン側はその逆数(UVスケール)を持つので変換する
-        if (m_Scene.HasCloudCoverage)  { m_CloudCoverage = m_Scene.CloudCoverage; }
-        if (m_Scene.HasCloudAltitude)  { m_CloudAltitude = m_Scene.CloudAltitude; }
-        if (m_Scene.HasCloudThickness) { m_CloudThickness = m_Scene.CloudThickness; }
-        if (m_Scene.HasCloudDensity)   { m_CloudDensity = m_Scene.CloudDensity; }
-        if (m_Scene.HasCloudTypeBias) { m_CloudTypeBias = m_Scene.CloudTypeBias; }
-        if (m_Scene.HasCloudCellSize)  { m_CloudUvScale = 1.0f / std::max(m_Scene.CloudCellSize, 1.0f); }
+        if (m_Scene.HasCloudCoverage)  { m_CloudSettings.Coverage = m_Scene.CloudCoverage; }
+        if (m_Scene.HasCloudAltitude)  { m_CloudSettings.Altitude = m_Scene.CloudAltitude; }
+        if (m_Scene.HasCloudThickness) { m_CloudSettings.Thickness = m_Scene.CloudThickness; }
+        if (m_Scene.HasCloudDensity)   { m_CloudSettings.Density = m_Scene.CloudDensity; }
+        if (m_Scene.HasCloudTypeBias) { m_CloudSettings.TypeBias = m_Scene.CloudTypeBias; }
+        if (m_Scene.HasCloudCellSize)  { m_CloudSettings.UvScale = 1.0f / std::max(m_Scene.CloudCellSize, 1.0f); }
         // 巻雲(P11)。CirrusCellSizeも積雲のCellSizeと同じく逆数へ直す
-        if (m_Scene.HasCirrusCoverage)   { m_CirrusCoverage = m_Scene.CirrusCoverage; }
-        if (m_Scene.HasCirrusAltitude)   { m_CirrusAltitude = m_Scene.CirrusAltitude; }
-        if (m_Scene.HasCirrusCellSize)   { m_CirrusUvScale = 1.0f / std::max(m_Scene.CirrusCellSize, 1.0f); }
-        if (m_Scene.HasCirrusDensity)    { m_CirrusDensity = m_Scene.CirrusDensity; }
-        if (m_Scene.HasCirrusAnisotropy) { m_CirrusAnisotropy = m_Scene.CirrusAnisotropy; }
-        if (m_Scene.HasCirrusWindSpeed)  { m_CirrusWindSpeed = m_Scene.CirrusWindSpeed; }
+        if (m_Scene.HasCirrusCoverage)   { m_CloudSettings.CirrusCoverage = m_Scene.CirrusCoverage; }
+        if (m_Scene.HasCirrusAltitude)   { m_CloudSettings.CirrusAltitude = m_Scene.CirrusAltitude; }
+        if (m_Scene.HasCirrusCellSize)   { m_CloudSettings.CirrusUvScale = 1.0f / std::max(m_Scene.CirrusCellSize, 1.0f); }
+        if (m_Scene.HasCirrusDensity)    { m_CloudSettings.CirrusDensity = m_Scene.CirrusDensity; }
+        if (m_Scene.HasCirrusAnisotropy) { m_CloudSettings.CirrusAnisotropy = m_Scene.CirrusAnisotropy; }
+        if (m_Scene.HasCirrusWindSpeed)  { m_CloudSettings.CirrusWindSpeed = m_Scene.CirrusWindSpeed; }
         // 大気遠近。[Cloud]と同じく指定されたキーだけを上書きする。
         // 【この値は遠景の霞だけの設定ではない】消散係数は雲がどれだけ空から浮き上がって
         // 見えるかも一手に決める(Scene.h の HasFogDensity 付近のコメントに実測を残してある)
-        if (m_Scene.HasFogEnabled)     { m_FogEnabled = m_Scene.FogEnabled; }
-        if (m_Scene.HasFogDensity)     { m_FogDensity = m_Scene.FogDensity; }
-        if (m_Scene.HasFogScaleHeight) { m_FogScaleHeight = m_Scene.FogScaleHeight; }
-        if (m_Scene.HasFogRefHeight)   { m_FogRefHeight = m_Scene.FogRefHeight; }
+        if (m_Scene.HasFogEnabled)     { m_FogSettings.Enabled = m_Scene.FogEnabled; }
+        if (m_Scene.HasFogDensity)     { m_FogSettings.Density = m_Scene.FogDensity; }
+        if (m_Scene.HasFogScaleHeight) { m_FogSettings.ScaleHeight = m_Scene.FogScaleHeight; }
+        if (m_Scene.HasFogRefHeight)   { m_FogSettings.RefHeight = m_Scene.FogRefHeight; }
         // ブルーム。エンジンの既定は無効なので、夜景で光源が主役になるシーンは
         // ここで有効にしないと発光体に光芒が出ない
         if (m_Scene.HasBloomEnabled)   { m_BloomEnabled = m_Scene.BloomEnabled; }
         if (m_Scene.HasBloomStrength)  { m_BloomStrength = m_Scene.BloomStrength; }
         if (m_Scene.HasBloomThreshold) { m_BloomThreshold = m_Scene.BloomThreshold; }
         // 星空。[Cloud]/[Fog]と同じく指定されたキーだけを上書きする
-        if (m_Scene.HasStarsEnabled)    { m_StarsEnabled = m_Scene.StarsEnabled; }
-        if (m_Scene.HasStarsDensity)    { m_StarsDensity = m_Scene.StarsDensity; }
-        if (m_Scene.HasStarsBrightness) { m_StarsBrightness = m_Scene.StarsBrightness; }
-        if (m_Scene.HasStarsTwinkle)    { m_StarsTwinkle = m_Scene.StarsTwinkle; }
+        if (m_Scene.HasStarsEnabled)    { m_StarsSettings.Enabled = m_Scene.StarsEnabled; }
+        if (m_Scene.HasStarsDensity)    { m_StarsSettings.Density = m_Scene.StarsDensity; }
+        if (m_Scene.HasStarsBrightness) { m_StarsSettings.Brightness = m_Scene.StarsBrightness; }
+        if (m_Scene.HasStarsTwinkle)    { m_StarsSettings.Twinkle = m_Scene.StarsTwinkle; }
         // ドローンショー。[Cloud]/[Fog]と同じく指定されたキーだけを上書きする。
         // ショーの中身(点・機体数・秒数・明るさ)は.kshowが持ち、Loaderスレッドで読み込み済み
         if (m_Scene.HasDroneShowEnabled) { m_DroneShowEnabled = m_Scene.DroneShowEnabled; }
@@ -7988,7 +7988,7 @@ namespace Kurenai
 
         // 水面。[Water]が無いシーンでもScene::WaterWaveScale等はリテラル既定値
         // (EngineDefaults.hを複製したもの、Scene.h参照)を持っているため、常にそのまま反映してよい
-        // (m_TimeOfDay/m_SunAzimuthDegreesと同じ扱い)
+        // (m_SkySettings.TimeOfDay/m_SkySettings.SunAzimuthDegreesと同じ扱い)
         m_WaterWaveScale = m_Scene.WaterWaveScale;
         m_WaterWaveSpeed = m_Scene.WaterWaveSpeed;
         m_WaterWaveStrength = m_Scene.WaterWaveStrength;
@@ -8098,7 +8098,7 @@ namespace Kurenai
         m_TextureStreaming.Build(m_Scene, *m_Device);
 
         m_SelectedProbeIndex = m_ReflectionProbes.empty() ? -1 : 0;
-        m_ProbeDebugIndex = 0;
+        m_ReflectionProbeSettings.DebugIndex = 0;
         m_ProbeBaked = false;
         m_ProbeBakeRequested = !m_ReflectionProbes.empty();
         // Realtimeのラウンドロビンは先頭から仕切り直す(シーンが変わればプローブの数も並びも変わる)
@@ -8490,9 +8490,9 @@ namespace Kurenai
 
         // 太陽と昼夜サイクル。ProbeCapture.hlslは共有のFrameConstantsから太陽の向き・色を読むため、
         // 時刻を動かすと焼き上がりが変わる
-        mixFloat(m_TimeOfDay);
-        mixFloat(m_SunAzimuthDegrees);
-        mixBool(m_SunEnabled);
+        mixFloat(m_SkySettings.TimeOfDay);
+        mixFloat(m_SkySettings.SunAzimuthDegrees);
+        mixBool(m_SkySettings.SunEnabled);
         // 影の手法ではなく「影を落とすかどうか」だけを混ぜる。ProbeCapture.hlslが読むのは
         // 常にカスケードシャドウマップで、そのシャドウマップはRTシャドウ選択時も同じように
         // 描かれるため、CascadedShadowMapとRaytracedでプローブの焼き上がりは変わらない
@@ -8503,12 +8503,12 @@ namespace Kurenai
         // 焼き直しが起きず、収束済みで停止しているモードでは絵が一切変わらない。
         // 反射プローブはこの2つの影響を受けないが、署名を共有しているため一緒に焼き直しになる
         // (余分な焼き直しが1回起きるだけで、破綻はしない)
-        mixBool(m_DDGIRayMode == DDGIRayMode::Raytraced);
-        mixBool(m_DDGISunShadowRayEnabled);
+        mixBool(m_DDGISettings.RayMode == DDGIRayMode::Raytraced);
+        mixBool(m_DDGISettings.SunShadowRayEnabled);
         // 月は時刻に連動せず手動指定なので、太陽とは別に混ぜる必要がある。太陽が沈むと
         // 平行光源の枠が月へ切り替わり、キャプチャの直接光がそのまま変わる
-        mixFloat(m_MoonAzimuthDegrees);
-        mixFloat(m_MoonElevationDegrees);
+        mixFloat(m_SkySettings.MoonAzimuthDegrees);
+        mixFloat(m_SkySettings.MoonElevationDegrees);
         // キャプチャ内の環境項はグローバルIBLを引くため、その強度も焼き上がりに影響する。
         // 手続き空か.ksceneのDDSかで空そのものが変わるため、その切り替えも含める。
         // 拡散・鏡面の倍率もProbeCapture.hlslが同じように適用するため署名へ含める
@@ -8516,7 +8516,7 @@ namespace Kurenai
         mixFloat(m_IBLEnabled ? m_IBLIntensity : 0.0f);
         mixFloat(m_AmbientDiffuseScale);
         mixFloat(m_AmbientSpecularScale);
-        mixBool(m_ProceduralSkyEnabled);
+        mixBool(m_SkySettings.ProceduralEnabled);
         // 自発光の強度倍率はキャプチャのエミッシブ項へそのまま乗る
         mixFloat(m_EmissiveIntensity);
         // エミッシブ光源(62章)。プロキシはProbeCapture.hlslのライトループ(t8)にも入るので、
@@ -8572,24 +8572,24 @@ namespace Kurenai
 
         // SSAO/SSILのサンプリング半径はシーンの規模に応じて変わるべきなので、対角線に比例させる
         // (小さすぎる/大きすぎるシーンでも遮蔽表現が破綻しないよう妥当な範囲にクランプする)
-        m_SSAORadius = std::clamp(diagonal * 0.01f, 0.05f, 2.0f);
-        m_SSILRadius = m_SSAORadius;
-        m_SSILThickness = m_SSILRadius * 0.2f;
+        m_AmbientOcclusionSettings.SSAORadius = std::clamp(diagonal * 0.01f, 0.05f, 2.0f);
+        m_AmbientOcclusionSettings.SSILRadius = m_AmbientOcclusionSettings.SSAORadius;
+        m_AmbientOcclusionSettings.SSILThickness = m_AmbientOcclusionSettings.SSILRadius * 0.2f;
 
         // SSRの最大レイ距離もシーンの規模に応じて変わるべきなので、対角線に比例させる。
         // ヒット判定の厚みはSSAO/SSILと同様、遮蔽・接触判定として妥当な小さい値にする
-        m_SSRMaxDistance = std::clamp(diagonal * 0.5f, 1.0f, 100.0f);
-        m_SSRThickness = m_SSAORadius * 0.2f;
+        m_ReflectionSettings.SSRMaxDistance = std::clamp(diagonal * 0.5f, 1.0f, 100.0f);
+        m_ReflectionSettings.SSRThickness = m_AmbientOcclusionSettings.SSAORadius * 0.2f;
 
         // RT反射のレイ距離はSSRより長く取る。SSRは「画面外へ出たら打ち切り」で早々に確信度0へ
         // 落ちるためシーン対角の半分でも足りるが、RTは画面外も追えるので短く切ると
         // 本来映るはずの建物を通り越して空が映ってしまう。シーン対角そのものを上限にする
-        m_RTReflectionMaxDistance = std::clamp(diagonal, 1.0f, 500.0f);
+        m_ReflectionSettings.RTReflectionMaxDistance = std::clamp(diagonal, 1.0f, 500.0f);
 
         // RTAOのレイ距離はSSAO/SSILの半径より長く取る。スクリーンスペース手法は
         // 半径を伸ばすほど画面上のサンプル間隔が粗くなって破綻するが、RTには
         // その制約が無く、部屋の広さ程度まで伸ばしたほうがバウンス光が正しく回る
-        m_RTAOMaxDistance = std::clamp(diagonal * 0.03f, 0.1f, 10.0f);
+        m_AmbientOcclusionSettings.RTAOMaxDistance = std::clamp(diagonal * 0.03f, 0.1f, 10.0f);
 
         // カメラの移動速度。.ksceneが[Scene]CameraSpeedを持っていればそれを使い、
         // 無ければシーン対角から決める。
@@ -9001,20 +9001,20 @@ namespace Kurenai
             m_RenderDeltaTime = renderDeltaTime;
 
             // 昼夜サイクルの自動進行はUpdateスレッドではなくこちら(Renderスレッド)で行う。
-            // m_TimeOfDay/m_TimeAutoAdvance/m_TimeAdvanceSpeedはImGuiパネル(RenderLightingUI、
+            // m_SkySettings.TimeOfDay/m_SkySettings.TimeAutoAdvance/m_SkySettings.TimeAdvanceSpeedはImGuiパネル(RenderLightingUI、
             // Renderスレッドから描画)でも書き換えられるため、両方をRenderスレッド専有にすることで
             // 追加の排他制御なしに済ませられる
-            if (m_TimeAutoAdvance)
+            if (m_SkySettings.TimeAutoAdvance)
             {
-                m_TimeOfDay = std::fmod(m_TimeOfDay + m_TimeAdvanceSpeed * renderDeltaTime, 24.0f);
-                if (m_TimeOfDay < 0.0f)
+                m_SkySettings.TimeOfDay = std::fmod(m_SkySettings.TimeOfDay + m_SkySettings.TimeAdvanceSpeed * renderDeltaTime, 24.0f);
+                if (m_SkySettings.TimeOfDay < 0.0f)
                 {
-                    m_TimeOfDay += 24.0f;
+                    m_SkySettings.TimeOfDay += 24.0f;
                 }
             }
 
             // 水面のスクロール位相。太陽の自動進行とまったく同じ場所・同じ理由
-            // (m_TimeAutoAdvance/m_WaterTimeFrozenがRenderingパネル(Renderスレッドから描画)でも
+            // (m_SkySettings.TimeAutoAdvance/m_WaterTimeFrozenがRenderingパネル(Renderスレッドから描画)でも
             // 書き換えられるため、両方をRenderスレッド専有にすることで追加の排他制御なしに済ませる)
             if (!m_WaterTimeFrozen)
             {
@@ -9022,7 +9022,7 @@ namespace Kurenai
             }
 
             // 雲のスクロール位相。水面とまったく同じ場所・同じ理由でRenderスレッド専有のまま進める。
-            // 【風速の単位について】m_CloudWindSpeedは実世界の速度[m/s]として持つ(UIで直感的に
+            // 【風速の単位について】m_CloudSettings.WindSpeedは実世界の速度[m/s]として持つ(UIで直感的に
             // 扱えるようにするため)。Sky.hlsliのノイズ空間はワールド距離にCloudUvScaleを掛けた
             // ものなので、ノイズ空間上の移動量へ換算するにはここでCloudUvScaleを掛ける必要がある。
             // 【なぜベイクをdirtyにしないのか】風のスクロールはIBLキューブの明るさに一切影響しない
@@ -9030,12 +9030,12 @@ namespace Kurenai
             // 毎フレーム空生成6回+プリフィルタ36回のディスパッチが走ってしまい、判断Aの利点が
             // 丸ごと消える。被覆率のような「キューブの明るさに効く」パラメータだけがdirtyを立てる
             // (RenderingPanel::DrawCloudSection参照)
-            if (!m_CloudTimeFrozen)
+            if (!m_CloudSettings.TimeFrozen)
             {
-                const float windRadians = DirectX::XMConvertToRadians(m_CloudWindDirectionDegrees);
+                const float windRadians = DirectX::XMConvertToRadians(m_CloudSettings.WindDirectionDegrees);
                 const float windDirX = std::cos(windRadians);
                 const float windDirZ = std::sin(windRadians);
-                const float advanceNoiseSpace = m_CloudWindSpeed * m_CloudUvScale * renderDeltaTime;
+                const float advanceNoiseSpace = m_CloudSettings.WindSpeed * m_CloudSettings.UvScale * renderDeltaTime;
                 // Sky.hlsliのkCloudNoisePeriodと同じ値でwrapする(このファイル冒頭近くの
                 // kCloudNoisePeriod定数のコメント参照)
                 m_CloudScrollOffset.x =
@@ -9044,11 +9044,11 @@ namespace Kurenai
                     std::fmod(m_CloudScrollOffset.y + windDirZ * advanceNoiseSpace, kCloudNoisePeriod);
 
                 // 巻雲。積雲とまったく同じ形(kCloudNoisePeriodでstd::fmod)で進める。
-                // 風向はm_CloudWindDirectionDegreesを積雲と共有し、速度・UVスケールだけ
-                // 巻雲側の値(m_CirrusWindSpeed/m_CirrusUvScale)を使う。凍結トグル
-                // (m_CloudTimeFrozen)も積雲と共有する——片方にしか効かないとA/B比較で
+                // 風向はm_CloudSettings.WindDirectionDegreesを積雲と共有し、速度・UVスケールだけ
+                // 巻雲側の値(m_CloudSettings.CirrusWindSpeed/m_CloudSettings.CirrusUvScale)を使う。凍結トグル
+                // (m_CloudSettings.TimeFrozen)も積雲と共有する——片方にしか効かないとA/B比較で
                 // スクロールが揺れる側だけ残ってしまい対照が取れなくなるため
-                const float cirrusAdvanceNoiseSpace = m_CirrusWindSpeed * m_CirrusUvScale * renderDeltaTime;
+                const float cirrusAdvanceNoiseSpace = m_CloudSettings.CirrusWindSpeed * m_CloudSettings.CirrusUvScale * renderDeltaTime;
                 m_CirrusScrollOffset.x =
                     std::fmod(m_CirrusScrollOffset.x + windDirX * cirrusAdvanceNoiseSpace, kCloudNoisePeriod);
                 m_CirrusScrollOffset.y =
@@ -9654,7 +9654,7 @@ namespace Kurenai
         UpdateImGuiToggle();
         // 新しいシーンが反映されていれば、その初期カメラとウィンドウタイトルをここで取り込む
         UpdateAppliedSceneHandoff();
-        // 昼夜サイクルの自動進行(m_TimeOfDay)はRenderThreadMain側で行う(RenderThreadMain参照)
+        // 昼夜サイクルの自動進行(m_SkySettings.TimeOfDay)はRenderThreadMain側で行う(RenderThreadMain参照)
     }
 
     void KurenaiEngine3D::Render(const FrameState& frameState)
@@ -9775,7 +9775,7 @@ namespace Kurenai
             if (m_PlanarReflectionResolutionDirty)
             {
                 m_PlanarReflectionResolutionDirty = false;
-                m_PlanarReflectionResolutionScale = m_PendingPlanarReflectionResolutionScale;
+                m_ReflectionSettings.PlanarResolutionScale = m_PendingPlanarReflectionResolutionScale;
             }
 
             m_Device->WaitForGPUIdle();
@@ -9850,7 +9850,7 @@ namespace Kurenai
 
         // 太陽・月・空の状態を求める(すべて絶対的な測光量[lx]。露出はまだ掛かっていない)
         const SunLighting sunLighting = ComputeSunLighting(
-            m_TimeOfDay, m_SunAzimuthDegrees, m_MoonAzimuthDegrees, m_MoonElevationDegrees);
+            m_SkySettings.TimeOfDay, m_SkySettings.SunAzimuthDegrees, m_SkySettings.MoonAzimuthDegrees, m_SkySettings.MoonElevationDegrees);
 
         // === 可変プリ露出の決定 ===
         // 昼(直射日光10万lx)を基準0として、そのフレームのキー照度が何段暗いかを求め、
@@ -9911,11 +9911,11 @@ namespace Kurenai
         // 明るさが暴れないか)は、静止した絵をいくら撮っても測れない。
         // 蓄積ダンプは総和を書くので、Nを変えた2本の差が1フレームぶんになる ――
         // これで追従の時間変化を、フレームごとのGPU読み戻し無しで測れる
-        if (m_MegaLightsPerturbMode != 0 && !m_MegaLightsPerturbApplied && m_MegaLightsAccumTargetFrames > 0 &&
+        if (m_MegaLightsSettings.PerturbMode != 0 && !m_MegaLightsPerturbApplied && m_MegaLightsSettings.AccumTargetFrames > 0 &&
             m_MegaLightsAccumWarmupFrames >= kMegaLightsAccumWarmup)
         {
             m_MegaLightsPerturbApplied = true;
-            if (m_MegaLightsPerturbMode == 1)
+            if (m_MegaLightsSettings.PerturbMode == 1)
             {
                 // 全ライトを消す。次フレーム以降のGPULight配列から外れるので、
                 // 真値は「ローカルライトの寄与が0」になる。時間再利用が履歴を抱えていると
@@ -9926,7 +9926,7 @@ namespace Kurenai
                 }
                 Core::Logger::Info("KurenaiEngine3D", "【検証】全ライトを消しました(ゴースト測定)");
             }
-            else if (m_MegaLightsPerturbMode == 2)
+            else if (m_MegaLightsSettings.PerturbMode == 2)
             {
                 // 実効プリ露出を+2段跳ばす。ライトの放射輝度は露出を掛け込んで作られるので、
                 // 履歴のWは前フレームの露出のままになる。補正が効いていれば絵は変わらない
@@ -10000,9 +10000,9 @@ namespace Kurenai
         // --- MegaLights候補プールのタイル格子ジッター ---
         // 書き手・Initial/Spatial・Presentへ配る値をここで一度だけ決める。
         // 各パスが個別にフレーム番号から導くと、式の片側だけを直した際に別タイルを静かに読むため
-        const bool megaLightsTileJitterEnabled = m_MegaLightsTileJitterMode != 0;
+        const bool megaLightsTileJitterEnabled = m_MegaLightsSettings.TileJitterMode != 0;
         DirectX::XMUINT2 megaLightsTileOffset{ 0u, 0u };
-        if (m_MegaLightsTileJitterMode == 1)
+        if (m_MegaLightsSettings.TileJitterMode == 1)
         {
             // Halton(2,3)を16段階へ量子化する。RadicalInverseは[0,1)だが、丸め誤差でも
             // 16にならないようタイル幅-1で明示的に押さえる
@@ -10429,16 +10429,16 @@ namespace Kurenai
             const DirectX::XMVECTOR baked = DirectX::XMLoadFloat3(&m_LastBakedSunPosition);
             const float cosAngle = DirectX::XMVectorGetX(DirectX::XMVector3Dot(current, baked));
             const bool sunMoved =
-                cosAngle < std::cos(DirectX::XMConvertToRadians(m_SkyBakeAngleThresholdDegrees));
+                cosAngle < std::cos(DirectX::XMConvertToRadians(m_SkySettings.BakeAngleThresholdDegrees));
             // 露出が0.05段(約3.5%)以上動いたら焼き直す。時刻変化に伴う露出の追従でも
             // 動くため、太陽の角度閾値とあわせて実質的に連続した更新になる
             const bool exposureMoved =
                 std::abs(m_EffectiveExposureEV100 - m_LastBakedExposureEV100) > 0.05f;
             // タービディティが動いたら焼き直す。PreethamのxyYモデルの形自体が変わるため、
             // exposureMovedと同じ形の判定をここへ追加する
-            const bool turbidityMoved = std::abs(m_SkyTurbidity - m_LastBakedTurbidity) > 0.01f;
+            const bool turbidityMoved = std::abs(m_SkySettings.Turbidity - m_LastBakedTurbidity) > 0.01f;
             // 空の彩度(アート指定)もPreethamの色度を動かすため、タービディティと同じ扱いで焼き直す
-            const bool saturationMoved = std::abs(m_SkySaturation - m_LastBakedSkySaturation) > 0.005f;
+            const bool saturationMoved = std::abs(m_SkySettings.Saturation - m_LastBakedSkySaturation) > 0.005f;
             // 雲のパラメータが動いたら焼き直す(P18)。
             //
             // 【なぜ要るか】ここまでの4つは晴天の空の形を決める値だけで、雲は「晴天の空を
@@ -10496,7 +10496,7 @@ namespace Kurenai
             // SkyParametersBufferの天頂輝度を減光すると、雲の隙間から見える青空まで暗くなり、
             // Sky.hlsli側のSkyColorがそこへさらに雲を重ねることで二重に暗くなってしまう
             m_ActiveCloudTransmittance = ComputeCloudAverageTransmittance(
-                m_CloudEnabled, m_CloudCoverage, m_CirrusEnabled, m_CirrusCoverage);
+                m_CloudSettings.Enabled, m_CloudSettings.Coverage, m_CloudSettings.CirrusEnabled, m_CloudSettings.CirrusCoverage);
 
             // P18: この焼き直しがどの雲パラメータで行われたかを覚えておく。
             // 上の焼き直し判定(cloudChanged)がこれと比べる
@@ -10509,8 +10509,8 @@ namespace Kurenai
             m_SkyBakeDirty = false;
             m_LastBakedSunPosition = sunLighting.SunPosition;
             m_LastBakedExposureEV100 = m_EffectiveExposureEV100;
-            m_LastBakedTurbidity = m_SkyTurbidity;
-            m_LastBakedSkySaturation = m_SkySaturation;
+            m_LastBakedTurbidity = m_SkySettings.Turbidity;
+            m_LastBakedSkySaturation = m_SkySettings.Saturation;
             m_IBLBaked = false;
             m_IBLIrradianceBaked = false;
         }
@@ -10554,14 +10554,14 @@ namespace Kurenai
         //  DX12では常に丸ごと無駄になる。実測でもDX12起動時に水面へ映っていたのはRT反射の結果で、
         //  平面反射パスの出力ではなかった)
         const bool planarReflectionPassRuns =
-            m_PlanarReflectionEnabled && hasWaterInstance && m_ReflectionMode == ReflectionMode::ScreenSpace;
+            m_ReflectionSettings.PlanarEnabled && hasWaterInstance && m_ReflectionSettings.Mode == ReflectionMode::ScreenSpace;
 
         // 大気遠近パスを実行するか。UIで無効化されているか、密度が0以下(効果が無い)なら
         // パス自体を登録しない(GetActiveReflectionOutput()の結果がそのままTAA/Tonemapへ渡る)。
         // 手続き空が無効なシーンかどうかの判断(FogParams0.w)はパスの実行有無とは別に、
         // 下のconstants.FogParams0組み立て時にusingProceduralSkyを見て決める
         // (SSRパスのwaterAnalyticSkyFlagと同じ、パスの実行可否とシェーダー内の有効フラグを分ける設計)
-        const bool fogPassRuns = m_FogEnabled && m_FogDensity > 0.0f;
+        const bool fogPassRuns = m_FogSettings.Enabled && m_FogSettings.Density > 0.0f;
 
         // メッシュレット(増幅シェーダー + メッシュシェーダー)経路でG-Bufferを描くか。
         // メッシュシェーダー非対応のデバイスではPSOが作られないためnullptrになる。
@@ -10616,7 +10616,7 @@ namespace Kurenai
         // LightColor.rgbを乗算するため、これで完全に消える)。TimeOfDayを夜にする方法と違い
         // 昼度(AmbientColor.a)は下がらないので、環境光だけで照らす状態を作れる
         // sunLighting.Color は絶対的な測光量[lx]なので、ここで実効プリ露出を掛けて表示レンジへ移す
-        constants.LightColor = m_SunEnabled
+        constants.LightColor = m_SkySettings.SunEnabled
             ? DirectX::XMFLOAT4{
                   sunLighting.Color.x * effectiveExposure,
                   sunLighting.Color.y * effectiveExposure,
@@ -10685,7 +10685,7 @@ namespace Kurenai
             // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、この設定に関わらず
             // 常にキューブマップを使う。DDSは任意の絵でPerezモデルとは無関係なため、
             // 解析評価してはいけない
-            (m_SkyAnalyticBackground && usingProceduralSky) ? 1.0f : 0.0f,
+            (m_SkySettings.AnalyticBackground && usingProceduralSky) ? 1.0f : 0.0f,
             // z=太陽照度/空照度比(SunToSkyIlluminanceRatio、雲の明るさの基準に使う)
             sunToSkyIlluminanceRatio,
             0.0f,
@@ -10704,7 +10704,7 @@ namespace Kurenai
         // ない。手続き空が同じ理由で焼き直しているのと揃える(閾値は空の0.05段よりずっと粗く
         // 取ってある。フルベイクはプローブ数×6面の描画になるため)。
         // Realtimeは毎フレーム焼き直しているので対象外
-        if (m_ProbeUpdateMode != ProbeUpdateMode::Realtime && m_ProbeBaked && !m_ReflectionProbes.empty() &&
+        if (m_ReflectionProbeSettings.UpdateMode != ProbeUpdateMode::Realtime && m_ProbeBaked && !m_ReflectionProbes.empty() &&
             std::abs(m_EffectiveExposureEV100 - m_ProbeBakedExposureEV100) > kProbeRebakeExposureEV)
         {
             m_ProbeBakeRequested = true;
@@ -10717,7 +10717,7 @@ namespace Kurenai
         // (m_ProbeBaked=false)や機能を無効にしている場合はプローブ数を0にして、シェーダー側の
         // 選択ループ自体を回さない=中身が未定義のキューブマップを引かせないようにする
         std::vector<GPUReflectionProbe> gpuProbes;
-        if (m_ReflectionProbeEnabled && m_ProbeBaked)
+        if (m_ReflectionProbeSettings.Enabled && m_ProbeBaked)
         {
             gpuProbes.reserve(m_ReflectionProbes.size());
             for (const Assets::ReflectionProbe& probe : m_ReflectionProbes)
@@ -10746,12 +10746,12 @@ namespace Kurenai
         constants.ProbeParams = {
             static_cast<float>(gpuProbes.size()),
             probeInfluenceDebug,
-            m_ProbeParallaxCorrectionEnabled ? 1.0f : 0.0f,
-            m_ProbeBlendingEnabled ? 1.0f : 0.0f,
+            m_ReflectionProbeSettings.ParallaxCorrectionEnabled ? 1.0f : 0.0f,
+            m_ReflectionProbeSettings.BlendingEnabled ? 1.0f : 0.0f,
         };
         constants.ProbeParams2 = {
-            m_ProbeDepthParallaxEnabled ? 1.0f : 0.0f,
-            m_ProbeOcclusionEnabled ? 1.0f : 0.0f,
+            m_ReflectionProbeSettings.DepthParallaxEnabled ? 1.0f : 0.0f,
+            m_ReflectionProbeSettings.OcclusionEnabled ? 1.0f : 0.0f,
             static_cast<float>(kProbeCaptureSize),
             // 焼いた時点の実効プリ露出から現在の実効プリ露出への換算倍率
             // (m_ProbeBakedExposureEV100のコメント参照)。ComputeExposure(ev)=1/(1.2*2^ev)
@@ -10778,7 +10778,7 @@ namespace Kurenai
 
         // DDGI(22章)。一度も焼けていない間はアトラスの中身が未定義なので無効にしておく
         // (反射プローブのm_ProbeBakedと同じ方針)
-        const bool ddgiActive = m_DDGIEnabled && m_HasGIVolume && m_DDGIBaked;
+        const bool ddgiActive = m_DDGISettings.Enabled && m_HasGIVolume && m_DDGIBaked;
         constants.DDGIParams0 = {
             m_GIVolume.Origin[0], m_GIVolume.Origin[1], m_GIVolume.Origin[2],
             ddgiActive ? 1.0f : 0.0f,
@@ -10796,7 +10796,7 @@ namespace Kurenai
         constants.DDGIParams3 = {
             static_cast<float>(kDDGIIrradianceTexels),
             static_cast<float>(kDDGIDistanceTexels),
-            m_DDGIIntensity,
+            m_DDGISettings.Intensity,
             static_cast<float>(kDDGIProbeBorder),
         };
         // y = DeferredLightingがDDGIを低解像度パス(DDGIResolve)から引くか。
@@ -10804,13 +10804,13 @@ namespace Kurenai
         // (あるいは未初期化の)低解像度バッファを読んで間接光が固まる/壊れる。
         // 条件はDDGIResolveパスの登録側(ddgiResolvePassRuns)と同じものを並べている
         const bool ddgiHalfResolutionActive =
-            m_DDGIHalfResolution && m_DDGIResolveTexture && m_DDGIEnabled && m_HasGIVolume && m_DDGIBaked;
+            m_DDGISettings.HalfResolution && m_DDGIResolveTexture && m_DDGISettings.Enabled && m_HasGIVolume && m_DDGIBaked;
         // プローブ分類のしきい値。裏面の情報を持てるのはレイトレース経路だけなので、
         // ラスタ経路では分類そのものを無効(0)にして従来どおりの挙動に保つ
         // (ラスタ経路のαは常に0なのでどのしきい値でも有効側に倒れるが、
         //  「分類は掛かっていない」ことを値として明示しておく)
         const float ddgiBackfaceThreshold =
-            (m_DDGIProbeClassificationEnabled && ShouldRunRaytracedDDGITrace()) ? m_DDGIBackfaceThreshold : 0.0f;
+            (m_DDGISettings.ProbeClassificationEnabled && ShouldRunRaytracedDDGITrace()) ? m_DDGISettings.BackfaceThreshold : 0.0f;
         constants.DDGIParams4 = {
             effectiveExposure, ddgiHalfResolutionActive ? 1.0f : 0.0f,
             static_cast<float>(m_DDGILODCount), ddgiBackfaceThreshold
@@ -10842,54 +10842,54 @@ namespace Kurenai
             }
         }
         // 水面。スクロール位相はRenderThreadMainがm_WaterTimeFrozen/m_WaterWaveSpeedに
-        // 応じて毎フレーム進める(m_TimeOfDayの自動進行と同じ場所・同じ方式)。
+        // 応じて毎フレーム進める(m_SkySettings.TimeOfDayの自動進行と同じ場所・同じ方式)。
         // y=波のスケール倍率(m_WaterWaveScale)、z=波の強さ(m_WaterWaveStrength、0〜1)を
         // Water.hlslへ渡す(UIのスライダーが見た目へ反映されるようにするため)
         constants.TimeParams = { m_WaterScrollOffset, m_WaterWaveScale, m_WaterWaveStrength, 0.0f };
 
         // 雲。DeferredLighting.hlsl(背景)とSSR.hlsl(水面反射)の両方が同じ値を読むため、
-        // ここで一度だけ組み立てる。m_CloudEnabled=falseのときはCloudParams0.xへ0を渡し、
+        // ここで一度だけ組み立てる。m_CloudSettings.Enabled=falseのときはCloudParams0.xへ0を渡し、
         // Sky.hlsli側のSkyColorが早期脱出する経路(判断C)を通す
         constants.CloudParams0 = {
-            m_CloudEnabled ? m_CloudCoverage : 0.0f,
-            m_CloudAltitude,
-            m_CloudUvScale,
-            m_CloudDensity,
+            m_CloudSettings.Enabled ? m_CloudSettings.Coverage : 0.0f,
+            m_CloudSettings.Altitude,
+            m_CloudSettings.UvScale,
+            m_CloudSettings.Density,
         };
         // wには積雲の厚み[m]を詰めてある(FrameConstantsを増やさずに済ませるため)。
         // 0ならシェーダー側はレイマーチせず平面として扱う
         constants.CloudParams1 = {
-            m_CloudScrollOffset.x, m_CloudScrollOffset.y, m_CloudForwardG,
-            m_CloudVolumetric ? m_CloudThickness : 0.0f,
+            m_CloudScrollOffset.x, m_CloudScrollOffset.y, m_CloudSettings.ForwardG,
+            m_CloudSettings.Volumetric ? m_CloudSettings.Thickness : 0.0f,
         };
-        // 巻雲。積雲と同じ理由でここで一度だけ組み立てる。m_CirrusEnabled=falseのときは
+        // 巻雲。積雲と同じ理由でここで一度だけ組み立てる。m_CloudSettings.CirrusEnabled=falseのときは
         // CloudParams2.xへ0を渡し、Sky.hlsli側のSkyColorが早期脱出する経路(判断C)を通す
         constants.CloudParams2 = {
-            m_CirrusEnabled ? m_CirrusCoverage : 0.0f,
-            m_CirrusAltitude,
-            m_CirrusUvScale,
-            m_CirrusDensity,
+            m_CloudSettings.CirrusEnabled ? m_CloudSettings.CirrusCoverage : 0.0f,
+            m_CloudSettings.CirrusAltitude,
+            m_CloudSettings.CirrusUvScale,
+            m_CloudSettings.CirrusDensity,
         };
-        constants.CloudParams3 = { m_CirrusScrollOffset.x, m_CirrusScrollOffset.y, m_CirrusAnisotropy, m_CloudTypeBias };
+        constants.CloudParams3 = { m_CirrusScrollOffset.x, m_CirrusScrollOffset.y, m_CloudSettings.CirrusAnisotropy, m_CloudSettings.TypeBias };
         // 平面反射(P6)。このフィールドを参照するのはPlanarReflection.hlslだけで、そちらは
         // 専用のm_PlanarReflectionConstantBufferで明示的に上書きした値を使う(下のPlanarReflection
         // パス登録箇所参照)。共有のm_FrameConstantBufferにも一貫した値を入れておく
         constants.PlanarReflectionPlane = { 0.0f, 1.0f, 0.0f, hasWaterInstance ? -waterPlaneY : 0.0f };
 
         // 大気遠近。AerialPerspective.hlsl/PlanarReflection.hlslの両方が読む。
-        // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、m_FogEnabledの値に関わらず
+        // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、m_FogSettings.Enabledの値に関わらず
         // 常に無効化する――DDSは任意の絵でPerezモデルとは無関係なため、in-scatter項の
         // 解析評価(SkyColor)をしてはいけない(SSRパスのwaterAnalyticSkyFlagと同じ判断)
-        const float fogEnabledFlag = (m_FogEnabled && m_FogDensity > 0.0f && usingProceduralSky) ? 1.0f : 0.0f;
-        constants.FogParams0 = { m_FogDensity, m_FogScaleHeight, m_FogRefHeight, fogEnabledFlag };
-        constants.FogParams1 = { m_FogMaxOpacity, 0.0f, 0.0f, 0.0f };
+        const float fogEnabledFlag = (m_FogSettings.Enabled && m_FogSettings.Density > 0.0f && usingProceduralSky) ? 1.0f : 0.0f;
+        constants.FogParams0 = { m_FogSettings.Density, m_FogSettings.ScaleHeight, m_FogSettings.RefHeight, fogEnabledFlag };
+        constants.FogParams1 = { m_FogSettings.MaxOpacity, 0.0f, 0.0f, 0.0f };
         // 水中項。Water.hlslのPSMainが読む
         constants.WaterBodyColor = { m_WaterBodyColor.x, m_WaterBodyColor.y, m_WaterBodyColor.z, 0.0f };
 
         // 星空。
         // 【昼は強度0にしてしまう】星は太陽が地平線下にあるときしか見えない。ここで0に
         // 落としておけば、Sky.hlsli側は最初のif文で抜けるので昼のシーンの絵は1画素も動かない
-        // (m_StarsEnabledを切ったときとまったく同じ経路を通る)。
+        // (m_StarsSettings.Enabledを切ったときとまったく同じ経路を通る)。
         // sunLighting.SunPositionは太陽が「ある」向きなので、yが負なら地平線下。
         // 仰角0度から-8度にかけて滑らかに立ち上げ、市民薄明のあいだに星が出そろう形にする
         const float sunElevationSin = sunLighting.SunPosition.y;
@@ -10897,7 +10897,7 @@ namespace Kurenai
         // 手続き空を使わないシーン(DDSスカイボックス指定)ではSkyColorの解析評価自体を
         // 通らないため、フォグの有効フラグと同じ判断で0にしておく
         const float starsIntensity =
-            (m_StarsEnabled && usingProceduralSky) ? (m_StarsBrightness * starsNightFactor) : 0.0f;
+            (m_StarsSettings.Enabled && usingProceduralSky) ? (m_StarsSettings.Brightness * starsNightFactor) : 0.0f;
         // 1画素が張る角度[rad]。射影行列の_22 = 1/tan(fovY/2) から
         // 画面の高さ全体が 2*tan(fovY/2) なので、1画素あたりはそれを縦解像度で割ればよい。
         // 解像度やFOVを変えても星の見かけの下限が追従する
@@ -10907,12 +10907,12 @@ namespace Kurenai
             (projForPixelAngle._22 > 0.0f && m_RenderHeight > 0)
                 ? (2.0f / (projForPixelAngle._22 * static_cast<float>(m_RenderHeight)))
                 : 0.001f;
-        constants.StarsParams = { starsIntensity, m_StarsDensity, m_StarsTwinkle, pixelAngle };
+        constants.StarsParams = { starsIntensity, m_StarsSettings.Density, m_StarsSettings.Twinkle, pixelAngle };
 
         // 積雲のボリュームレイマーチの段数。シェーダー側でも上限へ丸めるが、
         // 0以下を渡すと「コンパイル時の既定を使う」の意味になってしまうため下限はここで効かせる
         constants.CloudQualityParams = {
-            static_cast<float>(std::clamp(m_CloudRaymarchSteps, 1u, kCloudRaymarchStepsMax)),
+            static_cast<float>(std::clamp(m_CloudSettings.RaymarchSteps, 1u, kCloudRaymarchStepsMax)),
             0.0f, 0.0f, 0.0f
         };
 
@@ -11083,7 +11083,7 @@ namespace Kurenai
         //
         //     【定数バッファは3つのエントリポイント共通】濁りはMieの密度としてTransmittanceにも
         //     MultiScatteringにも効くため、AtmosphereConstantsを3者で共有している
-        const float atmosphereMieDensityScale = ComputeAtmosphereMieDensityScale(m_SkyTurbidity);
+        const float atmosphereMieDensityScale = ComputeAtmosphereMieDensityScale(m_SkySettings.Turbidity);
         const auto updateAtmosphereConstants = [this, &sunLighting, atmosphereMieDensityScale]
             (RHI::IRHICommandList* cmd)
         {
@@ -11096,7 +11096,7 @@ namespace Kurenai
             cmd->SetComputeConstantBuffer(0, m_AtmosphereConstantBuffer.get());
         };
 
-        if (m_AtmosphereLUTBakedTurbidity != m_SkyTurbidity &&
+        if (m_AtmosphereLUTBakedTurbidity != m_SkySettings.Turbidity &&
             m_TransmittancePipelineState && m_MultiScatteringPipelineState)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
@@ -11120,7 +11120,7 @@ namespace Kurenai
                     cmd->Dispatch(groups, groups, 1);
                 },
             });
-            m_AtmosphereLUTBakedTurbidity = m_SkyTurbidity;
+            m_AtmosphereLUTBakedTurbidity = m_SkySettings.Turbidity;
         }
 
         // SkyView LUTを焼き直すかどうか。CSSkyViewの入力は太陽の向きと濁りだけで、
@@ -11129,7 +11129,7 @@ namespace Kurenai
         // 濁りは上のAtmosphereLUTBakeとまったく同じ条件で判定するため、濁りが動いたフレームでは
         // Transmittance/MultiScatteringとSkyViewが同じフレームで焼き直され、実行順序は
         // Reads/Writesの依存からレンダーグラフが決める
-        bool bakeSkyViewThisFrame = m_SkyViewBakedTurbidity != m_SkyTurbidity;
+        bool bakeSkyViewThisFrame = m_SkyViewBakedTurbidity != m_SkySettings.Turbidity;
         if (!bakeSkyViewThisFrame)
         {
             const DirectX::XMVECTOR current = DirectX::XMLoadFloat3(&sunLighting.SunPosition);
@@ -11142,7 +11142,7 @@ namespace Kurenai
         if (m_SkyViewPipelineState && bakeSkyViewThisFrame)
         {
             m_SkyViewBakedSunPosition = sunLighting.SunPosition;
-            m_SkyViewBakedTurbidity = m_SkyTurbidity;
+            m_SkyViewBakedTurbidity = m_SkySettings.Turbidity;
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyViewBake",
                 .Reads = { m_TransmittanceLUT.get(), m_MultiScatteringLUT.get() },
@@ -11177,7 +11177,7 @@ namespace Kurenai
                 sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
             };
             integrateConstants.IntegrateParams = {
-                sunLighting.SkyIlluminanceLux, effectiveExposure, m_SkyTurbidity, m_SkySaturation
+                sunLighting.SkyIlluminanceLux, effectiveExposure, m_SkySettings.Turbidity, m_SkySettings.Saturation
             };
             integrateConstants.CloudParams0 = constants.CloudParams0;
             integrateConstants.CloudParams1 = constants.CloudParams1;
@@ -11914,7 +11914,7 @@ namespace Kurenai
 
         // OnDemandは、焼き上がりに影響する状態(時刻・太陽・ライト)が変わったフレームだけ焼き直す。
         // 一度も焼けていない間はシーン読み込み時の要求が既に立っているのでここでは何もしない
-        if (m_ProbeUpdateMode == ProbeUpdateMode::OnDemand && probeCount > 0 && m_ProbeBaked &&
+        if (m_ReflectionProbeSettings.UpdateMode == ProbeUpdateMode::OnDemand && probeCount > 0 && m_ProbeBaked &&
             ComputeProbeBakeSignature() != m_ProbeBakeSignature)
         {
             m_ProbeBakeRequested = true;
@@ -11968,7 +11968,7 @@ namespace Kurenai
             m_ProbeRealtimeFace = 0;
             m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
         }
-        else if (m_ProbeUpdateMode == ProbeUpdateMode::Realtime && probeCount > 0 && m_ProbeBaked)
+        else if (m_ReflectionProbeSettings.UpdateMode == ProbeUpdateMode::Realtime && probeCount > 0 && m_ProbeBaked)
         {
             // --- 時間分割: キャプチャフェーズ(1フレーム1面、6フレーム)→ プリフィルタフェーズ
             //     (1フレームkProbeRealtimePrefilterStepsPerFrame個の(mip,face)、6フレーム)を
@@ -12082,7 +12082,7 @@ namespace Kurenai
         // --- DDGIのプローブ更新(22章) ---
         // 反射プローブとまったく同じキャプチャ経路を使い、解像度だけkDDGICaptureSizeへ落とす。
         // 6面×16×16 = 1536テクセルがそのままDDGIの「1536本のレイ」になる。
-        // フルベイクは持たず、初回も含めて常に1フレームm_DDGIProbesPerFrame個ずつ時間分割で回す
+        // フルベイクは持たず、初回も含めて常に1フレームm_DDGISettings.ProbesPerFrame個ずつ時間分割で回す
         // (理由はKurenaiEngine3D.hのm_DDGIWarmingUpのコメント参照)
 
         // プローブ1面ぶんのキャプチャ → スクラッチのキューブ2本(放射輝度・距離)の該当面へコピー。
@@ -12268,7 +12268,7 @@ namespace Kurenai
             traceConstants.Params1 = {
                 static_cast<float>(kDDGICaptureSize),
                 m_EmissiveIntensity,
-                m_DDGISunShadowRayEnabled ? 1.0f : 0.0f,
+                m_DDGISettings.SunShadowRayEnabled ? 1.0f : 0.0f,
                 ShouldSuppressEmissiveForGI() ? 0.0f : 1.0f
             };
             // 舐めるライトの数。ラスタ経路(ProbeCaptureのcaptureConstants)と同じ値にすること。
@@ -12372,7 +12372,7 @@ namespace Kurenai
         };
 
         // 焼き上がりに影響する状態が変わったら、停止していた更新を再開する。
-        // 【判定はm_DDGIEnabled等のガードの外に置く】無効な間も署名を追い続けないと、
+        // 【判定はm_DDGISettings.Enabled等のガードの外に置く】無効な間も署名を追い続けないと、
         // 無効中に時刻を動かして再度有効にしたとき「署名は同じ」と誤判定して止まったままになる
         if (m_HasGIVolume && m_DDGIProbeCount > 0)
         {
@@ -12386,7 +12386,7 @@ namespace Kurenai
             }
         }
 
-        if (m_DDGIEnabled && m_HasGIVolume && m_DDGIProbeCount > 0 && !m_DDGIUpdateSuspended)
+        if (m_DDGISettings.Enabled && m_HasGIVolume && m_DDGIProbeCount > 0 && !m_DDGIUpdateSuspended)
         {
             // レイの取得をどちらで行うか。パスの登録とキャプチャの実行で同じ判定を使う
             const bool useRaytracedTrace = ShouldRunRaytracedDDGITrace();
@@ -12401,12 +12401,12 @@ namespace Kurenai
                     "KurenaiEngine3D",
                     useRaytracedTrace
                         ? std::string("DDGIのレイ取得: レイトレーシング(DXR)。太陽の影レイ: ") +
-                              (m_DDGISunShadowRayEnabled ? "有効" : "無効")
+                              (m_DDGISettings.SunShadowRayEnabled ? "有効" : "無効")
                         : std::string("DDGIのレイ取得: ラスタライズ"));
             }
 
             uint32_t perFrame = std::min<uint32_t>(
-                static_cast<uint32_t>(std::max(m_DDGIProbesPerFrame, 1)), m_DDGIProbeCount);
+                static_cast<uint32_t>(std::max(m_DDGISettings.ProbesPerFrame, 1)), m_DDGIProbeCount);
             if (!useRaytracedTrace)
             {
                 // 1フレームの描画回数・定数書き込み回数の上限はラスタ経路だけの制約。
@@ -12438,7 +12438,7 @@ namespace Kurenai
             // 【止めるモードでは停止するまでの全巡回を上書きで焼く】理由はKurenaiEngine3D.hの
             // kDDGIBounceCyclesのコメント参照。露出追従のm_DDGIOverwriteRemainingとは
             // 独立に効かせたいので、残数を消費せず条件だけ合流させる
-            const bool overwriteWholeCycle = !warmingUp && m_DDGIUpdateMode != DDGIUpdateMode::Always;
+            const bool overwriteWholeCycle = !warmingUp && m_DDGISettings.UpdateMode != DDGIUpdateMode::Always;
 
             // --- 格子のスクロールで未確定になったスロットを拾う ---
             //
@@ -12593,12 +12593,12 @@ namespace Kurenai
             // 一巡ぶん焼き終えるたびに数え、モードごとの巡回数に達したら止める。
             // 【上書きが残っている間は止めない】まだ焼き切っていないため。
             // 一巡目(warmingUp)はこの後の分岐で別に扱うのでここでは数えない
-            if (cycleCompleted && !warmingUp && m_DDGIUpdateMode != DDGIUpdateMode::Always)
+            if (cycleCompleted && !warmingUp && m_DDGISettings.UpdateMode != DDGIUpdateMode::Always)
             {
                 ++m_DDGIStableCycles;
                 if (m_DDGIOverwriteRemaining == 0)
                 {
-                    const uint32_t requiredCycles = (m_DDGIUpdateMode == DDGIUpdateMode::OverwriteThenStop)
+                    const uint32_t requiredCycles = (m_DDGISettings.UpdateMode == DDGIUpdateMode::OverwriteThenStop)
                         ? 1u
                         : kDDGIBounceCycles;
                     if (m_DDGIStableCycles >= requiredCycles)
@@ -13775,7 +13775,7 @@ namespace Kurenai
                         static_cast<uint32_t>(gpuLights.size()),
                         // 【書き手と読み手で必ず同じKを使うこと】プールの1タイルぶんの
                         // 要素数はKから決まるので、食い違うと別タイルの領域を読み書きする
-                        static_cast<uint32_t>(m_MegaLightsTilePoolCapacity),
+                        static_cast<uint32_t>(m_MegaLightsSettings.TilePoolCapacity),
                     };
                     poolConstants.RenderSize = { m_RenderWidth, m_RenderHeight, 0u, 0u };
 
@@ -13839,7 +13839,7 @@ namespace Kurenai
         RHI::IRHIBuffer* const meshLightBufferForBinding =
             meshLightsActive ? m_MeshLightScene.GetTriangleBuffer() : m_LightBuffer.get();
 
-        if (ShouldRunMegaLights() && m_MegaLightsMode == MegaLightsMode::Reference)
+        if (ShouldRunMegaLights() && m_MegaLightsSettings.Mode == MegaLightsMode::Reference)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLights",
@@ -13864,7 +13864,7 @@ namespace Kurenai
                     {
                         m_RenderWidth,
                         m_RenderHeight,
-                        static_cast<uint32_t>(std::max(0, m_MegaLightsShadowRayCount)),
+                        static_cast<uint32_t>(std::max(0, m_MegaLightsSettings.ShadowRayCount)),
                         static_cast<uint32_t>(gpuLights.size()),
                     };
                     // 球光源のサンプル列を毎フレーム回す種。確率的サンプリング側と同じ
@@ -13926,9 +13926,9 @@ namespace Kurenai
         // Initial を共有していることが陽性対照の土台になる ―― 共有を切った手法3は、
         // 手法2から再利用を外した構成と画素単位で一致するはず
         const bool megaLightsQuadShared =
-            ShouldRunMegaLights() && m_MegaLightsMode == MegaLightsMode::QuadShared;
+            ShouldRunMegaLights() && m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared;
         if (ShouldRunMegaLights() &&
-            (m_MegaLightsMode == MegaLightsMode::Stochastic || megaLightsQuadShared))
+            (m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic || megaLightsQuadShared))
         {
             // 2パスで同じ定数バッファを共有する。中身はグラフ構築のこの時点で確定しているので、
             // Initial側のExecuteで1回だけ更新すればよい
@@ -13941,30 +13941,30 @@ namespace Kurenai
                 {
                     m_RenderWidth,
                     m_RenderHeight,
-                    static_cast<uint32_t>(std::max(1, m_MegaLightsSampleCount)),
+                    static_cast<uint32_t>(std::max(1, m_MegaLightsSettings.SampleCount)),
                     // 影レイ本数の意味は参照実装と揃える(0なら影を撃たない=恒等テスト側)。
                     // 確率的サンプリングは選ばれた1灯にしか撃たないので本数ではなく有無
-                    (m_MegaLightsShadowRayCount > 0) ? 1u : 0u,
+                    (m_MegaLightsSettings.ShadowRayCount > 0) ? 1u : 0u,
                 };
                 stochasticConstants.Params1 =
                 {
                     megaLightsEffectiveTilesX,
                     kLightTileSize,
                     // 候補プールを書いたときと同じKでなければならない(上のTileParams.wと同値)
-                    static_cast<uint32_t>(m_MegaLightsTilePoolCapacity),
+                    static_cast<uint32_t>(m_MegaLightsSettings.TilePoolCapacity),
                     m_TAAFrameIndex,
                 };
                 stochasticConstants.Params2 =
                 {
-                    static_cast<uint32_t>(std::max(0, m_MegaLightsSpatialNeighborCount)),
-                    static_cast<uint32_t>(std::max(1, m_MegaLightsSpatialRadius)),
-                    m_MegaLightsSpatialMIS ? 1u : 0u,
+                    static_cast<uint32_t>(std::max(0, m_MegaLightsSettings.SpatialNeighborCount)),
+                    static_cast<uint32_t>(std::max(1, m_MegaLightsSettings.SpatialRadius)),
+                    m_MegaLightsSettings.SpatialMIS ? 1u : 0u,
                     // 初期可視レイでリザーバを殺すか(Initialが読む)。殺すと影の縁に
                     // 暗い側の系統誤差が残るため、切り替えて測れるようにしてある。
                     // 【手法3では必ず撃つ】クアッド共有は「Initialが撃った1本」だけを
                     // 可視性の情報源にしている。切ると全標本が可視フラグ付きで出てきて
                     // 影が1つも出ない(絵が明るいだけで例外もログも出ない)
-                    (megaLightsQuadShared || m_MegaLightsInitialVisibility) ? 1u : 0u,
+                    (megaLightsQuadShared || m_MegaLightsSettings.InitialVisibility) ? 1u : 0u,
                 };
                 // 候補プールが錐台を組み立てたのと**同じ行列**から取る。ずれると
                 // 「その灯が隣のタイルへ届くか」の判定が候補プールと食い違い、定義域がずれる
@@ -13987,7 +13987,7 @@ namespace Kurenai
                         projection._11, projection._22,
                         // z は未使用(かつて露出補正を入れていた枠。上のコメント参照)
                         0.0f,
-                        static_cast<float>(std::max(1, m_MegaLightsTemporalMClamp)),
+                        static_cast<float>(std::max(1, m_MegaLightsSettings.TemporalMClamp)),
                     };
                 }
                 // 履歴が使えるか。解像度が変わった直後は添字の意味が変わっており、
@@ -14000,13 +14000,13 @@ namespace Kurenai
                 // 遮蔽の確定した灯のキャッシュを信用してよいかの判定にだけ使う。
                 // **陽性対照では切る**(履歴に依存すると手法2との画素単位の一致が崩れる)
                 const bool historyUsable = megaLightsQuadShared
-                                               ? (m_MegaLightsHistoryValid && m_MegaLightsBlockedCacheEnabled)
+                                               ? (m_MegaLightsHistoryValid && m_MegaLightsSettings.BlockedCacheEnabled)
                                                : m_MegaLightsHistoryValid;
                 stochasticConstants.Params4 = {
                     historyUsable ? 1u : 0u,
                     spatialIteration,
-                    (megaLightsQuadShared && m_MegaLightsQuadShareEnabled) ? 1u : 0u,
-                    (megaLightsQuadShared && m_MegaLightsQuadStratify) ? 1u : 0u,
+                    (megaLightsQuadShared && m_MegaLightsSettings.QuadShareEnabled) ? 1u : 0u,
+                    (megaLightsQuadShared && m_MegaLightsSettings.QuadStratify) ? 1u : 0u,
                 };
                 // 1画素あたりの標本数。**リザーババッファの確保と必ず同じ値にすること** ――
                 // ずれると Initial が確保外へ書くか、Resolve が別画素の標本を読む
@@ -14038,13 +14038,13 @@ namespace Kurenai
             // 【手法3は再利用の段をどちらも通さない】リザーバを持ち回らないのが手法3の要点で、
             // 追加のレイ(可視レイ・時間検証レイ・不偏化の分母のための補正レイ)が
             // ここから生まれている。1画素1レイという予算はこれを外して初めて成り立つ
-            const bool temporalRuns = !megaLightsQuadShared && m_MegaLightsTemporalEnabled &&
+            const bool temporalRuns = !megaLightsQuadShared && m_MegaLightsSettings.TemporalEnabled &&
                                       m_MegaLightsTemporalPipelineState &&
                                       m_MegaLightsReservoirHistory[0] && m_MegaLightsHistoryGuide[0];
-            const bool spatialRuns = !megaLightsQuadShared && m_MegaLightsSpatialEnabled &&
+            const bool spatialRuns = !megaLightsQuadShared && m_MegaLightsSettings.SpatialEnabled &&
                                      m_MegaLightsSpatialPipelineState &&
                                      m_MegaLightsReservoirSpatialBuffer &&
-                                     m_MegaLightsReservoirSpatialBuffer2 && m_MegaLightsSpatialNeighborCount > 0;
+                                     m_MegaLightsReservoirSpatialBuffer2 && m_MegaLightsSettings.SpatialNeighborCount > 0;
             // 反復回数。ping-pongのバッファと定数バッファの本数で上限が決まる。
             // 【時間再利用を切っているときは1回に落とす】不偏化の分母(Z)の可視性込みの
             // 判定は「生きているリザーバはこのフレーム・この画素で可視」という不変条件に
@@ -14055,7 +14055,7 @@ namespace Kurenai
             //(同じ測定で +0.0% / 誤差の中央値は 0.0379 → 0.0305 と改善)
             uint32_t spatialIterations =
                 spatialRuns ? static_cast<uint32_t>(std::clamp(
-                                  m_MegaLightsSpatialIterations, 1,
+                                  m_MegaLightsSettings.SpatialIterations, 1,
                                   static_cast<int32_t>(kMegaLightsMaxSpatialIterations)))
                             : 0u;
             if (!temporalRuns && spatialIterations > 1u)
@@ -14333,9 +14333,9 @@ namespace Kurenai
         // ノイズもAAも両方失う(MegaLightsDenoise.hlsl 冒頭)
         // 手法2と手法3は同じデノイザを共有する(入力は「確率的に作られた1枚の絵」で同じもの)
         const bool megaLightsDenoiseRuns = ShouldRunMegaLights() &&
-                                           (m_MegaLightsMode == MegaLightsMode::Stochastic ||
-                                            m_MegaLightsMode == MegaLightsMode::QuadShared) &&
-                                           m_MegaLightsDenoiseEnabled && m_MegaLightsDenoiseTemporalPSO &&
+                                           (m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic ||
+                                            m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared) &&
+                                           m_MegaLightsSettings.DenoiseEnabled && m_MegaLightsDenoiseTemporalPSO &&
                                            m_MegaLightsDenoisedTexture != nullptr;
         if (megaLightsDenoiseRuns)
         {
@@ -14345,9 +14345,9 @@ namespace Kurenai
             // 書いているのは、手法2では時間再利用、手法3では Resolve。
             // どちらも走っていなければ更新されないので使えない
             const bool denoiseGuideWritten =
-                (m_MegaLightsMode == MegaLightsMode::QuadShared)
+                (m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared)
                     ? (m_MegaLightsResolvePipelineState != nullptr)
-                    : (m_MegaLightsTemporalEnabled && m_MegaLightsTemporalPipelineState != nullptr);
+                    : (m_MegaLightsSettings.TemporalEnabled && m_MegaLightsTemporalPipelineState != nullptr);
             const bool denoiseGuideValid =
                 denoiseGuideWritten && m_MegaLightsHistoryGuide[0] && m_MegaLightsHistoryValid;
             // 【読むのは前フレームが書いた側】今フレームの時間再利用はもう片方へ書いている
@@ -14358,7 +14358,7 @@ namespace Kurenai
             const std::vector<RHI::IRHIBuffer*> denoiseGuideReads =
                 denoiseGuideBuffer ? std::vector<RHI::IRHIBuffer*>{ denoiseGuideBuffer }
                                    : std::vector<RHI::IRHIBuffer*>{};
-            const int atrousPasses = std::clamp(m_MegaLightsDenoiseAtrousPasses, 0, 5);
+            const int atrousPasses = std::clamp(m_MegaLightsSettings.DenoiseAtrousPasses, 0, 5);
 
             const auto updateDenoiseConstants =
                 [this, denoiseGuideValid](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
@@ -14369,21 +14369,21 @@ namespace Kurenai
                 };
                 // 時間累積の上限は手法ごとに別の変数を持つ。手法3にはリザーバの履歴が
                 // 無く、デノイザだけが時間方向の記憶なので長くしてある(EngineDefaults.h)
-                const int32_t denoiseMaxFrames = (m_MegaLightsMode == MegaLightsMode::QuadShared)
-                                                     ? m_MegaLightsQuadDenoiseMaxFrames
-                                                     : m_MegaLightsDenoiseMaxFrames;
+                const int32_t denoiseMaxFrames = (m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared)
+                                                     ? m_MegaLightsSettings.QuadDenoiseMaxFrames
+                                                     : m_MegaLightsSettings.DenoiseMaxFrames;
                 denoiseConstants.Params1 = {
                     stepWidth,
                     static_cast<float>(std::max(1, denoiseMaxFrames)),
                     // 輝度のエッジ停止の強さ(σ_l)。根拠は EngineDefaults.h の宣言に書いてある
-                    m_MegaLightsDenoiseSigmaLuminance,
+                    m_MegaLightsSettings.DenoiseSigmaLuminance,
                     // 法線のエッジ停止の指数(同128)
                     128.0f,
                 };
                 // 深度のエッジ停止(View空間Zに対する相対差なので無次元)と、
                 // ファイアフライの近傍クランプの強さ(近傍平均 + k・標準偏差で頭打ちにする)
                 denoiseConstants.Params2 = {
-                    0.02f, m_MegaLightsDenoiseFireflyClamp, denoiseGuideValid ? 1.0f : 0.0f, 0.0f
+                    0.02f, m_MegaLightsSettings.DenoiseFireflyClamp, denoiseGuideValid ? 1.0f : 0.0f, 0.0f
                 };
                 cmd->UpdateBuffer(
                     m_MegaLightsDenoiseConstantBuffer.get(), &denoiseConstants, sizeof(denoiseConstants));
@@ -14534,10 +14534,10 @@ namespace Kurenai
         //     「偏りが無くてもノイズがあるだけで平均が低く出る」。線形で足す場所がここに要る ---
         // 整定を待ってから足し始める(内部解像度の切り替えとストリーミングが片付くまで)
         ++m_MegaLightsAccumWarmupFrames;
-        const bool megaLightsAccumRuns = ShouldRunMegaLights() && m_MegaLightsAccumTargetFrames > 0 &&
+        const bool megaLightsAccumRuns = ShouldRunMegaLights() && m_MegaLightsSettings.AccumTargetFrames > 0 &&
                                          m_MegaLightsAccumPipelineState && m_MegaLightsAccumBuffer &&
                                          m_MegaLightsAccumWarmupFrames > kMegaLightsAccumWarmup &&
-                                         m_MegaLightsAccumFrames < static_cast<uint32_t>(m_MegaLightsAccumTargetFrames);
+                                         m_MegaLightsAccumFrames < static_cast<uint32_t>(m_MegaLightsSettings.AccumTargetFrames);
         if (megaLightsAccumRuns)
         {
             // 最初の1枚は「足す」ではなく「代入する」。RHIにバッファのクリアが無いため
@@ -14570,8 +14570,8 @@ namespace Kurenai
         // 画面キャプチャは8bit・トーンマップ後で、丸めだけでRMSEに0.29階調の下限が生まれる。
         // 「平均が真値へ 1/√N で寄るか」はその下限に隠れて読めないので、線形のまま取り出す
         if (!m_MegaLightsDumpPath.empty() && !m_MegaLightsDumpDone && m_MegaLightsAccumBuffer &&
-            m_MegaLightsAccumTargetFrames > 0 &&
-            m_MegaLightsAccumFrames >= static_cast<uint32_t>(m_MegaLightsAccumTargetFrames))
+            m_MegaLightsSettings.AccumTargetFrames > 0 &&
+            m_MegaLightsAccumFrames >= static_cast<uint32_t>(m_MegaLightsSettings.AccumTargetFrames))
         {
             const uint32_t accumBytes =
                 static_cast<uint32_t>(sizeof(float) * 4) * m_RenderWidth * m_RenderHeight;
@@ -14769,11 +14769,11 @@ namespace Kurenai
 
         // --- AO/GIパス: 選択中の手法(SSAO / SSIL / RTAO)で遮蔽率(・間接拡散光)を計算し、
         //     ブラーで均す(常に指定した内部解像度)。出力フォーマットはどれもrgb=間接拡散光, a=遮蔽率で共通 ---
-        if (m_AOEnabled)
+        if (m_AmbientOcclusionSettings.Enabled)
         {
             RHI::IRHITexture* const aoRawTexture = GetActiveAORawTexture();
             RHI::IRHITexture* const aoBlurredTexture = GetActiveAOTexture();
-            const bool useSSIL = !ShouldRunRaytracedAO() && m_AOTechnique == AOTechnique::SSILVisibilityBitmask;
+            const bool useSSIL = !ShouldRunRaytracedAO() && m_AmbientOcclusionSettings.Technique == AOTechnique::SSILVisibilityBitmask;
 
             if (ShouldRunRaytracedAO())
             {
@@ -14790,11 +14790,11 @@ namespace Kurenai
                         RTAOConstants rtAOConstants{};
                         rtAOConstants.Params0 = {
                             static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight),
-                            m_RTAOMaxDistance, m_RTAOPower
+                            m_AmbientOcclusionSettings.RTAOMaxDistance, m_AmbientOcclusionSettings.RTAOPower
                         };
                         rtAOConstants.Params1 = {
-                            static_cast<float>(std::max(1, m_RTAOSampleCount)), m_RTAOIntensity,
-                            m_RTAOBounceShadowRayEnabled ? 1.0f : 0.0f, 0.0f
+                            static_cast<float>(std::max(1, m_AmbientOcclusionSettings.RTAOSampleCount)), m_AmbientOcclusionSettings.RTAOIntensity,
+                            m_AmbientOcclusionSettings.RTAOBounceShadowRayEnabled ? 1.0f : 0.0f, 0.0f
                         };
                         cmd->UpdateBuffer(m_RTAOConstantBuffer.get(), &rtAOConstants, sizeof(rtAOConstants));
 
@@ -14849,8 +14849,8 @@ namespace Kurenai
                         if (useSSIL)
                         {
                             SSILConstants ssilConstants{};
-                            ssilConstants.Params0 = { m_SSILRadius, m_SSILThickness, m_SSILIntensity, m_SSILPower };
-                            ssilConstants.Params1 = { m_SSILSliceCount, m_SSILStepCount, 0u, 0u };
+                            ssilConstants.Params0 = { m_AmbientOcclusionSettings.SSILRadius, m_AmbientOcclusionSettings.SSILThickness, m_AmbientOcclusionSettings.SSILIntensity, m_AmbientOcclusionSettings.SSILPower };
+                            ssilConstants.Params1 = { m_AmbientOcclusionSettings.SSILSliceCount, m_AmbientOcclusionSettings.SSILStepCount, 0u, 0u };
                             cmd->UpdateBuffer(m_SSILConstantBuffer.get(), &ssilConstants, sizeof(ssilConstants));
 
                             cmd->SetPipelineState(m_SSILPipelineState.get());
@@ -14863,10 +14863,10 @@ namespace Kurenai
                         else
                         {
                             // UIやプリセットで段数が変わったらカーネルを作り直す。
-                            // 先頭N本を流用してはいけない理由はm_SSAOKernelSizeのコメント参照。
+                            // 先頭N本を流用してはいけない理由はm_AmbientOcclusionSettings.SSAOKernelSizeのコメント参照。
                             // 生成は16回のRNGだけなので毎フレーム比較しても問題にならない
                             const uint32_t kernelSize =
-                                std::clamp(m_SSAOKernelSize, 1u, kSSAOKernelSizeMax);
+                                std::clamp(m_AmbientOcclusionSettings.SSAOKernelSize, 1u, kSSAOKernelSizeMax);
                             if (m_SSAOKernel.size() != kernelSize)
                             {
                                 m_SSAOKernel = GenerateSSAOKernel(kernelSize);
@@ -14876,7 +14876,7 @@ namespace Kurenai
                             SSAOConstants ssaoConstants{};
                             std::copy(m_SSAOKernel.begin(), m_SSAOKernel.end(), ssaoConstants.Samples);
                             ssaoConstants.Params = {
-                                m_SSAORadius, m_SSAORadius * 0.05f, m_SSAOPower, static_cast<float>(kernelSize) };
+                                m_AmbientOcclusionSettings.SSAORadius, m_AmbientOcclusionSettings.SSAORadius * 0.05f, m_AmbientOcclusionSettings.SSAOPower, static_cast<float>(kernelSize) };
                             cmd->UpdateBuffer(m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
 
                             cmd->SetPipelineState(m_SSAOPipelineState.get());
@@ -14924,7 +14924,7 @@ namespace Kurenai
         //
         // 【手続き空が無効なら登録しない】.ksceneでDDSスカイボックスを使う場合、Lightingパスは
         // キューブマップをサンプルする経路(SkyParams.y <= 0.5)へ入り、この結果を一切読まない
-        const bool skyCloudPassRuns = m_SkyCloudTexture && (m_SkyAnalyticBackground && usingProceduralSky);
+        const bool skyCloudPassRuns = m_SkyCloudTexture && (m_SkySettings.AnalyticBackground && usingProceduralSky);
         if (skyCloudPassRuns)
         {
             RHI::Viewport skyCloudViewport;
@@ -14965,7 +14965,7 @@ namespace Kurenai
         // 拡散イラディアンスとinsideWeightを1/2解像度で求め、Lightingパスが深度を見て
         // アップサンプルする。雲と違い厳密ではない近似のため既定は無効(DDGIResolve.hlsl冒頭参照)
         const bool ddgiResolvePassRuns =
-            m_DDGIHalfResolution && m_DDGIResolveTexture && m_DDGIEnabled && m_HasGIVolume && m_DDGIBaked;
+            m_DDGISettings.HalfResolution && m_DDGIResolveTexture && m_DDGISettings.Enabled && m_HasGIVolume && m_DDGIBaked;
         if (ddgiResolvePassRuns)
         {
             RHI::Viewport ddgiResolveViewport;
@@ -15448,7 +15448,7 @@ namespace Kurenai
         // --- 反射パス: Lightingパスが適用した鏡面IBLを、実際に追跡した反射で差し替える(20章)。
         //     ScreenSpaceならSSR(レイマーチ)、RaytracedならRT反射(RayQuery)。
         //     Offならスキップし、後段のTonemapが直接m_SceneColorを読む ---
-        if (m_ReflectionMode == ReflectionMode::ScreenSpace)
+        if (m_ReflectionSettings.Mode == ReflectionMode::ScreenSpace)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SSR",
@@ -15490,8 +15490,8 @@ namespace Kurenai
 
                     SSRConstants ssrConstants{};
                     ssrConstants.Params0 =
-                        { m_SSRMaxDistance, m_SSRThickness, m_SSRRoughnessCutoff, waterAnalyticSkyFlag };
-                    ssrConstants.Params1 = { planarReflectionFlag, m_PlanarReflectionDistortion, 0.0f, 0.0f };
+                        { m_ReflectionSettings.SSRMaxDistance, m_ReflectionSettings.SSRThickness, m_ReflectionSettings.SSRRoughnessCutoff, waterAnalyticSkyFlag };
+                    ssrConstants.Params1 = { planarReflectionFlag, m_ReflectionSettings.PlanarDistortion, 0.0f, 0.0f };
                     cmd->UpdateBuffer(m_SSRConstantBuffer.get(), &ssrConstants, sizeof(ssrConstants));
 
                     cmd->SetViewport(gbufferViewport);
@@ -15552,13 +15552,13 @@ namespace Kurenai
                     RTReflectionConstants rtConstants{};
                     rtConstants.Params0 = {
                         static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight),
-                        m_RTReflectionMaxDistance, m_RTReflectionRoughnessCutoff
+                        m_ReflectionSettings.RTReflectionMaxDistance, m_ReflectionSettings.RTReflectionRoughnessCutoff
                     };
                     // yはメッシュレットのデバッグ表示。ラスタ側と同じトグルで駆動するので、
                     // 有効にすると「直接見えている面」と「反射に映る面」の両方が
                     // メッシュレット色になり、同じ塊が同じ色かを見比べられる
                     rtConstants.Params1 = {
-                        m_RTReflectionShadowRayEnabled ? 1.0f : 0.0f,
+                        m_ReflectionSettings.RTReflectionShadowRayEnabled ? 1.0f : 0.0f,
                         m_MeshletDebugViewEnabled ? 1.0f : 0.0f,
                         0.0f,
                         0.0f,
@@ -16324,13 +16324,13 @@ namespace Kurenai
             // 大気散乱のLUT。HDRなのでMode 4(Reinhard+ガンマ)で表示する。
             // Transmittanceは0〜1なのでそのままでも読めるが、MultiScatteringは値が小さいので
             // 表示輝度の倍率と併用する
-            if (m_AtmosphereLUTDebugIndex == 1)
+            if (m_SkySettings.AtmosphereLUTDebugIndex == 1)
             {
                 presentSourceTexture = m_MultiScatteringLUT.get();
                 presentSourceWidth = kMultiScatteringLUTSize;
                 presentSourceHeight = kMultiScatteringLUTSize;
             }
-            else if (m_AtmosphereLUTDebugIndex == 2)
+            else if (m_SkySettings.AtmosphereLUTDebugIndex == 2)
             {
                 presentSourceTexture = m_SkyViewLUT.get();
                 presentSourceWidth = kSkyViewLUTWidth;
@@ -16378,7 +16378,7 @@ namespace Kurenai
         {
             // 雲の3Dノイズ。形状(128^3)とディテール(32^3)を切り替えて任意のスライスを見る。
             // 正方形のテクスチャなので表示も正方形にする(レターボックスの計算に渡す)
-            const bool showDetail = m_CloudNoiseDebugShowDetail;
+            const bool showDetail = m_CloudSettings.NoiseDebugShowDetail;
             presentDebugVolumeTexture =
                 showDetail ? m_CloudDetailNoiseTexture.get() : m_CloudShapeNoiseTexture.get();
             presentMode = 18;
@@ -16396,7 +16396,7 @@ namespace Kurenai
         RHI::IRHIBuffer* const presentTileBuffer =
             presentUsesTilePool ? m_MegaLightsTilePoolBuffer.get() : m_LightTileBuffer.get();
         const uint32_t presentTileCapacity =
-            presentUsesTilePool ? static_cast<uint32_t>(m_MegaLightsTilePoolCapacity) : kLightTileCapacity;
+            presentUsesTilePool ? static_cast<uint32_t>(m_MegaLightsSettings.TilePoolCapacity) : kLightTileCapacity;
         // Mode 21だけは候補プールを書いた有効タイル幅を使う。Mode 11は従来のライトグリッドなので
         // m_LightTileCountXのままにし、デバッグ表示が実データと別の添字を読まないようにする
         const uint32_t presentTileCountX =
@@ -16438,7 +16438,7 @@ namespace Kurenai
         }
         else if (m_DebugView == DebugView::ProbePrefilter)
         {
-            presentConstants.MipLevel = static_cast<float>(m_ProbePrefilterDebugMipLevel);
+            presentConstants.MipLevel = static_cast<float>(m_ReflectionProbeSettings.PrefilterDebugMipLevel);
         }
         else
         {
@@ -16449,12 +16449,12 @@ namespace Kurenai
         if (m_DebugView == DebugView::ProbePrefilter || m_DebugView == DebugView::ProbeDistance)
         {
             presentConstants.ArraySlice = static_cast<float>(
-                std::clamp(m_ProbeDebugIndex, 0, std::max(0, static_cast<int32_t>(m_ReflectionProbes.size()) - 1)));
+                std::clamp(m_ReflectionProbeSettings.DebugIndex, 0, std::max(0, static_cast<int32_t>(m_ReflectionProbes.size()) - 1)));
         }
         else if (m_DebugView == DebugView::CloudNoiseSlice)
         {
             // Mode 18ではW座標(0〜1)として使う。3Dテクスチャなので配列番号ではなく連続値
-            presentConstants.ArraySlice = std::clamp(m_CloudNoiseDebugSlice, 0.0f, 1.0f);
+            presentConstants.ArraySlice = std::clamp(m_CloudSettings.NoiseDebugSlice, 0.0f, 1.0f);
         }
         else
         {
@@ -16471,7 +16471,7 @@ namespace Kurenai
             // 「クランプに当たっている方向」が一目で分かる
             const float whiteAt = (m_DebugView == DebugView::DDGIDistance)
                 ? m_GIVolume.MaxRayDistance
-                : m_ProbeDistanceDebugRange;
+                : m_ReflectionProbeSettings.DistanceDebugRange;
             presentConstants.Gain = 1.0f / std::max(whiteAt, 0.01f);
         }
         else if (m_DebugView == DebugView::DDGIIrradiance)
@@ -16749,15 +16749,15 @@ namespace Kurenai
         // MegaLightsの時間再利用も同じ場所でping-pongを反転する。
         // 今フレームの書き込み先が、次フレームでは履歴(読み込み元)になる
         {
-            const bool temporalRan = ShouldRunMegaLights() && m_MegaLightsMode == MegaLightsMode::Stochastic &&
-                                     m_MegaLightsTemporalEnabled && m_MegaLightsTemporalPipelineState &&
+            const bool temporalRan = ShouldRunMegaLights() && m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic &&
+                                     m_MegaLightsSettings.TemporalEnabled && m_MegaLightsTemporalPipelineState &&
                                      m_MegaLightsReservoirHistory[0] && m_MegaLightsHistoryGuide[0];
             // 【手法3もガイドを書くので同じ反転が要る】あちらは時間再利用を持たないが、
             // デノイザが読む「前フレームの幾何」を Resolve が書いている。反転しないと
             // 同じフレームで書いた側を読むことになり、比べたい「別のフレームの同じ点」に
             // ならない(そのうえ RenderGraph は WAR の辺を張らないので競合する)
             const bool quadGuideRan = ShouldRunMegaLights() &&
-                                      m_MegaLightsMode == MegaLightsMode::QuadShared &&
+                                      m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared &&
                                       m_MegaLightsResolvePipelineState && m_MegaLightsHistoryGuide[0];
             if (temporalRan || quadGuideRan)
             {
@@ -16779,9 +16779,9 @@ namespace Kurenai
             // リザーバを混ぜる時間再利用とは独立に効く。条件を混ぜると、片方を切ったときに
             // もう片方の履歴まで無効になって原因が分からなくなる
             const bool denoiseRan = ShouldRunMegaLights() &&
-                                    (m_MegaLightsMode == MegaLightsMode::Stochastic ||
-                                     m_MegaLightsMode == MegaLightsMode::QuadShared) &&
-                                    m_MegaLightsDenoiseEnabled && m_MegaLightsDenoiseTemporalPSO &&
+                                    (m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic ||
+                                     m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared) &&
+                                    m_MegaLightsSettings.DenoiseEnabled && m_MegaLightsDenoiseTemporalPSO &&
                                     m_MegaLightsDenoisedTexture != nullptr;
             if (denoiseRan)
             {

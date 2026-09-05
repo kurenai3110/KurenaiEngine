@@ -40,28 +40,28 @@ namespace Kurenai::UI
 
     void ReflectionProbePanel::DrawGlobalSettings()
     {
-        using ProbeUpdateMode = KurenaiEngine3D::ProbeUpdateMode;
+        using ProbeUpdateMode = Kurenai::ProbeUpdateMode;
 
         BeginParamGroup();
 
         CheckboxEx(
-            "反射プローブを有効にする###EnableReflectionProbes", &m_Engine.m_ReflectionProbeEnabled,
+            "反射プローブを有効にする###EnableReflectionProbes", &m_Engine.m_ReflectionProbeSettings.Enabled,
             Defaults::ReflectionProbeEnabled,
             "無効にすると、鏡面反射の環境項がすべてスカイボックス由来のグローバルIBLになる");
 
         // 以下2つは球形・単一選択・視差補正なしの旧構成との見比べ用。どちらも焼き直し不要で、
         // 環境ソースの引き方だけが変わる
         CheckboxEx(
-            "視差補正###ProbeParallaxCorrection", &m_Engine.m_ProbeParallaxCorrectionEnabled,
+            "視差補正###ProbeParallaxCorrection", &m_Engine.m_ReflectionProbeSettings.ParallaxCorrectionEnabled,
             Defaults::ProbeParallaxCorrectionEnabled,
             "Box形状のときのみ有効。反射ベクトルを箱と交差させることで、プローブの中心から離れた"
             "場所でも反射の位置が合うようにする");
 
         // 視差補正の方式(19.12節)。上のトグルが有効なときだけ意味を持つ
-        ImGui::BeginDisabled(!m_Engine.m_ProbeParallaxCorrectionEnabled);
+        ImGui::BeginDisabled(!m_Engine.m_ReflectionProbeSettings.ParallaxCorrectionEnabled);
         ImGui::Indent();
         CheckboxEx(
-            "距離キューブを使う###ProbeDepthParallax", &m_Engine.m_ProbeDepthParallaxEnabled,
+            "距離キューブを使う###ProbeDepthParallax", &m_Engine.m_ReflectionProbeSettings.DepthParallaxEnabled,
             Defaults::ProbeDepthParallaxEnabled,
             "部屋を直方体とみなす代わりに、キャプチャ時に一緒に焼いた距離を辿って実際の形状へ"
             "反射を当てる。交差が見つからなければ箱の交点へフォールバックする。\n"
@@ -71,11 +71,11 @@ namespace Kurenai::UI
         ImGui::EndDisabled();
 
         CheckboxEx(
-            "プローブのブレンド###ProbeBlending", &m_Engine.m_ProbeBlendingEnabled, Defaults::ProbeBlendingEnabled,
+            "プローブのブレンド###ProbeBlending", &m_Engine.m_ReflectionProbeSettings.BlendingEnabled, Defaults::ProbeBlendingEnabled,
             "影響範囲の境界から内側へブレンド距離ぶんかけて重みを立ち上げる。"
             "無効にすると最も近いプローブだけを使うため、境界に継ぎ目が出る");
         CheckboxEx(
-            "遮蔽判定(光漏れの抑制)###ProbeOcclusion", &m_Engine.m_ProbeOcclusionEnabled,
+            "遮蔽判定(光漏れの抑制)###ProbeOcclusion", &m_Engine.m_ReflectionProbeSettings.OcclusionEnabled,
             Defaults::ProbeOcclusionEnabled,
             "プローブから見て記録面より奥にあるピクセル(=壁の向こう)で、そのプローブの重みを落とす。\n"
             "ただしプローブが少ないうちは落ちた重みをより明るい空由来のIBLが埋めるため、"
@@ -85,7 +85,7 @@ namespace Kurenai::UI
         // プロファイラの ProbeBakeCaptureN / ProbeBakeConvolvePrefilterN /
         // ProbeRealtimeCapture / ProbeRealtimeConvolvePrefilterStep と見比べながら選べるようにしてある
         static const char* kUpdateModeNames[] = { "焼き込み", "変化を検出して焼き直す", "毎フレーム少しずつ" };
-        int updateModeIndex = static_cast<int>(m_Engine.m_ProbeUpdateMode);
+        int updateModeIndex = static_cast<int>(m_Engine.m_ReflectionProbeSettings.UpdateMode);
         if (ComboEx(
                 "更新モード###ProbeUpdateMode", &updateModeIndex, kUpdateModeNames, IM_ARRAYSIZE(kUpdateModeNames),
                 static_cast<int>(ProbeUpdateMode::Baked),
@@ -94,7 +94,7 @@ namespace Kurenai::UI
                 "毎フレーム少しずつ: さらに1プローブを12フレームかけて焼き直し(6フレームで6面を\n"
                 "キャプチャ→6フレームで畳み込み)、プローブをラウンドロビンで回る"))
         {
-            m_Engine.m_ProbeUpdateMode = static_cast<ProbeUpdateMode>(updateModeIndex);
+            m_Engine.m_ReflectionProbeSettings.UpdateMode = static_cast<ProbeUpdateMode>(updateModeIndex);
         }
 
         EndParamGroup();
@@ -106,7 +106,7 @@ namespace Kurenai::UI
         {
             ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "まだ焼かれていません");
         }
-        else if (m_Engine.m_ProbeUpdateMode == ProbeUpdateMode::Realtime && !m_Engine.m_ReflectionProbes.empty())
+        else if (m_Engine.m_ReflectionProbeSettings.UpdateMode == ProbeUpdateMode::Realtime && !m_Engine.m_ReflectionProbes.empty())
         {
             // 今どのプローブの何面目を焼いているか。1周にプローブ数×6フレームかかるので、
             // 「変化が反射へ現れるまでの遅れ」がこの進行から読める

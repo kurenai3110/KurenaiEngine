@@ -79,6 +79,15 @@
     <ClInclude Include="Source\Engine\KurenaiTypes.h" />
     <ClInclude Include="Source\Engine\KurenaiEngine3D.h" />
     <ClInclude Include="Source\Engine\EngineDefaults.h" />
+    <ClInclude Include="Source\Engine\Settings\AmbientOcclusionSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\CloudSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\DDGISettings.h" />
+    <ClInclude Include="Source\Engine\Settings\FogSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\MegaLightsSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\ReflectionProbeSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\ReflectionSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\SkySettings.h" />
+    <ClInclude Include="Source\Engine\Settings\StarsSettings.h" />
     <ClInclude Include="Source\Engine\DroneShow.h" />
     <ClInclude Include="Source\Engine\UI\IPanel.h" />
     <ClInclude Include="Source\Engine\UI\UIManager.h" />

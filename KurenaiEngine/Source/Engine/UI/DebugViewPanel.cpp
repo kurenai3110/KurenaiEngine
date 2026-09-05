@@ -21,7 +21,7 @@ namespace Kurenai::UI
         using DebugView = KurenaiEngine3D::DebugView;
 
         // DebugView::AtmosphereLUTで表示するLUTの選択肢。
-        // 並びはKurenaiEngine3D::m_AtmosphereLUTDebugIndexの意味と一致させること
+        // 並びはKurenaiEngine3D::m_SkySettings.AtmosphereLUTDebugIndexの意味と一致させること
         static const char* kAtmosphereLUTNames[] =
         {
             "Transmittance (256x64)",
@@ -124,13 +124,13 @@ namespace Kurenai::UI
             const int maxProbeIndex =
                 m_Engine.m_ReflectionProbes.empty() ? 0 : static_cast<int>(m_Engine.m_ReflectionProbes.size()) - 1;
             SliderIntEx(
-                "プローブ番号###ProbeIndex", &m_Engine.m_ProbeDebugIndex, 0, maxProbeIndex, 0,
+                "プローブ番号###ProbeIndex", &m_Engine.m_ReflectionProbeSettings.DebugIndex, 0, maxProbeIndex, 0,
                 "表示する反射プローブの番号。反射プローブパネルの一覧と同じ並び");
 
             if (m_Engine.m_DebugView == DebugView::ProbePrefilter)
             {
                 SliderIntEx(
-                    "プローブ プリフィルタ ミップ###ProbePrefilterMip", &m_Engine.m_ProbePrefilterDebugMipLevel, 0,
+                    "プローブ プリフィルタ ミップ###ProbePrefilterMip", &m_Engine.m_ReflectionProbeSettings.PrefilterDebugMipLevel, 0,
                     static_cast<int>(KurenaiEngine3D::kIBLPrefilterMipLevels) - 1, 0,
                     "表示するミップの段。ミップ0はぼかす前のキャプチャ結果そのもの");
             }
@@ -140,7 +140,7 @@ namespace Kurenai::UI
                 // 距離キューブに入っているのは色ではなくワールド距離なので、表示輝度の倍率(1倍以上)
                 // ではなく「白になる距離」で正規化する(Render()側でこの逆数をGainとして渡す)
                 SliderFloatEx(
-                    "白になる距離###ProbeDistanceRange", &m_Engine.m_ProbeDistanceDebugRange, 1.0f, 200.0f,
+                    "白になる距離###ProbeDistanceRange", &m_Engine.m_ReflectionProbeSettings.DistanceDebugRange, 1.0f, 200.0f,
                     Defaults::ProbeDistanceDebugRange, "%.1f", ImGuiSliderFlags_Logarithmic,
                     "この距離で白飽和するようグレースケール化する。部屋の大きさに合わせると形が読める");
             }
@@ -151,10 +151,10 @@ namespace Kurenai::UI
             ImGui::TextWrapped(
                 "画面には2x2タイルぶんを表示している。タイル境界に継ぎ目があれば画面中央の十字線として現れる");
             CheckboxEx(
-                "ディテール(32^3)を見る###CloudNoiseDetail", &m_Engine.m_CloudNoiseDebugShowDetail, false,
+                "ディテール(32^3)を見る###CloudNoiseDetail", &m_Engine.m_CloudSettings.NoiseDebugShowDetail, false,
                 "オフで形状ノイズ(128^3、RGB=Perlin-Worley/Worley/Worley)、オンで縁を削るディテールノイズ");
             SliderFloatEx(
-                "スライス位置###CloudNoiseSlice", &m_Engine.m_CloudNoiseDebugSlice, 0.0f, 1.0f, 0.0f, "%.3f", 0,
+                "スライス位置###CloudNoiseSlice", &m_Engine.m_CloudSettings.NoiseDebugSlice, 0.0f, 1.0f, 0.0f, "%.3f", 0,
                 "3Dテクスチャのどの断面を見るか(W座標)。動かして中身が変わらなければ焼けていない");
         }
 
@@ -166,7 +166,7 @@ namespace Kurenai::UI
                 "SkyView: 横=太陽の子午線からの方位(左端が太陽側)、"
                 "縦=天頂角(上端が天頂、中央が地平線)");
             ComboEx(
-                "表示するLUT###AtmosphereLUTIndex", &m_Engine.m_AtmosphereLUTDebugIndex,
+                "表示するLUT###AtmosphereLUTIndex", &m_Engine.m_SkySettings.AtmosphereLUTDebugIndex,
                 kAtmosphereLUTNames, IM_ARRAYSIZE(kAtmosphereLUTNames), 0,
                 "MultiScatteringは値が小さいので表示輝度の倍率を上げて見る");
         }

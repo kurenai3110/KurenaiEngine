@@ -252,7 +252,7 @@ namespace Kurenai::Defaults
 
     // --- 大気遠近(height fog / aerial perspective) ---
     // 以下の数値はいずれも見た目からの調整値であり、物理的な導出や実測値ではない
-    // (親セッション側の実機確認で調整可能。KurenaiEngine3D::m_FogDensity等のコメント参照)
+    // (親セッション側の実機確認で調整可能。KurenaiEngine3D::m_FogSettings.Density等のコメント参照)
     inline constexpr bool FogEnabled = true;
     // 基準高度(FogRefHeight)での消散係数[1/m]。
     // 【この値の根拠】消散係数は気象学的視程Vと Koschmieder の関係 sigma = 3.912 / V で結び付く

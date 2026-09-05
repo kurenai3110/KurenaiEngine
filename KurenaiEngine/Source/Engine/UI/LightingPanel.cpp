@@ -63,28 +63,28 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         SliderFloatEx(
-            "時刻###TimeOfDay", &m_Engine.m_TimeOfDay, 0.0f, 24.0f, Defaults::TimeOfDay, "%.2f h", 0,
+            "時刻###TimeOfDay", &m_Engine.m_SkySettings.TimeOfDay, 0.0f, 24.0f, Defaults::TimeOfDay, "%.2f h", 0,
             "1日のうちの時刻。太陽高度と空の色がこれで決まる");
         CheckboxEx(
-            "自動で進める###AutoAdvance", &m_Engine.m_TimeAutoAdvance, Defaults::TimeAutoAdvance,
+            "自動で進める###AutoAdvance", &m_Engine.m_SkySettings.TimeAutoAdvance, Defaults::TimeAutoAdvance,
             "時刻を実時間に応じて自動で進める");
-        if (m_Engine.m_TimeAutoAdvance)
+        if (m_Engine.m_SkySettings.TimeAutoAdvance)
         {
             SliderFloatEx(
-                "進む速さ###TimeSpeed", &m_Engine.m_TimeAdvanceSpeed, 0.1f, 10.0f, Defaults::TimeAdvanceSpeed,
+                "進む速さ###TimeSpeed", &m_Engine.m_SkySettings.TimeAdvanceSpeed, 0.1f, 10.0f, Defaults::TimeAdvanceSpeed,
                 "%.1f h/s", 0, "実時間1秒あたりに進むシーン内の時間");
         }
         SliderFloatEx(
-            "方位角###SunAzimuth", &m_Engine.m_SunAzimuthDegrees, 0.0f, 360.0f, Defaults::SunAzimuthDegrees, "%.1f deg",
+            "方位角###SunAzimuth", &m_Engine.m_SkySettings.SunAzimuthDegrees, 0.0f, 360.0f, Defaults::SunAzimuthDegrees, "%.1f deg",
             0, "太陽が昇る方位。時刻と組み合わせて太陽の向きが決まる");
         // 月の位置は時刻に連動しない(実際の月は太陽と独立した周期で動くため)。平行光源の枠は
         // 太陽と共有しており、太陽が沈むと支配ライトが月へ切り替わる。
         // 月を動かすと夜空の目標照度が変わるため、空を焼き直す必要がある
         bool moonMoved = SliderFloatEx(
-            "月の方位角###MoonAzimuth", &m_Engine.m_MoonAzimuthDegrees, 0.0f, 360.0f, Defaults::MoonAzimuthDegrees,
+            "月の方位角###MoonAzimuth", &m_Engine.m_SkySettings.MoonAzimuthDegrees, 0.0f, 360.0f, Defaults::MoonAzimuthDegrees,
             "%.1f deg", 0, "月の方位。時刻に連動しないため、任意の月齢・任意の時刻の見え方を作れる");
         moonMoved |= SliderFloatEx(
-            "月の仰角###MoonElevation", &m_Engine.m_MoonElevationDegrees, -90.0f, 90.0f,
+            "月の仰角###MoonElevation", &m_Engine.m_SkySettings.MoonElevationDegrees, -90.0f, 90.0f,
             Defaults::MoonElevationDegrees, "%.1f deg", 0, "月の高さ。0度以下なら地平線下にあり月光は出ない");
         if (moonMoved)
         {
@@ -94,14 +94,14 @@ namespace Kurenai::UI
         // 太陽だけを消して環境光のみで照らす状態を作る(White Furnace Testが使う)。
         // 時刻を夜にする方法と違い、環境光の明るさは下がらない
         CheckboxEx(
-            "太陽光を有効にする###EnableSun", &m_Engine.m_SunEnabled, Defaults::SunEnabled,
+            "太陽光を有効にする###EnableSun", &m_Engine.m_SkySettings.SunEnabled, Defaults::SunEnabled,
             "無効にすると環境光だけで照らした状態になる。時刻を夜にする方法と違い、環境光の明るさは下がらない");
 
         // 手続き空(Perez分布をGPUで評価)。無効にするとオフラインで焼いたSky.ddsへ戻る。
         // .ksceneがスカイボックスを明示しているシーン(White Furnace Test)では、
         // このトグルに関わらず常にそのDDSが使われる
         if (CheckboxEx(
-                "手続き空###ProceduralSky", &m_Engine.m_ProceduralSkyEnabled, Defaults::ProceduralSkyEnabled,
+                "手続き空###ProceduralSky", &m_Engine.m_SkySettings.ProceduralEnabled, Defaults::ProceduralSkyEnabled,
                 "空をGPU上で毎回生成する。無効にするとオフラインで焼いたSky.ddsを使う。"
                 "スカイボックスを明示しているシーンでは、この設定に関わらずそのテクスチャが使われる"))
         {
@@ -112,14 +112,14 @@ namespace Kurenai::UI
         // タービディティ(Preetham xyYモデルの大気の濁り具合)。変更時にm_SkyBakeDirtyを
         // 直接ここで立てず、Render()側のturbidityMoved判定(exposureMovedと同じ形)に任せる
         SliderFloatEx(
-            "タービディティ###SkyTurbidity", &m_Engine.m_SkyTurbidity, 1.7f, 10.0f, Defaults::SkyTurbidity, "%.2f",
+            "タービディティ###SkyTurbidity", &m_Engine.m_SkySettings.Turbidity, 1.7f, 10.0f, Defaults::SkyTurbidity, "%.2f",
             0,
             "Preethamモデルの大気の濁り具合。値が大きいほど地平線が白く霞み、天頂の青が薄くなる。"
             "1.7が最も澄んだ空、10が霞んだ空に近い");
         // 空の彩度(アート指定)。タービディティと同じくPreethamの色度を動かすため、
         // Render()側のsaturationMoved判定でベイクが焼き直される
         SliderFloatEx(
-            "空の彩度###SkySaturation", &m_Engine.m_SkySaturation, 0.0f, 2.0f, Defaults::SkySaturation, "%.2f",
+            "空の彩度###SkySaturation", &m_Engine.m_SkySettings.Saturation, 0.0f, 2.0f, Defaults::SkySaturation, "%.2f",
             0,
             "物理量ではないアート指定。1.0でPreethamの色度そのまま、上げるほど空が鮮やかになる"
             "(色度図上で白色点から遠ざける倍率なので色相は変わらない)。"
@@ -129,7 +129,7 @@ namespace Kurenai::UI
         // 表示の切り替えでしかないため、上の「手続き空」トグルと違ってm_SkyBakeDirty等の
         // ベイク用フラグは立てない
         CheckboxEx(
-            "空の背景を解析評価する###AnalyticSkyBackground", &m_Engine.m_SkyAnalyticBackground,
+            "空の背景を解析評価する###AnalyticSkyBackground", &m_Engine.m_SkySettings.AnalyticBackground,
             Defaults::SkyAnalyticBackground,
             "背景(深度が無い画素)をキューブマップのサンプルではなく、Perez分布を画面解像度で"
             "直接評価して描く。キューブマップは256px/面しかなく背景としては拡大表示されるため、"

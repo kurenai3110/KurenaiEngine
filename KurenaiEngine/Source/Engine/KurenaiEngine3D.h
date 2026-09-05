@@ -26,6 +26,15 @@
 #include "Assets/TextureStreaming.h"
 #include "Core/Camera.h"
 #include "Core/CPUProfiler.h"
+#include "Settings/AmbientOcclusionSettings.h"
+#include "Settings/CloudSettings.h"
+#include "Settings/DDGISettings.h"
+#include "Settings/FogSettings.h"
+#include "Settings/MegaLightsSettings.h"
+#include "Settings/ReflectionProbeSettings.h"
+#include "Settings/ReflectionSettings.h"
+#include "Settings/SkySettings.h"
+#include "Settings/StarsSettings.h"
 
 #pragma warning(push)
 #pragma warning(disable: 4251)
@@ -141,7 +150,7 @@ namespace Kurenai
         void ForceDDGIRayModeRaster();
 
         // プローブ分類のしきい値を上書きする(0以下なら分類そのものを無効にする)。
-        // しきい値の効き方をA/Bで測るための起動オプション用。根拠はm_DDGIBackfaceThresholdを参照
+        // しきい値の効き方をA/Bで測るための起動オプション用。根拠はm_DDGISettings.BackfaceThresholdを参照
         void SetDDGIBackfaceThreshold(float threshold);
 
         // DDGIのクリップマップLODの段数と追従の有無を、読み込んだ`.kscene`の指定より優先して上書きする。
@@ -150,7 +159,7 @@ namespace Kurenai
         void OverrideDDGILOD(uint32_t lodCount, bool followCamera);
 
         // MegaLightsの手法と、1灯あたりに撃つ影レイの本数を起動時に上書きする。
-        // mode は KurenaiEngine3D::MegaLightsMode の値(0=なし, 1=参照実装)。
+        // mode は MegaLightsMode の値(0=なし, 1=参照実装)。
         // mode / shadowRayCount / sampleCount のいずれも、負の値を渡すとその項目は既定のままにする
         // (一部だけの指定ができるようにするため)。sampleCount は確率的サンプリングが
         // 1ピクセルあたりに候補プールから引く数(RISのM)。
@@ -370,7 +379,7 @@ namespace Kurenai
         void ApplyDroneShowData(const Assets::ShowData& data);
 
     private:
-        // UIパネル群(Source/Engine/UI/)は、m_SSAORadius等のパラメータメンバをImGuiウィジェットへ
+        // UIパネル群(Source/Engine/UI/)は、m_AmbientOcclusionSettings.SSAORadius等のパラメータメンバをImGuiウィジェットへ
         // アドレスで直接渡すためprivateへアクセスする必要がある。
         // パラメータを専用の構造体へ切り出して物理的に移動させる案も検討したが、Render()内の
         // 参照が約200箇所あり、書き換えの過程で1箇所間違えてもコンパイルが通ってしまい静かに
@@ -389,7 +398,7 @@ namespace Kurenai
         friend class UI::StreamingPanel;
 
         // UpdateスレッドからRenderスレッドへ、1フレーム分のカメラ・ImGui表示状態を引き渡すための
-        // スナップショット。m_TimeOfDay等それ以外の状態はRenderスレッド側のみが読み書きするため
+        // スナップショット。m_SkySettings.TimeOfDay等それ以外の状態はRenderスレッド側のみが読み書きするため
         // ここには含めない(RenderThreadMain参照)
         struct FrameState
         {
@@ -415,7 +424,7 @@ namespace Kurenai
         void CreateSamplerSets();
         void CreateRenderTargets(uint32_t width, uint32_t height);
         // 平面反射専用のレンダーターゲット2枚(m_PlanarReflectionColor/Depth)を、
-        // 反射解像度(レンダー解像度 × m_PlanarReflectionResolutionScale)で作り直す。
+        // 反射解像度(レンダー解像度 × m_ReflectionSettings.PlanarResolutionScale)で作り直す。
         // メインのCreateRenderTargetsとは独立に呼べる(Legacy8bitフォールバックの対象外。
         // このバッファは常にHDR固定フォーマットのため)。呼び出し箇所はCreateRenderTargetsと
         // 同じ2か所(Initialize直後、Render()の解像度変更ハンドリング)
@@ -1132,21 +1141,9 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_DirectLightPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_DirectLightTexture;
 
-        // AO/GI手法の選択。SSAOは遮蔽率のみ、SSIL(Visibility Bitmask)は遮蔽率に加えて
-        // 近傍サーフェスからの間接拡散光(バウンス光)も計算する。Raytracedは同じものを
-        // 深度バッファではなく高速化構造への交差判定で求める(画面外の遮蔽物も効く)。
-        // いずれも出力フォーマットは共通(rgb=間接拡散光, a=遮蔽率)で、
-        // ライティングパスは選択中のテクスチャを1枚読むだけでよい
-        enum class AOTechnique
-        {
-            SSAO,
-            SSILVisibilityBitmask,
-            Raytraced,
-        };
-        bool m_AOEnabled = Defaults::AOEnabled;
-        AOTechnique m_AOTechnique = AOTechnique::SSAO;
+        AmbientOcclusionSettings m_AmbientOcclusionSettings;
         // マテリアルの遮蔽マップ(glTFのocclusionTexture。22章)を使うか。
-        // 上のm_AOEnabled(スクリーンスペースAO/GI)とは完全に別系統で、無効にしても遮蔽マップは
+        // 上のm_AmbientOcclusionSettings.Enabled(スクリーンスペースAO/GI)とは完全に別系統で、無効にしても遮蔽マップは
         // 効き続けるためこのトグルを別に持つ。無効時はObjectConstants.OcclusionStrengthへ0を渡し、
         // 各パスのlerp(1, occlusionSample, 0) = 1(遮蔽なし)にする方式なのでシェーダー側の変更は不要。
         // 反射プローブはキャプチャ時の値が焼き込まれるため、切り替えても焼き直すまで反映されない
@@ -1165,17 +1162,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_SSAOTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_SSAOConstantBuffer;
         std::vector<DirectX::XMFLOAT4> m_SSAOKernel;
-        float m_SSAORadius = Defaults::SSAORadius;
-        float m_SSAOPower = Defaults::SSAOPower;
-        // 1画素あたりのカーネルサンプル数。SSAOのコストはほぼこれに比例する
-        // (実測でAOパスはジオメトリが画面を占めるシーンで4.8〜11.0msあり、雲を分離した後の
-        //  最大の残りだった)。定数バッファの配列はkSSAOKernelSizeMax(16)で固定のまま、
-        // 実際に回す段数だけをSSAOConstants.Params.wでシェーダへ渡す。
-        //
-        // 【減らすときはカーネルを作り直す】GenerateSSAOKernelはi/kernelSizeで各サンプルの
-        // 長さを決めているため、16本用のカーネルの先頭N本を使うと原点付近の短いサンプルばかりが
-        // 残り、遠距離の遮蔽を拾わなくなる。必ずこの数で生成し直すこと(EnsureSSAOKernel)
-        uint32_t m_SSAOKernelSize = Defaults::SSAOKernelSize;
 
         // SSILパス(Visibility Bitmask): G-BufferのAlbedo/Normal/Depthから遮蔽率と間接拡散光を計算する
         std::unique_ptr<RHI::IRHIShader> m_SSILPixelShader;
@@ -1183,12 +1169,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_SSILRawTexture;
         std::unique_ptr<RHI::IRHITexture> m_SSILTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_SSILConstantBuffer;
-        float m_SSILRadius = Defaults::SSILRadius;
-        float m_SSILThickness = Defaults::SSILThickness;
-        float m_SSILIntensity = Defaults::SSILIntensity;
-        float m_SSILPower = Defaults::SSILPower;
-        uint32_t m_SSILSliceCount = Defaults::SSILSliceCount;
-        uint32_t m_SSILStepCount = Defaults::SSILStepCount;
 
         // RTAOパス: 法線周りの半球へ余弦重みでレイを撃ち、遮蔽率と1バウンスの間接拡散光を求める
         // コンピュートパス。出力はSSAO/SSILとまったく同じ意味・同じフォーマットなので、
@@ -1201,11 +1181,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_RTAORawTexture;
         std::unique_ptr<RHI::IRHITexture> m_RTAOTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_RTAOConstantBuffer;
-        int32_t m_RTAOSampleCount = Defaults::RTAOSampleCount;
-        float m_RTAOMaxDistance = Defaults::RTAOMaxDistance;
-        float m_RTAOPower = Defaults::RTAOPower;
-        float m_RTAOIntensity = Defaults::RTAOIntensity;
-        bool m_RTAOBounceShadowRayEnabled = Defaults::RTAOBounceShadowRayEnabled;
 
         // ライティングパス(G-Bufferを読みSceneColorへ出力。G-Bufferと同じレンダー解像度)。
         // SceneColorはHDR(R16G16B16A16_Float)で、トーンマッピングは行わない(Tonemapパス参照)
@@ -1306,42 +1281,12 @@ namespace Kurenai
         // 解像度変更・シーン読み込みでfalseへ戻し、Hi-Zパスが1回走ってからtrueにする
         bool m_HiZValid = false;
 
-        // 鏡面反射の手法。どのモードでもLightingパスが適用した鏡面IBLを「差し替える」形で働き、
-        // Offならその差し替えを一切行わない(プローブ/グローバルIBLがそのまま残る。20章)
-        enum class ReflectionMode
-        {
-            Off,         // 反射パスを実行しない
-            ScreenSpace, // SSR(SSR.hlsl)。画面に映っているものだけが反射に映る
-            Raytraced,   // RT反射(RTReflection.hlsl)。画面外も映るが、DX12かつDXR Tier 1.1が要る
-        };
-        // 「反射を出す」と決まったあとで、環境から**手法だけ**を選ぶ。出すかどうかはここでは決めない。
-        // 画面外も反射に映るRTが使えるなら常にそちら
-        static constexpr ReflectionMode ReflectionModeForCapability(bool raytracingAvailable)
-        {
-            return raytracingAvailable ? ReflectionMode::Raytraced : ReflectionMode::ScreenSpace;
-        }
-        // シーンが何も言っていないときの既定。「反射を出すか」をここで決める。
-        //
-        // 【この関数に「出すか」と「どの手法か」を兼ねさせてはいけない】兼ねさせると、
-        // ApplyLoadedSceneが「シーンが反射を要求している。ではどの手法か」を聞くときにも
-        // 同じ関数を使うことになる。Defaults::SSREnabledはfalse(SSRは画面端で反射が途切れる
-        // 破綻が目立つため)なので、RTが使えない環境では**.ksceneがScreenSpaceReflection = true
-        // と明示していてもReflectionMode::Offが返り、シーンの指定が握り潰される**。
-        // DX11でモン・サン=ミシェルの水面に何も映らない、White Furnace TestのSSR回帰テストが
-        // 実は動いていない、という形で現れていた(DX12はDXRが使えてRTが選ばれるため露見しなかった)
-        static constexpr ReflectionMode DefaultReflectionMode(bool raytracingAvailable)
-        {
-            return Defaults::SSREnabled ? ReflectionModeForCapability(raytracingAvailable) : ReflectionMode::Off;
-        }
-        // 現在の手法。RaytracedはSupportsRaytracing()がtrueの環境でしか選べない
-        // (UI側で選択不可にする)。ここの初期値はm_RaytracingAvailableが確定する前の値でしかなく、
-        // 実際の既定はシーン読み込み時にDefaultReflectionModeで決め直される
-        ReflectionMode m_ReflectionMode = DefaultReflectionMode(false);
+        ReflectionSettings m_ReflectionSettings;
         // UIの「既定値に戻す」(右クリック)が戻る先。シーン読み込み時に決まった手法を控えておく。
         // 【静的なDefaultReflectionModeを使ってはいけない】.ksceneが指定を持つ場合、
         // 戻る先はエンジンの既定ではなく**そのシーンを読み込んだ直後の状態**である。
         // ここを取り違えると「既定へ戻したらシーンが要求した反射が消える」ことになる
-        ReflectionMode m_SceneDefaultReflectionMode = DefaultReflectionMode(false);
+        ReflectionMode m_SceneDefaultReflectionMode = ReflectionSettings::DefaultReflectionMode(false);
         // レイトレーシング反射が使える環境か。デバイスのSupportsRaytracing()を初期化時に控えたもので、
         // UIの選択可否とシェーダー/パイプラインステートを作るかどうかの両方に使う
         // (RTReflection.hlslはRayQueryを含むためSM 6.5でしかコンパイルできず、
@@ -1365,9 +1310,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_SSRPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_SSRTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_SSRConstantBuffer;
-        float m_SSRMaxDistance = Defaults::SSRMaxDistance;
-        float m_SSRThickness = Defaults::SSRThickness;
-        float m_SSRRoughnessCutoff = Defaults::SSRRoughnessCutoff;
 
         // RT反射パス: TLASへ鏡面レイを撃ち、ヒット面を陰影計算して反射色を求めるコンピュートパス。
         // 出力はSSRと同じ「SceneColor + 反射の差し替え」なので、後段(Tonemap)から見ると
@@ -1377,9 +1319,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_RTReflectionPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_RTReflectionTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_RTReflectionConstantBuffer;
-        float m_RTReflectionMaxDistance = Defaults::RTReflectionMaxDistance;
-        float m_RTReflectionRoughnessCutoff = Defaults::RTReflectionRoughnessCutoff;
-        bool m_RTReflectionShadowRayEnabled = Defaults::RTReflectionShadowRayEnabled;
 
         // RTシャドウパス: TLASへ太陽の見かけの円盤に向けて影レイを撃ち、可視率(0〜1)を
         // 単チャンネルのテクスチャへ書くコンピュートパス。DirectLighting.hlslがt6で読み、
@@ -1392,45 +1331,12 @@ namespace Kurenai
         int32_t m_RTShadowSampleCount = Defaults::RTShadowSampleCount;
         float m_RTShadowSunAngularRadiusDegrees = Defaults::RTShadowSunAngularRadiusDegrees;
 
-        // --- MegaLights: ポイント/スポットライトの直接光を専用パスで求める経路 ---
-        // 求めた寄与をHDRのテクスチャへ書き、DirectLighting.hlslがt7でそれを読んで加算する
-        // (有効なあいだ、あちらのライトループは回らない)。太陽はこの経路の対象外で、
-        // 従来どおりb0とCSM/RTシャドウが担当する。
-        //
-        // Referenceは全灯を総当たりして1灯ごとに影レイを撃つ、遅いが真値を返す経路で、
-        // すべての測定の物差しにするためにある(MegaLightsReference.hlsl冒頭を参照)。
-        //
-        // 【StochasticとQuadSharedは同じ問題への別の解き方】どちらも候補プールから
-        // 確率的に灯を選ぶが、1画素の推定量を良くする手段が違う:
-        //   Stochastic … リザーバを時間・空間で再利用する(ReSTIR DI)。厳密に不偏だが、
-        //                 再利用のたびに可視性を確かめるレイと不偏化の分母のための補正レイが要る。
-        //                 実測(BistroExteriorNight 107灯/1280x720/RTX 4070 Ti)で
-        //                 MegaLights合計4.26ms、うちSpatialだけで2.64ms ――
-        //                 **全灯総当たりの参照実装(4.21ms)と同じコスト**になっていた
-        //   QuadShared  … 2x2クアッドの4画素が撃った4本の結果を共有して平均する。
-        //                 追加のレイは1本も撃たない(UE5 MegaLightsのDownsampleFactor=2に相当)。
-        //                 影の縁が最大1画素ぼける偏りを受け入れる代わりにコストを切り下げる
-        enum class MegaLightsMode
-        {
-            Off,        // 従来どおりDirectLighting.hlslのライトループで評価する
-            Reference,  // 全灯総当たり+1灯1影レイ。ノイズは無いが遅い(グラウンドトゥルース)
-            Stochastic, // 候補プールからRISで1灯選び、時間・空間再利用で磨く。厳密に不偏だがレイが多い
-            QuadShared, // 1画素1レイのまま、2x2クアッドで可視性を共有して平均する
-        };
-        MegaLightsMode m_MegaLightsMode = Defaults::MegaLightsEnabled ? MegaLightsMode::Reference
-                                                                     : MegaLightsMode::Off;
+        MegaLightsSettings m_MegaLightsSettings;
         // シェーダーとパイプラインステートはm_RaytracingAvailableがtrueのときだけ作る
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsReferenceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsReferencePipelineState;
         std::unique_ptr<RHI::IRHITexture> m_MegaLightsTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsConstantBuffer;
-        // 1灯あたりに撃つ影レイの本数。**0にすると影を撃たず可視率1で評価する**。
-        // その状態の出力は、スクリーンスペースシャドウを切った既存のライトループと
-        // 数値的に一致するはずで、BRDF・減衰・スポット円錐・プリ露出をまとめて検証できる
-        // (MegaLightsReference.hlslの「恒等テスト」)。punctualは方向が1つに決まるため、
-        // 1より大きくしても答えは変わらない(光源に半径が入る段階で意味を持つ)
-        int32_t m_MegaLightsShadowRayCount = Defaults::MegaLightsShadowRayCount;
-
         // MegaLightsの候補プール(MegaLightsTilePool.hlsl)。タイルごとに「届くライト」を走査し、
         // 寄与に比例した確率でK灯を重みつきで抽出する。読み手は Initial(RISの提案分布)と
         // Spatial(不偏化の分母で「その灯が隣のタイルへ届くか」を判定する)。
@@ -1504,36 +1410,18 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoisedTexture;
         uint32_t m_MegaLightsDenoiseHistoryIndex = 0u;
         bool m_MegaLightsDenoiseHistoryValid = false;
-        bool m_MegaLightsDenoiseEnabled = Defaults::MegaLightsDenoiseEnabled;
-        int32_t m_MegaLightsDenoiseAtrousPasses = Defaults::MegaLightsDenoiseAtrousPasses;
-        int32_t m_MegaLightsDenoiseMaxFrames = Defaults::MegaLightsDenoiseMaxFrames;
-        // クアッド共有(手法3)での時間累積の上限。**手法ごとに別に持つ。**
-        // 1つの変数を共有して手法ごとに黙って読み替えると、UIのつまみが示す値と
-        // 実際に効いている値が食い違う(「指定したのに効かない」の型)。
-        // 分けておけば、UIもCLIも「いま効いている値」をそのまま触れる。
-        // 手法3にリザーバの履歴が無いぶんここを長くしている(根拠は EngineDefaults.h)
-        int32_t m_MegaLightsQuadDenoiseMaxFrames = Defaults::MegaLightsQuadDenoiseMaxFrames;
-        float m_MegaLightsDenoiseSigmaLuminance = Defaults::MegaLightsDenoiseSigmaLuminance;
-        float m_MegaLightsDenoiseFireflyClamp = Defaults::MegaLightsDenoiseFireflyClamp;
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsTemporalComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTemporalPipelineState;
         uint32_t m_MegaLightsHistoryIndex = 0u;
         // 履歴の中身が今の解像度・今のシーンのものとして使えるか。
         // バッファのクリアが無いRHIなので、無効な間はシェーダへ「履歴を読むな」と伝える
         bool m_MegaLightsHistoryValid = false;
-        bool m_MegaLightsTemporalEnabled = Defaults::MegaLightsTemporalEnabled;
-        // 履歴のM(何個の候補から絞ったか)の上限。大きいほど収束は速いが、
-        // 新しいサンプルが採用されにくくなり、灯を消しても明るさが残る(ゴースト)
-        int32_t m_MegaLightsTemporalMClamp = Defaults::MegaLightsTemporalMClamp;
         // 前フレームの実効プリ露出EV100。
         // 【補正には使っていない】リザーバのWは露出に対して不変(比なので約分される)と
         // 実測で確かめた ―― TAAのm_TAAPrevEffectiveExposureEV100と違い、掛ける係数は1。
         // 詳細はKurenaiEngine3D.cppの「プリ露出の補正は入れない」。
         // 値は、将来この前提を疑うときに差を見られるよう記録だけ続けている
         float m_MegaLightsPrevEffectiveExposureEV100 = 0.0f;
-        // 【検証専用】蓄積開始時に加える摂動(0=なし / 1=全ライトを消す / 2=露出を+2段跳ばす)。
-        // 静止した絵では測れない「追従」を測るための入口。SetMegaLightsPerturbのコメント参照
-        int32_t m_MegaLightsPerturbMode = 0;
         // 摂動を適用済みか(蓄積開始の1回だけ効かせる)
         bool m_MegaLightsPerturbApplied = false;
 
@@ -1541,48 +1429,6 @@ namespace Kurenai
         // レイは1本も増えない ―― 借りるのは「どの灯か」だけ
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsSpatialComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsSpatialPipelineState;
-        bool m_MegaLightsSpatialEnabled = Defaults::MegaLightsSpatialEnabled;
-        int32_t m_MegaLightsSpatialNeighborCount = Defaults::MegaLightsSpatialNeighborCount;
-        int32_t m_MegaLightsSpatialRadius = Defaults::MegaLightsSpatialRadius;
-        int32_t m_MegaLightsSpatialIterations = Defaults::MegaLightsSpatialIterations;
-        // 結合を不偏化(Z)にするか。単純なconfidence重みは、近傍が自分と違う候補集合から
-        // 引いている可能性を無視するため不偏にならない(実測で総和の相対差 -8.0%)。
-        // **切り替えて長時間平均を比べられるようにしてある** ――
-        // 差が出なければどちらかが実装されていない
-        bool m_MegaLightsSpatialMIS = Defaults::MegaLightsSpatialMIS;
-        // 初期サンプルの可視レイでリザーバを殺すか。殺すと影の縁に暗い側の系統誤差が残る
-        // (Zが可視率まで判定できないため)。詳細は EngineDefaults.h のコメント
-        bool m_MegaLightsInitialVisibility = Defaults::MegaLightsInitialVisibility;
-        // 1ピクセルあたりに候補プールから引く数(RISのM)。影レイの本数はこれとは独立で常に1本
-        int32_t m_MegaLightsSampleCount = Defaults::MegaLightsSampleCount;
-
-        // --- クアッド共有(手法3) ---
-        // 2x2クアッドの仲間が撃った影レイの結果を借りて平均するか。
-        // **切れるようにしてあるのは陽性対照のため** ―― 切ると自分の標本だけを使う形になり、
-        // 手法2から時間再利用と空間再利用を外した構成と画素単位で一致するはず。
-        // 一致しなければ配線のバグで、共有の効果を測る前にそこを潰す
-        bool m_MegaLightsQuadShareEnabled = Defaults::MegaLightsQuadShareEnabled;
-        // クアッドの4画素へ候補スロットを分けて引かせるか(層化)。
-        // プールのスロットは混合分布からの i.i.d. 抽出なので、スロットの選び方を変えても
-        // **周辺分布は変わらず割り戻しの式はそのまま厳密**。クアッドで重複した灯を
-        // 引く確率が下がるぶん、4標本の多様性が上がる
-        bool m_MegaLightsQuadStratify = Defaults::MegaLightsQuadStratify;
-        // 遮蔽が確定した灯のキャッシュ(BlockedLights)を手法3でも使うか。
-        // 手法3は時間再利用パスを持たないが、キャッシュ自体は Initial が維持している。
-        // **陽性対照では切る**(履歴に依存すると手法2との画素単位の一致が崩れる)
-        bool m_MegaLightsBlockedCacheEnabled = Defaults::MegaLightsBlockedCacheEnabled;
-        // 1画素あたりに引く標本(リザーバ)の数。**手法3だけが1より大きくできる。**
-        // 手法2の時間・空間再利用は「1画素1リザーバ」を前提に添字を組み立てているため。
-        // 影レイの本数はそのままこの数になる(標本ごとに1本撃つ)
-        int32_t m_MegaLightsQuadSamplesPerPixel = Defaults::MegaLightsQuadSamplesPerPixel;
-        // 候補プールが1タイルあたりに抽出する灯の数(K)。
-        // **1画素あたりの標本数では減らないノイズがここで決まる** ―― プールはタイルに1つで、
-        // タイル内の全画素が同じK個から引くので、プールの引き方のばらつきはタイル内で
-        // 共通のオフセットとして乗る(根拠は EngineDefaults.h)
-        int32_t m_MegaLightsTilePoolCapacity = Defaults::MegaLightsTilePoolCapacity;
-        // タイル格子を動かすと共通誤差が時間方向に別の画面位置へ移る。
-        // boolではなくモードなのは、+1タイルの経路を保ったままオフセットだけ0にする対照実験を行うため
-        int32_t m_MegaLightsTileJitterMode = Defaults::MegaLightsTileJitterEnabled ? 1 : 0;
         // いまリザーババッファを確保したときの標本数。**定数バッファへ渡す値と必ず一致させる**。
         // 食い違うと Initial が確保外へ書くか Resolve が別画素の標本を読み、
         // 例外もログも出ないまま絵だけが壊れる
@@ -1616,10 +1462,6 @@ namespace Kurenai
         uint32_t m_MegaLightsAccumWarmupFrames = 0;
         // 何フレーム待ってから足し始めるか。小さなシーンの読み込みとリサイズが片付く目安
         static constexpr uint32_t kMegaLightsAccumWarmup = 180;
-        // 何フレーム足したら止めるか。0なら蓄積そのものを行わない。
-        // **止めることに意味がある** ―― 止めれば表示が静止し、「ちょうどNサンプルの平均」を
-        // 決定的に撮れる(1/√Nで誤差が下がるかを測るのに要る)
-        int32_t m_MegaLightsAccumTargetFrames = 0;
         // 蓄積し終えた平均をこのパスへ生データで書き出す(空なら書き出さない)。
         //
         // 【なぜ画面キャプチャでは足りないのか】画面から採れるのは8bitで、しかも
@@ -1792,29 +1634,18 @@ namespace Kurenai
         // m_SkyCloudWidth/Heightと同じ理由でここへ保存する(パスのビューポート指定に使う)
         uint32_t m_DDGIResolveWidth = 0;
         uint32_t m_DDGIResolveHeight = 0;
-        // DDGIを低解像度パスから引くか。実測(ProbeTest / 1280x720 / DX11)では
-        // Lightingパス23.9msのうちDDGIのサンプリングが10.2msを占めていた
-        bool m_DDGIHalfResolution = Defaults::DDGIHalfResolution;
+        DDGISettings m_DDGISettings;
 
         // --- 大気遠近(height fog / aerial perspective) ---
         // 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
         // Lightingパスの中へ入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl
-        // 冒頭のコメント参照。無効時(m_FogEnabled=falseまたはm_FogDensity<=0)はパス自体を
+        // 冒頭のコメント参照。無効時(m_FogSettings.Enabled=falseまたはm_FogSettings.Density<=0)はパス自体を
         // 登録せず、GetActiveReflectionOutput()の結果がそのままTAA(またはTonemap)へ渡る
         std::unique_ptr<RHI::IRHIShader> m_AerialPerspectiveVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_AerialPerspectivePixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_AerialPerspectivePipelineState;
         std::unique_ptr<RHI::IRHITexture> m_AerialPerspectiveTexture;
-        bool m_FogEnabled = Defaults::FogEnabled;
-        // 基準高度(m_FogRefHeight)での消散係数[1/m]。AerialPerspective.hlsl/PlanarReflection.hlslの
-        // FogParams0.xへ渡る
-        float m_FogDensity = Defaults::FogDensity;
-        // スケールハイト[m]。大きいほど霞が高くまで及ぶ(HeightFog.hlsli参照)
-        float m_FogScaleHeight = Defaults::FogScaleHeight;
-        // 基準高度[m](ワールドY)。既定は水面の高さに合わせている
-        float m_FogRefHeight = Defaults::FogRefHeight;
-        // 不透明度の上限(1.0で遠方が完全に空の色まで行く)
-        float m_FogMaxOpacity = Defaults::FogMaxOpacity;
+        FogSettings m_FogSettings;
         // 水中項。Water.hlslのPSMainがメッシュ自身のBaseColorFactorの代わりにこの色を
         // 出力Albedoに使う(見下ろした水面がFresnel最小でほぼ真っ黒になる問題への対処。
         // 干潟の水の色はシーン側で調整したいパラメータであり、.kmodelを焼き直さずに変えられるようにするため)
@@ -2127,7 +1958,7 @@ namespace Kurenai
                                 // データを持たないマテリアルはマゼンタで塗る
             WaterMask,          // G-BufferのMaterial.a(水面のマテリアルID)をグレースケール表示
             PlanarReflection,   // 平面反射パスの出力(m_PlanarReflectionColor)をトーンマッピングして表示
-            CloudNoiseSlice,    // 雲の3Dノイズの任意スライス。m_CloudNoiseDebugSlice/Detailで選ぶ
+            CloudNoiseSlice,    // 雲の3Dノイズの任意スライス。m_CloudSettings.NoiseDebugSlice/Detailで選ぶ
             AtmosphereLUT,      // 大気散乱のLUT。m_AtmosphereLUTDebugMultiで2枚を切り替える
             DDGIProbeBackface,  // DDGIのプローブ裏面率(イラディアンスアトラスのα、22章)。
                                 // 白いほど「面の裏側ばかり見ている」=壁の内部に埋まっている。
@@ -2162,15 +1993,6 @@ namespace Kurenai
         // ポスタリゼーションが何段あるかを目視で確認できるようにする。
         // 色として表示するモード(Present.hlsl Mode 0/3/4)にのみ効く
         float m_DebugViewGain = Defaults::DebugViewGain;
-        // DebugView::CloudNoiseSlice で表示する3Dノイズのスライス位置(0〜1、W方向)と、
-        // 形状(128^3)とディテール(32^3)のどちらを見るか。タイル境界に継ぎ目が出ていないかを
-        // 目と数値の両方で確認するために用意してある
-        float m_CloudNoiseDebugSlice = 0.0f;
-        bool m_CloudNoiseDebugShowDetail = false;
-        // DebugView::AtmosphereLUT で表示するLUT
-        // (0=Transmittance、1=MultiScattering、2=SkyView)
-        int m_AtmosphereLUTDebugIndex = 0;
-
         // シャドウパス(平行光のライト視点から深度のみを描画する)。カメラ視錐台をkCascadeCount個の
         // 深度範囲に分割し(Practical Split Scheme)、それぞれ専用の正射影・シャドウマップを持たせる
         // カスケードシャドウマップ(CSM)。近いカスケードほどテクセル密度が高く、遠いカスケードほど
@@ -2243,11 +2065,7 @@ namespace Kurenai
         // デバッグ表示(Render Targets - Shadow Map)で確認するカスケード番号(0=カメラに近い方)
         int32_t m_ShadowDebugCascade = 0;
 
-        // 太陽(平行光)そのものの有効/無効。.ksceneの[Sun]Enabledで設定される。
-        // TimeOfDayを夜にすると昼度(AmbientColor.a)も一緒に落ちて環境光まで消えてしまうため、
-        // 「昼のまま太陽だけ消す」にはこちらを使う(White Furnace Testが必要とする)。
-        // 無効時はFrameConstants.LightColorをゼロにするだけでよく、シェーダー側の変更は不要
-        bool m_SunEnabled = Defaults::SunEnabled;
+        SkySettings m_SkySettings;
 
         // 背景(深度が書き込まれなかったピクセル)に表示する空のキューブマップ。
         // .ksceneの[Scene]Skyboxでシーンごとに差し替えられる(LoadScene参照)
@@ -2322,7 +2140,6 @@ namespace Kurenai
         // (UpdateBuffer→SetComputeConstantBufferの順序制約があり、共用すると事故りやすい。
         //  詳細はRHI/IRHICommandList.hのSetConstantBufferのコメント)
         std::unique_ptr<RHI::IRHIBuffer> m_SkyBakeConstantBuffer;
-        bool m_ProceduralSkyEnabled = Defaults::ProceduralSkyEnabled;
         // 手続き空を焼き直す必要があるか。太陽が動いたとき等に立てる
         bool m_SkyBakeDirty = true;
         // 最後に焼いたときの太陽の向き。これと現在の向きの角度差が閾値を超えたら焼き直す。
@@ -2331,7 +2148,7 @@ namespace Kurenai
         // 最後に焼いたときの実効プリ露出。空はプリ露出済みの値で焼かれるため、
         // 露出が動いたときも焼き直さないと空だけ古い露出のまま取り残される
         float m_LastBakedExposureEV100 = 0.0f;
-        // 最後に焼いたときのタービディティ。m_SkyTurbidityが動いたときも、Preethamの
+        // 最後に焼いたときのタービディティ。m_SkySettings.Turbidityが動いたときも、Preethamの
         // xyYモデルの形自体が変わるため焼き直しが要る(exposureMovedと同じ形の判定。Render()参照)
         float m_LastBakedTurbidity = 0.0f;
         // 最後に焼いたときの空の彩度。タービディティと同じ理由で、動いたら焼き直す
@@ -2346,14 +2163,14 @@ namespace Kurenai
         // 焼き直しになる。求めているのは半球平均なので、雲の場の平行移動では値がほとんど動かない
         struct CloudBakeSignature
         {
-            float CumulusCoverage = -1.0f;   // 無効(m_CloudEnabled=false)なら0
+            float CumulusCoverage = -1.0f;   // 無効(m_CloudSettings.Enabled=false)なら0
             float CumulusAltitude = 0.0f;
             float CumulusUvScale = 0.0f;
             float CumulusDensity = 0.0f;
             float CumulusForwardG = 0.0f;
             float CumulusThickness = 0.0f;   // ボリューム無効なら0(FrameConstantsと同じ扱い)
             float CloudTypeBias = 0.0f;
-            float CirrusCoverage = 0.0f;     // 無効(m_CirrusEnabled=false)なら0
+            float CirrusCoverage = 0.0f;     // 無効(m_CloudSettings.CirrusEnabled=false)なら0
             float CirrusAltitude = 0.0f;
             float CirrusUvScale = 0.0f;
             float CirrusDensity = 0.0f;
@@ -2366,22 +2183,11 @@ namespace Kurenai
             bool operator==(const CloudBakeSignature&) const = default;
         };
         // 現在の設定からシグネチャを作る。**FrameConstants/SkyIntegrateConstantsへ詰めるのと
-        // 同じ有効/無効の潰し方をすること**(m_CloudEnabled=falseなら被覆率0、など)。
+        // 同じ有効/無効の潰し方をすること**(m_CloudSettings.Enabled=falseなら被覆率0、など)。
         // 揃っていないと「無効にしたのに焼き直しが走らない」取りこぼしが出る
         CloudBakeSignature MakeCloudBakeSignature() const;
         CloudBakeSignature m_LastBakedCloudSignature{};
         bool m_HasBakedCloudSignature = false;
-        // 焼き直しの角度閾値(度)。Auto Advance既定(1h/s)では太陽は15度/秒動くので、
-        // 1.0度なら毎秒15回の焼き直しになる。空の見た目は15Hz更新でも連続に見える
-        float m_SkyBakeAngleThresholdDegrees = 1.0f;
-
-        // 背景(深度が書かれていない画素)をキューブマップのサンプルではなく、Sky.hlsliの
-        // SkyColorを画面解像度で直接評価するか。キューブマップは256px/面しかなく
-        // 3840px・水平画角68度のカメラでは約20倍に拡大表示されるため、既定で有効にしてある。
-        // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、この設定に関わらずキューブマップを使う
-        // (DeferredLighting.hlslへ渡すSkyParams.yはActiveSkyTexture()の結果とのANDで決める)
-        bool m_SkyAnalyticBackground = Defaults::SkyAnalyticBackground;
-
         // 空パラメータ(ティント4本+照度正規化済みの天頂輝度)をGPU側で計算するコンピュートシェーダー
         // (SkyIntegrate.hlsl)。**CPU側に同じ式のミラーを置いてはいけない**(二重実装になる)。
         // 結果はm_SkyParametersBuffer(SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む)へ書く
@@ -2494,7 +2300,7 @@ namespace Kurenai
         // 太陽がこの角度以上動いたらSkyView LUTを焼き直す。LUTは天頂方向180度を108テクセルで
         // 持つので1テクセルあたり約1.67度あり、その1/30以下しかずらさない値にしてある。
         //
-        // 【意図的に手続き空のm_SkyBakeAngleThresholdDegrees(1.0度)より桁で細かくしている】
+        // 【意図的に手続き空のm_SkySettings.BakeAngleThresholdDegrees(1.0度)より桁で細かくしている】
         // このLUTは背景の空(Sky.hlsliのSkyColor)が画面解像度で毎フレーム引くもので、
         // 間引きの粒度がそのまま背景の時間解像度になる。一方あちらが焼くIBLキューブは
         // 6面+プリフィルタ36回のディスパッチを伴う重いベイクで、間接光にしか効かない。
@@ -2711,58 +2517,7 @@ namespace Kurenai
         // 一度でも焼けたか。焼く前のプローブは中身が未定義なので、それまでは影響を無効にして
         // グローバルIBLのまま描く(未初期化のキューブマップが映り込むのを防ぐ)
         bool m_ProbeBaked = false;
-        bool m_ReflectionProbeEnabled = Defaults::ReflectionProbeEnabled;
-        // 視差補正(box projection)を行うか。Box形状のプローブにのみ効く。無効にすると
-        // 反射ベクトルをそのまま引くPhase 1相当の挙動になり、壁際で反射位置がずれるのを確認できる
-        bool m_ProbeParallaxCorrectionEnabled = Defaults::ProbeParallaxCorrectionEnabled;
-        // プローブ間・プローブとグローバルIBLの重み付きブレンドを行うか。無効にすると
-        // 「影響範囲に入る最も近い1つだけを使う」Phase 1相当の挙動になり、境界の継ぎ目を確認できる
-        bool m_ProbeBlendingEnabled = Defaults::ProbeBlendingEnabled;
-        // 視差補正に距離キューブを使うか(19.12節)。無効にすると箱との交差だけで補正する
-        // 従来の挙動になる。有効時も、箱との交点を探索範囲の上限として使う点は変わらない。
-        //
-        // 既定でfalseなのは、二重像が軽減される代わりにレイマーチの結果へ距離キューブの
-        // テクセルの階段状のエッジが乗るためで、実機で見比べると「全体としては良くなった
-        // とは言えない」ため。式としては正しく動いており(19.12節の検証参照)、
-        // 距離キューブの解像度を上げるか2次モーメントを持って確率的に扱えば伸ばせる余地が
-        // あるので、比較用のトグルとして残してある
-        bool m_ProbeDepthParallaxEnabled = Defaults::ProbeDepthParallaxEnabled;
-        // 距離キューブによる遮蔽判定で、プローブから見えない位置のピクセルの重みを落とすか
-        // (光漏れの抑制)。無効にすると影響範囲に入っているだけで重みが立つ従来の挙動になる。
-        //
-        // 既定でfalseなのは、プローブが疎な現状では副作用のほうが大きいため(19.12節)。
-        // 重みを落とした分はグローバルIBL(=空)が埋めるので、「プローブから見えない」だけの
-        // 場所——例えば球の真下の床——が空の色で明るくなり、影のはずの位置に白いハローが出る。
-        // 落ちた重みを別のプローブが引き取れる密度になって初めて素直に使える機能なので、
-        // 効果と副作用を見比べられるトグルとして残し、既定は従来の挙動にしてある
-        bool m_ProbeOcclusionEnabled = Defaults::ProbeOcclusionEnabled;
-        // デバッグ表示(Render Targets)で確認するプローブ番号とプリフィルタのミップレベル
-        int32_t m_ProbeDebugIndex = 0;
-        int32_t m_ProbePrefilterDebugMipLevel = 0;
-        // 距離キューブのデバッグ表示で白になる距離(メートル相当)。距離は色ではないので
-        // 表示輝度の倍率(1〜64倍)ではなくこちらで正規化する(Present.hlsl Mode 13へは
-        // 逆数をGainとして渡す)
-        float m_ProbeDistanceDebugRange = Defaults::ProbeDistanceDebugRange;
-
-        // プローブの更新モード。焼き直しのコストと「シーンの変化への追従」のどちらを取るかの選択で、
-        // ImGuiで切り替えて負荷と品質を比較できるようにしてある(19.10節)
-        enum class ProbeUpdateMode
-        {
-            // シーン読み込み時とImGuiのBakeボタンのときだけ焼く。実行時コストはゼロだが、
-            // ライトや時刻を動かしても反射は焼いた時点のまま止まる
-            Baked,
-            // 上に加えて、焼き上がりに影響する状態(時刻・太陽・ライト)の変化を検出して自動で焼き直す。
-            // 変化していないフレームのコストはゼロだが、変化したフレームは全プローブぶんの
-            // フルベイクが1フレームに集中する
-            OnDemand,
-            // 上に加えて、1プローブを12フレームかけて焼き直し、次のプローブへ回る(ラウンドロビン)。
-            // 内訳は「6フレームで1面ずつキャプチャ」→「6フレームで1面ぶんのミップチェーンずつ畳み込み」
-            // (畳み込みの割り当ての根拠はKurenaiEngine3D.cppのプリフィルタフェーズ参照)。
-            // 全プローブを毎フレーム焼くとドローコールがプローブ数×6倍になり非現実的なため、
-            // 時間分割を既定の実装方式にしている
-            Realtime,
-        };
-        ProbeUpdateMode m_ProbeUpdateMode = ProbeUpdateMode::Baked;
+        ReflectionProbeSettings m_ReflectionProbeSettings;
         // Realtimeの進行状態。次に焼くプローブ番号と面番号
         uint32_t m_ProbeRealtimeProbeIndex = 0;
         uint32_t m_ProbeRealtimeFace = 0;
@@ -2898,9 +2653,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_DDGICaptureRadianceCube;
         std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDistanceCube;
 
-        bool m_DDGIEnabled = Defaults::DDGIEnabled;
-        // 拡散間接光の強度倍率。DDGIとSSILは近傍/遠方で寄与が重なるため、実測で決めるための倍率
-        float m_DDGIIntensity = Defaults::DDGIIntensity;
         // 全プローブが一度でも書かれたか。書かれる前のアトラスは中身が未定義なので、
         // それまではDDGIを無効にして従来のIBLのまま描く(反射プローブのm_ProbeBakedと同じ方針)
         bool m_DDGIBaked = false;
@@ -2928,106 +2680,8 @@ namespace Kurenai
         bool m_DDGILastExposureValid = false;
         // これを超えて実効プリ露出が動いたら追従させる(段)。1段=明るさ2倍ぶん
         static constexpr float kDDGIExposureRewarmEV = 0.5f;
-        // 時間分割の進行状態。1フレームにm_DDGIProbesPerFrame個ずつ順に焼き直す
+        // 時間分割の進行状態。1フレームにm_DDGISettings.ProbesPerFrame個ずつ順に焼き直す
         uint32_t m_DDGIUpdateCursor = 0;
-        int32_t m_DDGIProbesPerFrame = Defaults::DDGIProbesPerFrame;
-
-        // DDGIの更新モード。反射プローブのProbeUpdateModeと同じ考え方だが、
-        // **「1フレームでフルベイク」に相当するモードは持たない** ――
-        // DDGIは全プローブ×6面(455プローブなら2730回の描画)を1フレームでは焼けないため。
-        // どのモードでも時間分割(1フレームm_DDGIProbesPerFrame個)であることは変わらず、
-        // 違うのは「いつ止めるか」だけである。
-        //
-        // 【なぜ止める必要があるか】実測(Intel UHD Graphics 620 / 1280x720 / DX11)で、
-        // GIVolumeを持つシーンのプローブ更新は**GPU 40〜47ms + CPU 30ms**あり、
-        // どちらもフレームの最大要素だった。しかも収束後も止まらず課金され続けていた
-        enum class DDGIUpdateMode
-        {
-            // 常に焼き続ける。ライトや時刻が動き続けるシーンでも必ず追従する
-            Always,
-            // 焼き上がりに影響する状態(ComputeProbeBakeSignature)が変わらなくなったら、
-            // 多重バウンスが積み上がるkDDGIBounceCycles巡だけ焼いて停止する
-            ConvergeThenStop,
-            // 同じく停止するが、こちらは一巡だけで止める。最も速く止まる代わりに
-            // 多重バウンスが1回ぶんしか乗らない
-            OverwriteThenStop,
-        };
-        // 【既定はAlways(従来どおり)】止める側を既定にすると既存シーンの実行時の挙動が変わるため。
-        // 止めたい場合はこのつまみか品質プリセット(低/中)から選ぶ
-        DDGIUpdateMode m_DDGIUpdateMode = DDGIUpdateMode::Always;
-
-        // プローブへ入れる放射輝度・距離を、どうやって集めるか。
-        //
-        // Raytracedを末尾に置くこと ―― UI側が「レイトレーシング非対応なら選択肢の末尾を
-        // 削って出す」形で分岐しており(DrawSSRSectionと同じ作法)、並びを変えると
-        // 非対応環境で別の項目が消える
-        enum class DDGIRayMode
-        {
-            // 従来のラスタライズ。プローブ1個につきシーンを6回描く(ProbeCapture.hlsl)。
-            // 1フレームの描画回数がメッシュ数に比例して増えるため、
-            // ClampDDGIProbesPerFrameToConstantRingで更新プローブ数を抑える必要がある
-            Raster,
-            // DXR(インラインRayQuery)。1スレッド1レイでスクラッチキューブを直接埋める
-            // (DDGIProbeTrace.hlsl)。メッシュ数はBVHが吸収するので描画回数の制約が無く、
-            // 太陽の影もカスケードシャドウマップではなく影レイで求まる
-            Raytraced,
-        };
-        // 「レイをどう集めるか」を環境から選ぶ。DXRが使えるなら常にそちら ――
-        // 更新コストが下がり、カメラから遠いプローブにも影が落ちるようになるため
-        // (ReflectionModeForCapabilityと同じ考え方)
-        static constexpr DDGIRayMode DDGIRayModeForCapability(bool raytracingAvailable)
-        {
-            return raytracingAvailable ? DDGIRayMode::Raytraced : DDGIRayMode::Raster;
-        }
-        // 【既定はDXRが使えるならDXR】DX11とDXR非対応機は自動的にラスタのまま。
-        // 実際の値はレイトレーシングの可否が分かった時点(Initialize)で入れ直す
-        DDGIRayMode m_DDGIRayMode = DDGIRayMode::Raster;
-        // プローブ分類(壁や地面の内部に埋まったプローブをサンプリングから外す)を行うか。
-        //
-        // 【レイトレース経路でのみ意味を持つ】裏面に当たったことを記録できるのはDXR経路だけで、
-        // ラスタ経路は裏面カリングの結果それを「空」として見てしまうため分類できない。
-        // ラスタ経路ではこのフラグに関わらず分類は掛からない
-        bool m_DDGIProbeClassificationEnabled = true;
-        // 裏面ヒット率がこれを超えたプローブを「信用しない」と判定する。
-        //
-        // 【既定値0.5の根拠】2つのシーンで分布と効果を実測して決めた。分布そのものは
-        // デバッグ表示「DDGI - プローブ裏面率」で確認できる。
-        //
-        //   Sponza(1152プローブ)      … きれいに二山。76%が0.05未満、21%が0.5超で、
-        //                                その間(0.05〜0.50)はほぼ空。谷が広いので
-        //                                この範囲のどこに置いてもほぼ同じ集合になる
-        //   BistroInteriorLit(480個) … 二山にならない。0から滑らかに減る連続分布で、
-        //                                0.5を超えるのは1.9%(9個)、0.9超は0.6%(3個)だけ
-        //
-        // つまり「谷に置く」という決め方はSponzaでしか使えない。そこで**効果の向きが
-        // 両シーンで揃う位置**を採った ―― 0.5では両シーンとも「わずかに明るくなり、
-        // 暗くなる画素は0.1%未満」で一致する(埋まったプローブが配っていた偽の暗さが消えるため)。
-        //
-        // 【0.25を採らなかった理由】RTXGIの既定値だが、Bistroの連続分布を途中で切るため
-        // 壁の領域が18〜22%暗くなる。しきい値を0.75(3個だけ無効)にすると同じ領域の変化は
-        // +0.004%(82800画素中28画素が±1階調)まで落ちるので、この暗化は
-        // 「明らかに埋まったプローブ」ではなく中間の率を持つプローブを落としたことによると分かる。
-        // それが正しい方向だと言える根拠が無いため採らなかった。
-        //
-        // 【この根拠の弱いところ】数字を額面どおりに受け取らないこと。
-        //   - BistroInteriorLitは画面がほぼ真っ暗(平均輝度1.19/255、95%の画素が4未満)で、
-        //     「-18%」は平均にすると0.5階調ほどしかない。個々の画素では最大41〜66階調
-        //     動いているので実体はあるが、百分率だけを根拠に使わないこと
-        //   - Sponza側の変化はほとんどが±1階調で、8bitの量子化の底に張り付いている
-        //   - 分布は8bitのデバッグ表示越しに読んでいる。率は約1/1536刻みで計算されるので、
-        //     しきい値の境目にいるプローブの数え方には±数個の誤差がある
-        //
-        // 0.5は物理的な意味も明確で、「全レイの半分より多くが面の裏側に当たった」
-        // = そのプローブは外より内側にいる、という判定になる
-        float m_DDGIBackfaceThreshold = 0.5f;
-
-        // レイトレース経路で太陽の影レイを撃つか。
-        //
-        // 【何のためにつまみにしてあるのか】これを切ると「影が落ちない」ラスタ経路の
-        // 既知の制約と同じ状態になる。切り替えて絵と数値が動くことが、
-        // レイトレース経路が実際に走っていることの対照実験になる(差分ゼロは合格ではない)。
-        // 常用の想定は有効側で、ラスタ経路には効かない
-        bool m_DDGISunShadowRayEnabled = true;
         // どちらの経路が実際に走ったかを、切り替わったときだけログへ出すための状態。
         // 毎フレーム出すと埋もれるが、出さないと「切り替えたつもり」の取り違えに気づけない
         bool m_DDGIRayModeReported = false;
@@ -3121,20 +2775,15 @@ namespace Kurenai
         // 上のクランプが効いたことを一度だけログへ出すためのフラグ(毎フレーム出さない)
         bool m_DDGIProbesPerFrameClampReported = false;
 
-        // 昼夜サイクル: ImGuiで操作する時刻(0〜24時)。太陽の向き・色・環境光・空の明るさに反映される
-        float m_TimeOfDay = Defaults::TimeOfDay;
-        bool m_TimeAutoAdvance = Defaults::TimeAutoAdvance;
-        float m_TimeAdvanceSpeed = Defaults::TimeAdvanceSpeed; // 自動進行時、1秒あたりに進む時間(時)
-
-        // 水面。m_TimeOfDayの自動進行とまったく同じ方針
+        // 水面。m_SkySettings.TimeOfDayの自動進行とまったく同じ方針
         // (RenderThreadMainが同じ場所・同じ条件分岐の形で進める)で、水面法線マップの
         // スクロール位相を[0,1)で持つ。FrameConstants.TimeParams.xとしてWater.hlslへ渡る
         float m_WaterScrollOffset = 0.0f;
-        // trueにすると波のスクロールが止まる(m_TimeAutoAdvanceの水面版に近いが、
+        // trueにすると波のスクロールが止まる(m_SkySettings.TimeAutoAdvanceの水面版に近いが、
         // 「動かす/止める」の2値なので速度ではなくフラグにしている)
         bool m_WaterTimeFrozen = Defaults::WaterTimeFrozen;
         // シーン読み込み時にScene::WaterWaveScale等から初期化され、以降はUIで実行時上書きできる
-        // (m_ReflectionModeがScene.SSREnabledから初期化されるのと同じ設計、ApplyLoadedScene参照)。
+        // (m_ReflectionSettings.ModeがScene.SSREnabledから初期化されるのと同じ設計、ApplyLoadedScene参照)。
         // m_WaterWaveSpeedはm_WaterScrollOffsetの進行速度に使われる。m_WaterWaveScale/
         // m_WaterWaveStrengthはFrameConstants.TimeParams.y/zとしてWater.hlslへ渡り、層のUV
         // スケール(kWaterLayerAUvScale等への倍率)・波の振幅(距離減衰のweightへの倍率)に効く
@@ -3145,14 +2794,14 @@ namespace Kurenai
         // 最大距離まで判定がつかなかった水面画素で、プリフィルタ済み鏡面IBL(128pxベースの
         // キューブマップをラフネス由来のミップで引くため広い水面ではにじむ)の代わりに
         // Sky.hlsliのSkyColorを画面解像度で直接評価する(SSR.hlslのPSMain参照)。
-        // 効果が出るのはm_ReflectionMode==ScreenSpaceのときだけで、かつ手続き空が無効な
+        // 効果が出るのはm_ReflectionSettings.Mode==ScreenSpaceのときだけで、かつ手続き空が無効な
         // シーンでは常に無効化される(SSRパスのExecute内、usingProceduralSkyとのAND判定)
         bool m_WaterAnalyticSkyReflection = Defaults::WaterAnalyticSkyReflection;
 
         // --- 平面反射 ---
         // 水面に不透明ジオメトリの鏡像を映す専用フォワードパス。設計判断の詳細は
         // Shaders/3D/PlanarReflection.hlsl冒頭のコメントを参照。反射解像度はレンダー解像度に
-        // m_PlanarReflectionResolutionScaleを掛けた値で、実際の作成はCreatePlanarReflectionTargetsが行う
+        // m_ReflectionSettings.PlanarResolutionScaleを掛けた値で、実際の作成はCreatePlanarReflectionTargetsが行う
         std::unique_ptr<RHI::IRHITexture> m_PlanarReflectionColor;
         std::unique_ptr<RHI::IRHITexture> m_PlanarReflectionDepth;
         std::unique_ptr<RHI::IRHIShader> m_PlanarReflectionVertexShader;
@@ -3165,11 +2814,6 @@ namespace Kurenai
         // captureProbeFaceと同じ役割の専用FrameConstants(共有のm_FrameConstantBufferとは別インスタンス)。
         // ViewProj/CameraPosition/PlanarReflectionPlaneだけをこのパス用に差し替える
         std::unique_ptr<RHI::IRHIBuffer> m_PlanarReflectionConstantBuffer;
-        bool m_PlanarReflectionEnabled = Defaults::PlanarReflectionEnabled;
-        // 反射解像度の倍率(レンダー解像度に対する比)。EngineDefaults.hのコメント参照
-        float m_PlanarReflectionResolutionScale = Defaults::PlanarReflectionResolutionScale;
-        // 波の法線による画面UVのずらし量(SSR.hlslが読む)
-        float m_PlanarReflectionDistortion = Defaults::PlanarReflectionDistortion;
         // 「システム」パネルのm_PendingRenderWidth/Height・m_RenderResolutionDirtyとまったく同じ方式
         // (要求を記録するだけにしてRender()の先頭でまとめて反映する。理由はCreateRenderTargets/
         // RequestRenderResolutionのコメント参照。GPUがまだ参照しているテクスチャを
@@ -3185,54 +2829,7 @@ namespace Kurenai
         // 「水面は単一の水平な平面である」という前提に立っており、複数ある場合は最初のものだけを使う
         bool m_PlanarReflectionMultipleWaterLogged = false;
 
-        // --- 雲 ---
-        // 積雲(1層目)の有効/無効。巻雲は m_CirrusEnabled が別に持つ。
-        // 無効時はFrameConstants.CloudParams0.xへ被覆率0を渡し、Sky.hlsli側の早期脱出
-        // (SkyColor)を通す。CloudCoverageスライダー自体は動かせるが効果が出ない状態になる
-        bool m_CloudEnabled = Defaults::CloudEnabled;
-        // 被覆率。0.40は写真の見た目に寄せて選んだ値であり、物理的な導出ではない
-        // (実測で調整可能。EngineDefaults.h参照)
-        float m_CloudCoverage = Defaults::CloudCoverage;
-        // 雲底の高度[m](**ワールドYの絶対高度**。Sky.hlsli EvaluateCloudLayerがレイと
-        // 雲層スラブの交差を解くのに使う)。
-        // 【P17で意味が変わった】以前は「カメラのワールドY基準」の相対高度で、雲層がカメラの
-        // Yに追従していた(上空へ飛んでも雲の上に出られなかった)。渡す値そのものは変えていない
-        // ため、カメラが地表付近にいる従来の構図では見た目は実質変わらない
-        float m_CloudAltitude = Defaults::CloudAltitude;
-        // ワールド1mあたりのノイズ空間の距離(= 1/セルの広さ[m])。
-        // 【C7で厚みに比例させたが撤去した】厚みを上げるとセルも広がる形にしていたが、
-        // 「厚みを上げても横幅が広がったように見えない」という判断で外した。
-        // 実際には測ると実効セル幅は厚みに正確に比例していた(厚み600/1200/2400で
-        // 493/997/1988m)ものの、**同時に雲の背が高くなって空が埋まる**ため、
-        // 幅の変化が埋まり具合の変化に飲み込まれて見えなかった。
-        // 根本の問題は別にあり、密度がウェザーマップ(2次元)の掛け算で決まるので
-        // **雲の輪郭が高さによって変わらない**(同じ形が積み上がるだけ)ことである
-        float m_CloudUvScale = Defaults::CloudUvScale;
-        // 雲の種類の偏り(C4)。FrameConstants.CloudParams3.wへ載る。
-        // Sky.hlsliのCloudTypeAtが場所ごとの種類(層雲/積雲/雄大積雲)を決めるとき、
-        // 空全体をどちらへ寄せるかのバイアスになる。0.5が中立
-        float m_CloudTypeBias = Defaults::CloudTypeBias;
-        float m_CloudDensity = Defaults::CloudDensity;
-        // 風速[m/s]。実世界の速度としてUIで直感的に扱えるようにしてあり、ノイズ空間の移動量への
-        // 換算(CloudUvScaleを掛ける)はRenderThreadMainのm_CloudScrollOffset更新側で行う
-        float m_CloudWindSpeed = Defaults::CloudWindSpeed;
-        // 風向き(度)。太陽方位角(m_SunAzimuthDegrees)と同じ規約(X軸0度、Z軸(+方向)90度)
-        float m_CloudWindDirectionDegrees = Defaults::CloudWindDirectionDegrees;
-        float m_CloudForwardG = Defaults::CloudForwardG;
-        // 積雲をボリューム(スラブのレイマーチ)として描くか。falseで従来の平面へ戻る。
-        // シェーダー側へはCloudParams1.wの厚みを0にすることで伝える(専用のフラグは持たない)
-        bool m_CloudVolumetric = Defaults::CloudVolumetric;
-        // 雲底から雲頂までの厚み[m]。EngineDefaults::CloudThicknessのコメント参照
-        float m_CloudThickness = Defaults::CloudThickness;
-        // trueにすると雲のスクロールが止まる(m_WaterTimeFrozenの雲版。A/B比較などスクロールが
-        // 揺れると困る場面で使う)
-        bool m_CloudTimeFrozen = Defaults::CloudTimeFrozen;
-        // 積雲のボリュームレイマーチの段数。**このパスのコストの主なつまみ**。
-        // FrameConstants::CloudQualityParams.xとして渡り、SkyCloud.hlslだけが読む
-        // (ボリューム経路を持つのがこのシェーダーだけのため。詳細はそちらのコメント)。
-        // 減らすと雲の内部の階調が粗くなる=絵が変わるので、41.17までの「見た目を変えない削減」
-        // とは性質が違う。品質プリセットの低/中から振るための値である
-        uint32_t m_CloudRaymarchSteps = Defaults::CloudRaymarchSteps;
+        CloudSettings m_CloudSettings;
         // 段数の上限。**Sky.hlsliのkCumulusRaymarchStepsMaxと一致させること**
         static constexpr uint32_t kCloudRaymarchStepsMax = 32;
         // 風によるノイズ空間の移動量。m_WaterScrollOffsetと同じくUIつまみではなく内部状態で、
@@ -3241,61 +2838,17 @@ namespace Kurenai
         // 判断B(被覆率による平均透過率をIBLキューブのベイク時にだけ掛ける)のキャッシュ。
         // bakeSkyThisFrameブロックで確定させ、ベイクとFrameConstantsが同じタイミングの
         // 値を見るようにする(GPU側のm_SkyParametersBufferと同じ更新タイミング)。
-        // 巻雲(m_CirrusCoverage)も加味した2層の積になる
+        // 巻雲(m_CloudSettings.CirrusCoverage)も加味した2層の積になる
         // (ComputeCloudAverageTransmittance参照)
         float m_ActiveCloudTransmittance = 1.0f;
 
-        // --- 巻雲(高層のレイヤーを2層目として追加し雲を多層化する) ---
-        // m_CloudEnabled=falseのときと同じく、無効時はFrameConstants.CloudParams2.xへ
-        // 被覆率0を渡し、Sky.hlsli側の早期脱出(SkyColor、判断C)を通す
-        bool m_CirrusEnabled = Defaults::CirrusEnabled;
-        float m_CirrusCoverage = Defaults::CirrusCoverage;
-        // 雲底の高度[m](**ワールドYの絶対高度**。積雲と同じ規約。m_CloudAltitude参照)
-        float m_CirrusAltitude = Defaults::CirrusAltitude;
-        float m_CirrusUvScale = Defaults::CirrusUvScale;
-        float m_CirrusDensity = Defaults::CirrusDensity;
-        // 風速[m/s]。風向はm_CloudWindDirectionDegreesを積雲と共有する(同じ風系という前提)
-        float m_CirrusWindSpeed = Defaults::CirrusWindSpeed;
-        // fBmのUV(U方向)を伸ばして筋状にする倍率
-        float m_CirrusAnisotropy = Defaults::CirrusAnisotropy;
         // 風によるノイズ空間の移動量(巻雲側)。m_CloudScrollOffsetとまったく同じ形で
         // RenderThreadMainがkCloudNoisePeriodの周期でstd::fmodしながら進める。
-        // 凍結トグルはm_CloudTimeFrozenを共有する(片方にしか効かないとA/B比較の対照が
+        // 凍結トグルはm_CloudSettings.TimeFrozenを共有する(片方にしか効かないとA/B比較の対照が
         // 崩れるため。RenderThreadMainのスクロール更新箇所を参照)
         DirectX::XMFLOAT2 m_CirrusScrollOffset{ 0.0f, 0.0f };
 
-        // --- 星空 ---
-        // 夜空の星。Sky.hlsliのSkyColorが方向ハッシュで解析的に描く(テクスチャは使わない)。
-        // **IBLキューブ(SkyGenerate.hlsl)へは焼かない**ので、これらを変えても空の焼き直しは要らない
-        // (雲の風と同じ扱い。m_SkyBakeDirtyを立てないこと)
-        bool m_StarsEnabled = Defaults::StarsEnabled;
-        float m_StarsDensity = Defaults::StarsDensity;
-        float m_StarsBrightness = Defaults::StarsBrightness;
-        // またたきの強さ。既定0。上げるとTAAがちらつきとして拾い、A/B比較の再現性も落ちる
-        float m_StarsTwinkle = Defaults::StarsTwinkle;
-
-        // 太陽が昇ってくる方位角(度)。X軸を0度、Z軸(+方向)を90度とした水平面上の角度で、
-        // ImGuiで調整する(ComputeSunLightingが太陽の日の出側水平方向として使用する)
-        float m_SunAzimuthDegrees = Defaults::SunAzimuthDegrees;
-
-        // 大気の濁り具合(Preetham xyYモデルのタービディティ)。値が大きいほど地平線が白く
-        // 霞み、天頂の青が薄くなる。定義域はおおむね1.7〜10(EngineDefaults.h::SkyTurbidity参照)。
-        // 変更すると空の焼き直しが必要(Render()のturbidityMoved判定参照)
-        float m_SkyTurbidity = Defaults::SkyTurbidity;
-        // 空の彩度(アート指定)。既定1.0=Preethamそのまま。詳細はEngineDefaults::SkySaturation。
-        // .ksceneの[Scene]SkySaturationで初期化され、以降はUIで上書きできる
-        // (m_ReflectionModeがScene.SSREnabledから初期化されるのと同じ設計)
-        float m_SkySaturation = Defaults::SkySaturation;
-
-        // 月の位置。**時刻には連動せず、ここで指定した固定位置に居続ける**。
-        // 実際の月は太陽とは独立した周期(朔望月)で動くので、反太陽方向に固定するのは
-        // 「常に満月かつ常に真夜中に南中する」という二重の簡略化になってしまう。
-        // 任意の月齢・任意の時刻の見え方を作れるよう、位置は手動指定にしている。
-        // 方位角の規約は太陽と同じ(X軸が0度、Z軸(+方向)が90度)。
-        // 仰角が0度以下なら月は地平線下にあり、月光は出ない。
-        // シーンを切り替えても引き継がれる(.ksceneのキーは持たない)
-        float m_MoonAzimuthDegrees = Defaults::MoonAzimuthDegrees;
-        float m_MoonElevationDegrees = Defaults::MoonElevationDegrees;
+        StarsSettings m_StarsSettings;
 
         // パスごとにバインドするサンプラーの組。スロットの役割(s0=MaterialSampler、
         // s1=ColorSampler、s2=DataSampler)はShaders/3D/Samplers.hlsliで定義しており、
@@ -3362,7 +2915,7 @@ namespace Kurenai
         // ここで決めた本数だけを重みつきで取り出す。届いた灯が欠落するわけではない
         // (どの灯も w_i / SumW の確率で選ばれる)ため、容量超過のような静かな欠落は起きない。
         // 【実行時に振れる。ここは確保の上限】1タイルの抽出数Kは
-        // m_MegaLightsTilePoolCapacity が持ち、シェーダへは定数バッファで渡している。
+        // m_MegaLightsSettings.TilePoolCapacity が持ち、シェーダへは定数バッファで渡している。
         // バッファの確保だけがコンパイル時の上限を要るのでここに残す
         static constexpr uint32_t kMegaLightsTilePoolCapacity = 128;
         // Kの下限。これを下回るとタイルに届く灯を代表できない
@@ -3706,7 +3259,7 @@ namespace Kurenai
         std::chrono::steady_clock::time_point m_LastRenderFrameTime;
         // 直前のRenderフレームの経過時間[秒]。自動露出の時間方向の順応に使う。
         // RenderThreadMainが書き、Render()が読む。どちらもRenderスレッドなので追加の排他は不要
-        // (m_TimeOfDayと同じ扱い)
+        // (m_SkySettings.TimeOfDayと同じ扱い)
         float m_RenderDeltaTime = 0.0f;
         float m_FixedTimeStep = 0.0f;
 
