@@ -143,7 +143,7 @@ float3 ReconstructWorldPos(float2 uv, float depth)
 // (正規化の扱いを含む)。4つのシェーダーはcbufferをそれぞれ別に宣言しているため関数そのものは
 // 共有できず複製しているが、中身がずれると「背景の空」「水面に映る空」「フォグの合成先の色」が
 // 互いに食い違ってしまうため、中身を変える場合は必ず4つとも同時に直すこと
-SkyParameters MakeSkyParameters()
+SkyParameters MakeSkyParameters(float2 pixelPosition)
 {
     SkyParameters params;
     params.SunDirection = normalize(SkySunDirection.xyz);
@@ -166,9 +166,13 @@ SkyParameters MakeSkyParameters()
     params.CirrusDensity = CloudParams2.w;
     params.CirrusScrollOffset = CloudParams3.xy;
     params.CirrusAnisotropy = CloudParams3.z;
-    // 雲層へ掛ける大気遠近(Sky.hlsliのEvaluateCloudLayer (f)節)。
+    // 雲の種類の偏り(C4)。CloudParams3.wはこれまで未使用だった枠なので、FrameConstantsは1バイトも増えない
+    params.CloudTypeBias = CloudParams3.w;
+    // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
     // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
-    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
+    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
+    // レイマーチの開始位置を画素ごとにずらす量(C2)。スライスの縞をディザへ変える
+    params.RaymarchJitter = CloudRaymarchDither(pixelPosition);
     return params;
 }
 
@@ -234,11 +238,19 @@ float4 PSMain(PSInput input) : SV_TARGET
     // (dir.y < kGroundFadeStartY = -0.02)には決して入らず、SkyColorをSkyColorUpperへ
     // 置き換えることは「雲の合成を外す」ことと厳密に等価になる。
     //
-    // 【割り切り】雲に覆われた空の下では airlight を照らす光そのものが弱まる(曇天の霞は
-    // 晴天より暗く無彩色になる)が、ここではその全天平均の減光は掛けていない。掛けるには
-    // 平均透過率(KurenaiEngine3D.cppのComputeCloudAverageTransmittance)をFrameConstantsへ
-    // 追加する必要がある
-    const float3 inScatter = SkyColorUpper(fogDir, MakeSkyParameters());
+    // 【雲による減光と無彩色化はここで掛ける】(P18) 雲に覆われた空の下では airlight を
+    // 照らす光そのものが弱まり、色も無彩色に寄る。SkyColorUpperは雲を通さない晴天の空
+    // なので、被覆率1.0で空が灰色一色でも遠方の地物には青い散乱光が掛かり続けていた
+    // (実測: 被覆率1.0での水平線際の空はB-R 42・輝度81だが、掛かっていたのは被覆率0の
+    // B-R 86・輝度110)。
+    //
+    // 【視線の先の雲でSkyColorへ替える案は却下した】(a)地物の画素ごとにレイマーチが走って
+    // コストが跳ねる。(b)地物までの散乱光を決めるのは「その空間を照らしている光」であって
+    // 視線の先の雲ではないので、意味的にもずれる。正しい量は空全体の照度の半球平均であり、
+    // それをSkyIntegrate.hlslが1本のRGBとして求めている(Sky.hlsli CloudSkyLight参照)。
+    // 被覆率0では厳密に(1,1,1)なので、雲を持たないシーンの画素は1ビットも動かない
+    const SkyParameters skyParams = MakeSkyParameters(input.Position.xy);
+    const float3 inScatter = SkyColorUpper(fogDir, skyParams) * skyParams.CloudSkyLight;
 
     const float3 outColor = sceneColor * (1.0f - alpha) + inScatter * alpha;
     return float4(outColor, 1.0f);

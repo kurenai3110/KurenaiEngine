@@ -20,6 +20,19 @@
 // 引くこと。Clamp で引くと周期の境界でトライリニア補間のタップが端のテクセルに張り付き、
 // 一定間隔で継ぎ目が出る(シェーダー側で frac() しても補間そのものが端を跨げないため消せない)。
 
+// 【H3で2Dのウェザーマップも焼くようになった】CSGenerateWeather。
+// レイマーチの1歩あたりコストの91%が2Dのfbmだったため(根拠はSky.hlsli側のコメント)。
+// **式はSky.hlsliの手続き版をそのまま呼ぶ。** ここへ写し直すと、定数を直したときに
+// 焼く側と引く側が静かにずれる。
+//
+// 【SkyViewのレジスタを定義しないとコンパイルが通らない】Sky.hlsli の SkyColorUpperUnit は
+// SkyViewLUTTexture を無条件に参照しており、フォールバックがあえて用意されていない
+// (Sky.hlsli の SkyView 節のコメント参照)。このベイクは空の関数を1つも呼ばないが、
+// HLSLは呼ばない関数も構文解析するので宣言だけは要る。t0 はこのファイルで未使用で、
+// 参照されないSRVはコンパイル時に落ちるためパイプラインには現れない
+#define KURENAI_SKYVIEW_REGISTER t0
+#include "Sky.hlsli"
+
 // ============================================================================
 // ハッシュと格子
 // ============================================================================
@@ -165,7 +178,21 @@ float NoiseRemap(float x, float lo, float hi)
 // R = Perlin-Worley(低周波の塊)、G/B/A = 周波数を上げたWorley(縁を削るのに使う)。
 // この4チャンネル構成はSchneiderらのボリュメトリック雲(Nubis)で標準的に使われるもので、
 // R単体では塊が丸すぎ、Worleyを重ねることで綿状の輪郭になる
-static const float kShapeBaseCells = 4.0f;
+//
+// 【H1cで4から8へ上げた】被覆率を上げると**遠方まで一定間隔の繰り返し**が見えていた。
+// 4だと**タイル1枚に大きな特徴が4x4=16個しか無い**。Sky.hlsli側はこのテクスチャを
+// ワールドの2,096mごとに繰り返して敷いていたので、空が「同じ16種類の塊の反復」になっていた。
+//
+// 【この値だけを上げてはいけない】上げると特徴が小さくなるので、Sky.hlsliの
+// kCloudShapeRepeats を同じ比率で下げて**ワールドでの特徴の大きさ(524m)を保つ**こと。
+// 8にしたときの相棒は kCloudShapeRepeats = 86 / kCloudShapeVerticalPeriod = 1984。
+//
+// 【上限】128^3に対して1セルあたりのテクセル数が 128/8 = 16。WorleyFbmは3オクターブで
+// セル数を倍々にするので最高で 8*4 = 32セル = 4テクセル/セルになる。
+// これ以上増やすとベイクの時点でエイリアスするため、16へ上げるのは避ける。
+// 【この値を変えたら測り直すもの】kCloudShapeContrastLow/High と
+// kCloudVolumeDensityNormalize(どちらもSky.hlsli)
+static const float kShapeBaseCells = 8.0f;
 
 RWTexture3D<float4> ShapeOut : register(u0);
 
@@ -224,4 +251,42 @@ void CSGenerateDetail(uint3 dispatchThreadID : SV_DispatchThreadID)
         WorleyFbm(uvw, kDetailBaseCells * 2.0f),
         WorleyFbm(uvw, kDetailBaseCells * 4.0f),
         0.0f);
+}
+
+// ============================================================================
+// ウェザーマップ(4096^2、H3)
+// ============================================================================
+
+// 【1枚でノイズ空間の1周期ぶんを覆う】Sky.hlsliのfbmは kCloudNoisePeriod = 256(セル)で
+// 周期化してあるので、[0, 256)^2 を焼けばWrapでそのままタイリングできる。
+// 4096テクセルで 256/4096 = 0.0625セル(88m)刻み。一番細かい帯(frequency 4.0)の
+// 格子間隔0.25セルに対して4テクセル入る(解像度の実測はSky.hlsli側のコメント)。
+//
+// 【テクセルの中心で評価する】+0.5 を入れないとバイリニアで半テクセルずれる。
+// 引く側は uv / kCloudNoisePeriod をそのままWrapで渡すので、ここと同じ位置になる
+static const float kWeatherNoiseSize = 4096.0f;
+
+RWTexture2D<float4> WeatherOut : register(u0);
+
+[numthreads(8, 8, 1)]
+void CSGenerateWeather(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    uint width, height;
+    WeatherOut.GetDimensions(width, height);
+    if (dispatchThreadID.x >= width || dispatchThreadID.y >= height)
+    {
+        return;
+    }
+
+    const float2 noiseXZ =
+        (float2(dispatchThreadID.xy) + 0.5f) / float2(width, height) * kCloudNoisePeriod;
+
+    float large;
+    float small;
+    CloudFbmBandsProcedural(noiseXZ, large, small);
+
+    // 雲の種類は typeBias を掛ける前の生の値を入れる(被覆率と同じく実行時に変わるため)。
+    // **CloudFbmBandsとはUVが違う**(向こうは異方スケールが掛かる)ので、引く側も別に引く
+    WeatherOut[dispatchThreadID.xy] =
+        float4(large, small, CloudTypeNoiseProcedural(noiseXZ), 0.0f);
 }

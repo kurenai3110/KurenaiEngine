@@ -79,7 +79,7 @@ namespace Kurenai::RHI
         // SRVアンバインドがドライバ任せ(警告付きの自動アンバインド)になってしまう。
         // **SetTextureは範囲外スロットも素通しするため、漏れていても描画結果には現れない。**
         //
-        // 【現在の22の内訳】最も多く使うDeferredLighting.hlslがt0〜t21をちょうど使い切る:
+        // 【現在の23の内訳】最も多く使うDeferredLighting.hlslがt0〜t22をちょうど使い切る:
         //   t0〜t7   G-Buffer一式(アルベド/直接光/マテリアル/深度/スカイボックス/AO/自発光/法線)
         //   t8,t9    グローバルIBL(放射照度・プリフィルタ済み鏡面)
         //   t10      BRDF LUT
@@ -87,10 +87,12 @@ namespace Kurenai::RHI
         //   t12〜t14 反射プローブ(鏡面専任。拡散はDDGIへ一本化した)
         //   t15,t16  DDGIのオクタヘドラルアトラス2枚
         //   t17      bent normalのG-Buffer(34章)
-        //   t18,t19  雲の形状/ディテールの3Dノイズ
+        //   t18      低解像度の雲パス(SkyCloud.hlsl)の出力。rgb=事前乗算済みの散乱光 / a=透過率
+        //   t19      DDGIResolveが書いた低解像度のイラディアンス
         //   t20      大気散乱のSkyView LUT
         //   t21      DDGIResolveが書いた低解像度の深度(41.24節)
-        static constexpr uint32_t kTextureSlotCount = 22;
+        //   t22      低解像度の雲パスが書いたfogInFront(雲の手前の霞。P18bの補正に使う)
+        static constexpr uint32_t kTextureSlotCount = 23;
 
         // ピクセルシェーダのSRVスロットに現在バインドされているビュー。
         // UAVバインド時に同一リソースのSRVを外すため(UnbindPixelSrvForResource)に持つ。

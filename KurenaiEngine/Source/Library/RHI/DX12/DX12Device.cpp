@@ -47,10 +47,13 @@ namespace Kurenai::RHI
         // t0〜t17。最大はDeferredLighting.hlsl(G-Buffer4枚+スカイボックス+AO+エミッシブ+法線+
         // グローバルIBL3枚+反射プローブのキューブ配列2枚+プローブ一覧のStructuredBuffer+距離キューブ配列
         // +DDGIのオクタヘドラルアトラス2枚+空パラメータのStructuredBuffer
-        // +bent normalのG-Buffer+雲の3Dノイズ2枚+大気散乱のSkyView LUT)。
+        // +bent normalのG-Buffer+低解像度の雲パスの出力+DDGIResolveの出力2枚
+        // +大気散乱のSkyView LUT+低解像度の雲パスのfogInFront)。
         // 内訳はDX11CommandList.hの同名の定数のコメントに1枚ずつ書いてある。
-        // DX11CommandList/DX12CommandListの同名の定数と必ず一致させること(3か所)
-        constexpr uint32_t kTextureSlotCount = 22;
+        // DX11CommandList/DX12CommandListの同名の定数と必ず一致させること(3か所)。
+        // 【超えるとDX11では黙って落ち、DX12ではPSOの作成が 0x80070057 で失敗する】
+        // H3でt21を足したときに実際に踏んだ。DX11だけで確認していると気付けない
+        constexpr uint32_t kTextureSlotCount = 23;
         // ObjectConstants(b1)を受けるルートパラメータの番号。
         // CreateRootSignature / CreateMeshRootSignature の rootParams[1] と一致させること。
         // 間接DispatchMeshのコマンドシグネチャが、この番号のCBVをドローごとに差し替える

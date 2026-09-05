@@ -1589,12 +1589,18 @@ namespace Kurenai::UI
 
         SliderFloatEx(
             "雲底の高度###CloudAltitude", &m_Engine.m_CloudAltitude, 200.0f, 5000.0f, Defaults::CloudAltitude,
-            "%.0f m", 0, "雲底の高さ(カメラのワールドY基準)。視線とこの高さの平面との交点から雲のUVを"
-            "作るレイヤーモデルのため、値を大きくすると地平線際の雲がより遠くに、小さくすると近くに見える");
+            "%.0f m", 0, "雲底の高さ(ワールドYの絶対高度)。雲層は世界に固定されており、カメラを"
+            "上下させると雲との高度差が実際に変わる。値を大きくすると地平線際の雲がより遠くに、"
+            "小さくすると近くに見える");
         SliderFloatEx(
             "UVスケール###CloudUvScale", &m_Engine.m_CloudUvScale, 1.0f / 8000.0f, 1.0f / 500.0f,
             Defaults::CloudUvScale, "%.6f", ImGuiSliderFlags_Logarithmic,
             "ワールド1mあたりのノイズ空間の距離。大きいほど雲の塊(1個あたり)が小さく見える");
+        SliderFloatEx(
+            "雲の種類###CloudTypeBias", &m_Engine.m_CloudTypeBias, 0.0f, 1.0f, Defaults::CloudTypeBias,
+            "%.2f", 0, "場所ごとの雲の背の高さをどちらへ寄せるか。0で層雲(薄いシート)、0.5で積雲、"
+            "1で雄大積雲。空全体が同じ種類になるのではなく、種類の場が低い周波数で分布している"
+            "ぶんを丸ごとずらす。厚み(Thickness)がスラブの上限で、種類はその何割まで使うかを決める");
         SliderFloatEx(
             "密度###CloudDensity", &m_Engine.m_CloudDensity, 0.0f, 30.0f, Defaults::CloudDensity, "%.2f", 0,
             "消散係数。ビアの法則(exp(-density*経路長))で透過率を決める。大きいほど雲が不透明になり"
@@ -1657,7 +1663,7 @@ namespace Kurenai::UI
         SliderFloatEx(
             "雲底の高度###CirrusAltitude", &m_Engine.m_CirrusAltitude, 3000.0f, 15000.0f, Defaults::CirrusAltitude,
             "%.0f m", 0,
-            "雲底の高さ(カメラのワールドY基準)。巻雲の高度帯として一般に言われる目安"
+            "雲底の高さ(ワールドYの絶対高度。積雲と同じ規約)。巻雲の高度帯として一般に言われる目安"
             "(だいたい5,000〜13,000m)");
         SliderFloatEx(
             "UVスケール###CirrusUvScale", &m_Engine.m_CirrusUvScale, 1.0f / 12000.0f, 1.0f / 1000.0f,

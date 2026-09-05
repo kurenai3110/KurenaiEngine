@@ -222,7 +222,7 @@ PSInput VSMain(VSInput input, uint instanceID : SV_InstanceID)
 // あること(正規化の扱いを含む)。4つのシェーダーはcbufferをそれぞれ別に宣言しているため
 // 関数そのものは共有できず複製しているが、中身がずれると「背景の空」「水面に映る空」
 // 「フォグの合成先の色」が互いに食い違ってしまうため、中身を変える場合は必ず4つとも同時に直すこと
-SkyParameters MakeSkyParameters()
+SkyParameters MakeSkyParameters(float2 pixelPosition)
 {
     SkyParameters params;
     params.SunDirection = normalize(SkySunDirection.xyz);
@@ -245,9 +245,16 @@ SkyParameters MakeSkyParameters()
     params.CirrusDensity = CloudParams2.w;
     params.CirrusScrollOffset = CloudParams3.xy;
     params.CirrusAnisotropy = CloudParams3.z;
-    // 雲層へ掛ける大気遠近(Sky.hlsliのEvaluateCloudLayer (f)節)。
-    // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
-    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
+    // 雲の種類の偏り(C4)。CloudParams3.wはこれまで未使用だった枠なので、FrameConstantsは1バイトも増えない
+    params.CloudTypeBias = CloudParams3.w;
+    // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer参照)。
+    // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける。
+    // 【このCameraPositionは鏡映後のカメラ位置(yが負になる)】このシェーダーはSkyColorUpperしか
+    // 呼ばずEvaluateCloudLayerへ到達しないため影響は無いが、P17でこの引数はレイの起点そのものに
+    // なった。SkyColor/SkyColorWithRayを呼ぶよう変えるなら、鏡映前のカメラ位置を渡し直すこと
+    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
+    // レイマーチの開始位置を画素ごとにずらす量(C2)。スライスの縞をディザへ変える
+    params.RaymarchJitter = CloudRaymarchDither(pixelPosition);
     return params;
 }
 
@@ -521,8 +528,10 @@ float4 PSMain(PSInput input) : SV_TARGET
         // Mie位相関数を掛けない理由、および雲を含むSkyColorではなく晴天のSkyColorUpperを使う
         // 理由(雲は高度1,000m以上にあり、カメラと着目点の間の空気には存在しないため、
         // in-scatterに乗せると雲の模様が地物へ透けて焼き付く)はAerialPerspective.hlslに
-        // 詳しく書いてある。2つのパスで霞の色が食い違わないよう、必ず同時に直すこと
-        const float3 inScatter = SkyColorUpper(fogDir, MakeSkyParameters());
+        // 詳しく書いてある。2つのパスで霞の色が食い違わないよう、必ず同時に直すこと。
+        // CloudSkyLight(P18、雲による空の明かりの減光と無彩色化)も同じ理由で両方に掛ける
+        const SkyParameters skyParams = MakeSkyParameters(input.Position.xy);
+        const float3 inScatter = SkyColorUpper(fogDir, skyParams) * skyParams.CloudSkyLight;
 
         color = color * (1.0f - alpha) + inScatter * alpha;
     }
