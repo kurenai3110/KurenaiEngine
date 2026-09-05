@@ -257,6 +257,20 @@ namespace Kurenai::UI
                 m_Engine.SetMegaLightsTilePoolCapacity(poolCapacity);
             }
 
+            // CLIのモード2も有効として表示する。UIで一度切った後に戻す場合は通常のHalton列へ戻す
+            bool tileJitterEnabled = m_Engine.m_MegaLightsTileJitterMode != 0;
+            if (CheckboxEx(
+                    "タイル格子ジッター###MegaLightsTileJitter", &tileJitterEnabled,
+                    Defaults::MegaLightsTileJitterEnabled,
+                    "候補プールの16x16格子をフレームごとに画素単位でずらす。"
+                    "タイル内で共通する抽出誤差を時間方向に別の場所へ移し、時間累積後の"
+                    "ブロック状の残差を抑える。\n\n"
+                    "【1フレームのノイズ量は減らない】格子と誤差の位置を動かす機能であり、"
+                    "1枚だけの比較では改善を判定できない"))
+            {
+                m_Engine.SetMegaLightsTileJitter(tileJitterEnabled ? 1 : 0);
+            }
+
             CheckboxEx(
                 "デノイザ###MegaLightsDenoise", &m_Engine.m_MegaLightsDenoiseEnabled,
                 Defaults::MegaLightsDenoiseEnabled,

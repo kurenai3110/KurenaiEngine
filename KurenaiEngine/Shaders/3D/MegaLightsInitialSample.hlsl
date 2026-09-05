@@ -59,7 +59,8 @@ cbuffer MegaLightsStochasticConstants : register(b1)
 {
     // x=出力幅, y=出力高, z=1ピクセルあたりの初期候補数M, w=影レイを撃つか
     uint4 Params0;
-    // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
+    // x=候補プールの有効タイル数X(格子ジッター有効時だけ+1)、
+    // y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
     uint4 Params1;
     // xyz=空間再利用用(このパスでは未使用)、w=初期可視レイでリザーバを殺すか。
     // 【途中のフィールドを飛ばしてはいけない】wだけ欲しくてもxyzごと宣言する
@@ -74,6 +75,8 @@ cbuffer MegaLightsStochasticConstants : register(b1)
     // x=1画素あたりの標本数(リザーバの本数)。手法3だけが1より大きくなる。
     // 【末尾へ足すこと】途中へ挿すと Shade / Temporal / Spatial のオフセットがずれる
     uint4 Params5;
+    // xy=候補プールのタイル格子オフセット(画素、各0〜15)、zw=未使用
+    uint4 Params6;
 };
 
 RaytracingAccelerationStructure SceneTLAS : register(t0);
@@ -211,7 +214,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     // --- このピクセルが属するタイルの候補プールを引く ---
     const uint tileSize = max(Params1.y, 1u);
-    const uint2 tileCoord = pixel / tileSize;
+    // 書き手の [tile*16-offset, tile*16-offset+16) と逆写像になる同じ格子規約
+    const uint2 tileCoord = (pixel + Params6.xy) / tileSize;
     const uint candidateCount = Params1.z;
     const uint tileBase = MegaLightsTilePoolBase(tileCoord, Params1.x, candidateCount);
 
