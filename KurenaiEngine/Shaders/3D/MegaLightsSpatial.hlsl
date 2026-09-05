@@ -399,16 +399,16 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 勝つと殺しを捨てるため、初期パスの出力を直接見る。両方に殺しがあれば初期を優先
     uint selfKilledLight = kMegaLightsInvalidLight;
     uint selfKilledSampleUV = 0u;
-    if (candidate[0].W <= 0.0f && !MegaLightsUnpackVisible(candidate[0].LightAndFlags))
+    if (candidate[0].W <= 0.0f && !MegaLightsUnpackVisible(candidate[0].IndexAndFlags))
     {
-        selfKilledLight = MegaLightsUnpackLight(candidate[0].LightAndFlags);
+        selfKilledLight = MegaLightsUnpackLight(candidate[0].IndexAndFlags);
         selfKilledSampleUV = candidate[0].SampleUV;
     }
     {
         const MegaLightsReservoir initial = InitialReservoirs[index];
-        const uint initialLight = MegaLightsUnpackLight(initial.LightAndFlags);
+        const uint initialLight = MegaLightsUnpackLight(initial.IndexAndFlags);
         if (initialLight != kMegaLightsInvalidLight && initial.W <= 0.0f &&
-            !MegaLightsUnpackVisible(initial.LightAndFlags))
+            !MegaLightsUnpackVisible(initial.IndexAndFlags))
         {
             selfKilledLight = initialLight;
             selfKilledSampleUV = initial.SampleUV;
@@ -442,7 +442,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             continue;
         }
 
-        const uint lightI = MegaLightsUnpackLight(candidate[i].LightAndFlags);
+        const uint lightI = MegaLightsUnpackLight(candidate[i].IndexAndFlags);
         // 自分から見えないことが確定している標的は選ばない(理由は selfKilledLight の定義)。
         // 球光源はサンプル点まで一致した場合だけ確定と見なす
         if (lightI == selfKilledLight &&
@@ -607,10 +607,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             // W = Σw/(Z・p̂) の上界は変わらない(Z ≥ 勝者のM)。
             if (visibilityAware)
             {
-                const uint candLight = MegaLightsUnpackLight(candidate[j].LightAndFlags);
+                const uint candLight = MegaLightsUnpackLight(candidate[j].IndexAndFlags);
                 const bool sameTarget = (candLight == selectedLight) &&
                     (selectedRadius <= 0.0f || candidate[j].SampleUV == selectedSampleUV);
-                if (sameTarget && MegaLightsUnpackVisible(candidate[j].LightAndFlags))
+                if (sameTarget && MegaLightsUnpackVisible(candidate[j].IndexAndFlags))
                 {
                     // 可視が確定(このフレーム・その画素で検証済み)。レイ不要で数える
                 }
@@ -657,7 +657,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 【可視フラグ = このフレーム・この画素で可視を証明済みか】目標関数に可視性を
     // 入れているとき、勝者は自分の面からのレイを通過している ―― シェードは
     // このフラグを見て影レイを省く
-    result.LightAndFlags = MegaLightsPackLightAndFlags(selectedLight, visibilityTargetAware);
+    result.IndexAndFlags = MegaLightsPackLightAndFlags(selectedLight, visibilityTargetAware);
     result.SampleUV = selectedSampleUV;
     result.W = weightSum / (denominator * selectedTargetPdf);
     result.M = confidenceSum;

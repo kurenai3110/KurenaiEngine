@@ -457,7 +457,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             // (実測 -3.6%。docs/ImplementationDetail.md 61.7f)。
             // M は残す ―― 「M個の候補を検討した」ことは事実で、他の灯の Z には数えるべき
             MegaLightsReservoir killed = MegaLightsMakeEmptyReservoir();
-            killed.LightAndFlags = MegaLightsPackLightAndFlags(selectedLightIndex, false);
+            killed.IndexAndFlags = MegaLightsPackLightAndFlags(selectedLightIndex, false);
             killed.SampleUV = MegaLightsPackSampleUV(sampleUV);
             killed.M = float(sampleCount);
             Reservoirs[reservoirBase + sampleSlot] = killed;
@@ -486,7 +486,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         MegaLightsReservoir reservoir;
         // ライト番号は16bitへ詰める(kMaxLights = 1024 なので収まる)
-        reservoir.LightAndFlags = MegaLightsPackLightAndFlags(selectedLightIndex, true);
+        reservoir.IndexAndFlags = MegaLightsPackLightAndFlags(selectedLightIndex, true);
         // 球面上のどこを狙ったか。時空間再利用がこの点ごと持ち回るので、借りた側も同じ点へ撃つ
         // (半径0なら中心になり、点光源と完全に一致する)
         reservoir.SampleUV = MegaLightsPackSampleUV(sampleUV);

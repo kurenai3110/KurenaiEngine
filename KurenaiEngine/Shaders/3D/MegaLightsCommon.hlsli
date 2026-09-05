@@ -16,7 +16,14 @@
 #define KURENAI_MEGALIGHTS_COMMON_HLSLI
 
 // 無効なライト番号。リザーバが空であることを表す
-static const uint kMegaLightsInvalidLight = 0xFFFFu;
+// 番号は30bit。bit30 をメッシュライトの印、bit31 を可視フラグに使う。
+//
+// 【30bitにする理由】段階2の三角形はクラスタあたりの枚数に上限を置きたくない。
+// 16+16 に割る案より素直で、リザーバは16バイトのまま収まる(C++側は1行も変わらない)
+static const uint kMegaLightsIndexMask = 0x3FFFFFFFu;
+static const uint kMegaLightsMeshLightBit = 1u << 30u;
+static const uint kMegaLightsVisibleBit = 1u << 31u;
+static const uint kMegaLightsInvalidLight = 0x3FFFFFFFu;
 
 // 候補プールの抽出に混ぜる「一様成分」の割合(防御的混合)。
 //
@@ -94,9 +101,14 @@ uint MegaLightsTilePoolBase(uint2 tileCoord, uint tileCountX, uint candidateCoun
 // GPULightと同じく、パッキング規則の解釈揺れを避けるため要素はすべて32bit単位で持つ
 struct MegaLightsReservoir
 {
-    // 下位16bit = ライト番号(kMegaLightsInvalidLight で空)、
-    // 上位16bit = フラグ。bit0 = 初期可視レイで生き残った
-    uint LightAndFlags;
+    // bit0..29 = 番号。punctual はライト番号、メッシュライトは三角形番号
+    //            (kMegaLightsInvalidLight で空)
+    // bit30    = メッシュライト(1) / punctual(0)
+    // bit31    = 初期可視レイで生き残った
+    //
+    // 【1つの枠に両方を入れる理由】時間・空間再利用はこの値をほぼ不透明に扱っており、
+    // 中身を見ているのは数箇所しかない。枠を分けると再利用側に分岐が増える
+    uint IndexAndFlags;
     // 光源面上のどこを選んだか(fp16 x2)。punctual の現段階では常に0で、
     // 光源に半径が入る段階で使う。ここを空けておかないと後でレイアウトを変えることになる
     uint SampleUV;
@@ -112,23 +124,37 @@ struct MegaLightsReservoir
 
 uint MegaLightsPackLightAndFlags(uint lightIndex, bool visible)
 {
-    return (lightIndex & 0xFFFFu) | (visible ? (1u << 16u) : 0u);
+    return (lightIndex & kMegaLightsIndexMask) | (visible ? kMegaLightsVisibleBit : 0u);
+}
+
+// メッシュライト(三角形)の番号を詰める。punctual と同じ枠へ入れ、印で見分ける
+uint MegaLightsPackMeshLightAndFlags(uint triangleIndex, bool visible)
+{
+    return (triangleIndex & kMegaLightsIndexMask) | kMegaLightsMeshLightBit |
+           (visible ? kMegaLightsVisibleBit : 0u);
 }
 
 uint MegaLightsUnpackLight(uint packed)
 {
-    return packed & 0xFFFFu;
+    return packed & kMegaLightsIndexMask;
+}
+
+// このリザーバが指しているのは三角形か。**punctual と定義域を分ける唯一の判定**なので、
+// 提案分布・目標関数・影レイ・シェードのすべてがここを通ること
+bool MegaLightsUnpackIsMeshLight(uint packed)
+{
+    return (packed & kMegaLightsMeshLightBit) != 0u;
 }
 
 bool MegaLightsUnpackVisible(uint packed)
 {
-    return (packed & (1u << 16u)) != 0u;
+    return (packed & kMegaLightsVisibleBit) != 0u;
 }
 
 MegaLightsReservoir MegaLightsMakeEmptyReservoir()
 {
     MegaLightsReservoir reservoir;
-    reservoir.LightAndFlags = MegaLightsPackLightAndFlags(kMegaLightsInvalidLight, false);
+    reservoir.IndexAndFlags = MegaLightsPackLightAndFlags(kMegaLightsInvalidLight, false);
     reservoir.SampleUV = 0u;
     reservoir.W = 0.0f;
     reservoir.M = 0.0f;
@@ -137,7 +163,7 @@ MegaLightsReservoir MegaLightsMakeEmptyReservoir()
 
 bool MegaLightsReservoirIsEmpty(MegaLightsReservoir reservoir)
 {
-    return MegaLightsUnpackLight(reservoir.LightAndFlags) == kMegaLightsInvalidLight || reservoir.W <= 0.0f;
+    return MegaLightsUnpackLight(reservoir.IndexAndFlags) == kMegaLightsInvalidLight || reservoir.W <= 0.0f;
 }
 
 // --- 履歴の幾何(時間再利用が「再投影先は同じ面か」を判定するのに使う) ---

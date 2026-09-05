@@ -1613,7 +1613,13 @@ namespace Kurenai
             // x: フレーム番号。球光源のサンプル列を毎フレーム回すのに使う。
             // 【混ぜないと蓄積が効かない】固定すると毎フレーム同じ点を引き、
             // 何枚足しても可視率のばらつきが残る(MegaLightsReference.hlsl)
+            // y: 発光三角形の枚数(0ならメッシュライト無効。段階1のプロキシがそのまま光る)
+            // z/w: 未使用
             DirectX::XMUINT4 Params1;
+            // x: シーン全体の自発光の強度倍率。三角形テーブルには焼けない(毎フレーム変わる)。
+            // 【露出ではない】自発光は露出を通らない経路で、段階1のプロキシも露出抜き。
+            // 露出を掛けるとEV100=15で1/39322倍になる。y/z/w: 未使用
+            DirectX::XMFLOAT4 Params2;
         };
 
         // RTAO.hlsl側のcbuffer RTAOConstantsと一致させる必要がある
@@ -3784,8 +3790,10 @@ namespace Kurenai
             m_EmissiveLightsEnabled = (enabled > 0);
         }
         // 0以下は「既定のまま」。OverrideMegaLightsの負値と同じ約束にしてある
+        bool cutoffChanged = false;
         if (cutoffIrradiance > 0.0f)
         {
+            cutoffChanged = (m_EmissiveLightsCutoffIrradiance != cutoffIrradiance);
             m_EmissiveLightsCutoffIrradiance = cutoffIrradiance;
         }
         if (maxCount > 0)
@@ -3796,6 +3804,15 @@ namespace Kurenai
         {
             m_EmissiveLightsDoubleCountGI = (doubleCountGI > 0);
         }
+        // 【三角形テーブルを焼き直す】メッシュライトの影響半径は読み込み時に焼くので、
+        // τを変えても焼き直さないと**つまみが静かに効かない**。シーンの読み込みは
+        // 設定の適用より先に走るため、ここで焼き直さないと起動引数すら届かない
+        // (実際に踏んだ。τを100分の1にしてもダンプがバイト完全一致した)
+        if (cutoffChanged && m_Device && !m_Scene.Instances.empty())
+        {
+            m_MeshLightScene.Build(*m_Device, m_Scene, m_EmissiveLightsCutoffIrradiance);
+        }
+
         // 上限の警告は設定を変えたら出し直す(τを上げてRangeを縮めた結果を見たいため)
         m_EmissiveLightsCapLogged = false;
         Core::Logger::Info(
@@ -3805,6 +3822,40 @@ namespace Kurenai
                 std::to_string(m_EmissiveLightsMaxCount) + "個 / プロキシ " +
                 std::to_string(m_EmissiveProxies.size()) + "個 / DDGIの自発光 " +
                 (ShouldSuppressEmissiveForGI() ? "抑止" : "そのまま(二重計上)"));
+    }
+
+    void KurenaiEngine3D::SetMeshLights(int enabled)
+    {
+        // 負は「既定のまま」(SetEmissiveLights と同じ約束)
+        if (enabled < 0)
+        {
+            return;
+        }
+        m_MeshLightsEnabled = (enabled > 0);
+
+        // 【効かない組み合わせを黙って受け付けない】有効にしたのに何も起きない状態は、
+        // 「実装が壊れている」と「前提が揃っていない」の区別がつかない。
+        // 実際にどちらへ落ちるかをここで言い切る
+        std::string note;
+        if (m_MeshLightsEnabled)
+        {
+            if (!m_EmissiveLightsEnabled)
+            {
+                note = " ※エミッシブ光源が無効なので三角形は出ない";
+            }
+            else if (!m_MeshLightScene.IsValid())
+            {
+                note = " ※三角形テーブルが空(発光メッシュが無いか読み込み前)";
+            }
+            else if (!ShouldRunMegaLights())
+            {
+                note = " ※MegaLightsが走らない構成(DX11/非DXR/無効)なので段階1のプロキシが光る";
+            }
+        }
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("メッシュライト: ") + (m_MeshLightsEnabled ? "有効" : "無効") + " / 三角形 " +
+                std::to_string(m_MeshLightScene.GetTriangleCount()) + "枚" + note);
     }
 
     void KurenaiEngine3D::SetEmissiveIntensity(float intensity)
@@ -6484,6 +6535,7 @@ namespace Kurenai
         RetiredAssets retired;
         retired.Scene = std::move(m_Scene);
         retired.RaytracingScene = std::move(m_RaytracingScene);
+        retired.MeshLightScene = std::move(m_MeshLightScene);
         m_Scene = Assets::Scene{};
         m_RaytracingScene = Assets::RaytracingScene{};
         RetireAssets(std::move(retired));
@@ -7647,6 +7699,19 @@ namespace Kurenai
             }
         }
 
+        // メッシュライトの三角形テーブル(段階2)。
+        //
+        // 【DXRの有無に関係なく作る】使うのは MegaLights の経路(DX12+DXR)だけだが、
+        // 構築そのものは頂点の変換とバッファ確保しかしておらず、レイトレーシングに依存しない。
+        // 対応環境でだけ作る形にすると、非対応機で「三角形が出ない」のか
+        // 「そもそも作っていない」のかがログから切り分けられなくなる。
+        // 【打ち切り照度はフレーム不変の定数を渡す】露出や現在のτから導くと、
+        // 参照実装が非決定的になって「同じ入力で同じ真値」が崩れる
+        // 【打ち切り照度は実効値を渡すこと】既定の定数を渡すと -emissivelightscutoff や
+        // ImGui の指定が三角形テーブルへ一切届かず、**つまみが静かに効かなくなる**
+        // (実際に踏んだ。τを100分の1にしてもダンプがバイト完全一致した)
+        loaded->MeshLightScene.Build(*m_Device, loaded->Scene, m_EmissiveLightsCutoffIrradiance);
+
         loaded->Camera = ComputeInitialCamera(loaded->Scene);
         return loaded;
     }
@@ -7661,6 +7726,7 @@ namespace Kurenai
 
         m_Scene = std::move(loaded.Scene);
         m_RaytracingScene = std::move(loaded.RaytracingScene);
+        m_MeshLightScene = std::move(loaded.MeshLightScene);
         m_CurrentSceneIndex = loaded.SceneIndex;
 
         // ストリーミングの状態もシーンに紐づく。世代を進めることで、切り替え前に発注して
@@ -13668,6 +13734,19 @@ namespace Kurenai
         RHI::IRHIBuffer* const tilePoolBufferForBinding =
             m_MegaLightsTilePoolBuffer ? m_MegaLightsTilePoolBuffer.get() : m_LightTileBuffer.get();
 
+        // 段階2のメッシュライトを、このフレームで三角形として積むかどうか。
+        // 【フレーム単位の1変数に閉じること】画素やタイルごとに切り替えると境界で
+        // 二重計上し、静止画では見えない。DX11/非DXR は ShouldRunMegaLights() が偽なので
+        // 自動的に段階1のプロキシへ落ちる ―― 分岐を追加で書かない
+        const bool meshLightsActive = m_MeshLightsEnabled && m_MeshLightScene.IsValid();
+        const uint32_t meshLightTriangleCount =
+            meshLightsActive ? m_MeshLightScene.GetTriangleCount() : 0u;
+        // t8 に張る三角形テーブル。無効なフレームでも何かを張る必要がある
+        // (DX12はPSO切替でルート引数が無効化されるため)。読まれないダミーとして
+        // ライトリストを張る ―― 三角形数0なのでループが1周も回らない
+        RHI::IRHIBuffer* const meshLightBufferForBinding =
+            meshLightsActive ? m_MeshLightScene.GetTriangleBuffer() : m_LightBuffer.get();
+
         if (ShouldRunMegaLights() && m_MegaLightsMode == MegaLightsMode::Reference)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
@@ -13684,8 +13763,9 @@ namespace Kurenai
                 // というこのコードベースの規約に従う。候補プールは確率的サンプリングのときだけ
                 // 読むが、宣言しておくことで候補プールパスより後ろへ順序付けられる
                 // (参照実装のフレームでは辺が1本余分に張られるだけで無害)
-                .BufferReads = { m_LightBuffer.get(), tilePoolBufferForBinding },
-                .Execute = [this, &gpuLights, tilePoolBufferForBinding](RHI::IRHICommandList* cmd)
+                .BufferReads = { m_LightBuffer.get(), tilePoolBufferForBinding, meshLightBufferForBinding },
+                .Execute = [this, &gpuLights, tilePoolBufferForBinding, meshLightBufferForBinding,
+                            meshLightTriangleCount](RHI::IRHICommandList* cmd)
                 {
                     MegaLightsConstants megaLightsConstants{};
                     megaLightsConstants.Params0 =
@@ -13697,7 +13777,14 @@ namespace Kurenai
                     };
                     // 球光源のサンプル列を毎フレーム回す種。確率的サンプリング側と同じ
                     // フレーム番号を使う(あちらは Params1.w)
-                    megaLightsConstants.Params1 = { m_TAAFrameIndex, 0u, 0u, 0u };
+                    megaLightsConstants.Params1 = { m_TAAFrameIndex, meshLightTriangleCount, 0u, 0u };
+                    // 段階1が MakeGPULightFromEmissiveProxy で毎フレーム掛けているのと同じ倍率。
+                    // これで ImGui の「自発光の強度」がメッシュライトにもライブに効く
+                    // y は影響半径の伸縮。半径は倍率1で焼いてあり、段階1の Range は
+                    // peak ∝ intensity から解かれるので R ∝ sqrt(intensity) で伸ばす
+                    megaLightsConstants.Params2 = {
+                        m_EmissiveIntensity, std::sqrt(std::max(m_EmissiveIntensity, 0.0f)),
+                        0.0f, 0.0f };
                     cmd->UpdateBuffer(m_MegaLightsConstantBuffer.get(), &megaLightsConstants,
                                       sizeof(megaLightsConstants));
 
@@ -13724,6 +13811,8 @@ namespace Kurenai
                     // 無効化されるため、確率的サンプリングのときは必ずバインドする必要がある。
                     // 常に張っても害は無いので分岐させない
                     cmd->SetComputeShaderResourceBuffer(7, tilePoolBufferForBinding);
+                    // 発光三角形テーブル。三角形数0のフレームでもダミーを張る(同上)
+                    cmd->SetComputeShaderResourceBuffer(8, meshLightBufferForBinding);
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
                     cmd->SetComputeUnorderedAccessTexture(0, m_MegaLightsTexture.get());

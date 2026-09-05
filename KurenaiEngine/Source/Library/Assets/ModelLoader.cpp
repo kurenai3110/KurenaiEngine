@@ -292,11 +292,72 @@ namespace Kurenai::Assets
         // 【決定的であること】乱数を使わないのはもちろん、unordered_map の**反復順に依存しない**
         // ように書く(添字は必ず三角形の走査順で採番し、段Cの種は面積と重心で順序を決める)。
         // 起動ごとに灯の位置や順番が変わると、A/B比較そのものが成立しなくなる。
+        // BuildEmissiveClusters が返した三角形→かたまりの対応から、かたまりごとに連続した
+        // 三角形の並びを作る。**かたまりの TriangleOffset もここで書き込む**。
+        //
+        // 【並べ替えの向きに注意】三角形を選ぶ第2段はこの連続範囲を面積比で引くので、
+        // 「かたまりごとに連続していること」が提案分布の前提そのものになる。
+        // 崩すと、あるかたまりを選んだのに別のかたまりの三角形へ行く ―― 絵は出る
+        void BuildEmissiveTriangles(
+            const Vertex* vertices, uint32_t vertexCount, const uint32_t* indices,
+            const std::vector<uint32_t>& triangleCluster, std::vector<EmissiveCluster>& clusters,
+            std::vector<EmissiveTriangle>& outTriangles)
+        {
+            outTriangles.clear();
+            if (vertices == nullptr || indices == nullptr || clusters.empty())
+            {
+                return;
+            }
+            // かたまりごとの枚数を数えてから開始位置を確定する(2パス。並べ替えは1回で済む)
+            std::vector<uint32_t> counts(clusters.size(), 0u);
+            for (const uint32_t cluster : triangleCluster)
+            {
+                if (cluster < clusters.size()) { ++counts[cluster]; }
+            }
+            uint32_t offset = 0;
+            for (size_t c = 0; c < clusters.size(); ++c)
+            {
+                clusters[c].TriangleOffset = offset;
+                offset += counts[c];
+            }
+            outTriangles.resize(offset);
+            std::vector<uint32_t> cursor(clusters.size(), 0u);
+            for (size_t tri = 0; tri < triangleCluster.size(); ++tri)
+            {
+                const uint32_t cluster = triangleCluster[tri];
+                if (cluster >= clusters.size()) { continue; }
+                const uint32_t i0 = indices[tri * 3 + 0];
+                const uint32_t i1 = indices[tri * 3 + 1];
+                const uint32_t i2 = indices[tri * 3 + 2];
+                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount) { continue; }
+
+                EmissiveTriangle& dst = outTriangles[clusters[cluster].TriangleOffset + cursor[cluster]];
+                ++cursor[cluster];
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    dst.P0[axis] = vertices[i0].Position[axis];
+                    dst.E1[axis] = vertices[i1].Position[axis] - vertices[i0].Position[axis];
+                    dst.E2[axis] = vertices[i2].Position[axis] - vertices[i0].Position[axis];
+                }
+                dst.ClusterIndex = cluster;
+            }
+        }
+
+        // outTriangleCluster に nullptr 以外を渡すと、三角形ごとの「どのかたまりに属するか」を
+        // 返す(要素数 = indexCount/3、どこにも属さない三角形は kEmissiveTriangleUnassigned)。
+        //
+        // 【段階2のメッシュライトが要る】三角形を面積比で引くとき、まずかたまりを選んでから
+        // その中の三角形を引く2段構えにする。**かたまりの中身が分からないと第2段が書けない**
         std::vector<EmissiveCluster> BuildEmissiveClusters(
             const Vertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount,
-            const float boundsMin[3], const float boundsMax[3], float clusterScale)
+            const float boundsMin[3], const float boundsMax[3], float clusterScale,
+            std::vector<uint32_t>* outTriangleCluster = nullptr)
         {
             std::vector<EmissiveCluster> result;
+            if (outTriangleCluster != nullptr)
+            {
+                outTriangleCluster->assign(indexCount / 3, kEmissiveTriangleUnassigned);
+            }
             if (vertices == nullptr || indices == nullptr || vertexCount == 0 || indexCount < 3)
             {
                 return result;
@@ -712,6 +773,13 @@ namespace Kurenai::Assets
             }
 
             // --- かたまりごとの値を確定する ---
+            //
+            // 【かたまり番号と出力の添字は一致しない】面積0のかたまりはここで落ちるので、
+            // 三角形→かたまりの対応もこの写像を通してから返す。
+            // 現状は面積0のかたまりが作られない(面積が正の三角形しか登録しない)が、
+            // **その前提に依存させない** ―― 依存すると、落ちる条件が増えた瞬間に
+            // 三角形が1つずつずれたかたまりを指し、絵は出るのに静かに壊れる
+            std::vector<uint32_t> groupToCluster(groups.size(), kEmissiveTriangleUnassigned);
             result.reserve(groups.size());
             for (size_t g = 0; g < groups.size(); ++g)
             {
@@ -720,6 +788,7 @@ namespace Kurenai::Assets
                 {
                     continue;
                 }
+                groupToCluster[g] = static_cast<uint32_t>(result.size());
                 const double invArea = 1.0 / acc.Area;
 
                 EmissiveCluster cluster;
@@ -754,6 +823,17 @@ namespace Kurenai::Assets
                 cluster.SourceRadius = static_cast<float>(std::sqrt(std::max(0.0, 2.0 * moment * invArea)));
 
                 result.push_back(cluster);
+            }
+
+            if (outTriangleCluster != nullptr)
+            {
+                for (uint32_t tri = 0; tri < triangleCount; ++tri)
+                {
+                    const uint32_t groupIndex = triangleGroup[tri];
+                    (*outTriangleCluster)[tri] = (groupIndex == 0xFFFFFFFFu)
+                                                     ? kEmissiveTriangleUnassigned
+                                                     : groupToCluster[groupIndex];
+                }
             }
 
             return result;
@@ -1548,6 +1628,7 @@ namespace Kurenai::Assets
         // メッシュごとに出すとEmeraldSquareで12行になり、他のログに埋もれる
         uint32_t emissiveMeshCount = 0;
         uint32_t emissiveClusterCount = 0;
+        uint32_t emissiveTriangleCount = 0;
         uint32_t emissiveTexturedMeshCount = 0;
         std::vector<float> emissiveTextureLuminances;
 
@@ -1815,12 +1896,48 @@ namespace Kurenai::Assets
                         emissiveTexturedMeshCount += 1u;
                     }
                 }
+                const auto* const meshVertices =
+                    reinterpret_cast<const Vertex*>(geometryPayload.data() + mesh.VertexOffset);
+                const auto* const meshIndices =
+                    reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.IndexOffset);
+                std::vector<uint32_t> triangleCluster;
                 outMesh.EmissiveClusters = BuildEmissiveClusters(
-                    reinterpret_cast<const Vertex*>(geometryPayload.data() + mesh.VertexOffset), mesh.VertexCount,
-                    reinterpret_cast<const uint32_t*>(geometryPayload.data() + mesh.IndexOffset), mesh.IndexCount,
-                    outMesh.BoundsMin, outMesh.BoundsMax, kEmissiveClusterScale);
+                    meshVertices, mesh.VertexCount, meshIndices, mesh.IndexCount,
+                    outMesh.BoundsMin, outMesh.BoundsMax, kEmissiveClusterScale, &triangleCluster);
+                BuildEmissiveTriangles(
+                    meshVertices, mesh.VertexCount, meshIndices, triangleCluster, outMesh.EmissiveClusters,
+                    outMesh.EmissiveTriangles);
                 emissiveMeshCount += 1u;
                 emissiveClusterCount += static_cast<uint32_t>(outMesh.EmissiveClusters.size());
+                emissiveTriangleCount += static_cast<uint32_t>(outMesh.EmissiveTriangles.size());
+
+                // 【三角形の総面積はかたまりの総面積と一致しなければならない】
+                // 並べ替えでどれかを取りこぼしても、かたまりの範囲がずれても、
+                // 絵はそれらしく出てしまう。ここで数として突き合わせておく
+                double triangleArea = 0.0;
+                for (const EmissiveTriangle& tri : outMesh.EmissiveTriangles)
+                {
+                    const double cross[3] = {
+                        static_cast<double>(tri.E1[1]) * tri.E2[2] - static_cast<double>(tri.E1[2]) * tri.E2[1],
+                        static_cast<double>(tri.E1[2]) * tri.E2[0] - static_cast<double>(tri.E1[0]) * tri.E2[2],
+                        static_cast<double>(tri.E1[0]) * tri.E2[1] - static_cast<double>(tri.E1[1]) * tri.E2[0],
+                    };
+                    triangleArea +=
+                        0.5 * std::sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+                }
+                double clusterArea = 0.0;
+                for (const EmissiveCluster& cluster : outMesh.EmissiveClusters)
+                {
+                    clusterArea += cluster.Area;
+                }
+                if (clusterArea > 0.0 && std::fabs(triangleArea - clusterArea) > 1e-4 * clusterArea)
+                {
+                    Core::Logger::Warning(
+                        "ModelLoader",
+                        "エミッシブ三角形の総面積がかたまりの総面積と一致しません: 三角形 " +
+                            std::to_string(triangleArea) + " m^2 / かたまり " + std::to_string(clusterArea) +
+                            " m^2(材質 " + std::to_string(mesh.MaterialIndex) + ")");
+                }
             }
 
             // LOD0の三角形数を積む(メッシュレットLODのしきい値の基準。Model::TotalTriangleCount)
@@ -1849,7 +1966,8 @@ namespace Kurenai::Assets
             Core::Logger::Info(
                 "ModelLoader",
                 "エミッシブな光源: " + std::to_string(emissiveClusterCount) + "個(" +
-                    std::to_string(emissiveMeshCount) + "メッシュ由来)");
+                    std::to_string(emissiveMeshCount) + "メッシュ由来 / 三角形 " +
+                    std::to_string(emissiveTriangleCount) + "枚)");
             if (!emissiveTextureLuminances.empty())
             {
                 std::sort(emissiveTextureLuminances.begin(), emissiveTextureLuminances.end());

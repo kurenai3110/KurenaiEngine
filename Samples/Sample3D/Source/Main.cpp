@@ -731,6 +731,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const float emissiveLightsCutoff = ParseFloatOption(L"-emissivelightscutoff", -1.0f);
         const int emissiveLightsMax = ParseIntOption(L"-emissivelightsmax", -1);
         const int emissiveLightsDDGI = ParseIntOption(L"-emissivelightsddgi", -1);
+        // -meshlights <0|1>。段階2。発光面を三角形のまま面積分する(既定は無効)。
+        // MegaLights 経路でのみ効き、有効なフレームは参照実装が段階1のプロキシ(型3)を
+        // 読み飛ばして三角形を積む。**いまは全三角形総当たりの参照実装しか無い**ので
+        // 実シーンでは回らない(小さな専用シーン用)
+        const int meshLights = ParseIntOption(L"-meshlights", -1);
         // -emissiveintensity <倍率>。シーン全体の自発光の強度(ImGuiの同名スライダと同じ値)。
         // glTFのemissiveFactorは[0,1]に収まるため、既定の1.0では小さな器具が1階調に届かない
         const float emissiveIntensity = ParseFloatOption(L"-emissiveintensity", -1.0f);        // -megalightsdenoisesigma <値>。輝度のエッジ停止の強さ(SVGFのσ_l)
@@ -866,6 +871,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (emissiveIntensity > 0.0f)
             {
                 engine.SetEmissiveIntensity(emissiveIntensity);
+            }
+            if (meshLights >= 0)
+            {
+                engine.SetMeshLights(meshLights);
             }            if (megaLightsDenoiseSigma > 0.0f)
             {
                 engine.SetMegaLightsDenoiseSigmaLuminance(megaLightsDenoiseSigma);
