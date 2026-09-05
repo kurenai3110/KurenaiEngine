@@ -137,12 +137,12 @@ namespace Kurenai::UI
             "常にキューブマップのままで、この設定の影響を受けない。手続き空が無効なときは、"
             "この設定に関わらず常にキューブマップが使われる");
         SliderFloatEx(
-            "EV100###SceneExposure", &m_Engine.m_SceneExposureEV100, -8.0f, 20.0f, Defaults::SceneExposureEV100, "%.2f",
+            "EV100###SceneExposure", &m_Engine.m_PostProcessSettings.SceneExposureEV100, -8.0f, 20.0f, Defaults::SceneExposureEV100, "%.2f",
             0,
             "実在の写真露出値。太陽・環境光・ポイント/スポットライトすべてに一様にかかるシーン全体の露出。"
             "自動露出が有効なときは、バッファの数値レンジを決める基準値として働く");
         SliderFloatEx(
-            "自発光の強度###EmissiveIntensity", &m_Engine.m_EmissiveIntensity, 0.0f, 64.0f, Defaults::EmissiveIntensity,
+            "自発光の強度###EmissiveIntensity", &m_Engine.m_EmissiveLightSettings.Intensity, 0.0f, 64.0f, Defaults::EmissiveIntensity,
             "%.2fx", ImGuiSliderFlags_Logarithmic,
             "シーン全体の自発光にかける倍率。glTFのemissiveFactorは通常1.0以下に収まるため、"
             "アセットを作り直さずにHDRな自発光(照明器具のにじみ)を作るための倍率");
@@ -161,7 +161,7 @@ namespace Kurenai::UI
     void LightingPanel::DrawEmissiveLightControls()
     {
         const bool enabledMoved = CheckboxEx(
-            "エミッシブを光源にする###EmissiveLights", &m_Engine.m_EmissiveLightsEnabled,
+            "エミッシブを光源にする###EmissiveLights", &m_Engine.m_EmissiveLightSettings.LightsEnabled,
             Defaults::EmissiveLightsEnabled,
             "自発光メッシュから「光源のかたまり」を起こし、GPULight(型3)として直接光へ流す。"
             "**既定は無効**(既存シーンの絵を変えないため)。有効にすると明るさが増える。"
@@ -175,20 +175,20 @@ namespace Kurenai::UI
         ImGui::BeginDisabled(!hasProxy);
 
         const bool cutoffMoved = SliderFloatEx(
-            "打ち切り照度###EmissiveLightsCutoff", &m_Engine.m_EmissiveLightsCutoffIrradiance,
+            "打ち切り照度###EmissiveLightsCutoff", &m_Engine.m_EmissiveLightSettings.LightsCutoffIrradiance,
             1e-5f, 1e-1f, Defaults::EmissiveLightsCutoffIrradiance, "%.5f", ImGuiSliderFlags_Logarithmic,
             "この照度まで落ちる距離をRangeにする。窓関数が持ち込む絶対誤差はτの1.09倍を超えない"
             "ので、安全率を掛けずτひとつで縛れる。**上げるとRangeが縮む** ―― 1タイル64灯の"
             "上限に当たったときは、採用数を減らすよりこちらを上げるほうがエネルギーを捨てずに済む");
 
         const bool maxMoved = SliderIntEx(
-            "採用数の上限###EmissiveLightsMax", &m_Engine.m_EmissiveLightsMaxCount, 1, 1024,
+            "採用数の上限###EmissiveLightsMax", &m_Engine.m_EmissiveLightSettings.LightsMaxCount, 1, 1024,
             Defaults::EmissiveLightsMaxCount,
             "GPUへ送るプロキシ数の上限。手置きライトとは別枠で管理される。"
             "**切り捨てはエネルギーを捨てる** ―― 上限に当たったら、まずクラスタの併合を疑うこと");
 
         const bool ddgiMoved = CheckboxEx(
-            "DDGIにも自発光を加算する###EmissiveLightsDDGI", &m_Engine.m_EmissiveLightsDoubleCountGI,
+            "DDGIにも自発光を加算する###EmissiveLightsDDGI", &m_Engine.m_EmissiveLightSettings.LightsDoubleCountGI,
             Defaults::EmissiveLightsDoubleCountGI,
             "オンにすると、光源にした発光面をDDGIのプローブも「明るい面」として焼き込む"
             "(=同じ発光を二重に数える)。既定はオフ(抑止)。"

@@ -2254,7 +2254,7 @@ sRGBエンコード・ディザ)、<code>AutoExposure.hlsl</code>(輝度ヒス�
 <strong>自動露出の結果をライト強度へ戻してはいけない。</strong>1つは<strong>フィードバックループ</strong>で、
 露出が変わるとHDRバッファの値そのものが動き、その値から測った輝度でまた露出が変わる。
 もう1つは<strong>GPU→CPUのリードバック</strong>が必要になることで、同期待ちかフレーム遅延を強いられる。</p>
-<p>そのため、CPU側の乗算(<code>m_SceneExposureEV100</code>)を<strong>プリ露出</strong>として残し、
+<p>そのため、CPU側の乗算(<code>m_PostProcessSettings.SceneExposureEV100</code>)を<strong>プリ露出</strong>として残し、
 自動露出はGPU上だけで完結させる。HDRバッファには常にプリ露出済みの値が流れるので、
 <code>絶対輝度 = バッファの値 ÷ preExposure</code>で元の測光量へ戻せる。ヒストグラムはこの絶対輝度に対して働くため、
 プリ露出をどう設定しても測定結果は変わらない(プリ露出はバッファの数値レンジを<code>R16G16B16A16_Float</code>の
@@ -2971,7 +2971,7 @@ Tonemap・Bloom・AutoExposureはいずれも同じ値を受け取って割り�
 </p>
 <p>
 <b>(1) シーン読み込みで露出の追従状態を捨てる。</b>
-実効プリ露出は<code>m_EffectiveExposureAdaptSpeed</code>で平滑化されているため、
+実効プリ露出は<code>m_PostProcessSettings.EffectiveExposureAdaptSpeed</code>で平滑化されているため、
 リセットしないとシーンを読み込んだ次のフレーム ―― つまり<strong>プローブを焼くフレーム</strong> ――
 の露出が<b>前のシーンの露出から追従の途中</b>の値になる。
 <code>LoadScene</code>が<code>m_EffectiveExposureInitialized</code>を倒し、次のフレームで新しい時刻の
@@ -3844,7 +3844,7 @@ TAA側は <code>historyUv = uv - velocity</code> で履歴を引く。
 </p>
 <h3>23.3 ジッターの入れ方(行ベクトル規約での導出)</h3>
 <p>
-Halton(2,3)列の8サンプルを使い、<code>offsetPx = (halton - 0.5) * m_TAAJitterScale</code> を
+Halton(2,3)列の8サンプルを使い、<code>offsetPx = (halton - 0.5) * m_PostProcessSettings.TAAJitterScale</code> を
 NDCへ直して投影行列へ入れる。Halton列の添字は1から始める(添字0はradical inverseの定義上
 どの基数でも0となり、オフセットがピクセルの角へ偏る)。
 </p>
@@ -3907,7 +3907,7 @@ DX12のルートシグネチャはCBVをb0/b1の2枠しか持たないので、b
 色空間はYCoCg——RGBのまま行うと色相ごと動いてしまうため、輝度と色差を別軸として扱う。
 引き戻しは各軸独立の<code>clamp</code>ではなく、<strong>中心から履歴へ向かう線分とAABBの交点まで
 縮める</strong>方式にしている。<code>clamp</code>だとAABBの角へ寄った不自然な色になり色ずれが目立つ。
-γ(<code>m_TAAClipGamma</code>、既定1.25)と積集合を取るかどうか(<code>m_TAAClipMode</code>)は
+γ(<code>m_PostProcessSettings.TAAClipGamma</code>、既定1.25)と積集合を取るかどうか(<code>m_PostProcessSettings.TAAClip</code>)は
 UIから変更でき、ゴーストとちらつきのトレードオフを比較できる。
 </p>
 <h3>23.6.1 静止時のちらつき抑制</h3>
@@ -3922,10 +3922,10 @@ UIから変更でき、ゴーストとちらつきのトレードオフを比較
 </p>
 <pre><code>speedPixels = length(velocity * レンダー解像度)
 motion      = saturate(speedPixels / 0.5)        // 0.5画素/フレームで完全に「動いている」
-relax       = (1 - motion) * m_TAAAntiFlicker
+relax       = (1 - motion) * m_PostProcessSettings.TAAAntiFlicker
 
-blendWeight = m_TAABlendWeight * lerp(1, 0.2, relax)   // 静止時は 0.10 → 0.02
-clipGamma   = m_TAAClipGamma   * lerp(1, 8.0, relax)   // 静止時は 1.25 → 10
+blendWeight = m_PostProcessSettings.TAABlendWeight * lerp(1, 0.2, relax)   // 静止時は 0.10 → 0.02
+clipGamma   = m_PostProcessSettings.TAAClipGamma   * lerp(1, 8.0, relax)   // 静止時は 1.25 → 10
 
 // 近傍の実在min/maxとの積集合も同じrelaxで外側へ開く
 expand = (neighborMax - neighborMin) * (relax * 4.0)
@@ -4729,12 +4729,12 @@ BRDFの評価もライトの色も手法によらず共通なので、「CSMとR
 どちらもピクセルシェーダーであり、このエンジンで高速化構造をバインドできるのは
 コンピュート用ルートシグネチャだけ(28章)なので、自前でレイを撃つこともできない。
 そのため<strong>RTシャドウは不透明サーフェスの直接光パスだけを置き換える</strong>という位置づけにし、
-シャドウパスは<code>m_ShadowMode != ShadowMode::Off</code>の条件で従来どおり実行している。
+シャドウパスは<code>m_ShadowSettings.Mode != ShadowMode::Off</code>の条件で従来どおり実行している。
 結果としてRTシャドウは描画コストを減らす機能ではなく、<strong>品質だけを上げる機能</strong>になる。
 </p>
 <p>
 この割り切りの副作用として、反射プローブの焼き直しハッシュ(<code>ComputeProbeBakeHash</code>)に
-混ぜるのは手法ではなく<code>m_ShadowMode != ShadowMode::Off</code>の真偽値にしてある。
+混ぜるのは手法ではなく<code>m_ShadowSettings.Mode != ShadowMode::Off</code>の真偽値にしてある。
 CSMとRaytracedでプローブの焼き上がりは変わらないため、手法を切り替えるたびに
 全プローブを焼き直すのは無駄だからである。
 </p>
@@ -5425,7 +5425,7 @@ AMD FidelityFX Super Resolution 1.0 のEASU(方向性エッジ再構成)とRCAS(
 </p>
 <p>
 <strong><code>m_RenderWidth</code> / <code>m_RenderHeight</code>の意味は変えていない。</strong>
-足したのは「出力解像度」(<code>m_UpscaleOutputWidth</code> / <code>m_UpscaleOutputHeight</code>)
+足したのは「出力解像度」(<code>m_PostProcessSettings.UpscaleOutputWidth</code> / <code>m_PostProcessSettings.UpscaleOutputHeight</code>)
 という一段外側の概念だけで、<code>出力解像度 ÷ 品質モードの倍率</code>を
 <code>RequestRenderResolution()</code>へ流し込む関係になっている。こうしてあるため、
 33.1が挙げている「<code>Render()</code>の20箇所ほどから読まれる」参照を

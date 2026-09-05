@@ -3955,7 +3955,7 @@ Sample2Dのデモが`.tga`を生成しているのはこの理由による。
   t7へ移した。
 - **自動露出の夜ロールオフの旧既定(薄明視を入れる前)。** 満月に照らされた石壁を、空が画面の
   約40%を占める屋上視点と空が入らない構図の両方で測った8bitコード
-  (`m_AutoExposureKeyCeilingEV=-1`のとき): 3.0段…壁22 / 3.5段…壁15・13 / 4.0段…壁9・8。
+  (`m_PostProcessSettings.AutoExposureKeyCeilingEV=-1`のとき): 3.0段…壁22 / 3.5段…壁15・13 / 4.0段…壁9・8。
 - **拡散イラディアンスは専用マップ(`CSIrradiance`)から取っていた。** White Furnace Testで
   画素一致、実スカイボックスでも最大2〜4/255の差しか出ないことを確認して既定経路から外し、
   プリフィルタ済み鏡面の最終ミップ(roughness=1)で代用するようにした(約9750万サンプルの
@@ -5052,7 +5052,7 @@ G-Buffer・深度プリパス・シャドウを「1モデル = 1回の `Dispatch
 
 ### 53.1 深度プリパスは DX12 の既定構成で一度も走っていなかった
 
-`m_DepthPrepassEnabled` は既定で有効、`m_MeshletRenderingEnabled` も既定で有効。
+`m_DepthPrepassEnabled` は既定で有効、`m_GeometrySettings.MeshletRenderingEnabled` も既定で有効。
 ところが両者は排他で(`depthPrepassRuns` の条件に `!meshletPathActive` が入っていた)、
 **DX12 では常にプリパス側が負けて止まっていた。**
 
@@ -7931,7 +7931,7 @@ MegaLights が走るフレームには `LightCount.w` で止まっているの�
 
 ### 直し方 ― フラグではなく述語にする
 
-素直に書くと `if (m_LightCullingEnabled && !ShouldRunMegaLights())` だが、
+素直に書くと `if (m_GeometrySettings.LightCullingEnabled && !ShouldRunMegaLights())` だが、
 これだとデバッグ表示が壊れる。`DebugView::LightTiles` はグリッドそのものを
 見せる表示なので、MegaLights が走っていても実行が要る。落とすと
 前フレームの残骸か未初期化の中身をヒートマップにする。
@@ -7948,7 +7948,7 @@ MegaLights が走るフレームには `LightCount.w` で止まっているの�
   実際には起きない欠落を知らせることになる)
 - `LightingConstants.TileParams.w`(グリッドが有効か)。**トグルの状態ではなく
   実際に書いたかどうかで決める。** MegaLights が OFF のフレームでは
-  `m_LightCullingEnabled` と同値なので、従来経路の挙動は変わらない
+  `m_GeometrySettings.LightCullingEnabled` と同値なので、従来経路の挙動は変わらない
 
 ### 効果
 

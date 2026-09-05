@@ -105,7 +105,7 @@ namespace Kurenai::UI
         if (m_Engine.m_DebugView == DebugView::ShadowMap)
         {
             SliderIntEx(
-                "シャドウカスケード###ShadowCascade", &m_Engine.m_ShadowDebugCascade, 0,
+                "シャドウカスケード###ShadowCascade", &m_Engine.m_ShadowSettings.DebugCascade, 0,
                 static_cast<int>(KurenaiEngine3D::kCascadeCount) - 1, 0,
                 "表示するカスケードの番号。0がカメラに最も近い範囲");
         }
@@ -202,7 +202,7 @@ namespace Kurenai::UI
                 static_cast<int>(KurenaiEngine3D::kLightTileCapacity), Defaults::LightTileHeatmapMax,
                 "この灯数で赤になるようヒートマップを正規化する。ライトが少ないシーンでは下げると差が見える");
 
-            if (m_Engine.m_DebugView == DebugView::LightTiles && !m_Engine.m_LightCullingEnabled)
+            if (m_Engine.m_DebugView == DebugView::LightTiles && !m_Engine.m_GeometrySettings.LightCullingEnabled)
             {
                 ImGui::TextWrapped("タイルドライトカリングが無効のため、ライトグリッドは更新されていません");
             }
@@ -218,7 +218,7 @@ namespace Kurenai::UI
                 "灰色=動いていない / 赤が濃い=画面内容が右へ / 薄い=左へ / 緑が濃い=下へ / 薄い=上へ。"
                 "静止していれば全面が均一な灰色になり、色が付いていたら速度バッファが壊れている。"
                 "下の表示輝度の倍率で感度を変えられる(既定は約20画素/フレームで飽和)");
-            if (!m_Engine.m_TAAEnabled)
+            if (!m_Engine.m_PostProcessSettings.TAAEnabled)
             {
                 ImGui::TextWrapped("TAAが無効でも速度バッファは常に更新されるため、この表示はそのまま確認できます");
             }

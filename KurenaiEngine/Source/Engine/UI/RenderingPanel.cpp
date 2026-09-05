@@ -109,35 +109,35 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "スクリーンスペースシャドウを有効にする###EnableSSS", &m_Engine.m_ScreenSpaceShadowEnabled,
+            "スクリーンスペースシャドウを有効にする###EnableSSS", &m_Engine.m_ShadowSettings.ScreenSpaceEnabled,
             Defaults::ScreenSpaceShadowEnabled, "無効にするとポイント/スポットライトの影が一切出なくなる");
 
-        ImGui::BeginDisabled(!m_Engine.m_ScreenSpaceShadowEnabled);
+        ImGui::BeginDisabled(!m_Engine.m_ShadowSettings.ScreenSpaceEnabled);
         // 上限はScreenSpaceShadow.hlsliのkSSSMaxStepCountと揃える
         SliderIntEx(
-            "レイのステップ数###SSSSteps", &m_Engine.m_ScreenSpaceShadowStepCount, 1, 64,
+            "レイのステップ数###SSSSteps", &m_Engine.m_ShadowSettings.ScreenSpaceStepCount, 1, 64,
             Defaults::ScreenSpaceShadowStepCount,
             "1本のレイを何回に分けて進めるか。多いほど細い遮蔽物を拾えるが負荷が上がる");
         SliderFloatEx(
-            "レイの最大長###SSSMaxRayLength", &m_Engine.m_ScreenSpaceShadowMaxRayLength, 0.05f, 20.0f,
+            "レイの最大長###SSSMaxRayLength", &m_Engine.m_ShadowSettings.ScreenSpaceMaxRayLength, 0.05f, 20.0f,
             Defaults::ScreenSpaceShadowMaxRayLength, "%.2f", ImGuiSliderFlags_Logarithmic,
             "レイを飛ばすワールド距離の上限。長くすると遠くの遮蔽も拾えるが、"
             "同じステップ数ではサンプル間隔が粗くなる");
         SliderFloatEx(
-            "厚み###SSSThickness", &m_Engine.m_ScreenSpaceShadowThickness, 0.01f, 5.0f,
+            "厚み###SSSThickness", &m_Engine.m_ShadowSettings.ScreenSpaceThickness, 0.01f, 5.0f,
             Defaults::ScreenSpaceShadowThickness, "%.3f", ImGuiSliderFlags_Logarithmic,
             "深度バッファの面をどれだけの厚みを持つ物体とみなすか。深度しか無いため厚みは推定するしかない");
         SliderFloatEx(
-            "法線バイアス###SSSNormalBias", &m_Engine.m_ScreenSpaceShadowNormalBias, 0.0f, 0.02f,
+            "法線バイアス###SSSNormalBias", &m_Engine.m_ShadowSettings.ScreenSpaceNormalBias, 0.0f, 0.02f,
             Defaults::ScreenSpaceShadowNormalBias, "%.4f", 0,
             "レイの始点を法線方向へずらす量。自分自身を遮蔽物と誤検出するアクネを防ぐ");
         SliderFloatEx(
-            "画面端のフェード###SSSEdgeFade", &m_Engine.m_ScreenSpaceShadowEdgeFade, 0.01f, 0.5f,
+            "画面端のフェード###SSSEdgeFade", &m_Engine.m_ShadowSettings.ScreenSpaceEdgeFade, 0.01f, 0.5f,
             Defaults::ScreenSpaceShadowEdgeFade, "%.3f", 0,
             "レイが画面外へ出る手前で影を薄くする幅。情報が無くなる境界で影が唐突に切れるのを防ぐ");
         // 0にすると全ライトで影が消える。ライトを増やしたときのコスト上限を決めるつまみ
         SliderIntEx(
-            "影を落とすライト数の上限###SSSMaxLights", &m_Engine.m_ScreenSpaceShadowMaxLightsPerPixel, 0, 16,
+            "影を落とすライト数の上限###SSSMaxLights", &m_Engine.m_ShadowSettings.ScreenSpaceMaxLightsPerPixel, 0, 16,
             Defaults::ScreenSpaceShadowMaxLightsPerPixel,
             "1ピクセルあたり何灯までシャドウレイを飛ばすか。0にすると影が出なくなる。"
             "ライトを増やしたときの負荷の上限を決めるつまみ");
@@ -157,7 +157,7 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "タイルドライトカリングを有効にする###EnableLightCulling", &m_Engine.m_LightCullingEnabled,
+            "タイルドライトカリングを有効にする###EnableLightCulling", &m_Engine.m_GeometrySettings.LightCullingEnabled,
             Defaults::LightCullingEnabled,
             "無効にすると各ピクセルがシーン中の全ライトをループする。画は変わらず負荷だけが変わる");
 
@@ -467,7 +467,7 @@ namespace Kurenai::UI
             "モデル単位のカリングは常に有効で、こちらでは切れない");
 
         CheckboxEx(
-            "インスタンシング###Instancing", &m_Engine.m_InstancingEnabled,
+            "インスタンシング###Instancing", &m_Engine.m_GeometrySettings.InstancingEnabled,
             Defaults::InstancingEnabled,
             "同じ.kmodelを指すインスタンスをまとめ、1回のDrawIndexedで複数体を描く。"
             "インスタンスごとに違うワールド行列は、頂点シェーダー専用のStructuredBufferを"
@@ -565,7 +565,7 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "メッシュレット描画を有効にする###EnableMeshlet", &m_Engine.m_MeshletRenderingEnabled, true,
+            "メッシュレット描画を有効にする###EnableMeshlet", &m_Engine.m_GeometrySettings.MeshletRenderingEnabled, true,
             "無効にすると従来の頂点シェーダー + DrawIndexedで描く。"
             "切り替えても見た目は一致するはずで、変わる場合はメッシュシェーダー側の変換が"
             "頂点シェーダーとずれている。\n\n"
@@ -576,7 +576,7 @@ namespace Kurenai::UI
             "使うPSOがあるため、変換が同一のコードになり深度が一致する");
 
         CheckboxEx(
-            "メッシュレットを色分けして表示###MeshletDebugView", &m_Engine.m_MeshletDebugViewEnabled, false,
+            "メッシュレットを色分けして表示###MeshletDebugView", &m_Engine.m_GeometrySettings.MeshletDebugViewEnabled, false,
             "塊ごとに違う色でアルベドを塗る。分割のされ方を目で確かめるためのもので、"
             "法線・深度・モーションベクターは通常どおり書くため他のパスは破綻しない。"
             "灰色に見える面はメッシュレットを経由していない(メッシュレットが焼かれていない"
@@ -586,7 +586,7 @@ namespace Kurenai::UI
             "見ていることの確認になる");
 
         CheckboxEx(
-            "Hi-Zオクルージョンカリング###OcclusionCulling", &m_Engine.m_OcclusionCullingEnabled,
+            "Hi-Zオクルージョンカリング###OcclusionCulling", &m_Engine.m_GeometrySettings.OcclusionCullingEnabled,
             Defaults::OcclusionCullingEnabled,
             "メッシュレットのバウンディング球を前フレームのHi-Zへ投影し、"
             "「視界内だが手前の何かに完全に隠れている」塊を落とす。"
@@ -599,7 +599,7 @@ namespace Kurenai::UI
             "間引き率はPerfログの「メッシュレットカリング」の行に出る");
 
         SliderFloatEx(
-            "オクルージョンの半径倍率###OcclusionCullRadiusScale", &m_Engine.m_OcclusionCullRadiusScale,
+            "オクルージョンの半径倍率###OcclusionCullRadiusScale", &m_Engine.m_GeometrySettings.OcclusionCullRadiusScale,
             1.0f, 4.0f, Defaults::OcclusionCullRadiusScale, "%.2f", 0,
             "判定に使うバウンディング球をこの倍率で膨らませる。大きいほど間引きが減り、安全側になる。\n\n"
             "【1フレームぶんのカメラ移動はこの倍率とは別に補正されている】"
@@ -611,7 +611,7 @@ namespace Kurenai::UI
             "上げたときに間引き率が下がることを確認すれば、判定が実際に効いていることの証拠になる");
 
         CheckboxEx(
-            "カリングの間引き数を数える###MeshletCullStats", &m_Engine.m_MeshletCullStatsEnabled,
+            "カリングの間引き数を数える###MeshletCullStats", &m_Engine.m_GeometrySettings.MeshletCullStatsEnabled,
             Defaults::MeshletCullStatsEnabled,
             "増幅シェーダーが判定数と間引き数を数え、数フレーム遅れでCPUへ読み戻して"
             "下に表示し、Perfログにも1秒ごとに残す。\n\n"
@@ -623,7 +623,7 @@ namespace Kurenai::UI
 
         CheckboxEx(
             "Hi-Zを深度プリパスから作る###HiZFromDepthPrepass",
-            &m_Engine.m_HiZFromDepthPrepassEnabled, Defaults::HiZFromDepthPrepass,
+            &m_Engine.m_GeometrySettings.HiZFromDepthPrepassEnabled, Defaults::HiZFromDepthPrepass,
             "Hi-Zミップチェーンを深度プリパスの直後に、そのフレームの深度から作る。\n\n"
             "【入れるとG-Bufferの判定から1フレーム遅れが消える】投影に前フレームの行列を"
             "使う必要も、視差ぶんを保守的に膨らませる必要も無くなり、カメラが動いても"
@@ -635,7 +635,7 @@ namespace Kurenai::UI
             "プリパスとG-Bufferの間に入るぶん重なりが減り、深度バッファの状態遷移が1往復増える");
 
         CheckboxEx(
-            "モデル単位のGPUカリング###ModelCullGpu", &m_Engine.m_ModelCullGpuEnabled,
+            "モデル単位のGPUカリング###ModelCullGpu", &m_Engine.m_GeometrySettings.ModelCullGpuEnabled,
             Defaults::ModelCullGpuEnabled,
             "コンピュートシェーダーが、描画候補のワールドAABBを視錐台とHi-Zで判定し、"
             "生き残りのExecuteIndirect引数と統計をGPU上に作る。\n\n"
@@ -646,7 +646,7 @@ namespace Kurenai::UI
             "総GPU時間のON/OFF差のほうが信用できる");
 
         CheckboxEx(
-            "カリング結果で間接描画する###ModelCullIndirect", &m_Engine.m_ModelCullIndirectEnabled,
+            "カリング結果で間接描画する###ModelCullIndirect", &m_Engine.m_GeometrySettings.ModelCullIndirectEnabled,
             Defaults::ModelCullIndirectEnabled,
             "生き残った候補だけをExecuteIndirectで発行する。深度プリパスとG-Bufferの"
             "1モデル1ドロー経路が、CPUのループではなくこの引数で描かれるようになる。\n\n"
@@ -662,7 +662,7 @@ namespace Kurenai::UI
 
         BeginParamGroup();
         CheckboxEx(
-            "段を選ぶ###MeshletLOD", &m_Engine.m_MeshletLODEnabled, Defaults::MeshletLODEnabled,
+            "段を選ぶ###MeshletLOD", &m_Engine.m_GeometrySettings.MeshletLODEnabled, Defaults::MeshletLODEnabled,
             "KurenaiPackerが焼いた離散LODの段から、増幅シェーダーがモデルのバウンディング球の"
             "投影サイズで1段を選ぶ。切ると常に原寸(段0)になる。\n\n"
             "【1つのモデル内で段は混ざらない】選択の入力はモデルの外接球とカメラだけで、"
@@ -673,7 +673,7 @@ namespace Kurenai::UI
             "段を持たないモデル(潰せる辺が無く1段しか焼かれなかったもの)では何も起きない");
 
         SliderFloatEx(
-            "段のしきい値の倍率###MeshletLODQuality", &m_Engine.m_MeshletLODQuality, 0.25f, 8.0f,
+            "段のしきい値の倍率###MeshletLODQuality", &m_Engine.m_GeometrySettings.MeshletLODQuality, 0.25f, 8.0f,
             Defaults::MeshletLODQuality, "%.2f", 0,
             "段を落とす投影直径 = 倍率 x sqrt(4 x モデルのLOD0三角形数 / π) [画素]。"
             "大きいほど原寸を長く保つ。\n\n"
@@ -684,7 +684,7 @@ namespace Kurenai::UI
             "そこから先は原寸を保っても画面に出せる情報が増えない");
 
         SliderIntEx(
-            "段を固定###MeshletLODForced", &m_Engine.m_MeshletLODForcedLevel, -1, 3,
+            "段を固定###MeshletLODForced", &m_Engine.m_GeometrySettings.MeshletLODForcedLevel, -1, 3,
             Defaults::MeshletLODForcedLevel,
             "-1で自動選択。0〜3を指定すると全モデルをその段に固定する。\n\n"
             "【対照実験に使う】自動のまま三角形数もフレーム時間も動かないとき、"
@@ -694,7 +694,7 @@ namespace Kurenai::UI
             "【段が無いメッシュは動かない】焼かれている段より粗い番号を指定しても、"
             "そのメッシュは自分の最も粗い段までしか下がらない(下がると画面から消えるため)");
         CheckboxEx(
-            "色分けを段ごとにする###MeshletLODDebugColor", &m_Engine.m_MeshletLODDebugColorEnabled, false,
+            "色分けを段ごとにする###MeshletLODDebugColor", &m_Engine.m_GeometrySettings.MeshletLODDebugColorEnabled, false,
             "上の「メッシュレットを色分けして表示」を、塊ごとの色ではなく段ごとの色にする"
             "(詳細な順に緑→黄→橙→赤)。\n\n"
             "【1つのモデルが単色になるのが正しい】段はモデル単位で決まる。"
@@ -772,7 +772,7 @@ namespace Kurenai::UI
         // カリングの効き。**「間引き0」だけでは判定が働いていないのか本当に全部見えているのかを
         // 区別できない**ため、判定した数と併せて出す。オクルージョンは視錐台+コーンとは
         // 別に出す(俯瞰と街路で差が出ることが、判定が効いていることの証拠になる)
-        if (m_Engine.m_MeshletCullStatsEnabled)
+        if (m_Engine.m_GeometrySettings.MeshletCullStatsEnabled)
         {
             const uint32_t tested = m_Engine.m_MeshletCullTested;
             if (tested > 0)
@@ -818,7 +818,7 @@ namespace Kurenai::UI
 
         CheckboxEx(
             "ソフトウェアラスタライザを実行する###EnableSoftwareRaster",
-            &m_Engine.m_SoftwareRasterEnabled, false,
+            &m_Engine.m_GeometrySettings.SoftwareRasterEnabled, false,
             "有効にすると、G-Bufferパスの直後に専用のパス(SWRaster)が走る。"
             "出力はデバッグ表示の「SWラスタ」「SWラスタ - 深度 (生値)」「SWラスタ - 法線」で見る。"
             "無効の間はパスごと登録されないため、コストもVRAM以外は掛からない。\n\n"
@@ -1009,7 +1009,7 @@ namespace Kurenai::UI
 
     void RenderingPanel::DrawShadowSection()
     {
-        using ShadowMode = KurenaiEngine3D::ShadowMode;
+        using ShadowMode = Kurenai::ShadowMode;
 
         BeginParamGroup();
 
@@ -1025,15 +1025,15 @@ namespace Kurenai::UI
         const char* const* modeNames = rtAvailable ? kModeNamesWithRT : kModeNamesWithoutRT;
         const int modeCount = rtAvailable ? IM_ARRAYSIZE(kModeNamesWithRT) : IM_ARRAYSIZE(kModeNamesWithoutRT);
 
-        int modeIndex = static_cast<int>(m_Engine.m_ShadowMode);
+        int modeIndex = static_cast<int>(m_Engine.m_ShadowSettings.Mode);
         if (ComboEx(
                 "影の手法###ShadowMode", &modeIndex, modeNames, modeCount,
-                static_cast<int>(KurenaiEngine3D::DefaultShadowMode(rtAvailable)),
+                static_cast<int>(ShadowSettings::DefaultShadowMode(rtAvailable)),
                 "平行光(太陽)の影の求め方。CSMはライト視点の深度バッファを4枚描いて深度比較する。"
                 "レイトレーシングはピクセルごとに太陽へ影レイを撃つため、カスケードの境界も"
                 "ピーターパン(接地部の浮き)もアクネも出ない"))
         {
-            m_Engine.m_ShadowMode = static_cast<ShadowMode>(modeIndex);
+            m_Engine.m_ShadowSettings.Mode = static_cast<ShadowMode>(modeIndex);
         }
 
         if (!rtAvailable)
@@ -1041,22 +1041,22 @@ namespace Kurenai::UI
             ImGui::TextDisabled("レイトレーシングは利用できません(DX12かつDXR Tier 1.1が必要)");
         }
 
-        if (m_Engine.m_ShadowMode == ShadowMode::CascadedShadowMap)
+        if (m_Engine.m_ShadowSettings.Mode == ShadowMode::CascadedShadowMap)
         {
             SliderFloatEx(
-                "PCSS ライトサイズ###ShadowLightSize", &m_Engine.m_ShadowLightSize, 0.001f, 0.05f,
+                "PCSS ライトサイズ###ShadowLightSize", &m_Engine.m_ShadowSettings.LightSize, 0.001f, 0.05f,
                 Defaults::ShadowLightSize, "%.4f", 0,
                 "シャドウマップUV空間でのブロッカーサーチ半径。大きいほど半影が広く柔らかくなる");
         }
-        else if (m_Engine.m_ShadowMode == ShadowMode::Raytraced)
+        else if (m_Engine.m_ShadowSettings.Mode == ShadowMode::Raytraced)
         {
             SliderIntEx(
-                "RT サンプル数###RTShadowSampleCount", &m_Engine.m_RTShadowSampleCount, 1, 16,
+                "RT サンプル数###RTShadowSampleCount", &m_Engine.m_ShadowSettings.RTSampleCount, 1, 16,
                 Defaults::RTShadowSampleCount,
                 "1ピクセルあたりに撃つ影レイの本数。デノイザを持たないため、太陽を大きくするほど"
                 "ここを増やさないと半影にノイズが出る");
             SliderFloatEx(
-                "RT 太陽の角半径###RTShadowSunAngularRadius", &m_Engine.m_RTShadowSunAngularRadiusDegrees,
+                "RT 太陽の角半径###RTShadowSunAngularRadius", &m_Engine.m_ShadowSettings.RTSunAngularRadiusDegrees,
                 0.0f, 5.0f, Defaults::RTShadowSunAngularRadiusDegrees, "%.3f度", 0,
                 "太陽の見かけの半径。実際の太陽は視直径約0.53度なので既定値はその半分。"
                 "大きくすると半影が広く柔らかくなる");
@@ -1461,12 +1461,12 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "水面アニメを止める###FreezeWaterTime", &m_Engine.m_WaterTimeFrozen, Defaults::WaterTimeFrozen,
+            "水面アニメを止める###FreezeWaterTime", &m_Engine.m_WaterSettings.TimeFrozen, Defaults::WaterTimeFrozen,
             "水面法線マップのスクロールを止める。A/B比較などスクロールが揺れると困る場面で使う");
 
         CheckboxEx(
             "水面の反射に解析的な空を使う###WaterAnalyticSkyReflection",
-            &m_Engine.m_WaterAnalyticSkyReflection, Defaults::WaterAnalyticSkyReflection,
+            &m_Engine.m_WaterSettings.AnalyticSkyReflection, Defaults::WaterAnalyticSkyReflection,
             "水面のSSRレイが画面外へ抜けた、または最大距離まで判定がつかなかったとき、"
             "プリフィルタ済み鏡面IBL(128pxベースのキューブマップをラフネス由来のミップで引く)の"
             "代わりに、Perez分布(手続き空)を画面解像度で直接評価した空を映す。"
@@ -1481,14 +1481,14 @@ namespace Kurenai::UI
         // (KurenaiEngine3D::RenderThreadMainのTimeParams構築箇所、Water.hlslのPSMain参照)。
         // つまみ自体はScene::WaterWaveScale等から読み込める値をUIで確認・上書きできるよう用意してある
         SliderFloatEx(
-            "波のスケール###WaterWaveScale", &m_Engine.m_WaterWaveScale, 1.0f, 64.0f, Defaults::WaterWaveScale,
+            "波のスケール###WaterWaveScale", &m_Engine.m_WaterSettings.WaveScale, 1.0f, 64.0f, Defaults::WaterWaveScale,
             "%.2f", ImGuiSliderFlags_Logarithmic,
             "水面法線マップのタイリングスケール。値が大きいほど波紋の繰り返しが細かくなる");
         SliderFloatEx(
-            "波の速度###WaterWaveSpeed", &m_Engine.m_WaterWaveSpeed, 0.0f, 1.0f, Defaults::WaterWaveSpeed, "%.3f", 0,
+            "波の速度###WaterWaveSpeed", &m_Engine.m_WaterSettings.WaveSpeed, 0.0f, 1.0f, Defaults::WaterWaveSpeed, "%.3f", 0,
             "水面法線マップのスクロール速度。m_WaterScrollOffsetの進行速度に直接効く");
         SliderFloatEx(
-            "波の強さ###WaterWaveStrength", &m_Engine.m_WaterWaveStrength, 0.0f, 1.0f, Defaults::WaterWaveStrength,
+            "波の強さ###WaterWaveStrength", &m_Engine.m_WaterSettings.WaveStrength, 0.0f, 1.0f, Defaults::WaterWaveStrength,
             "%.3f", 0, "波打ちの振幅。0で波が完全に消え平坦な鏡面、1で最大の揺らぎになる");
 
         // --- 水中項 ---
@@ -1499,13 +1499,13 @@ namespace Kurenai::UI
             "見下ろすと水の色、すれすれだと鏡になる切り替わりはFresnelの式(DeferredLighting.hlsl)が"
             "そのまま担当する");
         SliderFloatEx(
-            "水体の色 R###WaterBodyColorR", &m_Engine.m_WaterBodyColor.x, 0.0f, 0.5f, Defaults::WaterBodyColorR,
+            "水体の色 R###WaterBodyColorR", &m_Engine.m_WaterSettings.BodyColor.x, 0.0f, 0.5f, Defaults::WaterBodyColorR,
             "%.4f", 0, "水体の拡散反射色(リニア)の赤成分");
         SliderFloatEx(
-            "水体の色 G###WaterBodyColorG", &m_Engine.m_WaterBodyColor.y, 0.0f, 0.5f, Defaults::WaterBodyColorG,
+            "水体の色 G###WaterBodyColorG", &m_Engine.m_WaterSettings.BodyColor.y, 0.0f, 0.5f, Defaults::WaterBodyColorG,
             "%.4f", 0, "水体の拡散反射色(リニア)の緑成分");
         SliderFloatEx(
-            "水体の色 B###WaterBodyColorB", &m_Engine.m_WaterBodyColor.z, 0.0f, 0.5f, Defaults::WaterBodyColorB,
+            "水体の色 B###WaterBodyColorB", &m_Engine.m_WaterSettings.BodyColor.z, 0.0f, 0.5f, Defaults::WaterBodyColorB,
             "%.4f", 0, "水体の拡散反射色(リニア)の青成分");
 
         // --- 平面反射 ---

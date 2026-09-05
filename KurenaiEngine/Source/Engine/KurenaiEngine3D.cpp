@@ -261,7 +261,7 @@ namespace Kurenai
             DirectX::XMFLOAT4 AmbientColor;
             // M2: カスケード選択・PCSS用(末尾に追加)。xyzw = 各カスケードのView空間far距離
             DirectX::XMFLOAT4 CascadeSplits;
-            // x: PCSSのライトサイズ(m_ShadowLightSize)。y: IBLプリフィルタ済み鏡面マップの
+            // x: PCSSのライトサイズ(m_ShadowSettings.LightSize)。y: IBLプリフィルタ済み鏡面マップの
             // 最大ミップレベル(kIBLPrefilterMipLevels-1、DeferredLighting.hlslがラフネス→ミップの
             // 変換に使う)。z: IBL強度倍率(m_IBLEnabled=falseの場合は0.0fを渡し、シェーダ側で
             // EvaluateIBLの代わりに定数色アンビエント(AmbientColor.rgb)へフォールバックする)。
@@ -371,8 +371,8 @@ namespace Kurenai
             // 突き合わせて直すこと**(ずれても絵は出るが値が全部おかしくなる)
             DirectX::XMFLOAT4 OcclusionParams;
             // 水面用(さらに末尾に追加)。x=水面法線マップのスクロール
-            // オフセット(0〜1、CPU側で既にfmod済み)、y=波のスケール倍率(m_WaterWaveScale)、
-            // z=波の強さ(m_WaterWaveStrength、0〜1)、w=未使用。Water.hlslのPSMainが読む。
+            // オフセット(0〜1、CPU側で既にfmod済み)、y=波のスケール倍率(m_WaterSettings.WaveScale)、
+            // z=波の強さ(m_WaterSettings.WaveStrength、0〜1)、w=未使用。Water.hlslのPSMainが読む。
             // 末尾に足す限り、既に宣言済みのシェーダのcbufferオフセットは1バイトも動かない
             // (DDGIParams0〜4を末尾に追加したときと同じ規約)
             DirectX::XMFLOAT4 TimeParams;
@@ -466,7 +466,7 @@ namespace Kurenai
             // 読むのはGBufferMeshlet.hlslの増幅シェーダーだけ。
             //
             // x=有効フラグ(0で判定そのものを行わない)、y=バウンディング球の半径倍率
-            // (m_OcclusionCullRadiusScale)、z=前フレームからのカメラ移動距離[m]、
+            // (m_GeometrySettings.OcclusionCullRadiusScale)、z=前フレームからのカメラ移動距離[m]、
             // w=Hi-Zのミップ段数(m_HiZMipLevels)。
             //
             // 【xを明示的なフラグにする理由】判定はPrevViewProjで投影するが、プローブ
@@ -628,7 +628,7 @@ namespace Kurenai
         // 【月と夜空の比が夜の影の見え方を決める】影の濃さは「平行光(月) : 環境光(夜空)」の比で
         // 決まる。物理値の0.25:0.05は5:1で、影は十分な濃さを持つ。この比を保ったまま
         // 表示上の明るさだけを調整したい場合は、照度ではなく自動露出の
-        // m_AutoExposureNightRolloffEV(夜の露出切り詰め量)を動かすこと
+        // m_PostProcessSettings.AutoExposureNightRolloffEV(夜の露出切り詰め量)を動かすこと
         constexpr float kMoonSkyIlluminanceLux = 0.05f;
         // 星明かりだけの夜空の照度[lx]。月が地平線下にあるときの下限になる。
         // 月の位置は手動指定なので「月の出ていない夜」もスライダー一つで作れる。
@@ -1041,7 +1041,7 @@ namespace Kurenai
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
         // TRS(平行移動・回転・スケール)から計算済み(HLSL側のmul(vec, matrix)規約に合わせて
         // 転置済み)なので、ここでは単純にコピーするだけでよい
-        // emissiveIntensity: シーン全体の自発光の強度倍率(m_EmissiveIntensity)。glTFの
+        // emissiveIntensity: シーン全体の自発光の強度倍率(m_EmissiveLightSettings.Intensity)。glTFの
         // emissiveFactorは通常1.0以下に収まるため、これを掛けないとG-Bufferのエミッシブを
         // HDR化しても照明器具の輝度が1.0を超えず、ブルームが効かない
         // occlusionMapEnabled: マテリアルの遮蔽マップを使うか(m_OcclusionMapEnabled)。
@@ -1185,7 +1185,7 @@ namespace Kurenai
         // Tonemap.hlsl側のcbuffer TonemapConstantsと一致させる必要がある
         struct alignas(16) TonemapConstants
         {
-            // KurenaiEngine3D::TonemapCurve(0=Reinhard, 1=ACES, 2=AgX)
+            // TonemapCurve(0=Reinhard, 1=ACES, 2=AgX)
             int32_t Curve;
             // 手動露出時に掛ける倍率。プリ露出は時刻連動で変動するため、ユーザー設定EV100との
             // 差分 2^(実効EV100 - 設定EV100) を割り戻して固定露出の絵に戻す(1.0固定ではない)
@@ -1501,7 +1501,7 @@ namespace Kurenai
         struct alignas(16) SSRConstants
         {
             // w: 水面の解析空フォールバックを使うか(1=使う)。Render()側で
-            // m_WaterAnalyticSkyReflection && usingProceduralSky の両方が立っているときだけ1にする
+            // m_WaterSettings.AnalyticSkyReflection && usingProceduralSky の両方が立っているときだけ1にする
             // (手続き空が無効なシーンではDDSは任意の絵でPerezモデルとは無関係なため、
             // このトグルの値に関わらず必ず0にする)
             DirectX::XMFLOAT4 Params0; // x: 最大レイ距離, y: ヒット判定の厚み, z: ラフネスカットオフ, w: 水面の解析空フォールバック
@@ -1642,13 +1642,13 @@ namespace Kurenai
             DirectX::XMFLOAT4X4 PrevViewProj; // 前フレームのジッター済みVP
             DirectX::XMFLOAT4 JitterUv;       // xy=今フレームのジッター(UV単位), zw=前フレーム
             DirectX::XMFLOAT4 ScreenParams;   // xy=レンダー解像度, zw=その逆数
-            // x: 今フレームの色を混ぜる割合(m_TAABlendWeight)
-            // y: 近傍クリップのボックス幅(標準偏差の何倍か。m_TAAClipGamma)
+            // x: 今フレームの色を混ぜる割合(m_PostProcessSettings.TAABlendWeight)
+            // y: 近傍クリップのボックス幅(標準偏差の何倍か。m_PostProcessSettings.TAAClipGamma)
             // z: 履歴が使えるか(0=使えない。TAA.hlslは履歴をサンプルすらしない)
             // w: プリ露出の変化を打ち消す倍率(今フレームの露出 / 前フレームの露出)
             DirectX::XMFLOAT4 Params0;
             // x: 近傍クリップの方式(TAAClipMode)
-            // y: 静止時のちらつき抑制の強さ(m_TAAAntiFlicker)。zwは未使用
+            // y: 静止時のちらつき抑制の強さ(m_PostProcessSettings.TAAAntiFlicker)。zwは未使用
             DirectX::XMFLOAT4 Params1;
         };
 
@@ -1717,7 +1717,7 @@ namespace Kurenai
         struct alignas(16) LightingConstants
         {
             // x=有効ライト数, y=ピクセルあたりに撃つスクリーンスペースシャドウのレイ数の上限,
-            // z=太陽の影の手法(KurenaiEngine3D::ShadowMode。2のときだけRTShadowTexture(t6)を読む),
+            // z=太陽の影の手法(ShadowMode。2のときだけRTShadowTexture(t6)を読む),
             // w=MegaLightsの寄与を使うか(1なら t7 のテクスチャを読み、ライトループを回さない)
             DirectX::XMUINT4 LightCount;
             // スクリーンスペースシャドウ(ScreenSpaceShadow.hlsli)のパラメータ。
@@ -1971,12 +1971,15 @@ namespace Kurenai
         , m_InitialSceneIndex(initialSceneIndex)
         , m_RenderWidth(std::max(1u, renderWidth))
         , m_RenderHeight(std::max(1u, renderHeight))
+    {
         // 超解像の出力解像度は、無効なうちは内部レンダー解像度と同じ意味を持つ。
         // ここを揃えておかないと、UIで初めて超解像を有効にした瞬間に
-        // 出力解像度が既定値(1920x1080)へ飛んでしまう
-        , m_UpscaleOutputWidth(std::max(1u, renderWidth))
-        , m_UpscaleOutputHeight(std::max(1u, renderHeight))
-    {
+        // 出力解像度が既定値(1920x1080)へ飛んでしまう。
+        // 【初期化子リストではなくここで代入する】メンバ変数の中のフィールドは
+        // 初期化子リストへ書けない(m_PostProcessSettings 自体の既定値が先に入る)
+        m_PostProcessSettings.UpscaleOutputWidth = std::max(1u, renderWidth);
+        m_PostProcessSettings.UpscaleOutputHeight = std::max(1u, renderHeight);
+
         m_ImGuiBackend = m_Device->CreateImGuiBackend(m_Window->GetHandle());
         m_GPUProfiler = m_Device->CreateGPUProfiler();
 
@@ -3706,7 +3709,7 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunRaytracedShadow() const
     {
-        return m_ShadowMode == ShadowMode::Raytraced && m_RaytracingScene.IsValid() &&
+        return m_ShadowSettings.Mode == ShadowMode::Raytraced && m_RaytracingScene.IsValid() &&
                m_RTShadowPipelineState != nullptr && m_RTShadowTexture != nullptr;
     }
 
@@ -3737,7 +3740,7 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunLightCulling() const
     {
-        if (!m_LightCullingEnabled)
+        if (!m_GeometrySettings.LightCullingEnabled)
         {
             return false;
         }
@@ -3780,7 +3783,7 @@ namespace Kurenai
     {
         // 【プロキシが1つも無いなら抑止しない】発光面を光源にしていないのに
         // DDGIから自発光だけ抜くと、その面の照明が丸ごと落ちる
-        return m_EmissiveLightsEnabled && !m_EmissiveLightsDoubleCountGI && !m_EmissiveProxies.empty();
+        return m_EmissiveLightSettings.LightsEnabled && !m_EmissiveLightSettings.LightsDoubleCountGI && !m_EmissiveProxies.empty();
     }
 
     void KurenaiEngine3D::SetEmissiveLights(int enabled, float cutoffIrradiance, int maxCount, int doubleCountGI)
@@ -3788,22 +3791,22 @@ namespace Kurenai
         // 負は「既定のまま」。しきい値だけ差し替えたいときに状態を巻き添えで倒さないため
         if (enabled >= 0)
         {
-            m_EmissiveLightsEnabled = (enabled > 0);
+            m_EmissiveLightSettings.LightsEnabled = (enabled > 0);
         }
         // 0以下は「既定のまま」。OverrideMegaLightsの負値と同じ約束にしてある
         bool cutoffChanged = false;
         if (cutoffIrradiance > 0.0f)
         {
-            cutoffChanged = (m_EmissiveLightsCutoffIrradiance != cutoffIrradiance);
-            m_EmissiveLightsCutoffIrradiance = cutoffIrradiance;
+            cutoffChanged = (m_EmissiveLightSettings.LightsCutoffIrradiance != cutoffIrradiance);
+            m_EmissiveLightSettings.LightsCutoffIrradiance = cutoffIrradiance;
         }
         if (maxCount > 0)
         {
-            m_EmissiveLightsMaxCount = maxCount;
+            m_EmissiveLightSettings.LightsMaxCount = maxCount;
         }
         if (doubleCountGI >= 0)
         {
-            m_EmissiveLightsDoubleCountGI = (doubleCountGI > 0);
+            m_EmissiveLightSettings.LightsDoubleCountGI = (doubleCountGI > 0);
         }
         // 【三角形テーブルを焼き直す】メッシュライトの影響半径は読み込み時に焼くので、
         // τを変えても焼き直さないと**つまみが静かに効かない**。シーンの読み込みは
@@ -3811,16 +3814,16 @@ namespace Kurenai
         // (実際に踏んだ。τを100分の1にしてもダンプがバイト完全一致した)
         if (cutoffChanged && m_Device && !m_Scene.Instances.empty())
         {
-            m_MeshLightScene.Build(*m_Device, m_Scene, m_EmissiveLightsCutoffIrradiance);
+            m_MeshLightScene.Build(*m_Device, m_Scene, m_EmissiveLightSettings.LightsCutoffIrradiance);
         }
 
         // 上限の警告は設定を変えたら出し直す(τを上げてRangeを縮めた結果を見たいため)
         m_EmissiveLightsCapLogged = false;
         Core::Logger::Info(
             "KurenaiEngine3D",
-            std::string("エミッシブ光源: ") + (m_EmissiveLightsEnabled ? "有効" : "無効") +
-                " / 打ち切り照度 " + std::to_string(m_EmissiveLightsCutoffIrradiance) + " / 上限 " +
-                std::to_string(m_EmissiveLightsMaxCount) + "個 / プロキシ " +
+            std::string("エミッシブ光源: ") + (m_EmissiveLightSettings.LightsEnabled ? "有効" : "無効") +
+                " / 打ち切り照度 " + std::to_string(m_EmissiveLightSettings.LightsCutoffIrradiance) + " / 上限 " +
+                std::to_string(m_EmissiveLightSettings.LightsMaxCount) + "個 / プロキシ " +
                 std::to_string(m_EmissiveProxies.size()) + "個 / DDGIの自発光 " +
                 (ShouldSuppressEmissiveForGI() ? "抑止" : "そのまま(二重計上)"));
     }
@@ -3840,7 +3843,7 @@ namespace Kurenai
         std::string note;
         if (m_MeshLightsEnabled)
         {
-            if (!m_EmissiveLightsEnabled)
+            if (!m_EmissiveLightSettings.LightsEnabled)
             {
                 note = " ※エミッシブ光源が無効なので三角形は出ない";
             }
@@ -3865,12 +3868,12 @@ namespace Kurenai
         {
             return;
         }
-        m_EmissiveIntensity = intensity;
+        m_EmissiveLightSettings.Intensity = intensity;
         // 倍率を変えるとRangeも変わる(強さから解いているため)。上限の警告を出し直す
         m_EmissiveLightsCapLogged = false;
         m_EmissiveLightsValuesLogged = false;
         Core::Logger::Info(
-            "KurenaiEngine3D", "自発光の強度: " + std::to_string(m_EmissiveIntensity) + "倍");
+            "KurenaiEngine3D", "自発光の強度: " + std::to_string(m_EmissiveLightSettings.Intensity) + "倍");
     }
 
     void KurenaiEngine3D::OverrideMegaLights(int mode, int shadowRayCount, int sampleCount)
@@ -3976,7 +3979,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetAutoExposureEnabled(bool enabled)
     {
-        m_AutoExposureEnabled = enabled;
+        m_PostProcessSettings.AutoExposureEnabled = enabled;
         Core::Logger::Info(
             "KurenaiEngine3D",
             std::string("自動露出を起動オプションで設定しました: ") + (enabled ? "有効" : "無効"));
@@ -3984,7 +3987,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetOcclusionCullingEnabled(bool enabled)
     {
-        m_OcclusionCullingEnabled = enabled;
+        m_GeometrySettings.OcclusionCullingEnabled = enabled;
         Core::Logger::Info(
             "KurenaiEngine3D",
             std::string("Hi-Zオクルージョンカリングを起動オプションで設定しました: ")
@@ -3993,7 +3996,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetMeshletRenderingEnabled(bool enabled)
     {
-        m_MeshletRenderingEnabled = enabled;
+        m_GeometrySettings.MeshletRenderingEnabled = enabled;
         Core::Logger::Info(
             "KurenaiEngine3D",
             std::string("メッシュレット描画を起動オプションで設定しました: ")
@@ -4002,7 +4005,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetTAAEnabled(bool enabled)
     {
-        m_TAAEnabled = enabled;
+        m_PostProcessSettings.TAAEnabled = enabled;
         Core::Logger::Info(
             "KurenaiEngine3D",
             std::string("TAAを起動オプションで設定しました: ") + (enabled ? "有効" : "無効"));
@@ -4021,7 +4024,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetSoftwareRasterEnabled(bool enabled)
     {
-        m_SoftwareRasterEnabled = enabled;
+        m_GeometrySettings.SoftwareRasterEnabled = enabled;
         Core::Logger::Info("KurenaiEngine3D", std::string("ソフトウェアラスタライザを設定しました: ") + (enabled ? "有効" : "無効"));
     }
 
@@ -4045,7 +4048,7 @@ namespace Kurenai
     void KurenaiEngine3D::SetUpscaleEnabled(bool enabled)
     {
         // UI と同じく、現在の品質モードと出力解像度を保ったまま有効状態だけを変える。
-        RequestUpscaleSettings(enabled, m_UpscaleQualityMode, m_UpscaleOutputWidth, m_UpscaleOutputHeight);
+        RequestUpscaleSettings(enabled, m_PostProcessSettings.UpscaleQuality, m_PostProcessSettings.UpscaleOutputWidth, m_PostProcessSettings.UpscaleOutputHeight);
         Core::Logger::Info("KurenaiEngine3D", std::string("超解像を設定しました: ") + (enabled ? "有効" : "無効"));
     }
 
@@ -4474,7 +4477,7 @@ namespace Kurenai
             return false;
         }
 
-        return m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+        return m_GeometrySettings.MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
     }
 
     void KurenaiEngine3D::EnsureModelCullCapacity(uint32_t candidateCount)
@@ -6270,10 +6273,10 @@ namespace Kurenai
             return;
         }
 
-        m_UpscaleEnabled = enabled;
-        m_UpscaleQualityMode = mode;
-        m_UpscaleOutputWidth = outputWidth;
-        m_UpscaleOutputHeight = outputHeight;
+        m_PostProcessSettings.UpscaleEnabled = enabled;
+        m_PostProcessSettings.UpscaleQuality = mode;
+        m_PostProcessSettings.UpscaleOutputWidth = outputWidth;
+        m_PostProcessSettings.UpscaleOutputHeight = outputHeight;
 
         if (enabled)
         {
@@ -6303,7 +6306,7 @@ namespace Kurenai
     void KurenaiEngine3D::CreateUpscaleTargets(uint32_t width, uint32_t height)
     {
         // 無効化された場合は解放だけして戻る
-        if (!m_UpscaleEnabled)
+        if (!m_PostProcessSettings.UpscaleEnabled)
         {
             m_UpscaleTexture.reset();
             m_UpscaleSharpTexture.reset();
@@ -6329,7 +6332,7 @@ namespace Kurenai
     {
         // テクスチャの確保に失敗している場合にパスを登録すると、バインドするリソースが無いまま
         // Dispatchすることになるため、確保済みであることまで条件に入れる
-        return m_UpscaleEnabled && m_UpscaleTexture && m_UpscaleSharpTexture &&
+        return m_PostProcessSettings.UpscaleEnabled && m_UpscaleTexture && m_UpscaleSharpTexture &&
                m_UpscaleTargetWidth > 0 && m_UpscaleTargetHeight > 0;
     }
 
@@ -6366,9 +6369,9 @@ namespace Kurenai
         settings.CloudVolumetric = m_CloudSettings.Volumetric;
         settings.CirrusEnabled = m_CloudSettings.CirrusEnabled;
         settings.StarsEnabled = m_StarsSettings.Enabled;
-        settings.TAAEnabled = m_TAAEnabled;
-        settings.BloomEnabled = m_BloomEnabled;
-        settings.ScreenSpaceShadowEnabled = m_ScreenSpaceShadowEnabled;
+        settings.TAAEnabled = m_PostProcessSettings.TAAEnabled;
+        settings.BloomEnabled = m_PostProcessSettings.BloomEnabled;
+        settings.ScreenSpaceShadowEnabled = m_ShadowSettings.ScreenSpaceEnabled;
         settings.DDGIProbesPerFrame = m_DDGISettings.ProbesPerFrame;
         settings.SSAOKernelSize = m_AmbientOcclusionSettings.SSAOKernelSize;
         settings.CloudRaymarchSteps = m_CloudSettings.RaymarchSteps;
@@ -6384,9 +6387,9 @@ namespace Kurenai
         m_CloudSettings.Volumetric = settings.CloudVolumetric;
         m_CloudSettings.CirrusEnabled = settings.CirrusEnabled;
         m_StarsSettings.Enabled = settings.StarsEnabled;
-        m_TAAEnabled = settings.TAAEnabled;
-        m_BloomEnabled = settings.BloomEnabled;
-        m_ScreenSpaceShadowEnabled = settings.ScreenSpaceShadowEnabled;
+        m_PostProcessSettings.TAAEnabled = settings.TAAEnabled;
+        m_PostProcessSettings.BloomEnabled = settings.BloomEnabled;
+        m_ShadowSettings.ScreenSpaceEnabled = settings.ScreenSpaceShadowEnabled;
         m_DDGISettings.ProbesPerFrame = settings.DDGIProbesPerFrame;
         // カーネル自体の作り直しはSSAOパスの中で行う(段数が変わったことを見て作り直す)
         m_AmbientOcclusionSettings.SSAOKernelSize = settings.SSAOKernelSize;
@@ -6699,7 +6702,7 @@ namespace Kurenai
         m_InstancedBatchCount = 0;
         m_InstancedInstanceCount = 0;
 
-        if (!m_InstancingEnabled || m_Scene.Instances.empty() || !m_ModelInstanceBuffer)
+        if (!m_GeometrySettings.InstancingEnabled || m_Scene.Instances.empty() || !m_ModelInstanceBuffer)
         {
             return;
         }
@@ -7785,7 +7788,7 @@ namespace Kurenai
         // 【打ち切り照度は実効値を渡すこと】既定の定数を渡すと -emissivelightscutoff や
         // ImGui の指定が三角形テーブルへ一切届かず、**つまみが静かに効かなくなる**
         // (実際に踏んだ。τを100分の1にしてもダンプがバイト完全一致した)
-        loaded->MeshLightScene.Build(*m_Device, loaded->Scene, m_EmissiveLightsCutoffIrradiance);
+        loaded->MeshLightScene.Build(*m_Device, loaded->Scene, m_EmissiveLightSettings.LightsCutoffIrradiance);
 
         loaded->Camera = ComputeInitialCamera(loaded->Scene);
         return loaded;
@@ -7865,7 +7868,7 @@ namespace Kurenai
         m_SkySettings.SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
         // .ksceneが持つのは「影を出すか」の真偽値だけなので、手法の選択はエンジン側で決める
         // (反射のm_ReflectionSettings.Modeと同じ扱い)。規則はDefaultShadowModeに1か所だけ置いてある
-        m_ShadowMode = m_Scene.ShadowEnabled ? DefaultShadowMode(m_RaytracingAvailable) : ShadowMode::Off;
+        m_ShadowSettings.Mode = m_Scene.ShadowEnabled ? ShadowSettings::DefaultShadowMode(m_RaytracingAvailable) : ShadowMode::Off;
         m_SkySettings.SunEnabled = m_Scene.SunEnabled;
         m_AmbientOcclusionSettings.Enabled = m_Scene.AOEnabled;
         // .ksceneが持つのは「反射を使うか」の真偽値だけなので、手法の選択はエンジン側で決める。
@@ -7884,7 +7887,7 @@ namespace Kurenai
         // 書いていないシーンはエンジンの既定のまま(Assets::Scene の Has〜Override のコメント参照)
         if (m_Scene.HasTAAOverride)
         {
-            m_TAAEnabled = m_Scene.TAAEnabled;
+            m_PostProcessSettings.TAAEnabled = m_Scene.TAAEnabled;
         }
         if (m_Scene.HasRenderResolutionOverride)
         {
@@ -7896,19 +7899,19 @@ namespace Kurenai
             // 超解像が無効ならRequestUpscaleSettingsは中でRequestRenderResolutionを呼ぶだけなので、
             // 従来とまったく同じ動作になる
             RequestUpscaleSettings(
-                m_UpscaleEnabled, m_UpscaleQualityMode, m_Scene.RenderWidth, m_Scene.RenderHeight);
+                m_PostProcessSettings.UpscaleEnabled, m_PostProcessSettings.UpscaleQuality, m_Scene.RenderWidth, m_Scene.RenderHeight);
         }
         // トーンマップのカーブと空の彩度(アート指定)をシーンから受け取る。
         // Source/LibraryはSource/Engineに依存できないため、Scene側は同じ並びの独立した列挙を持つ。
         // 【並びを変えたら両方直すこと】(Assets/Scene.h の TonemapCurveSetting)
         switch (m_Scene.Tonemap)
         {
-        case Assets::Scene::TonemapCurveSetting::Reinhard: m_TonemapCurve = TonemapCurve::Reinhard; break;
-        case Assets::Scene::TonemapCurveSetting::ACES:     m_TonemapCurve = TonemapCurve::ACES;     break;
-        case Assets::Scene::TonemapCurveSetting::AgX:      m_TonemapCurve = TonemapCurve::AgX;      break;
+        case Assets::Scene::TonemapCurveSetting::Reinhard: m_PostProcessSettings.Curve = TonemapCurve::Reinhard; break;
+        case Assets::Scene::TonemapCurveSetting::ACES:     m_PostProcessSettings.Curve = TonemapCurve::ACES;     break;
+        case Assets::Scene::TonemapCurveSetting::AgX:      m_PostProcessSettings.Curve = TonemapCurve::AgX;      break;
         }
         // 黒の締め。Tonemap/SkySaturationと同じく無条件に反映する(既定0で恒等のため)
-        m_TonemapBlackPoint = m_Scene.TonemapBlackPoint;
+        m_PostProcessSettings.TonemapBlackPoint = m_Scene.TonemapBlackPoint;
         m_SkySettings.Saturation = m_Scene.SkySaturation;
         // タービディティは指定されたときだけ上書きする(Scene.h の HasSkyTurbidity 参照)。
         // 値が動けばRender()側のturbidityMoved判定が大気LUTを焼き直す
@@ -7922,7 +7925,7 @@ namespace Kurenai
         // 動かさずにシーン側で持てるようにしてある(Scene.h の HasExposureOverride 参照)
         if (m_Scene.HasExposureOverride)
         {
-            m_SceneExposureEV100 = m_Scene.ExposureEV100;
+            m_PostProcessSettings.SceneExposureEV100 = m_Scene.ExposureEV100;
         }
         // 雲。天候はシーンの性質なので[Cloud]セクションで持てるようにした。
         // 露出と同じく指定されたキーだけを上書きする。CellSizeだけは.kscene側が「雲の塊1つの
@@ -7949,9 +7952,9 @@ namespace Kurenai
         if (m_Scene.HasFogRefHeight)   { m_FogSettings.RefHeight = m_Scene.FogRefHeight; }
         // ブルーム。エンジンの既定は無効なので、夜景で光源が主役になるシーンは
         // ここで有効にしないと発光体に光芒が出ない
-        if (m_Scene.HasBloomEnabled)   { m_BloomEnabled = m_Scene.BloomEnabled; }
-        if (m_Scene.HasBloomStrength)  { m_BloomStrength = m_Scene.BloomStrength; }
-        if (m_Scene.HasBloomThreshold) { m_BloomThreshold = m_Scene.BloomThreshold; }
+        if (m_Scene.HasBloomEnabled)   { m_PostProcessSettings.BloomEnabled = m_Scene.BloomEnabled; }
+        if (m_Scene.HasBloomStrength)  { m_PostProcessSettings.BloomStrength = m_Scene.BloomStrength; }
+        if (m_Scene.HasBloomThreshold) { m_PostProcessSettings.BloomThreshold = m_Scene.BloomThreshold; }
         // 星空。[Cloud]/[Fog]と同じく指定されたキーだけを上書きする
         if (m_Scene.HasStarsEnabled)    { m_StarsSettings.Enabled = m_Scene.StarsEnabled; }
         if (m_Scene.HasStarsDensity)    { m_StarsSettings.Density = m_Scene.StarsDensity; }
@@ -7989,9 +7992,9 @@ namespace Kurenai
         // 水面。[Water]が無いシーンでもScene::WaterWaveScale等はリテラル既定値
         // (EngineDefaults.hを複製したもの、Scene.h参照)を持っているため、常にそのまま反映してよい
         // (m_SkySettings.TimeOfDay/m_SkySettings.SunAzimuthDegreesと同じ扱い)
-        m_WaterWaveScale = m_Scene.WaterWaveScale;
-        m_WaterWaveSpeed = m_Scene.WaterWaveSpeed;
-        m_WaterWaveStrength = m_Scene.WaterWaveStrength;
+        m_WaterSettings.WaveScale = m_Scene.WaterWaveScale;
+        m_WaterSettings.WaveSpeed = m_Scene.WaterWaveSpeed;
+        m_WaterSettings.WaveStrength = m_Scene.WaterWaveStrength;
 
         // スカイボックスが差し替わった場合のみ非nullptr。IBLの拡散イラディアンス・プリフィルタ済み
         // 鏡面はスカイボックスから焼かれるため、差し替えたらm_IBLBakedを倒して焼き直させる
@@ -8496,7 +8499,7 @@ namespace Kurenai
         // 影の手法ではなく「影を落とすかどうか」だけを混ぜる。ProbeCapture.hlslが読むのは
         // 常にカスケードシャドウマップで、そのシャドウマップはRTシャドウ選択時も同じように
         // 描かれるため、CascadedShadowMapとRaytracedでプローブの焼き上がりは変わらない
-        mixBool(m_ShadowMode != ShadowMode::Off);
+        mixBool(m_ShadowSettings.Mode != ShadowMode::Off);
         // DDGIのレイの取得(ラスタライズ / レイトレーシング)と、その影レイの有無。
         //
         // 【混ぜ忘れると「つまみが効かない」型の不具合になる】切り替えても署名が変わらないため
@@ -8518,15 +8521,15 @@ namespace Kurenai
         mixFloat(m_AmbientSpecularScale);
         mixBool(m_SkySettings.ProceduralEnabled);
         // 自発光の強度倍率はキャプチャのエミッシブ項へそのまま乗る
-        mixFloat(m_EmissiveIntensity);
+        mixFloat(m_EmissiveLightSettings.Intensity);
         // エミッシブ光源(62章)。プロキシはProbeCapture.hlslのライトループ(t8)にも入るので、
         // 有効/無効・打ち切り照度・採用数の上限はどれも焼き上がりを変える。
         // 二重計上の抑止はDDGIのキャプチャから自発光を抜くので、これも焼き上がりを変える。
         // **混ぜ忘れると「つまみが効かない」型の不具合になる**(このすぐ上の注記と同じ)
-        mixBool(m_EmissiveLightsEnabled);
-        mixFloat(m_EmissiveLightsCutoffIrradiance);
-        mixFloat(static_cast<float>(m_EmissiveLightsMaxCount));
-        mixBool(m_EmissiveLightsDoubleCountGI);
+        mixBool(m_EmissiveLightSettings.LightsEnabled);
+        mixFloat(m_EmissiveLightSettings.LightsCutoffIrradiance);
+        mixFloat(static_cast<float>(m_EmissiveLightSettings.LightsMaxCount));
+        mixBool(m_EmissiveLightSettings.LightsDoubleCountGI);
         // 【上限に当たると採用集合がカメラ依存になる】採用順はカメラからの照度で決まるため、
         // 上の4つだけでは「カメラを動かしただけで焼く光源が変わったのに署名は同じ」になる。
         // 切り捨てが起きていないフレームでは0で固定なので、余分な焼き直しは起きない
@@ -9014,11 +9017,11 @@ namespace Kurenai
             }
 
             // 水面のスクロール位相。太陽の自動進行とまったく同じ場所・同じ理由
-            // (m_SkySettings.TimeAutoAdvance/m_WaterTimeFrozenがRenderingパネル(Renderスレッドから描画)でも
+            // (m_SkySettings.TimeAutoAdvance/m_WaterSettings.TimeFrozenがRenderingパネル(Renderスレッドから描画)でも
             // 書き換えられるため、両方をRenderスレッド専有にすることで追加の排他制御なしに済ませる)
-            if (!m_WaterTimeFrozen)
+            if (!m_WaterSettings.TimeFrozen)
             {
-                m_WaterScrollOffset = std::fmod(m_WaterScrollOffset + renderDeltaTime * m_WaterWaveSpeed, 1.0f);
+                m_WaterScrollOffset = std::fmod(m_WaterScrollOffset + renderDeltaTime * m_WaterSettings.WaveSpeed, 1.0f);
             }
 
             // 雲のスクロール位相。水面とまったく同じ場所・同じ理由でRenderスレッド専有のまま進める。
@@ -9810,7 +9813,7 @@ namespace Kurenai
                 m_UpscaleTargetsDirty = false;
                 try
                 {
-                    CreateUpscaleTargets(m_UpscaleOutputWidth, m_UpscaleOutputHeight);
+                    CreateUpscaleTargets(m_PostProcessSettings.UpscaleOutputWidth, m_PostProcessSettings.UpscaleOutputHeight);
                 }
                 catch (const std::exception& e)
                 {
@@ -9818,10 +9821,10 @@ namespace Kurenai
                     // Presentがバイリニアで拡大するので絵は出続ける(41.23節以前と同じ経路)
                     Core::Logger::Error(
                         "KurenaiEngine3D",
-                        "超解像の出力解像度" + std::to_string(m_UpscaleOutputWidth) + "x" +
-                            std::to_string(m_UpscaleOutputHeight) +
+                        "超解像の出力解像度" + std::to_string(m_PostProcessSettings.UpscaleOutputWidth) + "x" +
+                            std::to_string(m_PostProcessSettings.UpscaleOutputHeight) +
                             "のテクスチャ作成に失敗したため、超解像を無効にします: " + e.what());
-                    m_UpscaleEnabled = false;
+                    m_PostProcessSettings.UpscaleEnabled = false;
                     m_UpscaleTexture.reset();
                     m_UpscaleSharpTexture.reset();
                     m_UpscaleTargetWidth = 0;
@@ -9889,7 +9892,7 @@ namespace Kurenai
             // 割り戻すので、fp16の範囲に収まっている画素は1つも動かない。実測でも
             // 地形・水面・空の画素値は-18のときと完全に一致し、飽和していた機体だけが変わった。
             // 上限0段は「昼より明るくはしない」の意味で従来どおり
-            const float targetEV100 = m_SceneExposureEV100 + std::clamp(autoBias, -12.0f, 0.0f);
+            const float targetEV100 = m_PostProcessSettings.SceneExposureEV100 + std::clamp(autoBias, -12.0f, 0.0f);
 
             if (!m_EffectiveExposureInitialized)
             {
@@ -9901,7 +9904,7 @@ namespace Kurenai
             {
                 // 一時停止や巨大なdtで飛ばないよう上限を設ける
                 const float deltaTime = std::clamp(m_RenderDeltaTime, 0.0f, 0.1f);
-                const float t = std::clamp(1.0f - std::exp(-deltaTime * m_EffectiveExposureAdaptSpeed), 0.0f, 1.0f);
+                const float t = std::clamp(1.0f - std::exp(-deltaTime * m_PostProcessSettings.EffectiveExposureAdaptSpeed), 0.0f, 1.0f);
                 m_EffectiveExposureEV100 += (targetEV100 - m_EffectiveExposureEV100) * t;
             }
         }
@@ -9944,7 +9947,7 @@ namespace Kurenai
         // 実効EV100は夜に最大18段下がる(=バッファ上の値が26万倍明るくなる)ため、
         // ここを1.0に固定していると夜が昼と同じ明るさで出てしまい、
         // 自動露出をオフにしても露出が時刻に追従し続ける状態になる
-        const float manualExposureScale = std::exp2(m_EffectiveExposureEV100 - m_SceneExposureEV100);
+        const float manualExposureScale = std::exp2(m_EffectiveExposureEV100 - m_PostProcessSettings.SceneExposureEV100);
 
         // 自動露出の測光値を上側で止めるための、構図に依存しない基準EV。
         // キー照度は画面に何が写っていようと変わらないので、
@@ -10021,13 +10024,13 @@ namespace Kurenai
             megaLightsTileJitterEnabled ? (m_LightTileCountY + 1u) : m_LightTileCountY;
 
         DirectX::XMFLOAT2 jitterOffsetPixels{ 0.0f, 0.0f };
-        if (m_TAAEnabled)
+        if (m_PostProcessSettings.TAAEnabled)
         {
             // Halton列の添字は1から始める。添字0はradical inverseの定義上どの基数でも0となり、
             // オフセットがピクセルの角(-0.5, -0.5)へ偏ってしまう
             const uint32_t haltonIndex = (m_TAAFrameIndex % kTAAJitterSampleCount) + 1;
-            jitterOffsetPixels.x = (RadicalInverse(haltonIndex, 2) - 0.5f) * m_TAAJitterScale;
-            jitterOffsetPixels.y = (RadicalInverse(haltonIndex, 3) - 0.5f) * m_TAAJitterScale;
+            jitterOffsetPixels.x = (RadicalInverse(haltonIndex, 2) - 0.5f) * m_PostProcessSettings.TAAJitterScale;
+            jitterOffsetPixels.y = (RadicalInverse(haltonIndex, 3) - 0.5f) * m_PostProcessSettings.TAAJitterScale;
         }
         // ピクセル単位のオフセットをNDCとUVの2つの単位へ直す。
         // ピクセル座標は右が+x・下が+yなのに対しNDCは上が+yなので、yだけ符号が反転する
@@ -10074,9 +10077,9 @@ namespace Kurenai
             // 射影行列の_22 = 1/tan(fovY/2)。画面の高さ全体が 2*tan(fovY/2) なので、
             // 距離1メートルの1メートルは _22 * 高さ / 2 画素になる
             m_MeshletLODFrame.PixelScale = 0.5f * projForLOD._22 * static_cast<float>(m_RenderHeight);
-            m_MeshletLODFrame.Quality = m_MeshletLODEnabled ? m_MeshletLODQuality : 0.0f;
-            m_MeshletLODFrame.Forced = m_MeshletLODEnabled ? m_MeshletLODForcedLevel : -1;
-            m_MeshletLODFrame.DebugColorByLOD = m_MeshletLODDebugColorEnabled;
+            m_MeshletLODFrame.Quality = m_GeometrySettings.MeshletLODEnabled ? m_GeometrySettings.MeshletLODQuality : 0.0f;
+            m_MeshletLODFrame.Forced = m_GeometrySettings.MeshletLODEnabled ? m_GeometrySettings.MeshletLODForcedLevel : -1;
+            m_MeshletLODFrame.DebugColorByLOD = m_GeometrySettings.MeshletLODDebugColorEnabled;
         }
 
         // --- ドローンショーの機体を評価する ---
@@ -10121,7 +10124,7 @@ namespace Kurenai
         // 【手置きの後ろに置く】容量超過の切り捨ては下でプロキシ側だけに掛ける。
         // 全体をカメラ距離でソートして切ると、**手置きの遠いライトが黙って消える**。
         //
-        // 【毎フレーム作り直す】m_EmissiveIntensity のスライダーとτを即座に反映するため。
+        // 【毎フレーム作り直す】m_EmissiveLightSettings.Intensity のスライダーとτを即座に反映するため。
         // プロキシ側は倍率も露出も持たない値(RadianceBase)で保持してある
         m_EmissiveLightsUsedCount = 0;
         // 切り捨てが起きたときだけ、採用した集合の指紋を残す(起きなければ0のまま)。
@@ -10131,17 +10134,17 @@ namespace Kurenai
         // 焼き直さず、DDGIは更新を止めたまま、収束済みのプローブだけ古い集合で残る。
         // 切り捨てが起きない限り集合はシーン固定なので、そのときは0で十分
         m_EmissiveLightsSelectionHash = 0;
-        if (m_EmissiveLightsEnabled && !m_EmissiveProxies.empty() && manualLightCount < kMaxLights)
+        if (m_EmissiveLightSettings.LightsEnabled && !m_EmissiveProxies.empty() && manualLightCount < kMaxLights)
         {
             const size_t budget = std::min<size_t>(
-                static_cast<size_t>(std::max(0, m_EmissiveLightsMaxCount)), kMaxLights - manualLightCount);
+                static_cast<size_t>(std::max(0, m_EmissiveLightSettings.LightsMaxCount)), kMaxLights - manualLightCount);
 
             if (m_EmissiveProxies.size() <= budget)
             {
                 for (const Assets::EmissiveProxy& proxy : m_EmissiveProxies)
                 {
                     gpuLights.push_back(MakeGPULightFromEmissiveProxy(
-                        proxy, m_EmissiveIntensity, m_EmissiveLightsCutoffIrradiance,
+                        proxy, m_EmissiveLightSettings.Intensity, m_EmissiveLightSettings.LightsCutoffIrradiance,
                         m_EmissiveLightsMaxRange));
                 }
             }
@@ -10164,7 +10167,7 @@ namespace Kurenai
                     const float dz = p.Position[2] - cameraPosition.z;
                     const float distSq = dx * dx + dy * dy + dz * dz;
                     const float peak = std::max({ p.RadianceBase[0], p.RadianceBase[1], p.RadianceBase[2] }) *
-                                       m_EmissiveIntensity * p.Area;
+                                       m_EmissiveLightSettings.Intensity * p.Area;
                     return peak / std::max(distSq, p.SourceRadius * p.SourceRadius + 1e-6f);
                 };
                 std::stable_sort(
@@ -10199,7 +10202,7 @@ namespace Kurenai
                     mixIndex(proxy.MeshIndex);
                     mixIndex(proxy.ClusterIndex);
                     gpuLights.push_back(MakeGPULightFromEmissiveProxy(
-                        proxy, m_EmissiveIntensity, m_EmissiveLightsCutoffIrradiance, m_EmissiveLightsMaxRange));
+                        proxy, m_EmissiveLightSettings.Intensity, m_EmissiveLightSettings.LightsCutoffIrradiance, m_EmissiveLightsMaxRange));
                 }
                 m_EmissiveLightsSelectionHash = selectionHash;
 
@@ -10569,17 +10572,17 @@ namespace Kurenai
         // 【他の「PassRuns」と並べてここに置く理由】この値はG-Bufferパスの登録時だけでなく、
         // その手前で書き上げるFrameConstantsも見る(オクルージョンカリングの有効フラグ)。
         // 定数バッファの更新はパス登録より前に一度だけ行うため、判断もそこより前で確定させる
-        const bool meshletPathActive = m_MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
+        const bool meshletPathActive = m_GeometrySettings.MeshletRenderingEnabled && m_GBufferMeshletPipelineState != nullptr;
 
         // 増幅シェーダーのHi-Zオクルージョンカリング(Stage 5-2)をこのフレームで行うか。
         // 判定を書いてあるのは増幅シェーダーだけなので、メッシュレット経路に乗らないフレームでは
         // 1つも間引けず、Hi-Zを構築する意味も無い(下のHi-Zパスの登録条件がこれを見る)
-        const bool occlusionCullingActive = m_OcclusionCullingEnabled && meshletPathActive;
+        const bool occlusionCullingActive = m_GeometrySettings.OcclusionCullingEnabled && meshletPathActive;
 
         // メッシュレットカリングの統計をこのフレームで数えるか。
         // 増幅シェーダーが走らなければ数える相手がいない
         const bool meshletCullStatsActive =
-            m_MeshletCullStatsEnabled && meshletPathActive && m_MeshletCullStatsBuffer != nullptr;
+            m_GeometrySettings.MeshletCullStatsEnabled && meshletPathActive && m_MeshletCullStatsBuffer != nullptr;
 
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = viewMatrix * jitteredProj;
@@ -10641,7 +10644,7 @@ namespace Kurenai
         const float iblIntensity = m_IBLEnabled ? m_IBLIntensity : 0.0f;
         const float specularEnergyCompensation = static_cast<float>(m_SpecularCompensationMode);
         constants.ShadowParams = {
-            m_ShadowLightSize,
+            m_ShadowSettings.LightSize,
             static_cast<float>(kIBLPrefilterMipLevels - 1),
             iblIntensity,
             specularEnergyCompensation,
@@ -10841,11 +10844,11 @@ namespace Kurenai
                 constants.DDGILODBase[lod] = { 0.0f, 0.0f, 0.0f, 0.0f };
             }
         }
-        // 水面。スクロール位相はRenderThreadMainがm_WaterTimeFrozen/m_WaterWaveSpeedに
+        // 水面。スクロール位相はRenderThreadMainがm_WaterSettings.TimeFrozen/m_WaterSettings.WaveSpeedに
         // 応じて毎フレーム進める(m_SkySettings.TimeOfDayの自動進行と同じ場所・同じ方式)。
-        // y=波のスケール倍率(m_WaterWaveScale)、z=波の強さ(m_WaterWaveStrength、0〜1)を
+        // y=波のスケール倍率(m_WaterSettings.WaveScale)、z=波の強さ(m_WaterSettings.WaveStrength、0〜1)を
         // Water.hlslへ渡す(UIのスライダーが見た目へ反映されるようにするため)
-        constants.TimeParams = { m_WaterScrollOffset, m_WaterWaveScale, m_WaterWaveStrength, 0.0f };
+        constants.TimeParams = { m_WaterScrollOffset, m_WaterSettings.WaveScale, m_WaterSettings.WaveStrength, 0.0f };
 
         // 雲。DeferredLighting.hlsl(背景)とSSR.hlsl(水面反射)の両方が同じ値を読むため、
         // ここで一度だけ組み立てる。m_CloudSettings.Enabled=falseのときはCloudParams0.xへ0を渡し、
@@ -10884,7 +10887,7 @@ namespace Kurenai
         constants.FogParams0 = { m_FogSettings.Density, m_FogSettings.ScaleHeight, m_FogSettings.RefHeight, fogEnabledFlag };
         constants.FogParams1 = { m_FogSettings.MaxOpacity, 0.0f, 0.0f, 0.0f };
         // 水中項。Water.hlslのPSMainが読む
-        constants.WaterBodyColor = { m_WaterBodyColor.x, m_WaterBodyColor.y, m_WaterBodyColor.z, 0.0f };
+        constants.WaterBodyColor = { m_WaterSettings.BodyColor.x, m_WaterSettings.BodyColor.y, m_WaterSettings.BodyColor.z, 0.0f };
 
         // 星空。
         // 【昼は強度0にしてしまう】星は太陽が地平線下にあるときしか見えない。ここで0に
@@ -10932,7 +10935,7 @@ namespace Kurenai
         const bool depthPrepassRuns = m_DepthPrepassEnabled
             && m_DepthPrepassPipelineState && m_DepthPrepassCutoutPipelineState;
         const bool hiZFromDepthPrepass =
-            m_HiZFromDepthPrepassEnabled && occlusionCullingActive && depthPrepassRuns;
+            m_GeometrySettings.HiZFromDepthPrepassEnabled && occlusionCullingActive && depthPrepassRuns;
 
         // 前フレームからのカメラ移動距離。シーンが静的である以上、1フレームぶんの視差ずれの
         // 原因はカメラの移動だけなので、その距離をバウンディング球の半径へ足せば
@@ -10953,7 +10956,7 @@ namespace Kurenai
         // (ドローごとの選択は ObjectConstants::MeshletOcclusionMode)
         constants.OcclusionCullParams = {
             (occlusionCullEnabledThisFrame || hiZFromDepthPrepass) ? 1.0f : 0.0f,
-            m_OcclusionCullRadiusScale,
+            m_GeometrySettings.OcclusionCullRadiusScale,
             cameraMoveDistance,
             static_cast<float>(m_HiZMipLevels),
         };
@@ -10997,15 +11000,15 @@ namespace Kurenai
         // カスケードシャドウマップへ落とす。シャドウマップは手法によらず描いてあるため、
         // 落ちても影が消えることはない
         const ShadowMode effectiveShadowMode =
-            (m_ShadowMode == ShadowMode::Raytraced && !ShouldRunRaytracedShadow())
+            (m_ShadowSettings.Mode == ShadowMode::Raytraced && !ShouldRunRaytracedShadow())
                 ? ShadowMode::CascadedShadowMap
-                : m_ShadowMode;
+                : m_ShadowSettings.Mode;
 
         LightingConstants lightingConstants{};
         lightingConstants.LightCount =
         {
             static_cast<uint32_t>(gpuLights.size()),
-            static_cast<uint32_t>(std::max(0, m_ScreenSpaceShadowMaxLightsPerPixel)),
+            static_cast<uint32_t>(std::max(0, m_ShadowSettings.ScreenSpaceMaxLightsPerPixel)),
             static_cast<uint32_t>(effectiveShadowMode),
             // MegaLightsが走るフレームは、ポイント/スポットの寄与をあちらが計算済みなので
             // 直接光パス側のライトループを止める。**「パスを積むか」と同じ述語で決めること** ――
@@ -11014,17 +11017,17 @@ namespace Kurenai
         };
         lightingConstants.SSSParams0 =
         {
-            static_cast<float>(m_ScreenSpaceShadowStepCount),
-            m_ScreenSpaceShadowMaxRayLength,
-            m_ScreenSpaceShadowThickness,
-            m_ScreenSpaceShadowEnabled ? 1.0f : 0.0f,
+            static_cast<float>(m_ShadowSettings.ScreenSpaceStepCount),
+            m_ShadowSettings.ScreenSpaceMaxRayLength,
+            m_ShadowSettings.ScreenSpaceThickness,
+            m_ShadowSettings.ScreenSpaceEnabled ? 1.0f : 0.0f,
         };
         lightingConstants.SSSParams1 =
         {
             depthLinearizeA,
             depthLinearizeB,
-            m_ScreenSpaceShadowNormalBias,
-            m_ScreenSpaceShadowEdgeFade,
+            m_ShadowSettings.ScreenSpaceNormalBias,
+            m_ShadowSettings.ScreenSpaceEdgeFade,
         };
         lightingConstants.TileParams =
         {
@@ -11032,7 +11035,7 @@ namespace Kurenai
             kLightTileSize,
             kLightTileCapacity,
             // 「このフレームのライトグリッドは有効か」。**パスを積む述語と同じものを使う** ――
-            // トグルの状態(m_LightCullingEnabled)ではなく実際に書いたかどうかで決める。
+            // トグルの状態(m_GeometrySettings.LightCullingEnabled)ではなく実際に書いたかどうかで決める。
             // なおMegaLightsが走るフレームはLightCount.wが先に効くのでこの枝には入らない
             ShouldRunLightCulling() ? 1u : 0u,
         };
@@ -11515,7 +11518,7 @@ namespace Kurenai
                     // RTシャドウ選択時もここは描く。半透明(Transparent.hlsl)と反射プローブの
                     // キャプチャ(ProbeCapture.hlsl)はカメラ視点の可視率テクスチャを使えず、
                     // カスケードシャドウマップを必要とするため(26章)
-                    if (m_ShadowMode != ShadowMode::Off)
+                    if (m_ShadowSettings.Mode != ShadowMode::Off)
                     {
                         CascadeConstants cascadeConstants{};
                         DirectX::XMStoreFloat4x4(&cascadeConstants.ViewProj, DirectX::XMMatrixTranspose(cascadeViewProj[cascade]));
@@ -11605,7 +11608,7 @@ namespace Kurenai
                                     bindShadowPipelineState(pipelineState);
 
                                     const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                        instance, *coarsestModel, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask,
+                                        instance, *coarsestModel, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, rejectMask,
                                         requireMask, m_MeshletLODFrame);
                                     cmd->UpdateBuffer(
                                         m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -11659,7 +11662,7 @@ namespace Kurenai
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
                                 ObjectConstants objectConstants =
-                                    MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                                    MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
                                 objectConstants.InstanceBase = unit.InstanceBase;
                                 objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                                 cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -11808,7 +11811,7 @@ namespace Kurenai
                         continue;
                     }
 
-                    ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                    ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
                     objectConstants.InstanceBase = unit.InstanceBase;
                     objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -12074,7 +12077,7 @@ namespace Kurenai
             // Realtimeから切り替えた直後に不要なフルベイクが1回走る
             m_ProbeBakeSignature = ComputeProbeBakeSignature();
             // 露出の換算倍率も追随させる。1ステップずつ焼くため厳密には面・ミップごとに焼いた
-            // 露出が違うが、実効プリ露出の変化は毎秒2倍程度(m_EffectiveExposureAdaptSpeed)なので
+            // 露出が違うが、実効プリ露出の変化は毎秒2倍程度(m_PostProcessSettings.EffectiveExposureAdaptSpeed)なので
             // 1周(最大12フレーム)ぶんのずれは数%にとどまり、常時焼き直している以上すぐ解消する
             m_ProbeBakedExposureEV100 = m_EffectiveExposureEV100;
         }
@@ -12178,7 +12181,7 @@ namespace Kurenai
                     // RaytracingScene.cpp が !mesh.EmissiveClusters.empty() だけで印を付ける。
                     // 条件が1つでも違うと、環境によって二重計上の有無が変わる
                     const bool meshIsProxySource = suppressEmissiveForDDGI && !mesh.EmissiveClusters.empty();
-                    const float ddgiEmissiveIntensity = meshIsProxySource ? 0.0f : m_EmissiveIntensity;
+                    const float ddgiEmissiveIntensity = meshIsProxySource ? 0.0f : m_EmissiveLightSettings.Intensity;
                     ++ddgiDrawnMeshes;
                     const float emissiveMax =
                         std::max({ mesh.EmissiveFactor[0], mesh.EmissiveFactor[1], mesh.EmissiveFactor[2] });
@@ -12217,7 +12220,7 @@ namespace Kurenai
                         " / 描いたメッシュ " + std::to_string(ddgiDrawnMeshes) + "個(うち自発光 " +
                         std::to_string(ddgiEmissiveMeshes) + "個) / 0にしたメッシュ " +
                         std::to_string(ddgiSuppressedMeshes) + "個 / 自発光の強度 " +
-                        std::to_string(m_EmissiveIntensity));
+                        std::to_string(m_EmissiveLightSettings.Intensity));
                 if (ddgiLODMismatchMeshes > 0)
                 {
                     Core::Logger::Warning(
@@ -12267,7 +12270,7 @@ namespace Kurenai
             // ラスタ経路(ObjectConstantsの倍率を0にする)と**同じ判定**から決めること
             traceConstants.Params1 = {
                 static_cast<float>(kDDGICaptureSize),
-                m_EmissiveIntensity,
+                m_EmissiveLightSettings.Intensity,
                 m_DDGISettings.SunShadowRayEnabled ? 1.0f : 0.0f,
                 ShouldSuppressEmissiveForGI() ? 0.0f : 1.0f
             };
@@ -12662,7 +12665,7 @@ namespace Kurenai
         //
         // 【Hi-Zは前フレームのもの】Hi-Zパスの登録はG-Bufferより後なので、ここが読むのは
         // 前フレームに書かれた内容になる。カメラ移動ぶんAABBを膨らませて視差を吸収する
-        const bool modelCullGpuActive = m_ModelCullGpuEnabled && meshletPathActive
+        const bool modelCullGpuActive = m_GeometrySettings.ModelCullGpuEnabled && meshletPathActive
             && m_ModelCullPipelineState && m_ModelCullCounterBuffer && !m_Scene.Instances.empty();
 
         // hiZFromDepthPrepass = Hi-Zを**深度プリパスの深度から**作るか(宣言は上流にある)。
@@ -12692,7 +12695,7 @@ namespace Kurenai
         RHI::IRHIPipelineState* modelCullRegionPipelines[kModelCullRegionCount]{};
         if (modelCullGpuActive)
         {
-            const bool meshletDebug = m_MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
+            const bool meshletDebug = m_GeometrySettings.MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
             modelCullRegionPipelines[kModelCullRegionGBuffer] = meshletDebug
                 ? m_GBufferMeshletDebugPipelineState.get()
                 : m_GBufferMeshletPipelineState.get();
@@ -12837,7 +12840,7 @@ namespace Kurenai
         // 実際に描画発行まで任せるか。
         // 【DX11とメッシュシェーダー非対応環境では常にfalse】従来のCPUループへ縮退する
         const bool modelCullIndirectActive =
-            modelCullReady && m_ModelCullIndirectEnabled && m_Device->SupportsIndirectDispatchMesh();
+            modelCullReady && m_GeometrySettings.ModelCullIndirectEnabled && m_Device->SupportsIndirectDispatchMesh();
         m_ModelCullIndirectActiveLastFrame = modelCullIndirectActive;
         m_HiZFromDepthPrepassLastFrame = hiZFromDepthPrepass;
         m_ModelCullDispatchCounts[0] = hiZFromDepthPrepass
@@ -12904,7 +12907,7 @@ namespace Kurenai
                             if (modelCullIndirectActive)
                             {
                                 const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                    *draw.Instance, *draw.Model, m_EmissiveIntensity, m_OcclusionMapEnabled,
+                                    *draw.Instance, *draw.Model, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled,
                                     draw.RejectMask, draw.RequireMask, m_MeshletLODFrame,
                                     draw.CountCullStats, draw.DitherFade, draw.OcclusionMode);
                                 cmd->UpdateBuffer(
@@ -13191,7 +13194,7 @@ namespace Kurenai
                                 }
 
                                 const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                    instance, lodModel, m_EmissiveIntensity, m_OcclusionMapEnabled, rejectMask, requireMask,
+                                    instance, lodModel, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, rejectMask, requireMask,
                                     m_MeshletLODFrame);
                                 cmd->UpdateBuffer(
                                     m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -13262,7 +13265,7 @@ namespace Kurenai
                             }
 
                             ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame, lodDitherFade);
+                                MakeObjectConstants(instance, lodModel, mesh, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, m_MeshletLODFrame, lodDitherFade);
                             objectConstants.InstanceBase = unit.InstanceBase;
                             objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -13396,7 +13399,7 @@ namespace Kurenai
                     {
                         // デバッグ表示が有効ならメッシュレットごとの色分けPSOを使う。
                         // 用意できていない場合(作成失敗)は通常のメッシュレットPSOへ落とす
-                        const bool debugView = m_MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
+                        const bool debugView = m_GeometrySettings.MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
                         wanted = debugView
                             ? (mirrored ? m_GBufferMeshletDebugPipelineStateMirrored.get()
                                         : m_GBufferMeshletDebugPipelineState.get())
@@ -13437,7 +13440,7 @@ namespace Kurenai
                 // 選ぶPSOはbindPipelineState(mirrored, false, true)と同じもの
                 if (modelCullIndirectActive)
                 {
-                    const bool meshletDebug = m_MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
+                    const bool meshletDebug = m_GeometrySettings.MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
                     if (IssueModelCullIndirect(
                             cmd, kModelCullRegionGBuffer,
                             meshletDebug ? m_GBufferMeshletDebugPipelineState.get()
@@ -13509,7 +13512,7 @@ namespace Kurenai
                         bindPipelineState(instance.IsMirrored, false, true);
 
                         const ObjectConstants objectConstants = MakeModelObjectConstants(
-                            instance, lodModel, m_EmissiveIntensity, m_OcclusionMapEnabled,
+                            instance, lodModel, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled,
                             Assets::kGpuMaterialFlagTransparent, 0, m_MeshletLODFrame,
                             /*countCullStats=*/true, lodDitherFade);
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -13554,7 +13557,7 @@ namespace Kurenai
                         bindPipelineState(instance.IsMirrored, instance.IsWater, false);
 
                         ObjectConstants objectConstants =
-                            MakeObjectConstants(instance, lodModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame, lodDitherFade);
+                            MakeObjectConstants(instance, lodModel, mesh, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, m_MeshletLODFrame, lodDitherFade);
                         objectConstants.InstanceBase = unit.InstanceBase;
                         objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                         cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -13639,7 +13642,7 @@ namespace Kurenai
         // 【なぜハードウェアと比べられるのか】GBufferパスとまったく同じjitteredProjを渡すため、
         // 深度は丸め誤差とフィルルールの差を除いて一致するはず。差が面全体に出たら
         // 座標変換の間違いで、シルエットの±1画素ならフィルルールの差(想定内)
-        const bool softwareRasterPassRuns = m_SoftwareRasterEnabled && m_SoftwareRasterAvailable &&
+        const bool softwareRasterPassRuns = m_GeometrySettings.SoftwareRasterEnabled && m_SoftwareRasterAvailable &&
                                             m_SoftwareRasterVisibilityBuffer && !m_Scene.Instances.empty();
         if (softwareRasterPassRuns)
         {
@@ -13875,7 +13878,7 @@ namespace Kurenai
                     // y は影響半径の伸縮。半径は倍率1で焼いてあり、段階1の Range は
                     // peak ∝ intensity から解かれるので R ∝ sqrt(intensity) で伸ばす
                     megaLightsConstants.Params2 = {
-                        m_EmissiveIntensity, std::sqrt(std::max(m_EmissiveIntensity, 0.0f)),
+                        m_EmissiveLightSettings.Intensity, std::sqrt(std::max(m_EmissiveLightSettings.Intensity, 0.0f)),
                         0.0f, 0.0f };
                     cmd->UpdateBuffer(m_MegaLightsConstantBuffer.get(), &megaLightsConstants,
                                       sizeof(megaLightsConstants));
@@ -14666,8 +14669,8 @@ namespace Kurenai
                     {
                         static_cast<float>(m_RenderWidth),
                         static_cast<float>(m_RenderHeight),
-                        DirectX::XMConvertToRadians(m_RTShadowSunAngularRadiusDegrees),
-                        static_cast<float>(std::max(1, m_RTShadowSampleCount)),
+                        DirectX::XMConvertToRadians(m_ShadowSettings.RTSunAngularRadiusDegrees),
+                        static_cast<float>(std::max(1, m_ShadowSettings.RTSampleCount)),
                     };
                     cmd->UpdateBuffer(m_RTShadowConstantBuffer.get(), &rtShadowConstants, sizeof(rtShadowConstants));
 
@@ -15216,7 +15219,7 @@ namespace Kurenai
 
                     const ObjectConstants objectConstants =
                         MakeObjectConstants(
-                            *draw.Instance, *draw.Model, *draw.Mesh, m_EmissiveIntensity,
+                            *draw.Instance, *draw.Model, *draw.Mesh, m_EmissiveLightSettings.Intensity,
                             m_OcclusionMapEnabled, m_MeshletLODFrame);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
@@ -15380,7 +15383,7 @@ namespace Kurenai
                             bindPipelineState(!instance.IsMirrored);
 
                             ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, *currentModel, mesh, m_EmissiveIntensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
+                                MakeObjectConstants(instance, *currentModel, mesh, m_EmissiveLightSettings.Intensity, m_OcclusionMapEnabled, m_MeshletLODFrame);
                             objectConstants.InstanceBase = unit.InstanceBase;
                             objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -15477,12 +15480,12 @@ namespace Kurenai
                             planarReflectionPassRuns](RHI::IRHICommandList* cmd)
                 {
                     // 水面の解析空フォールバック。手続き空が無効(.ksceneがDDSスカイボックスを
-                    // 明示するシーン)なときは、m_WaterAnalyticSkyReflectionの値に関わらず必ず0にする
+                    // 明示するシーン)なときは、m_WaterSettings.AnalyticSkyReflectionの値に関わらず必ず0にする
                     // ――DDSは任意の絵でPerezモデルとは無関係なため、SSR.hlsl側のSkyColorで
                     // 解析評価してはいけない(usingProceduralSkyはRender()前半で既に確定済み。
                     // DeferredLighting.hlsl向けのconstants.SkyParams.y代入と同じ判断)
                     const float waterAnalyticSkyFlag =
-                        (m_WaterAnalyticSkyReflection && usingProceduralSky) ? 1.0f : 0.0f;
+                        (m_WaterSettings.AnalyticSkyReflection && usingProceduralSky) ? 1.0f : 0.0f;
                     // 平面反射。このフレームでPlanarReflectionパスを実際に実行したときだけ
                     // 有効にする(登録されなかったフレームにm_PlanarReflectionColorの中身は
                     // 前フレーム/未定義の残骸なので、フラグをそのままSSR.hlsl側へ渡してはいけない)
@@ -15559,7 +15562,7 @@ namespace Kurenai
                     // メッシュレット色になり、同じ塊が同じ色かを見比べられる
                     rtConstants.Params1 = {
                         m_ReflectionSettings.RTReflectionShadowRayEnabled ? 1.0f : 0.0f,
-                        m_MeshletDebugViewEnabled ? 1.0f : 0.0f,
+                        m_GeometrySettings.MeshletDebugViewEnabled ? 1.0f : 0.0f,
                         0.0f,
                         0.0f,
                     };
@@ -15709,7 +15712,7 @@ namespace Kurenai
             });
         }
 
-        if (m_TAAEnabled)
+        if (m_PostProcessSettings.TAAEnabled)
         {
             // 今フレームの書き込み先と、前フレームの結果(履歴)。Render()の末尾で役割が入れ替わる
             const uint32_t historyWriteIndex = m_TAAHistoryIndex;
@@ -15748,13 +15751,13 @@ namespace Kurenai
                         (historyValid && previousExposure > 0.0f) ? (effectiveExposure / previousExposure) : 1.0f;
 
                     taaConstants.Params0 = {
-                        m_TAABlendWeight,
-                        m_TAAClipGamma,
+                        m_PostProcessSettings.TAABlendWeight,
+                        m_PostProcessSettings.TAAClipGamma,
                         historyValid ? 1.0f : 0.0f,
                         exposureRescale,
                     };
                     taaConstants.Params1 = {
-                        static_cast<float>(m_TAAClipMode), m_TAAAntiFlicker, 0.0f, 0.0f
+                        static_cast<float>(m_PostProcessSettings.TAAClip), m_PostProcessSettings.TAAAntiFlicker, 0.0f, 0.0f
                     };
                     cmd->UpdateBuffer(m_TAAConstantBuffer.get(), &taaConstants, sizeof(taaConstants));
 
@@ -15778,11 +15781,11 @@ namespace Kurenai
         //     常に実行する ---
         // この行はTAAパスのAddPassより後に置くこと。ラムダは値キャプチャなので、先に差し替えると
         // TAAが自分の出力を入力として読む形になる(RenderGraphが循環を検出して例外を投げる)
-        RHI::IRHITexture* hdrSceneColor = m_TAAEnabled ? m_TAAHistory[m_TAAHistoryIndex].get() : taaInputColor;
+        RHI::IRHITexture* hdrSceneColor = m_PostProcessSettings.TAAEnabled ? m_TAAHistory[m_TAAHistoryIndex].get() : taaInputColor;
 
         // --- 自動露出パス: SceneColorの輝度ヒストグラムから目標EV100を求め、時間方向に順応させる。
         //     結果はm_ExposureTextureへ書かれ、後段のTonemapパスが読む(AutoExposure.hlsl参照) ---
-        if (m_AutoExposureEnabled)
+        if (m_PostProcessSettings.AutoExposureEnabled)
         {
             // シーン切り替え直後の1回だけ順応を飛ばす。パスを積んだ時点で消費しておくことで、
             // Executeが呼ばれる保証(グラフの枝刈り)に依存せず必ず1回で消える
@@ -15799,22 +15802,22 @@ namespace Kurenai
                     AutoExposureConstants autoExposureConstants{};
                     autoExposureConstants.InputSize = { m_RenderWidth, m_RenderHeight };
                     // Min>Maxのような不正な範囲だとヒストグラムのビン割りが破綻するため順序を保証する
-                    autoExposureConstants.MinEV100 = std::min(m_AutoExposureMinEV100, m_AutoExposureMaxEV100);
-                    autoExposureConstants.MaxEV100 = std::max(m_AutoExposureMinEV100, m_AutoExposureMaxEV100);
+                    autoExposureConstants.MinEV100 = std::min(m_PostProcessSettings.AutoExposureMinEV100, m_PostProcessSettings.AutoExposureMaxEV100);
+                    autoExposureConstants.MaxEV100 = std::max(m_PostProcessSettings.AutoExposureMinEV100, m_PostProcessSettings.AutoExposureMaxEV100);
                     autoExposureConstants.PreExposureEV100 = m_EffectiveExposureEV100;
                     // 一時停止やシーン読み込み直後の巨大なdtで順応が飛ばないよう上限を設ける
                     autoExposureConstants.DeltaTime = std::clamp(m_RenderDeltaTime, 0.0f, 0.1f);
-                    autoExposureConstants.AdaptationSpeedUp = m_AutoExposureSpeedUp;
-                    autoExposureConstants.AdaptationSpeedDown = m_AutoExposureSpeedDown;
-                    autoExposureConstants.LowPercentile = std::min(m_AutoExposureLowPercentile, m_AutoExposureHighPercentile);
-                    autoExposureConstants.HighPercentile = std::max(m_AutoExposureLowPercentile, m_AutoExposureHighPercentile);
-                    autoExposureConstants.ExposureCompensation = m_AutoExposureCompensation;
-                    autoExposureConstants.NightRolloffEV = m_AutoExposureNightRolloffEV;
+                    autoExposureConstants.AdaptationSpeedUp = m_PostProcessSettings.AutoExposureSpeedUp;
+                    autoExposureConstants.AdaptationSpeedDown = m_PostProcessSettings.AutoExposureSpeedDown;
+                    autoExposureConstants.LowPercentile = std::min(m_PostProcessSettings.AutoExposureLowPercentile, m_PostProcessSettings.AutoExposureHighPercentile);
+                    autoExposureConstants.HighPercentile = std::max(m_PostProcessSettings.AutoExposureLowPercentile, m_PostProcessSettings.AutoExposureHighPercentile);
+                    autoExposureConstants.ExposureCompensation = m_PostProcessSettings.AutoExposureCompensation;
+                    autoExposureConstants.NightRolloffEV = m_PostProcessSettings.AutoExposureNightRolloffEV;
                     // 折れ点は必ずDark < Brightにする(逆転すると補正が不連続になる)
                     autoExposureConstants.NightRolloffDarkEV100 =
-                        std::min(m_AutoExposureNightRolloffDarkEV100, m_AutoExposureNightRolloffBrightEV100);
+                        std::min(m_PostProcessSettings.AutoExposureNightRolloffDarkEV100, m_PostProcessSettings.AutoExposureNightRolloffBrightEV100);
                     autoExposureConstants.NightRolloffBrightEV100 =
-                        std::max(m_AutoExposureNightRolloffDarkEV100, m_AutoExposureNightRolloffBrightEV100);
+                        std::max(m_PostProcessSettings.AutoExposureNightRolloffDarkEV100, m_PostProcessSettings.AutoExposureNightRolloffBrightEV100);
                     // 構図に依存しないシーンの基準EV。測光値の上限の足がかりになる。
                     //
                     // **手続き空を使っていないシーンではクランプを無効にする**。
@@ -15826,7 +15829,7 @@ namespace Kurenai
                     // 飽和させてしまうとエネルギー保存の検証が成立しなくなる)
                     autoExposureConstants.KeyReferenceEV100 = keyReferenceEV100;
                     autoExposureConstants.KeyCeilingEV =
-                        usingProceduralSky ? m_AutoExposureKeyCeilingEV : 1.0e4f;
+                        usingProceduralSky ? m_PostProcessSettings.AutoExposureKeyCeilingEV : 1.0e4f;
                     autoExposureConstants.ResetAdaptation = resetAdaptation ? 1.0f : 0.0f;
                     cmd->UpdateBuffer(m_AutoExposureConstantBuffer.get(), &autoExposureConstants, sizeof(autoExposureConstants));
 
@@ -15858,7 +15861,7 @@ namespace Kurenai
 
         // --- ブルームパス: SceneColorから半解像度のピラミッドを作り、段階的にダウンサンプル→
         //     3x3テントでアップサンプルしながら加算する。最終段(m_BloomUpTextures[0])をTonemapが読む ---
-        if (m_BloomEnabled && !m_BloomDownTextures.empty())
+        if (m_PostProcessSettings.BloomEnabled && !m_BloomDownTextures.empty())
         {
             std::vector<RHI::IRHITexture*> bloomWrites;
             bloomWrites.reserve(m_BloomDownTextures.size() + m_BloomUpTextures.size());
@@ -15880,12 +15883,12 @@ namespace Kurenai
                     const uint32_t levelCount = static_cast<uint32_t>(m_BloomDownTextures.size());
 
                     BloomConstants bloomConstants{};
-                    bloomConstants.Threshold = m_BloomThreshold;
-                    bloomConstants.SoftKnee = m_BloomSoftKnee;
+                    bloomConstants.Threshold = m_PostProcessSettings.BloomThreshold;
+                    bloomConstants.SoftKnee = m_PostProcessSettings.BloomSoftKnee;
                     // しきい値を「表示上の白」基準の直感的な値のままにするため、
                     // ピラミッドの入力段で露出を反映する(Bloom.hlsl ExposureScale()参照)。
                     // Tonemapと同じ倍率でなければ、ブルームだけ露出がずれて合成比が狂う
-                    bloomConstants.UseAutoExposure = m_AutoExposureEnabled ? 1.0f : 0.0f;
+                    bloomConstants.UseAutoExposure = m_PostProcessSettings.AutoExposureEnabled ? 1.0f : 0.0f;
                     bloomConstants.PreExposureEV100 = m_EffectiveExposureEV100;
                     bloomConstants.ExposureScale = manualExposureScale;
 
@@ -15962,16 +15965,16 @@ namespace Kurenai
                         keyReferenceEV100, upscaleActive](RHI::IRHICommandList* cmd)
             {
                 TonemapConstants tonemapConstants{};
-                tonemapConstants.Curve = static_cast<int32_t>(m_TonemapCurve);
+                tonemapConstants.Curve = static_cast<int32_t>(m_PostProcessSettings.Curve);
                 // 手動露出時: プリ露出は時刻連動で変動するので、設定EV100との差分を割り戻して
                 // 「設定EV100で固定した絵」へ戻す(manualExposureScaleの算出箇所のコメント参照)
                 tonemapConstants.ExposureScale = manualExposureScale;
-                tonemapConstants.DitherStrength = m_DitherEnabled ? 1.0f : 0.0f;
-                tonemapConstants.UseAutoExposure = m_AutoExposureEnabled ? 1.0f : 0.0f;
+                tonemapConstants.DitherStrength = m_PostProcessSettings.DitherEnabled ? 1.0f : 0.0f;
+                tonemapConstants.UseAutoExposure = m_PostProcessSettings.AutoExposureEnabled ? 1.0f : 0.0f;
                 tonemapConstants.PreExposureEV100 = m_EffectiveExposureEV100;
                 tonemapConstants.BloomStrength =
-                    (m_BloomEnabled && !m_BloomUpTextures.empty()) ? m_BloomStrength : 0.0f;
-                tonemapConstants.MesopicStrength = m_MesopicStrength;
+                    (m_PostProcessSettings.BloomEnabled && !m_BloomUpTextures.empty()) ? m_PostProcessSettings.BloomStrength : 0.0f;
+                tonemapConstants.MesopicStrength = m_PostProcessSettings.MesopicStrength;
                 // 目の順応は画面の構図ではなくシーンの明るさで決まるので、
                 // 自動露出の測光値ではなくキー照度から求めた基準EVを使う
                 tonemapConstants.MesopicAdaptationEV100 = keyReferenceEV100;
@@ -15982,10 +15985,10 @@ namespace Kurenai
                 // その後EASUで拡大すると、戻した高域もオーバーシュートの縁も一緒に引き伸ばされて
                 // 太い縁取りになる。超解像時のシャープ化は出力解像度で効くRCASへ一本化し、
                 // ここは素直なトーンマップ出力をEASUへ渡すことに徹する
-                tonemapConstants.Sharpness = (m_TAAEnabled && !upscaleActive) ? m_TAASharpness : 0.0f;
+                tonemapConstants.Sharpness = (m_PostProcessSettings.TAAEnabled && !upscaleActive) ? m_PostProcessSettings.TAASharpness : 0.0f;
                 tonemapConstants.InvRenderWidth = 1.0f / static_cast<float>(m_RenderWidth);
                 tonemapConstants.InvRenderHeight = 1.0f / static_cast<float>(m_RenderHeight);
-                tonemapConstants.BlackPoint = m_TonemapBlackPoint;
+                tonemapConstants.BlackPoint = m_PostProcessSettings.TonemapBlackPoint;
                 cmd->UpdateBuffer(m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
 
                 cmd->SetViewport(gbufferViewport);
@@ -16018,7 +16021,7 @@ namespace Kurenai
             ComputeEasuConstants(
                 upscaleConstants, m_RenderWidth, m_RenderHeight, upscaleOutputWidth, upscaleOutputHeight);
             upscaleConstants.OutputSize = { upscaleOutputWidth, upscaleOutputHeight };
-            upscaleConstants.RcasSharpnessScale = ComputeRcasSharpnessScale(m_UpscaleSharpness);
+            upscaleConstants.RcasSharpnessScale = ComputeRcasSharpnessScale(m_PostProcessSettings.UpscaleSharpness);
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "UpscaleEASU",
@@ -16459,7 +16462,7 @@ namespace Kurenai
         else
         {
             presentConstants.ArraySlice =
-                static_cast<float>(std::clamp(m_ShadowDebugCascade, 0, static_cast<int32_t>(kCascadeCount) - 1));
+                static_cast<float>(std::clamp(m_ShadowSettings.DebugCascade, 0, static_cast<int32_t>(kCascadeCount) - 1));
         }
         // Finalの見た目は倍率の影響を受けてはならないため、デバッグ表示のときだけ倍率を掛ける
         // (Gainはゼロ初期化のままだと0倍=真っ黒になるので、必ず明示的に設定すること)
@@ -16795,7 +16798,7 @@ namespace Kurenai
             }
         }
 
-        if (m_TAAEnabled)
+        if (m_PostProcessSettings.TAAEnabled)
         {
             // 今フレームの書き込み先が、次フレームでは履歴(読み込み元)になる
             m_TAAHistoryIndex ^= 1u;

@@ -303,7 +303,7 @@ Lagarde & de Rousiers 2014の照度参照テーブルから、直射日光(正�
 使うとほぼ完全な黒になり視認性が失われるため、視認性確保のためのアート的な下限値を
 意図的に置いています。
 
-既定の`m_SceneExposureEV100 = 15.0`は、実写真の「Sunny 16」(晴天屋外の経験則、
+既定の`m_PostProcessSettings.SceneExposureEV100 = 15.0`は、実写真の「Sunny 16」(晴天屋外の経験則、
 EV100 ≈ 15)に基づく値です。**この露出はシーン全体で単一の値**であり、太陽・環境光・
 ポイント/スポットライトすべてに同じ式が適用されます。実カメラの露出設定が画角内の全光源に
 一様にかかるのと同じ理由です。屋内シーン(直射日光が無い/弱いシーン)では、実際のカメラで
@@ -7016,7 +7016,7 @@ MegaLights経路でも `LightCull`(従来のタイルライトカリング)が�
 **MegaLightsが走っていないとき、または `DebugView::LightTiles` を選んでいるとき**。
 `ShouldRunMegaLights` と同じ「述語を1か所に集約する」作法で、パスの登録条件・
 容量超過の警告・`LightingConstants.TileParams.w`(グリッドが有効か)の3か所が
-同じ関数を通る。MegaLightsがOFFのフレームでは `m_LightCullingEnabled` と同値なので、
+同じ関数を通る。MegaLightsがOFFのフレームでは `m_GeometrySettings.LightCullingEnabled` と同値なので、
 従来経路の挙動は変わらない。
 
 BistroExteriorNight(107灯)/ 2560x1440 / RTX 4070 Ti / Release / DX12 / 120フレーム平均:
@@ -8810,7 +8810,7 @@ CPU 側がパスごとに渡す値を変える形にしてある。
 #### 判定は1か所、述語は1本
 
 - 「抑止するか」は `KurenaiEngine3D::ShouldSuppressEmissiveForGI()` だけが決める
-  (`m_EmissiveLightsEnabled && !m_EmissiveLightsDoubleCountGI && !m_EmissiveProxies.empty()`)。
+  (`m_EmissiveLightSettings.LightsEnabled && !m_EmissiveLightSettings.LightsDoubleCountGI && !m_EmissiveProxies.empty()`)。
   **プロキシが1つも無いなら抑止しない** ―― 光源にしていないのに自発光だけ抜くと、
   その面の照明が丸ごと落ちる
 - 「どのメッシュを抑止するか」は **`!mesh.EmissiveClusters.empty()` の1本**。
@@ -8862,10 +8862,10 @@ DX12 / Release / 1280x720、ビューポート 691×479 = 330,989 画素:
 
 | 値 | なぜ焼き上がりを変えるか |
 |---|---|
-| `m_EmissiveLightsEnabled` | プロキシを送るかどうか |
-| `m_EmissiveLightsCutoffIrradiance` | Range が変わる |
-| `m_EmissiveLightsMaxCount` | 採用数が変わる |
-| `m_EmissiveLightsDoubleCountGI` | DDGI のキャプチャから自発光を抜くかどうか |
+| `m_EmissiveLightSettings.LightsEnabled` | プロキシを送るかどうか |
+| `m_EmissiveLightSettings.LightsCutoffIrradiance` | Range が変わる |
+| `m_EmissiveLightSettings.LightsMaxCount` | 採用数が変わる |
+| `m_EmissiveLightSettings.LightsDoubleCountGI` | DDGI のキャプチャから自発光を抜くかどうか |
 | **`m_EmissiveLightsSelectionHash`** | **上限に当たったときの採用集合** |
 
 最後の1つが要る理由:**採用順はカメラ位置からの照度で決まる。**

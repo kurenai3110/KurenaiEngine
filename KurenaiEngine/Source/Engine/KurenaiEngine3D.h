@@ -29,12 +29,17 @@
 #include "Settings/AmbientOcclusionSettings.h"
 #include "Settings/CloudSettings.h"
 #include "Settings/DDGISettings.h"
+#include "Settings/EmissiveLightSettings.h"
 #include "Settings/FogSettings.h"
+#include "Settings/GeometrySettings.h"
 #include "Settings/MegaLightsSettings.h"
+#include "Settings/PostProcessSettings.h"
 #include "Settings/ReflectionProbeSettings.h"
 #include "Settings/ReflectionSettings.h"
+#include "Settings/ShadowSettings.h"
 #include "Settings/SkySettings.h"
 #include "Settings/StarsSettings.h"
+#include "Settings/WaterSettings.h"
 
 #pragma warning(push)
 #pragma warning(disable: 4251)
@@ -243,7 +248,7 @@ namespace Kurenai
         // 消えてしまい、「ライト数に対して横ばいか」を測れない
         // 【計測専用】自動露出の有効/無効を起動時に決める。
         //
-        // UI(PostProcessPanel)は m_AutoExposureEnabled を直接触るが、起動オプションから
+        // UI(PostProcessPanel)は m_PostProcessSettings.AutoExposureEnabled を直接触るが、起動オプションから
         // 同じ状態を作れないと「画面で見ていた設定」と「計測で走らせた設定」を揃えられない。
         // 揃っていない条件どうしの比較は、差が手法の差なのか設定の差なのか分けられない
         void SetAutoExposureEnabled(bool enabled);
@@ -431,7 +436,7 @@ namespace Kurenai
         void CreatePlanarReflectionTargets();
         // 自前ソフトウェアラスタライザパス(46章)の本体。クリア2回とディスパッチ3回を積む。
         // 呼ぶのはRender()のレンダーグラフ登録からのみで、
-        // m_SoftwareRasterEnabled && m_SoftwareRasterAvailable のときだけ登録される。
+        // m_GeometrySettings.SoftwareRasterEnabled && m_SoftwareRasterAvailable のときだけ登録される。
         // viewProjはGBufferパスが使ったものとまったく同じ行列(ジッターを含む)を渡すこと ――
         // 別の行列で描くと深度の比較が意味を失う。
         // sunDirectionは光が進む向き(FrameConstants::LightDirectionと同じ規約)
@@ -685,38 +690,7 @@ namespace Kurenai
         // Updateスレッドが毎フレーム読み取ってm_Camera.SetAspectRatio()を呼ぶ
         std::atomic<float> m_RenderAspect{ 1.0f };
 
-        // --- 超解像(FSR1相当のEASU+RCAS。41.23節) ---
-        //
-        // 【m_RenderWidth/m_RenderHeightの意味は変えていない】ここで足したのは
-        // 「出力解像度」という一段外側の概念だけで、上のm_RenderWidth/m_RenderHeightは
-        // 従来どおり「G-Buffer以降すべての中間バッファの解像度」のままである。
-        // 超解像が有効なとき、出力解像度を品質モードの倍率で割った値を
-        // RequestRenderResolution()へ流し込む、という関係になっている。
-        // こうしてあるのは、Render()の各所に散らばるm_RenderWidth/m_RenderHeightの参照を
-        // 「レンダー解像度」と「出力解像度」へ仕分ける必要をなくすため。
-        // 追加のパスはTonemapの後ろに2本足すだけで済んでいる
-        enum class UpscaleQualityMode
-        {
-            UltraQuality, // 1.3倍
-            Quality,      // 1.5倍
-            Balanced,     // 1.7倍
-            Performance,  // 2.0倍
-        };
-        // 品質モードの既定値。EngineDefaults.hは列挙を知らない(<cstdint>しか取り込まない)ため
-        // ここに置くが、「メンバの初期化子とUIの『既定値に戻す』が同じ出所を見る」という
-        // EngineDefaults.hの原則自体は守る
-        static constexpr UpscaleQualityMode kDefaultUpscaleQualityMode = UpscaleQualityMode::Quality;
-
-        bool m_UpscaleEnabled = Defaults::UpscaleEnabled;
-        UpscaleQualityMode m_UpscaleQualityMode = kDefaultUpscaleQualityMode;
-        // RCASのシャープネス(0〜1)。UIの見た目の値で、シェーダーへ渡す前に
-        // ComputeRcasSharpnessScale()で参照実装のスケールへ変換する
-        float m_UpscaleSharpness = Defaults::UpscaleSharpness;
-        // 超解像が有効なときの出力解像度。無効なときは内部レンダー解像度そのものになる。
-        // ウィンドウサイズには追従しない(追従させるとドラッグ中に何度も
-        // レンダーターゲットを作り直すことになる。SystemPanelの「ウィンドウサイズに合わせる」参照)
-        uint32_t m_UpscaleOutputWidth = Defaults::RenderWidth;
-        uint32_t m_UpscaleOutputHeight = Defaults::RenderHeight;
+        PostProcessSettings m_PostProcessSettings;
         // 出力解像度用テクスチャの作り直し要求。m_RenderResolutionDirtyとまったく同じ扱いで、
         // Render()の先頭のWaitForGPUIdle()を挟んだ位置で処理する
         bool m_UpscaleTargetsDirty = false;
@@ -862,7 +836,7 @@ namespace Kurenai
         // 1つの巨大AABBになり、どのパスからも一度も間引かれなくなる。
         // グループ内を空間セルでソートしてから刻むので、バッチは局所的にまとまる
         static constexpr uint32_t kMaxInstancesPerBatch = 128;
-        bool m_InstancingEnabled = Defaults::InstancingEnabled;
+        GeometrySettings m_GeometrySettings;
         // バッチを組み直す(レンダーグラフの構築より前に1フレーム1回。UpdateModelLODの後)
         void BuildInstanceBatches(RHI::IRHICommandList* commandList);
 
@@ -930,47 +904,6 @@ namespace Kurenai
         // 白1x1で描かれてしまう**ため、UIとフレーム統計ログの両方へ出す
         uint32_t m_BindlessCapacity = 0;
         uint32_t m_BindlessUsedCount = 0;
-        // メッシュレット経路を使うか(ImGuiのレンダリングパネルから切り替える)。
-        // 対応環境では既定で有効。無効にすると従来の頂点シェーダー描画に戻るため、
-        // 見た目の差分を目で比較できる
-        bool m_MeshletRenderingEnabled = true;
-        // メッシュレットごとの色分け表示。m_MeshletRenderingEnabledが有効なときだけ効く
-        bool m_MeshletDebugViewEnabled = false;
-        // 増幅シェーダーのHi-Zオクルージョンカリング(Stage 5-2)。メッシュレットのバウンディング球を
-        // 前フレームのHi-Zへ投影し、「視界内だが手前の何かに完全に隠れている」塊を落とす。
-        //
-        // 【メッシュレット経路でしか効かない】判定を書いてあるのは増幅シェーダーなので、
-        // メッシュシェーダー非対応の環境(基準機のIntel UHD 620を含む)では一切走らない。
-        // これが有効なフレームだけHi-Zパスも構築される(m_HiZTextureのコメント参照)
-        bool m_OcclusionCullingEnabled = Defaults::OcclusionCullingEnabled;
-        // オクルージョン判定でバウンディング球を膨らませる倍率。
-        //
-        // 【1.0が基準】判定に使うHi-Zは前フレームのものなので、そのフレームのカメラ移動ぶんは
-        // 別項(移動距離をそのまま半径へ足す)で吸収している。この倍率が埋めるのはそれとは別の
-        // 誤差 ―― バウンディング球がメッシュレットの実体より緩いこと、およびカメラ回転による
-        // 見え方の変化。ポップ(隠れていないものが消える)が出たら上げる
-        float m_OcclusionCullRadiusScale = Defaults::OcclusionCullRadiusScale;
-
-        // --- メッシュレットカリングの統計(Stage 5-2) ---
-        //
-        // 【「間引き0」だけでは何も分からない】判定式が常に通しているのか、本当に全部
-        // 見えているのかを区別できない。CPU側のフラスタムカリング(m_FrustumCullTested /
-        // m_FrustumCullCulled)が判定数と対で出しているのと同じ理由で、ここでも対で出す。
-        // **オクルージョンは視錐台+コーンとは別のカウンタにする** ―― 合算すると
-        // 「俯瞰(遮蔽が少ない)と街路(遮蔽が多い)で差が出るか」という確認ができない。
-        bool m_MeshletCullStatsEnabled = Defaults::MeshletCullStatsEnabled;
-
-        // --- メッシュレットLOD(離散LOD。Stage 6) ---------------------------------------
-        //
-        // 段を選ぶのは増幅シェーダーで、ここにあるのはその入力。
-        // 【1つのモデル内で段を混ぜない】選択の入力はモデルのバウンディング球とカメラだけで、
-        // メッシュレットごとの値を使わない。段が混ざると、簡略化で頂点が動いた側と
-        // 動いていない側で辺が一致せず、境目に穴が開く
-        bool m_MeshletLODEnabled = Defaults::MeshletLODEnabled;
-        float m_MeshletLODQuality = Defaults::MeshletLODQuality;
-        int32_t m_MeshletLODForcedLevel = Defaults::MeshletLODForcedLevel;
-        // 色分け表示を段ごとにする。上の「メッシュレットを色分け」が有効なときだけ効く
-        bool m_MeshletLODDebugColorEnabled = false;
         // 毎フレーム主カメラから作り直し、全パスの定数バッファへ同じものを配る
         MeshletLODFrameConstants m_MeshletLODFrame;
         // 増幅シェーダーが数え上げる先。uint×3 = [判定, 視錐台+コーンで間引き, オクルージョンで間引き]
@@ -1043,13 +976,6 @@ namespace Kurenai
         };
         static_assert(sizeof(GpuModelCullInstance) == 48, "ModelCull.hlslのModelCullInstanceと一致させること");
 
-        // Hi-Zを深度プリパスの深度から作るか。切ると従来どおりG-Bufferの後で作り、
-        // 判定は前フレームのHi-Zで行う(意味と効果はDefaults::HiZFromDepthPrepass)
-        bool m_HiZFromDepthPrepassEnabled = Defaults::HiZFromDepthPrepass;
-        bool m_ModelCullGpuEnabled = Defaults::ModelCullGpuEnabled;
-        // カリング結果で実際に描画発行まで行うか。falseなら判定と計数だけ行い、
-        // 描くのは従来のCPUループのまま(コストと効果をA/Bで測るためのトグル)
-        bool m_ModelCullIndirectEnabled = Defaults::ModelCullIndirectEnabled;
         std::unique_ptr<RHI::IRHIShader> m_ModelCullComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_ModelCullPipelineState;
         std::unique_ptr<RHI::IRHIBuffer> m_ModelCullConstantBuffer;
@@ -1262,7 +1188,7 @@ namespace Kurenai
         // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
         //
         // 消費者は2つ: デバッグ表示(Render Targets - Hi-Z)と、増幅シェーダーの
-        // オクルージョンカリング(m_OcclusionCullingEnabled)。**どちらも要らないフレームでは
+        // オクルージョンカリング(m_GeometrySettings.OcclusionCullingEnabled)。**どちらも要らないフレームでは
         // 構築しない** ―― 1280x720で「コピー1回 + ミップ段数-1回のディスパッチ」が走り、
         // Intel UHD 620での実測で1.19〜1.21ms(GPUフレーム時間30msの約4%)を占めるため
         std::unique_ptr<RHI::IRHIShader> m_HiZCopyComputeShader;
@@ -1328,8 +1254,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_RTShadowPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_RTShadowTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_RTShadowConstantBuffer;
-        int32_t m_RTShadowSampleCount = Defaults::RTShadowSampleCount;
-        float m_RTShadowSunAngularRadiusDegrees = Defaults::RTShadowSunAngularRadiusDegrees;
 
         MegaLightsSettings m_MegaLightsSettings;
         // シェーダーとパイプラインステートはm_RaytracingAvailableがtrueのときだけ作る
@@ -1646,12 +1570,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_AerialPerspectivePipelineState;
         std::unique_ptr<RHI::IRHITexture> m_AerialPerspectiveTexture;
         FogSettings m_FogSettings;
-        // 水中項。Water.hlslのPSMainがメッシュ自身のBaseColorFactorの代わりにこの色を
-        // 出力Albedoに使う(見下ろした水面がFresnel最小でほぼ真っ黒になる問題への対処。
-        // 干潟の水の色はシーン側で調整したいパラメータであり、.kmodelを焼き直さずに変えられるようにするため)
-        DirectX::XMFLOAT3 m_WaterBodyColor{
-            Defaults::WaterBodyColorR, Defaults::WaterBodyColorG, Defaults::WaterBodyColorB
-        };
+        WaterSettings m_WaterSettings;
 
         // TAA(Temporal Anti-Aliasing)パス: SSRの後、露出/ブルーム/トーンマップの前に置く。
         // 毎フレーム投影行列を1ピクセル未満だけずらして(ジッター)サンプル位置を散らし、
@@ -1697,36 +1616,6 @@ namespace Kurenai
         // その値が時間順応で毎フレーム変わる(m_EffectiveExposureEV100)。補正しないと
         // 露出が動いている間ずっと履歴が古い明るさを引きずり、明るさの尾を引く
         float m_TAAPrevEffectiveExposureEV100 = 0.0f;
-        bool m_TAAEnabled = Defaults::TAAEnabled;
-        // 今フレームの色を履歴へ混ぜる割合。小さいほど収束後は滑らかだが、
-        // 遮蔽が変わったときの追従が遅くなる
-        float m_TAABlendWeight = Defaults::TAABlendWeight;
-        // ジッターの振れ幅の倍率(1.0でピクセル内いっぱい)。0にするとジッターが無くなり、
-        // 時間方向のスーパーサンプリング効果だけが消える(再投影と蓄積は残る)
-        float m_TAAJitterScale = Defaults::TAAJitterScale;
-        // 蓄積によるボケを補うシャープネス。TAAの中ではなくTonemapパスで最終出力にのみ掛ける。
-        // TAAの入力へ掛けるとアンシャープマスクが「ジッターで変動する高域」を増幅し、
-        // ちらつきが実測で約53%増える(Architecture.html 23.7節)
-        float m_TAASharpness = Defaults::TAASharpness;
-        // 近傍クリップのボックス幅(近傍の標準偏差の何倍まで履歴を許容するか)。
-        // 小さいほどゴーストに強いがちらつきが増え、大きいほどその逆になる。
-        // これは「動いている画素」に適用される値で、静止した画素ではm_TAAAntiFlickerに応じて広がる
-        float m_TAAClipGamma = Defaults::TAAClipGamma;
-        // 静止している画素に限ってブレンド率を下げ、近傍クリップのボックスを実質無効まで広げる量。
-        // 速度が0の画素では再投影誤差が原理的に起きないためクリップは害にしかならず、
-        // 一方でちらつきはブレンド率とクリップの両方から出る。動いている画素の挙動は
-        // 一切変えないため、ゴーストの出方はこの機能を切ったときと同じままになる。
-        // 0で無効(この機能を入れる前の挙動に戻る)
-        float m_TAAAntiFlicker = Defaults::TAAAntiFlicker;
-        // 近傍クリップの方式。TAA.hlsl側のclipModeと値を一致させること
-        // (TonemapCurveと同じく、列挙の既定値はEngineDefaults.hではなくここへ直接書く)
-        enum class TAAClipMode : int32_t
-        {
-            None = 0,     // クリップしない(切り分け測定用。ゴーストが激しく出るので常用しない)
-            Variance = 1, // 近傍の平均±(標準偏差×ClipGamma)のみ
-            Clamped = 2,  // 上記と近傍の実在min/maxとの積集合(最も狭く、最もゴーストに強い)
-        };
-        TAAClipMode m_TAAClipMode = TAAClipMode::Clamped;
 
         // Tonemapパス: SceneColor(SSR有効時はm_SSRTexture)のHDR値をReinhardトーンマッピング+
         // ガンマ補正でLDRへ変換し、Presentパスへ渡す。SSR等のHDR演算より後、Present直前の
@@ -1750,42 +1639,13 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_UpscaleSharpTexture; // RCASの出力(Presentが読む)
         std::unique_ptr<RHI::IRHIBuffer> m_UpscaleConstantBuffer;
 
-        // トーンマッピングカーブ。Tonemap.hlsl側のCurveと値を一致させること
-        enum class TonemapCurve
-        {
-            Reinhard, // c/(c+1)。比較用のリファレンスカーブ
-            ACES,     // Narkowicz 2015のフィット近似
-            AgX,      // Troy Sobotka の AgX(Filament/three.jsの実装形)
-        };
-        // 既定をAgXにしている理由: ACESは飽和した明るい色の色相がシフトする(赤がオレンジへ寄る)
-        // ことが知られており、Bistro内観のように赤い壁が支配的なシーンでその欠点が最も出やすい。
-        // AgXはハイライトが色相を保ったまま白へ脱色するため、この用途では素直な絵になる
-        TonemapCurve m_TonemapCurve = TonemapCurve::AgX;
-        // 黒の締め(ブラックポイント)。0で恒等。詳細はShaders/3D/Tonemap.hlslのコメント参照
-        float m_TonemapBlackPoint = Defaults::TonemapBlackPoint;
-
-        // 薄明視(mesopic vision)の適用量。0で無効、1で完全適用。
-        //
-        // 暗所では錐体が働かなくなり桿体だけの視覚に移る。桿体は1種類しか無いので色を
-        // 判別できず、実際の月明かりの下では「形は見えるのに色がほとんど無い」見え方になる。
-        // 露出を下げるだけでは「暗いが色鮮やかな夜」にしかならず、肉眼で見た夜と一致しない。
-        // 桿体の分光感度が短波長寄り(507nm)であることから来るプルキンエ現象も同時に入る
-        // (詳細はTonemap.hlsl の ApplyMesopicVision)。
-        // 既定は無効。効果が強く画作りの好みが分かれるため、使うときに明示的に上げる
-        float m_MesopicStrength = Defaults::MesopicStrength;
-
-        // 出力8bit量子化の直前に加えるディザリング。実測(Bistro Interior)では走査線上に
-        // 同一色が24px連続しており、これは中間バッファをHDR化しても変わらなかった。
-        // つまり暗部のバンディングの主因は最終8bit量子化であり、ここでしか直せない。
-        // 効果をA/B比較できるようトグルにしてある
-        bool m_DitherEnabled = Defaults::DitherEnabled;
 
         // 自動露出(eye adaptation)パス: SceneColorの輝度ヒストグラムをGPUで作り、
         // 低/高パーセンタイルを除外した加重平均から目標EV100を求めて時間方向に追従させる。
         // 結果はm_ExposureTextureへ書かれ、Tonemapパスが読んで露出倍率に変換する。
         //
         // 露出そのものはCPU側でライト強度へ事前乗算されている(プリ露出方式、
-        // m_SceneExposureEV100)。自動露出の結果をライト強度へ戻すとフィードバックループになり、
+        // m_PostProcessSettings.SceneExposureEV100)。自動露出の結果をライト強度へ戻すとフィードバックループになり、
         // かつGPU→CPUのリードバック(同期待ち)が要るため、プリ露出は固定のままにして
         // 「プリ露出EVと自動露出EVの差」だけをTonemapで掛ける構成にしている
         // (詳細はAutoExposure.hlsl冒頭)
@@ -1803,65 +1663,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_ExposureTexture;
         // 輝度ヒストグラムのビン数。AutoExposure.hlslのHISTOGRAM_BINSと一致させること
         static constexpr uint32_t kExposureHistogramBins = 256;
-
-        bool m_AutoExposureEnabled = Defaults::AutoExposureEnabled;
-        // 露出のクランプ範囲(EV100)。ヒストグラムのビン割りもこの範囲で行うため、
-        // 実シーンの輝度がこの外に出ると端に張り付く
-        // 下限-6は月夜の地表(反射率0.2の面で約0.016 cd/m^2 = EV100約-3)を余裕をもって含む値。
-        // 星明かりだけの夜まで追うならさらに下げる必要があるが、実写の夜景もEV -3〜-5程度で
-        // 撮るのが普通なので実用上はここで足りる。
-        // 上限18は、正規化後の昼の空(約6400 cd/m^2 = EV100約15.6)に余裕を持たせた値
-        float m_AutoExposureMinEV100 = Defaults::AutoExposureMinEV100;
-        float m_AutoExposureMaxEV100 = Defaults::AutoExposureMaxEV100;
-        // 明順応(暗→明)と暗順応(明→暗)の速度。人間の目は暗順応のほうが遅いため既定値も分けている
-        float m_AutoExposureSpeedUp = Defaults::AutoExposureSpeedUp;
-        float m_AutoExposureSpeedDown = Defaults::AutoExposureSpeedDown;
-        // 加重平均から除外する下側/上側の累積割合。暗すぎる画素・明るすぎる画素に露出が
-        // 引きずられるのを防ぐ
-        float m_AutoExposureLowPercentile = Defaults::AutoExposureLowPercentile;
-        float m_AutoExposureHighPercentile = Defaults::AutoExposureHighPercentile;
-        // 測定結果に対してユーザーが意図的に足すオフセット(EV)
-        float m_AutoExposureCompensation = Defaults::AutoExposureCompensation;
-        // 暗いシーンをわざと暗いまま写すための補正量[EV]。
-        // 自動露出は測ったものを中庸なグレーへ持ち上げるので、これが0だと夜が昼と同じ明るさで
-        // 出てしまう(実測: 補正なしでは22時と12時の空の明度がほぼ一致する)。
-        // 実写でも夜景はわざと露出を切り詰めて撮るため、既定で4.5段暗くする。
-        // 既定値は「肉眼で見た月明かりの夜」に合わせて実測で決めた
-        // (m_MesopicStrength=1のときの、月光を受ける壁 / 夜空の8bitコード):
-        //   3.5段 … 壁19 / 空70  形も質感もはっきり読め、夜というより夕暮れ寄り
-        //   4.5段 … 壁 6 / 空44  空が一番明るく、建物は輪郭と影がかろうじて読める ← 既定
-        //   5.5段 … 壁 2 / 空23  建物がほぼ完全に沈み、空しか見えない
-        //
-        // **m_MesopicStrengthとセットで意味を持つ**点に注意。露出を下げるだけでは
-        // 「暗いが色鮮やかな夜」にしかならず、肉眼で見た夜と一致しない。
-        //
-        // 0にすると「常に中庸なグレーへ合わせる」挙動になる。
-        //
-        // **m_AutoExposureKeyCeilingEVとセットで意味を持つ値**である点に注意。
-        // 上のクランプが無いと測光値が構図で2〜3.5段振れるので、この値をいくつにしても
-        // カメラの向きで夜の明るさが変わってしまう
-        float m_AutoExposureNightRolloffEV = Defaults::AutoExposureNightRolloffEV;
-        // 補正カーブの折れ点[EV100]。測定値がDark以下で補正量が最大、Bright以上で0、間は線形。
-        // Darkの-2は満月の夜の地表(反射率0.2の面で約0.016 cd/m^2 = EV100約-3)のすぐ上、
-        // Brightの10は曇天の屋外あたりで、日中は補正が掛からない値にしてある
-        float m_AutoExposureNightRolloffDarkEV100 = Defaults::AutoExposureNightRolloffDarkEV100;
-        float m_AutoExposureNightRolloffBrightEV100 = Defaults::AutoExposureNightRolloffBrightEV100;
-        // 測光値がキー照度の基準EV(ComputeReferenceEV100。構図に依存しない)から
-        // 何段上まで行くのを許すか[EV]。十分大きな値(16など)で無効になる。
-        //
-        // 【位置づけ】構図で露出が振れる問題そのものは、AutoExposure.hlslで
-        // **空を測光から外した**ことで根本的に解決している(21.9.8節)。
-        // こちらは残った病的なケースへの保険で、通常は発動しない:
-        // 夜の街で明るい看板が画面の大半を占めるようなとき、明るい側に寄った測光範囲
-        // (50〜95パーセンタイル)がその看板に支配され、街並みが黒く沈むのを防ぐ。
-        //
-        // **上側だけを止める**のは、屋内のように実際の輝度が屋外のキー照度よりずっと低い
-        // シーンでは測光値が下へ振れるのが正しいため(両側を締めると屋内が真っ暗になる)。
-        // 下側はm_AutoExposureMinEV100が絶対的な下限として効く。
-        //
-        // 既定の+2は「通常のシーンでは発動しないが、極端なケースは止まる」余裕を見た値。
-        // 測光から空を外してある(AutoExposure.hlsl)ため、-1のような強い値にすると締めすぎになる
-        float m_AutoExposureKeyCeilingEV = Defaults::AutoExposureKeyCeilingEV;
 
         // 次のAutoExposureパスで順応を飛ばして測光値へ即座に合わせる要求。LoadSceneが立て、
         // パスを積んだ時点で消費する。
@@ -1892,14 +1693,6 @@ namespace Kurenai
         // 各段の解像度(CreateRenderTargetsで内部解像度から決まる)
         std::vector<DirectX::XMUINT2> m_BloomLevelSizes;
 
-        bool m_BloomEnabled = Defaults::BloomEnabled;
-        // 最終合成の混合比。エネルギー保存のため加算ではなくlerpで混ぜるので、
-        // 物理的にレンズ散乱が持ち去る割合(数%)に相当する小さい値が既定になる
-        float m_BloomStrength = Defaults::BloomStrength;
-        // しきい値は既定で十分低くしてある(物理的にはブルームは全輝度に掛かるのが正しい)。
-        // アート制御として上げられるようにだけしてある
-        float m_BloomThreshold = Defaults::BloomThreshold;
-        float m_BloomSoftKnee = Defaults::BloomSoftKnee;
 
         // 垂直同期。既定で無効。有効にするとPresentがvblankまでブロックするため、GPU負荷が軽い
         // シーンではvsync待ちの間GPUがアイドル→省電力クロックに落ち、次フレームの立ち上がりが
@@ -1936,7 +1729,7 @@ namespace Kurenai
             AOIndirectLightRaw, // AO/GIバッファのrgb(間接拡散光、ブラー前の生値)
             AOOcclusion,        // AO/GIバッファのa(遮蔽率、ブラー後)をグレースケール表示
             AOOcclusionRaw,     // AO/GIバッファのa(遮蔽率、ブラー前の生値)
-            ShadowMap,          // m_ShadowDebugCascadeで選択したカスケードのシャドウマップを表示
+            ShadowMap,          // m_ShadowSettings.DebugCascadeで選択したカスケードのシャドウマップを表示
             RTShadow,           // RTシャドウの可視率(0=影, 1=光)をグレースケール表示。RTシャドウ未実行時は最終結果
             SSR,                // 反射パスの出力(SceneColor+反射)。反射がOffのときはSceneColorと同一
             HiZ,                // Hi-Zミップチェーンの指定ミップ(m_HiZDebugMipLevel)をグレースケール表示
@@ -2026,44 +1819,7 @@ namespace Kurenai
         // シャドウパスの各カスケード描画で使う専用の定数バッファ(カスケードごとに値を更新して使い回す)
         std::unique_ptr<RHI::IRHIBuffer> m_ShadowCascadeConstantBuffer;
 
-        // 太陽(平行光)の影の手法。値はDirectLighting.hlslのLightingConstants.LightCount.zへ
-        // そのまま渡すため、シェーダ側の分岐と番号を一致させること
-        enum class ShadowMode
-        {
-            Off,                // 影を落とさない
-            CascadedShadowMap,  // カスケードシャドウマップ+PCSS(ShadowSampling.hlsli)
-            Raytraced,          // RTシャドウ(RTShadow.hlsl)。DX12かつDXR Tier 1.1が要る
-        };
-        // 現在の手法。RaytracedはSupportsRaytracing()がtrueの環境でしか選べない
-        // (UI側で選択不可にし、シーン読み込み時にも非対応ならCascadedShadowMapへ落とす)。
-        //
-        // 【重要】Raytracedでもシャドウパス(CSMの描画)はスキップしない。半透明
-        // (Transparent.hlsl)と反射プローブのキャプチャ(ProbeCapture.hlsl)は
-        // カメラ視点の画面空間テクスチャを使えず、CSMのシャドウマップを必要とするため
-        // (RTシャドウは不透明サーフェスの直接光パスだけを置き換える。26章)
-        //
-        // 既定の手法はDefaultShadowModeが決める(反射のDefaultReflectionModeと同じ理由で1か所に置く)。
-        // ここの初期値はm_RaytracingAvailableが確定する前の値でしかなく、
-        // 実際の既定はシーン読み込み時に決め直される
-        // 【反射と違い「出すか」と「どの手法か」を分けていない】Defaults::ShadowEnabledがtrueで
-        // あるため、シーンがShadow = trueと書いたときにこの関数へ問い合わせても
-        // 手法の選択と同じ結果になるため問題にならない。ただし構造は反射と同じ危うさを持つ
-        // (DefaultReflectionModeのコメント参照)ので、Defaults::ShadowEnabledを
-        // falseにするなら反射と同じ形(ShadowModeForCapabilityへの分割)へ直すこと
-        static constexpr ShadowMode DefaultShadowMode(bool raytracingAvailable)
-        {
-            if (!Defaults::ShadowEnabled)
-            {
-                return ShadowMode::Off;
-            }
-            return raytracingAvailable ? ShadowMode::Raytraced : ShadowMode::CascadedShadowMap;
-        }
-        ShadowMode m_ShadowMode = DefaultShadowMode(false);
-        // PCSS(Percentage Closer Soft Shadows)のライトサイズ。シャドウマップUV空間での
-        // ブロッカーサーチ・半影の広さを決める係数(値が大きいほど半影が広く柔らかくなる)
-        float m_ShadowLightSize = Defaults::ShadowLightSize;
-        // デバッグ表示(Render Targets - Shadow Map)で確認するカスケード番号(0=カメラに近い方)
-        int32_t m_ShadowDebugCascade = 0;
+        ShadowSettings m_ShadowSettings;
 
         SkySettings m_SkySettings;
 
@@ -2414,12 +2170,7 @@ namespace Kurenai
         // 乗算する(HLSL側は素のAmbientColor.rgbを読むだけでよい)
         float m_AmbientScale = Defaults::AmbientScale;
 
-        // シーン全体の自発光(エミッシブ)の強度倍率。MakeObjectConstantsがmesh.EmissiveFactorへ
-        // 乗算する。glTFのemissiveFactorは通常1.0以下に収まるため、G-Bufferのエミッシブを
-        // HDR化(R11G11B10_Float)しただけでは照明器具の輝度が1.0を超えず、ブルームが効かない。
-        // アセットを再オーサリングせずにHDRな自発光を得るための倍率
-        // (KHR_materials_emissive_strengthをインポータが読むようになれば本来はそちらが正しい)
-        float m_EmissiveIntensity = Defaults::EmissiveIntensity;
+        EmissiveLightSettings m_EmissiveLightSettings;
 
         // --- エミッシブ光源(自発光メッシュを光源として扱う) ---
         //
@@ -2434,14 +2185,9 @@ namespace Kurenai
         // プロキシが持つMeshIndex(段0の番号)では引けない。インスタンス単位で
         // 判定し、メッシュ側はEmissiveClustersの有無で見る
         std::vector<bool> m_EmissiveProxyInstances;
-        bool m_EmissiveLightsEnabled = Defaults::EmissiveLightsEnabled;
         // 段階2: 発光面を三角形のまま面積分するか。MegaLights 経路でのみ効く
         // (有効なフレームは参照実装が型3のプロキシを読み飛ばし、代わりに三角形を積む)
         bool m_MeshLightsEnabled = Defaults::MeshLightsEnabled;
-        // DDGIにも自発光を加算したままにするか(=二重に数えるか)。既定は抑止する
-        bool m_EmissiveLightsDoubleCountGI = Defaults::EmissiveLightsDoubleCountGI;
-        float m_EmissiveLightsCutoffIrradiance = Defaults::EmissiveLightsCutoffIrradiance;
-        int m_EmissiveLightsMaxCount = Defaults::EmissiveLightsMaxCount;
         // RangeのクランプにつかうシーンAABBの対角。LoadSceneで一度だけ求める
         float m_EmissiveLightsMaxRange = 0.0f;
         // 直近のフレームで実際にGPUへ送ったプロキシの数(ImGuiとログの表示用)
@@ -2779,25 +2525,6 @@ namespace Kurenai
         // (RenderThreadMainが同じ場所・同じ条件分岐の形で進める)で、水面法線マップの
         // スクロール位相を[0,1)で持つ。FrameConstants.TimeParams.xとしてWater.hlslへ渡る
         float m_WaterScrollOffset = 0.0f;
-        // trueにすると波のスクロールが止まる(m_SkySettings.TimeAutoAdvanceの水面版に近いが、
-        // 「動かす/止める」の2値なので速度ではなくフラグにしている)
-        bool m_WaterTimeFrozen = Defaults::WaterTimeFrozen;
-        // シーン読み込み時にScene::WaterWaveScale等から初期化され、以降はUIで実行時上書きできる
-        // (m_ReflectionSettings.ModeがScene.SSREnabledから初期化されるのと同じ設計、ApplyLoadedScene参照)。
-        // m_WaterWaveSpeedはm_WaterScrollOffsetの進行速度に使われる。m_WaterWaveScale/
-        // m_WaterWaveStrengthはFrameConstants.TimeParams.y/zとしてWater.hlslへ渡り、層のUV
-        // スケール(kWaterLayerAUvScale等への倍率)・波の振幅(距離減衰のweightへの倍率)に効く
-        float m_WaterWaveScale = Defaults::WaterWaveScale;
-        float m_WaterWaveSpeed = Defaults::WaterWaveSpeed;
-        float m_WaterWaveStrength = Defaults::WaterWaveStrength;
-        // 水面の反射に解析空フォールバックを使うか(SSRの水面分岐)。SSRレイが画面外へ抜けた・
-        // 最大距離まで判定がつかなかった水面画素で、プリフィルタ済み鏡面IBL(128pxベースの
-        // キューブマップをラフネス由来のミップで引くため広い水面ではにじむ)の代わりに
-        // Sky.hlsliのSkyColorを画面解像度で直接評価する(SSR.hlslのPSMain参照)。
-        // 効果が出るのはm_ReflectionSettings.Mode==ScreenSpaceのときだけで、かつ手続き空が無効な
-        // シーンでは常に無効化される(SSRパスのExecute内、usingProceduralSkyとのAND判定)
-        bool m_WaterAnalyticSkyReflection = Defaults::WaterAnalyticSkyReflection;
-
         // --- 平面反射 ---
         // 水面に不透明ジオメトリの鏡像を映す専用フォワードパス。設計判断の詳細は
         // Shaders/3D/PlanarReflection.hlsl冒頭のコメントを参照。反射解像度はレンダー解像度に
@@ -2872,26 +2599,6 @@ namespace Kurenai
         // 容量(kMaxLights)超過を検出した最初のフレームだけ警告ログを出すためのフラグ
         bool m_LightOverflowLogged = false;
 
-        // ポイント/スポットライトのスクリーンスペースシャドウ(接触影)の設定。
-        // シャドウマップを増やさず、G-Bufferの深度バッファをライト方向へレイマーチして影を出す
-        // (Shaders/3D/ScreenSpaceShadow.hlsli、docs/Architecture.html 18章)
-        bool m_ScreenSpaceShadowEnabled = Defaults::ScreenSpaceShadowEnabled;
-        // レイマーチのステップ数。ScreenSpaceShadow.hlsliのkSSSMaxStepCount(64)が上限
-        int m_ScreenSpaceShadowStepCount = Defaults::ScreenSpaceShadowStepCount;
-        // 1本のレイが伸びる最大のワールド距離。ライトまでの距離がこれより短ければそちらが優先される。
-        // 短いほど「接触影」寄りになり、コストも下がる
-        float m_ScreenSpaceShadowMaxRayLength = Defaults::ScreenSpaceShadowMaxRayLength;
-        // 遮蔽と判定する深度差の上限。深度バッファがサーフェスの厚みを持たないための近似で、
-        // 大きすぎると遠景が無限に厚い遮蔽物として振る舞い、小さすぎると薄い物体を貫通する
-        float m_ScreenSpaceShadowThickness = Defaults::ScreenSpaceShadowThickness;
-        // レイ始点を法線方向へ押し出す量(View空間深度に比例させる係数)。自己遮蔽(シャドウアクネ)対策
-        float m_ScreenSpaceShadowNormalBias = Defaults::ScreenSpaceShadowNormalBias;
-        // ヒット位置が画面端に近いときに影を弱める幅(UV単位)。SSRのkSSREdgeFadeDistanceと同じ役割
-        float m_ScreenSpaceShadowEdgeFade = Defaults::ScreenSpaceShadowEdgeFade;
-        // 1ピクセルが撃てるシャドウレイ数の上限。ライトを増やしてもレイマーチのコストが
-        // 線形に伸び続けないようにするための予算
-        int m_ScreenSpaceShadowMaxLightsPerPixel = Defaults::ScreenSpaceShadowMaxLightsPerPixel;
-
         // タイルライトカリング(Shaders/3D/LightCulling.hlsl)。画面を16x16ピクセルのタイルに分け、
         // タイルごとに「そのタイルに届くライト」のインデックスリストをコンピュートシェーダーで作る。
         // 直接光パスはそのリストだけをループするため、ピクセルあたりのコストが
@@ -2937,7 +2644,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_LightTileBuffer;
         uint32_t m_LightTileCountX = 0;
         uint32_t m_LightTileCountY = 0;
-        bool m_LightCullingEnabled = Defaults::LightCullingEnabled;
         // タイル容量の超過"条件"(シーンのライト数が容量を超えている)を検出した最初のフレームだけ
         // 警告ログを出すためのフラグ(m_LightOverflowLoggedと同じ作法)。
         // 実際に超過したかはGPU側にしか無いため、確認はDebugView::LightTilesのマゼンタで行う
@@ -3000,7 +2706,6 @@ namespace Kurenai
         // デバイスが対応していて、かつシェーダー/リソースの作成に成功したか。
         // どちらかが欠けたらUIのチェックボックスごと無効化する
         bool m_SoftwareRasterAvailable = false;
-        bool m_SoftwareRasterEnabled = Defaults::SoftwareRasterEnabled;
         // 巨大三角形とみなすbbox画素面積のしきい値。
         //
         // 【実行時に振れるようにしている理由】小三角形パス(CSRaster)と巨大三角形パス
@@ -3215,11 +2920,7 @@ namespace Kurenai
         // m_Sceneと同じくRenderスレッド専有のためロックは不要
         std::vector<Assets::Light> m_Lights;
         int m_SelectedLightIndex = -1;
-        // 実在の写真露出値(EV100)。太陽・環境光・ポイント/スポットライトすべてに同じ値がかかる、
-        // シーン全体で単一の露出設定(詳細はdocs/Architecture.html参照)
-        float m_SceneExposureEV100 = Defaults::SceneExposureEV100;
-
-        // 実際にライト強度へ事前乗算される「実効プリ露出」。m_SceneExposureEV100(ユーザー設定)に
+        // 実際にライト強度へ事前乗算される「実効プリ露出」。m_PostProcessSettings.SceneExposureEV100(ユーザー設定)に
         // 時刻由来のバイアスを足したもので、Renderスレッドのみが読み書きする。
         //
         // 【なぜ可変にする必要があるか】
@@ -3239,8 +2940,6 @@ namespace Kurenai
         // Tonemap側で割り戻されるため過渡の絵には現れない)一方で、追従の途中の値で焼かれた
         // 資産(反射プローブ)が残ってしまう。切り替えは平滑化せず即座に合わせるのが正しい
         bool m_EffectiveExposureInitialized = false;
-        // 実効プリ露出の時間平滑化の速さ[1/秒]。段付きを防ぐために指数追従させる
-        float m_EffectiveExposureAdaptSpeed = 2.0f;
 
         std::chrono::steady_clock::time_point m_LastFrameTime;
 

@@ -288,7 +288,7 @@ namespace Kurenai::UI
         static_assert(
             IM_ARRAYSIZE(kResolutionNames) == IM_ARRAYSIZE(kResolutionValues), "表示名と値の並びを一致させること");
 
-        // 表示名と値の並びは KurenaiEngine3D::UpscaleQualityMode の宣言順に一致させること。
+        // 表示名と値の並びは UpscaleQualityMode の宣言順に一致させること。
         // 倍率の数値はGetUpscaleRatio()が持っているので、ここには表示名しか置かない
         static const char* kUpscaleQualityNames[] =
         {
@@ -296,9 +296,9 @@ namespace Kurenai::UI
         };
 
         // 超解像が有効なときComboが指すのは出力解像度、無効なときは内部レンダー解像度。
-        // どちらもm_UpscaleOutputWidth/Heightが追いかけているのでこれを見ればよい
-        const uint32_t comboWidth = m_Engine.m_UpscaleOutputWidth;
-        const uint32_t comboHeight = m_Engine.m_UpscaleOutputHeight;
+        // どちらもm_PostProcessSettings.UpscaleOutputWidth/Heightが追いかけているのでこれを見ればよい
+        const uint32_t comboWidth = m_Engine.m_PostProcessSettings.UpscaleOutputWidth;
+        const uint32_t comboHeight = m_Engine.m_PostProcessSettings.UpscaleOutputHeight;
 
         // 一覧に無い解像度(「ウィンドウサイズに合わせる」で設定した場合など)のときは-1のままにする。
         // ImGuiのComboは範囲外のインデックスを空表示として扱うため、そのままでも壊れない
@@ -319,8 +319,8 @@ namespace Kurenai::UI
         // 変更があった項目に関わらず、最終的にRequestUpscaleSettings()を1回だけ呼ぶ形に統一する。
         // 出力解像度・品質モード・有効/無効のどれが変わっても内部レンダー解像度の導出をやり直す
         // 必要があり、経路を分けると片方だけ更新し忘れる
-        bool upscaleEnabled = m_Engine.m_UpscaleEnabled;
-        int qualityIndex = static_cast<int>(m_Engine.m_UpscaleQualityMode);
+        bool upscaleEnabled = m_Engine.m_PostProcessSettings.UpscaleEnabled;
+        int qualityIndex = static_cast<int>(m_Engine.m_PostProcessSettings.UpscaleQuality);
         uint32_t outputWidth = comboWidth;
         uint32_t outputHeight = comboHeight;
         bool settingsChanged = false;
@@ -350,7 +350,7 @@ namespace Kurenai::UI
             if (ComboEx(
                     "品質モード###UpscaleQualityMode", &qualityIndex, kUpscaleQualityNames,
                     IM_ARRAYSIZE(kUpscaleQualityNames),
-                    static_cast<int>(KurenaiEngine3D::kDefaultUpscaleQualityMode),
+                    static_cast<int>(PostProcessSettings::kDefaultUpscaleQualityMode),
                     "出力解像度を何倍に拡大するか。倍率が大きいほど内部解像度が下がって速くなるが、"
                     "細部が失われる。内部解像度は8の倍数へ切り捨てられる"))
             {
@@ -358,7 +358,7 @@ namespace Kurenai::UI
             }
 
             SliderFloatEx(
-                "シャープネス###UpscaleSharpness", &m_Engine.m_UpscaleSharpness, 0.0f, 1.0f,
+                "シャープネス###UpscaleSharpness", &m_Engine.m_PostProcessSettings.UpscaleSharpness, 0.0f, 1.0f,
                 Defaults::UpscaleSharpness, "%.2f", 0,
                 "RCASのシャープ化の強さ。0で無効。拡大後の出力解像度で効くため、"
                 "トーンマップ側のシャープネス(ポストプロセスパネルのTAAシャープネス)は"
@@ -368,7 +368,7 @@ namespace Kurenai::UI
         if (settingsChanged)
         {
             m_Engine.RequestUpscaleSettings(
-                upscaleEnabled, static_cast<KurenaiEngine3D::UpscaleQualityMode>(qualityIndex), outputWidth,
+                upscaleEnabled, static_cast<UpscaleQualityMode>(qualityIndex), outputWidth,
                 outputHeight);
         }
 
@@ -379,7 +379,7 @@ namespace Kurenai::UI
             // 押した時点の1回きり。以後ウィンドウをリサイズしても内部解像度は追従しない
             // (毎フレーム追従させると、ドラッグ中に何度もレンダーターゲットを作り直すことになる)
             m_Engine.RequestUpscaleSettings(
-                upscaleEnabled, static_cast<KurenaiEngine3D::UpscaleQualityMode>(qualityIndex), m_Engine.GetWidth(),
+                upscaleEnabled, static_cast<UpscaleQualityMode>(qualityIndex), m_Engine.GetWidth(),
                 m_Engine.GetHeight());
         }
         ItemHelp(
@@ -387,9 +387,9 @@ namespace Kurenai::UI
             "(超解像が無効なら内部レンダー解像度がそのまま等倍になる)。"
             "押した時点で1回だけ適用され、その後のウィンドウリサイズには追従しない");
 
-        if (m_Engine.m_UpscaleEnabled)
+        if (m_Engine.m_PostProcessSettings.UpscaleEnabled)
         {
-            ImGui::Text("出力解像度: %u x %u", m_Engine.m_UpscaleOutputWidth, m_Engine.m_UpscaleOutputHeight);
+            ImGui::Text("出力解像度: %u x %u", m_Engine.m_PostProcessSettings.UpscaleOutputWidth, m_Engine.m_PostProcessSettings.UpscaleOutputHeight);
         }
         ImGui::Text("内部レンダー解像度: %u x %u", m_Engine.m_RenderWidth, m_Engine.m_RenderHeight);
         ImGui::Text("ウィンドウ(クライアント領域): %u x %u", m_Engine.GetWidth(), m_Engine.GetHeight());
