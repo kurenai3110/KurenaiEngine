@@ -1450,6 +1450,12 @@ namespace Kurenai
         static_assert(
             (RHI::IRHICommandList::kDispatchMeshIndirectArgStride % 8) == 0,
             "引数の刻みが8の倍数でないと、2件目以降のGPU仮想アドレスが境界を割る");
+        // 間接引数の刻みは RHI がインターフェースとして持ち、ShaderInterop 側は
+        // パッカーが HLSL へ渡すための写しを持つ。両者が離れないようここで止める
+        static_assert(
+            ShaderInterop::kDispatchMeshIndirectArgStride
+                == RHI::IRHICommandList::kDispatchMeshIndirectArgStride,
+            "ShaderInterop::kDispatchMeshIndirectArgStride が RHI 側と食い違っている");
 
 
         // 区画1つぶんのバイト数。区画の境目も8バイト境界に載せたいので256へ切り上げる

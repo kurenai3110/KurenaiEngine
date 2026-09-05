@@ -1,4 +1,5 @@
 #include "ShaderCompiler.h"
+#include "ShaderInterop/GroupSizes.h"
 
 #include <d3dcompiler.h>
 #include <dxcapi.h>
@@ -12,6 +13,31 @@
 
 using Microsoft::WRL::ComPtr;
 
+// C++側(KurenaiEngine/Source/Engine/ShaderInterop/GroupSizes.h)が持つ値を、
+// KURENAI_EXPECT_* として HLSL へ渡す。受け取った GroupSizes.hlsli は自分の #define と
+// 突き合わせ、食い違っていれば #error でこのコンパイルを落とす。
+//
+// 【なぜ値そのものを -D で置き換えないのか】-D が来ない経路(shader-check スキルが
+// fxc/dxc を直接叩く場合)でも HLSL 単体でコンパイルできる必要があるため。
+// 実数値は両方に置いたまま、一致だけを機械で確かめる。
+//
+// 【ここへ足すときは3箇所そろえる】GroupSizes.h の定数・GroupSizes.hlsli の #define と #if・
+// この表。1つでも欠けると、その値は黙って照合されなくなる
+namespace
+{
+    struct GroupSizeExpectation
+    {
+        const wchar_t* Name;
+        uint32_t Value;
+    };
+
+    const GroupSizeExpectation kGroupSizeExpectations[] = {
+        { L"KURENAI_EXPECT_AMPLIFICATION_GROUP_SIZE",   Kurenai::ShaderInterop::kAmplificationGroupSize },
+        { L"KURENAI_EXPECT_MODEL_CULL_GROUP_SIZE",      Kurenai::ShaderInterop::kModelCullGroupSize },
+        { L"KURENAI_EXPECT_SWRASTER_RESOLVE_GROUP_SIZE", Kurenai::ShaderInterop::kSWRasterResolveGroupSize },
+        { L"KURENAI_EXPECT_INDIRECT_ARG_STRIDE",        Kurenai::ShaderInterop::kDispatchMeshIndirectArgStride },
+    };
+}
 namespace Kurenai::ShaderPacker
 {
     namespace
@@ -307,6 +333,18 @@ namespace Kurenai::ShaderPacker
         {
             defines.push_back(DxcDefine{ L"KURENAI_BINDLESS", L"1" });
         }
+        // スレッドグループサイズの突き合わせ用。値そのものは HLSL 側にもあり、
+        // ここで渡すのは「C++側はこう思っている」という期待値だけ(上の表のコメント参照)
+        std::vector<std::wstring> expectationValues;
+        expectationValues.reserve(std::size(kGroupSizeExpectations));
+        for (const GroupSizeExpectation& expectation : kGroupSizeExpectations)
+        {
+            expectationValues.push_back(std::to_wstring(expectation.Value));
+        }
+        for (size_t i = 0; i < std::size(kGroupSizeExpectations); ++i)
+        {
+            defines.push_back(DxcDefine{ kGroupSizeExpectations[i].Name, expectationValues[i].c_str() });
+        }
 
         ComPtr<IDxcOperationResult> operationResult;
         const HRESULT compileHr = m_Compiler->Compile(
@@ -389,11 +427,31 @@ namespace Kurenai::ShaderPacker
             compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
         }
 
+        // dxc 側と同じ期待値を渡す(GroupSizes.hlsli の #if は両方の経路で効かせる)。
+        // D3D_SHADER_MACRO は UTF-8 の char* なので、ワイド文字の名前を変換して持ち替える
+        std::vector<std::string> macroNames;
+        std::vector<std::string> macroValues;
+        macroNames.reserve(std::size(kGroupSizeExpectations));
+        macroValues.reserve(std::size(kGroupSizeExpectations));
+        for (const GroupSizeExpectation& expectation : kGroupSizeExpectations)
+        {
+            macroNames.push_back(Core::WideToUtf8(expectation.Name));
+            macroValues.push_back(std::to_string(expectation.Value));
+        }
+        std::vector<D3D_SHADER_MACRO> macros;
+        macros.reserve(macroNames.size() + 1);
+        for (size_t i = 0; i < macroNames.size(); ++i)
+        {
+            macros.push_back(D3D_SHADER_MACRO{ macroNames[i].c_str(), macroValues[i].c_str() });
+        }
+        // D3DCompileFromFile は終端を {nullptr, nullptr} で判定する
+        macros.push_back(D3D_SHADER_MACRO{ nullptr, nullptr });
+
         ComPtr<ID3DBlob> bytecode;
         ComPtr<ID3DBlob> errorBlob;
         const HRESULT hr = D3DCompileFromFile(
             filePath.c_str(),
-            nullptr,
+            macros.data(),
             D3D_COMPILE_STANDARD_FILE_INCLUDE,
             entryPoint.c_str(),
             target.c_str(),

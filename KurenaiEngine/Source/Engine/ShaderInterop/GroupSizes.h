@@ -7,12 +7,14 @@
 // 以前は KurenaiEngine3D.cpp の中に「GBufferMeshlet.hlslと一致させること」という
 // コメント付きの constexpr が散らばっており、増幅シェーダーの32は2箇所にあった。
 //
-// 【HLSL側は Shaders/3D/ShaderInterop/GroupSizes.hlsli が持つ】値が一致していることを
-// **機械で確かめる仕掛けは無い**(HLSLのマクロをC++から読めないため。FrameConstants の
-// offsetof のようには守れない)。片方を直したらもう片方も直すこと。
+// 【HLSL側は Shaders/3D/ShaderInterop/GroupSizes.hlsli が持ち、一致は機械で確かめる】
+// KurenaiShaderPacker がこのヘッダーを取り込み、ここの値を
+// KURENAI_EXPECT_* として -D で HLSL へ渡す。GroupSizes.hlsli 側は受け取った値と
+// 自分の #define を突き合わせ、食い違っていれば #error でビルドを落とす。
 //
-// 間接引数の刻み(24)だけはここに置かない。RHIのインターフェースの一部なので
-// RHI::IRHICommandList::kDispatchMeshIndirectArgStride が持つ
+// 【なぜ HLSL 側にも実数値を残すのか】-D が来ない経路(shader-check スキルが
+// fxc/dxc を直接叩く場合)でもコンパイルできる必要があるため。
+// あちらの #if は KURENAI_EXPECT_* が未定義なら丸ごと飛ぶ
 namespace Kurenai::ShaderInterop
 {
     // 増幅シェーダー1グループが判定するメッシュレット数。
@@ -27,4 +29,12 @@ namespace Kurenai::ShaderInterop
     // ソフトウェアラスタライザの解決パスのタイル1辺(2次元グループ)。
     // GroupSizes.hlsli の KURENAI_SWRASTER_RESOLVE_GROUP_SIZE と一致させること
     constexpr uint32_t kSWRasterResolveGroupSize = 8;
+
+    // DispatchMeshIndirect の引数1件ぶんのバイト数。ModelCull.hlsl がこの刻みで書き込む。
+    //
+    // 【本体は RHI::IRHICommandList::kDispatchMeshIndirectArgStride】あちらは RHI の
+    // インターフェースの一部で、このヘッダーは RHI に依存しない(パッカーが取り込むため)。
+    // 二重に持つことになるが、KurenaiEngine3D.cpp の static_assert が両者の一致を止める。
+    // GroupSizes.hlsli の KURENAI_INDIRECT_ARG_STRIDE とはパッカーの -D で突き合わせる
+    constexpr uint32_t kDispatchMeshIndirectArgStride = 24;
 }
