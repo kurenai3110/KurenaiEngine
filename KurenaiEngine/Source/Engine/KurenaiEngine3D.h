@@ -1731,6 +1731,11 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_SkyCloudPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_SkyCloudPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_SkyCloudTexture;
+        // 上のパスが同時に書く fogInFront(雲に最初に当たった位置の霞の透過率、P18b)。
+        // Lightingパスが CloudAirlightCorrection をフル解像度で掛けるためだけに要る。
+        // 【なぜm_SkyCloudTextureのaに同居できないか】aには既に雲の透過率が入っており、
+        // 補正式に必要な画素ごとの量は (透過率, fogInFront) の2スカラ + 散乱光3成分=5chになる
+        std::unique_ptr<RHI::IRHITexture> m_SkyCloudFogTexture;
         // m_SkyCloudTextureの実寸(内部レンダー解像度を割った後の値。奇数解像度の切り捨てと
         // 最低1pxの下限があるため、割り算をその場でやり直さずここへ保存する)。
         // パスのビューポート指定に使う
@@ -2267,6 +2272,11 @@ namespace Kurenai
         static constexpr uint32_t kSkyViewLUTHeight = 108;
         static constexpr uint32_t kCloudShapeNoiseSize = 128;
         static constexpr uint32_t kCloudDetailNoiseSize = 32;
+        // ウェザーマップ(H3)。ノイズ空間の1周期(256セル=358km)を1枚で覆うので、
+        // 4096なら88m/テクセル。**CloudNoiseGenerate.hlsl の kWeatherNoiseSize と同じ値であること**
+        // (片方だけ変えるとテクセル中心がずれ、バイリニアが半テクセル分ぼける)。
+        // R8G8B8A8で4096^2 = 67MB。解像度の実測はSky.hlsliのウェザーマップの節
+        static constexpr uint32_t kCloudWeatherNoiseSize = 4096;
         // 手続き空(SkyGenerate.hlsl): Perez分布をGPUで評価してキューブマップを生成する。
         // オフラインで焼いたDDS(Sky.dds)と違い、太陽が動くと空の輝度分布の「形」も追従する
         // (circumsolarの明るい領域が太陽と一緒に動く)。詳細はSkyGenerate.hlsl冒頭。
@@ -2296,6 +2306,41 @@ namespace Kurenai
         float m_LastBakedTurbidity = 0.0f;
         // 最後に焼いたときの空の彩度。タービディティと同じ理由で、動いたら焼き直す
         float m_LastBakedSkySaturation = 0.0f;
+
+        // P18: 雲込みの空の照度(SkyIntegrateのCloudSkyLight)とIBLキューブの平均透過率
+        // (m_ActiveCloudTransmittance)は、どちらもベイクのタイミングでしか更新されない。
+        // ところが焼き直しの判定に雲のパラメータが入っていなかったため、被覆率を動かしても
+        // 古い値が残り続けていた。ここへ「ベイク時点の雲のパラメータ」を覚えておき、
+        // 変化したら焼き直す(Render()の焼き直し判定を参照)。
+        // **風のスクロールとカメラ位置は入れない**——毎フレーム動くので入れると毎フレーム
+        // 焼き直しになる。求めているのは半球平均なので、雲の場の平行移動では値がほとんど動かない
+        struct CloudBakeSignature
+        {
+            float CumulusCoverage = -1.0f;   // 無効(m_CloudEnabled=false)なら0
+            float CumulusAltitude = 0.0f;
+            float CumulusUvScale = 0.0f;
+            float CumulusDensity = 0.0f;
+            float CumulusForwardG = 0.0f;
+            float CumulusThickness = 0.0f;   // ボリューム無効なら0(FrameConstantsと同じ扱い)
+            float CloudTypeBias = 0.0f;
+            float CirrusCoverage = 0.0f;     // 無効(m_CirrusEnabled=false)なら0
+            float CirrusAltitude = 0.0f;
+            float CirrusUvScale = 0.0f;
+            float CirrusDensity = 0.0f;
+            float CirrusAnisotropy = 0.0f;
+            float FogSigma0 = 0.0f;          // 霞は雲の見え方(打ち切り)を変えるので入れる
+            float FogScaleHeight = 0.0f;
+            float FogRefHeight = 0.0f;
+            float FogEnabled = 0.0f;
+
+            bool operator==(const CloudBakeSignature&) const = default;
+        };
+        // 現在の設定からシグネチャを作る。**FrameConstants/SkyIntegrateConstantsへ詰めるのと
+        // 同じ有効/無効の潰し方をすること**(m_CloudEnabled=falseなら被覆率0、など)。
+        // 揃っていないと「無効にしたのに焼き直しが走らない」取りこぼしが出る
+        CloudBakeSignature MakeCloudBakeSignature() const;
+        CloudBakeSignature m_LastBakedCloudSignature{};
+        bool m_HasBakedCloudSignature = false;
         // 焼き直しの角度閾値(度)。Auto Advance既定(1h/s)では太陽は15度/秒動くので、
         // 1.0度なら毎秒15回の焼き直しになる。空の見た目は15Hz更新でも連続に見える
         float m_SkyBakeAngleThresholdDegrees = 1.0f;
@@ -2328,6 +2373,9 @@ namespace Kurenai
         // GPU専用(UAV/SRV)のDEFAULTヒープに確保しておりCPUから書き込む経路を持たないため、
         // UpdateBufferを呼ぶとクラッシュする(m_SkyParametersBuffer作成箇所のコメント参照)
         bool m_SkyParametersBufferInitialized = false;
+        // 雲のノイズテクスチャが無くP18(雲込みの空の照度)を積めなかったことを1度だけログへ出す。
+        // 毎ベイクで出すとログが埋まるため(m_PlanarReflectionMultipleWaterLoggedと同じ扱い)
+        bool m_SkyIntegrateCloudMissingLogged = false;
 
         bool m_IBLBaked = false;
         // BRDF積分LUTを焼き終えたか(m_IBLBakedとは別管理)。このLUTは(NdotV, ラフネス)の
@@ -2360,12 +2408,20 @@ namespace Kurenai
         //
         // 【なぜ2枚に分けるか】Shapeは雲の大まかな塊、Detailはその縁を削る高周波成分で、
         // 必要な解像度が2桁違う。1枚にまとめると細かい側に合わせた巨大なテクスチャが要る
+        //
+        // 【3枚目: ウェザーマップ(H3)】雲がどこに立つかを決める2Dの場。上の2枚と同じく
+        // 純粋な手続き生成なので同じパスで一度だけ焼く。**これはレイマーチの高速化が目的**で、
+        // 実測ではマーチの1歩あたりコストの91%がこの2Dのfbmだった(根拠と解像度の実測は
+        // Shaders/3D/Sky.hlsli のウェザーマップの節)
         std::unique_ptr<RHI::IRHITexture> m_CloudShapeNoiseTexture;
         std::unique_ptr<RHI::IRHITexture> m_CloudDetailNoiseTexture;
+        std::unique_ptr<RHI::IRHITexture> m_CloudWeatherNoiseTexture;
         std::unique_ptr<RHI::IRHIShader> m_CloudShapeNoiseComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_CloudShapeNoisePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_CloudDetailNoiseComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_CloudDetailNoisePipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_CloudWeatherNoiseComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_CloudWeatherNoisePipelineState;
         bool m_CloudNoiseBaked = false;
 
         // --- 大気散乱のLUT(Hillaire 2020) ---
@@ -3104,10 +3160,25 @@ namespace Kurenai
         // 被覆率。0.40は写真の見た目に寄せて選んだ値であり、物理的な導出ではない
         // (実測で調整可能。EngineDefaults.h参照)
         float m_CloudCoverage = Defaults::CloudCoverage;
-        // 雲底の高度[m](カメラのワールドY基準。Sky.hlsli EvaluateCloudLayerが視線との交点を
-        // 求めるのに使う)
+        // 雲底の高度[m](**ワールドYの絶対高度**。Sky.hlsli EvaluateCloudLayerがレイと
+        // 雲層スラブの交差を解くのに使う)。
+        // 【P17で意味が変わった】以前は「カメラのワールドY基準」の相対高度で、雲層がカメラの
+        // Yに追従していた(上空へ飛んでも雲の上に出られなかった)。渡す値そのものは変えていない
+        // ため、カメラが地表付近にいる従来の構図では見た目は実質変わらない
         float m_CloudAltitude = Defaults::CloudAltitude;
+        // ワールド1mあたりのノイズ空間の距離(= 1/セルの広さ[m])。
+        // 【C7で厚みに比例させたが撤去した】厚みを上げるとセルも広がる形にしていたが、
+        // 「厚みを上げても横幅が広がったように見えない」という判断で外した。
+        // 実際には測ると実効セル幅は厚みに正確に比例していた(厚み600/1200/2400で
+        // 493/997/1988m)ものの、**同時に雲の背が高くなって空が埋まる**ため、
+        // 幅の変化が埋まり具合の変化に飲み込まれて見えなかった。
+        // 根本の問題は別にあり、密度がウェザーマップ(2次元)の掛け算で決まるので
+        // **雲の輪郭が高さによって変わらない**(同じ形が積み上がるだけ)ことである
         float m_CloudUvScale = Defaults::CloudUvScale;
+        // 雲の種類の偏り(C4)。FrameConstants.CloudParams3.wへ載る。
+        // Sky.hlsliのCloudTypeAtが場所ごとの種類(層雲/積雲/雄大積雲)を決めるとき、
+        // 空全体をどちらへ寄せるかのバイアスになる。0.5が中立
+        float m_CloudTypeBias = Defaults::CloudTypeBias;
         float m_CloudDensity = Defaults::CloudDensity;
         // 風速[m/s]。実世界の速度としてUIで直感的に扱えるようにしてあり、ノイズ空間の移動量への
         // 換算(CloudUvScaleを掛ける)はRenderThreadMainのm_CloudScrollOffset更新側で行う
@@ -3146,6 +3217,7 @@ namespace Kurenai
         // 被覆率0を渡し、Sky.hlsli側の早期脱出(SkyColor、判断C)を通す
         bool m_CirrusEnabled = Defaults::CirrusEnabled;
         float m_CirrusCoverage = Defaults::CirrusCoverage;
+        // 雲底の高度[m](**ワールドYの絶対高度**。積雲と同じ規約。m_CloudAltitude参照)
         float m_CirrusAltitude = Defaults::CirrusAltitude;
         float m_CirrusUvScale = Defaults::CirrusUvScale;
         float m_CirrusDensity = Defaults::CirrusDensity;

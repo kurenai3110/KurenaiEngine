@@ -113,11 +113,12 @@ namespace Kurenai::RHI
         // 反射プローブ(19章)がDeferredLighting.hlslでt11〜t14(イラディアンス配列・プリフィルタ配列・
         // 影響範囲バッファ・距離キューブ配列)を、DDGI(22章)がt15〜t16(イラディアンスアトラス・
         // 距離モーメントアトラス)を使い、さらに空パラメータの構造化バッファ・bent normalの
-        // G-Buffer(34章)・雲の3Dノイズ2枚・大気散乱のSkyView LUTを使うため21スロット必要。
+        // G-Buffer(34章)・低解像度の雲パスの出力・DDGIResolveの出力2枚・大気散乱のSkyView LUT・
+        // 低解像度の雲パスが書いたfogInFrontを使うため23スロット必要。
         // 内訳はDX11CommandList.hの同名の定数のコメントに1枚ずつ書いてある。
         // DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)およびDX11CommandList
         // 側の同名の定数と必ず一致させること
-        static constexpr uint32_t kTextureSlotCount = 22;
+        static constexpr uint32_t kTextureSlotCount = 23;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス
         uint32_t m_CurrentSrvTableBase = 0;

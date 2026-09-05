@@ -338,6 +338,8 @@ namespace Kurenai::Assets
             uint32_t RenderHeight = 0;
             Scene::TonemapCurveSetting Tonemap = Scene::TonemapCurveSetting::AgX;
             float SkySaturation = 1.0f;
+            bool HasSkyTurbidity = false;
+            float SkyTurbidity = 2.5f;
             float TonemapBlackPoint = 0.0f;
             bool HasExposure = false;
             float ExposureEV100 = 15.0f;
@@ -355,8 +357,14 @@ namespace Kurenai::Assets
             bool HasCloudAltitude = false;   float CloudAltitude = 1500.0f;
             bool HasCloudThickness = false;  float CloudThickness = 400.0f;
             bool HasCloudDensity = false;    float CloudDensity = 8.0f;
+            bool HasCloudTypeBias = false;   float CloudTypeBias = 0.5f;
             bool HasCloudCellSize = false;   float CloudCellSize = 1000.0f;
-            bool HasCirrusCoverage = false;  float CirrusCoverage = 0.5f;
+            bool HasCirrusCoverage = false;    float CirrusCoverage = 0.5f;
+            bool HasCirrusAltitude = false;    float CirrusAltitude = 8000.0f;
+            bool HasCirrusCellSize = false;    float CirrusCellSize = 2000.0f;
+            bool HasCirrusDensity = false;     float CirrusDensity = 2.0f;
+            bool HasCirrusAnisotropy = false;  float CirrusAnisotropy = 3.0f;
+            bool HasCirrusWindSpeed = false;   float CirrusWindSpeed = 15.0f;
 
             // [Fog]セクション。指定されたキーだけエンジンの設定を上書きする
             bool HasFogEnabled = false;      bool  FogEnabled = true;
@@ -658,6 +666,19 @@ namespace Kurenai::Assets
                     {
                         if (!ParseFloatToken(value, result.SkySaturation)) errorAt(lineNumber, rawLine, "SkySaturationの値が不正です");
                         if (result.SkySaturation < 0.0f) errorAt(lineNumber, rawLine, "SkySaturationは0以上で指定してください");
+                    }
+                    // 大気の濁り具合。大きいほど地平線が白く霞み、天頂の青が薄くなる。
+                    // 【SkySaturationと違って指定されたときだけ上書きする】タービディティを動かすと
+                    // 大気LUTの焼き直しが走るため、書いていないシーンにまで無条件で触りたくない
+                    else if (CaseInsensitiveEquals(key, L"SkyTurbidity"))
+                    {
+                        if (!ParseFloatToken(value, result.SkyTurbidity)) errorAt(lineNumber, rawLine, "SkyTurbidityの値が不正です");
+                        // Preethamの定義域はおおむね1.7〜10。外れた値は打ち間違いとみなす
+                        if (result.SkyTurbidity < 1.0f || result.SkyTurbidity > 10.0f)
+                        {
+                            errorAt(lineNumber, rawLine, "SkyTurbidityの値が範囲外です");
+                        }
+                        result.HasSkyTurbidity = true;
                     }
                     else if (CaseInsensitiveEquals(key, L"TonemapBlackPoint"))
                     {
@@ -1087,6 +1108,11 @@ namespace Kurenai::Assets
                     {
                         readFloat(result.CloudDensity, result.HasCloudDensity, 0.0f, 100.0f, L"Density");
                     }
+                    else if (CaseInsensitiveEquals(key, L"TypeBias"))
+                    {
+                        // 0=層雲寄り / 0.5=中立 / 1=雄大積雲寄り(C4)
+                        readFloat(result.CloudTypeBias, result.HasCloudTypeBias, 0.0f, 1.0f, L"TypeBias");
+                    }
                     else if (CaseInsensitiveEquals(key, L"CellSize"))
                     {
                         readFloat(result.CloudCellSize, result.HasCloudCellSize, 10.0f, 100000.0f, L"CellSize");
@@ -1094,6 +1120,30 @@ namespace Kurenai::Assets
                     else if (CaseInsensitiveEquals(key, L"CirrusCoverage"))
                     {
                         readFloat(result.CirrusCoverage, result.HasCirrusCoverage, 0.0f, 1.0f, L"CirrusCoverage");
+                    }
+                    // 巻雲(P11)。積雲と同じ作法で、範囲外は打ち間違いとみなしてエラーにする。
+                    // 上限・下限はUIのスライダーより広く取る(スライダーは操作しやすい範囲、
+                    // ここは打ち間違いの門番、という役割の違い。積雲のAltitude/CellSizeと同じ)
+                    else if (CaseInsensitiveEquals(key, L"CirrusAltitude"))
+                    {
+                        readFloat(result.CirrusAltitude, result.HasCirrusAltitude, 100.0f, 20000.0f, L"CirrusAltitude");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"CirrusCellSize"))
+                    {
+                        readFloat(result.CirrusCellSize, result.HasCirrusCellSize, 10.0f, 100000.0f, L"CirrusCellSize");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"CirrusDensity"))
+                    {
+                        readFloat(result.CirrusDensity, result.HasCirrusDensity, 0.0f, 100.0f, L"CirrusDensity");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"CirrusAnisotropy"))
+                    {
+                        // 1で積雲と同じ等方な塊、大きいほどU方向へ伸びて筋状になる
+                        readFloat(result.CirrusAnisotropy, result.HasCirrusAnisotropy, 1.0f, 16.0f, L"CirrusAnisotropy");
+                    }
+                    else if (CaseInsensitiveEquals(key, L"CirrusWindSpeed"))
+                    {
+                        readFloat(result.CirrusWindSpeed, result.HasCirrusWindSpeed, 0.0f, 200.0f, L"CirrusWindSpeed");
                     }
                     else
                     {
@@ -1409,14 +1459,21 @@ namespace Kurenai::Assets
         scene.RenderHeight = parsed.RenderHeight;
         scene.Tonemap = parsed.Tonemap;
         scene.SkySaturation = parsed.SkySaturation;
+        scene.HasSkyTurbidity = parsed.HasSkyTurbidity; scene.SkyTurbidity = parsed.SkyTurbidity;
         scene.TonemapBlackPoint = parsed.TonemapBlackPoint;
         scene.HasExposureOverride = parsed.HasExposure;
         scene.HasCloudCoverage = parsed.HasCloudCoverage;   scene.CloudCoverage = parsed.CloudCoverage;
         scene.HasCloudAltitude = parsed.HasCloudAltitude;   scene.CloudAltitude = parsed.CloudAltitude;
         scene.HasCloudThickness = parsed.HasCloudThickness; scene.CloudThickness = parsed.CloudThickness;
         scene.HasCloudDensity = parsed.HasCloudDensity;     scene.CloudDensity = parsed.CloudDensity;
+        scene.HasCloudTypeBias = parsed.HasCloudTypeBias; scene.CloudTypeBias = parsed.CloudTypeBias;
         scene.HasCloudCellSize = parsed.HasCloudCellSize;   scene.CloudCellSize = parsed.CloudCellSize;
         scene.HasCirrusCoverage = parsed.HasCirrusCoverage; scene.CirrusCoverage = parsed.CirrusCoverage;
+        scene.HasCirrusAltitude = parsed.HasCirrusAltitude; scene.CirrusAltitude = parsed.CirrusAltitude;
+        scene.HasCirrusCellSize = parsed.HasCirrusCellSize; scene.CirrusCellSize = parsed.CirrusCellSize;
+        scene.HasCirrusDensity = parsed.HasCirrusDensity;   scene.CirrusDensity = parsed.CirrusDensity;
+        scene.HasCirrusAnisotropy = parsed.HasCirrusAnisotropy; scene.CirrusAnisotropy = parsed.CirrusAnisotropy;
+        scene.HasCirrusWindSpeed = parsed.HasCirrusWindSpeed;   scene.CirrusWindSpeed = parsed.CirrusWindSpeed;
         scene.HasFogEnabled = parsed.HasFogEnabled;         scene.FogEnabled = parsed.FogEnabled;
         scene.HasFogDensity = parsed.HasFogDensity;         scene.FogDensity = parsed.FogDensity;
         scene.HasFogScaleHeight = parsed.HasFogScaleHeight; scene.FogScaleHeight = parsed.FogScaleHeight;

@@ -14,12 +14,14 @@
 // SkyView LUT。日中の空はこのLUTを引く。**定義しないと日中の空が黒くなる**ので、
 // SkyColorUpperUnitを呼ぶシェーダーは全員定義すること(Sky.hlsliのSkyViewセクション参照)
 #define KURENAI_SKYVIEW_REGISTER t20
-// 【雲の3Dノイズ(KURENAI_CLOUD_SHAPE/DETAIL_REGISTER)をここで定義しない理由】
+// 【雲の3Dノイズ(KURENAI_CLOUD_SHAPE/DETAIL_REGISTER)とウェザーマップをここで定義しない理由】
 // このシェーダーは雲を自分で評価しない。雲はSkyCloud.hlsl(低解像度の専用パス)が評価し、
-// 結果を「透過率 + 事前乗算済み散乱光」としてSkyCloudTexture(t18)から受け取る(PSMain参照)。
+// 結果を「透過率 + 事前乗算済み散乱光」としてSkyCloudTexture(t18)から、
+// 霞の補正に使うfogInFrontをSkyCloudFogTexture(t22)から受け取る(PSMain参照)。
 // マクロを定義しないことでSky.hlsli側の3Dテクスチャ宣言が消え、t18/t19が空く。
-// このシェーダーはt0〜t21を使い切っている(RHIのkTextureSlotCount=22)ため、
+// このシェーダーはt0〜t22を使い切っている(RHIのkTextureSlotCount=23)ため、
 // この2枠の解放がそのままSkyCloudTextureの置き場所になっている
+
 #include "Sky.hlsli"
 
 static const float PI = 3.14159265359f;
@@ -184,6 +186,13 @@ Texture2D DDGIResolveTexture : register(t19);
 // 2テクセルおきの位置になり1回のGatherにまとまらない。低解像度で持っておけば
 // 隣り合う4テクセルなのでGatherRed 1回で済む(UpsampleDDGI参照)
 Texture2D DDGIResolveDepthTexture : register(t21);
+// SkyCloud.hlslがSV_TARGET1へ書いた fogInFront(雲に最初に当たった位置の霞の透過率)。
+// 雲の手前の霞の色を直す補正(P18b。Sky.hlsliのCloudAirlightCorrection参照)にだけ使う。
+// 【なぜSkyCloudTextureのaに同居できないのか】aには既に雲の透過率が入っている。
+// 補正は clearColor * (CloudSkyLight - 1) * (1 - fogInFront) で、CloudSkyLightが
+// float3のため画素ごとに (透過率, fogInFront) の2スカラが要り、RGBA1枚に収まらない。
+// 雲が無い画素には1.0が入る(補正が厳密に0になる中立元)
+Texture2D SkyCloudFogTexture : register(t22);
 
 // グローバルIBLの拡散イラディアンス(t8)・プリフィルタ済み鏡面(t9)・プローブのプリフィルタ済み
 // 鏡面キューブマップ配列(t12)・プローブの影響範囲バッファ(t13)の宣言と、プローブの選択・
@@ -389,7 +398,7 @@ float3 ReconstructWorldPos(float2 uv, float depth)
 // あること。4つのシェーダーはcbufferをそれぞれ別に宣言しているため関数そのものは共有できず
 // 複製しているが、中身がずれると「背景の空」「水面に映る空」「フォグの合成先の色」が
 // 互いに食い違ってしまうため、中身を変える場合は必ず4つとも同時に直すこと
-SkyParameters MakeSkyParameters()
+SkyParameters MakeSkyParameters(float2 pixelPosition)
 {
     SkyParameters params;
     params.SunDirection = normalize(SkySunDirection.xyz);
@@ -416,9 +425,13 @@ SkyParameters MakeSkyParameters()
     params.CirrusDensity = CloudParams2.w;
     params.CirrusScrollOffset = CloudParams3.xy;
     params.CirrusAnisotropy = CloudParams3.z;
-    // 雲層へ掛ける大気遠近(Sky.hlsliのEvaluateCloudLayer (f)節)。
+    // 雲の種類の偏り(C4)。CloudParams3.wはこれまで未使用だった枠なので、FrameConstantsは1バイトも増えない
+    params.CloudTypeBias = CloudParams3.w;
+    // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
     // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
-    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
+    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
+    // レイマーチの開始位置を画素ごとにずらす量(C2)。スライスの縞をディザへ変える
+    params.RaymarchJitter = CloudRaymarchDither(pixelPosition);
     // 星空。背景(このシェーダ)と水面の映り込み(SSR.hlsl)だけが星を描く。
     // 昼はCPU側がStarsParams.xへ0を入れるので、Sky.hlsli側が最初のifで抜ける
     params.StarsIntensity = StarsParams.x;
@@ -448,7 +461,11 @@ float4 PSMain(PSInput input) : SV_TARGET
         float3 skyColor;
         if (SkyParams.y > 0.5f)
         {
-            const SkyParameters skyParams = MakeSkyParameters();
+            // 【jitterはこのパスでは使われない】雲を評価するのはSkyCloud.hlslであり、
+            // ここが呼ぶのはSkyColorWithoutClouds(雲を踏まない)とCloudAirlightCorrection
+            // (レイマーチを持たない)だけ。他の4つのMakeSkyParametersと中身を揃えるために
+            // 引数と代入はそのまま残してある
+            const SkyParameters skyParams = MakeSkyParameters(input.Position.xy);
             // 雲を含まない空(SkyView LUT + 星)はここでフル解像度のまま評価する。
             // 太陽・星のような高周波成分がこちら側にあるため、雲の低解像度化で
             // にじむことがない
@@ -458,7 +475,15 @@ float4 PSMain(PSInput input) : SV_TARGET
             // 雲が無い画素には(0,1)が入っており、clearColor*1.0+0.0はIEEE754で
             // 厳密にclearColorと一致する
             const float4 cloud = SkyCloudTexture.Sample(ColorSampler, input.UV);
-            skyColor = clearColor * cloud.a + cloud.rgb;
+            // 雲の手前の霞の色を晴天の空色から曇天の空色へ直す(P18b)。
+            // 【なぜここでフル解像度で掛けるか】補正項はclearColorに比例するため、
+            // 低解像度の雲パス側で畳み込むと補正項の中の太陽・星だけがぼける。
+            // CloudSkyLightはフレーム定数なので、画素ごとに要るのはfogInFrontの1chだけ。
+            // 雲が無い画素には1.0が入っており、(1 - 1.0) = 0 で補正は厳密に0になる
+            const float fogInFront = SkyCloudFogTexture.Sample(ColorSampler, input.UV).r;
+            skyColor = clearColor * cloud.a + cloud.rgb
+                     + CloudAirlightCorrection(clearColor, fogInFront, skyParams);
+
         }
         else
         {

@@ -204,6 +204,10 @@ namespace Kurenai::Defaults
     // 既定の雲底1,500mと合わせると雲頂は2,500mになる。晴天時によく見る「もこもこした綿雲」の
     // 縦横比(1セル=1,000mに対して縦1,000m)に相当する。精密な気象観測値ではなく目安からの採用
     inline constexpr float CloudThickness = 400.0f;
+    // 雲の種類の偏り(C4)。0=層雲寄り / 0.5=中立 / 1=雄大積雲寄り。
+    // 場所ごとの縦プロファイル(層雲・積雲・雄大積雲)の選択を空全体でどちらへ寄せるかを決める。
+    // 0.5は「値ノイズの平均が0.5なので、そのまま3種が均等に散らばる」という中立点
+    inline constexpr float CloudTypeBias = 0.5f;
     // シーンに依存しないUIつまみ(m_WaterTimeFrozenと同じ位置づけ)。
     // 積雲・巻雲の両方に効く(片方だけ凍結できるとA/B比較の対照が取れなくなるため)
     inline constexpr bool CloudTimeFrozen = false;
