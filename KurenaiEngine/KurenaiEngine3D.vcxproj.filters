@@ -138,6 +138,9 @@
     <ClCompile Include="Source\Engine\KurenaiEngine3D.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Engine\Settings\QualitySettings.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
     <ClCompile Include="Source\Engine\DroneShow.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>

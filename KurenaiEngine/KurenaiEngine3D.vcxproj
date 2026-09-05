@@ -117,6 +117,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Source\Engine\KurenaiEngine3D.cpp" />
+    <ClCompile Include="Source\Engine\Settings\QualitySettings.cpp" />
     <ClCompile Include="Source\Engine\DroneShow.cpp" />
     <ClCompile Include="Source\Engine\UI\UIManager.cpp" />
     <ClCompile Include="Source\Engine\UI\UITheme.cpp" />
