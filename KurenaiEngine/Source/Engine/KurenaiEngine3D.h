@@ -20,6 +20,7 @@
 #include "KurenaiEngineBase.h"
 #include "KurenaiTypes.h"
 
+#include "Assets/MeshLightScene.h"
 #include "Assets/RaytracingScene.h"
 #include "Assets/Scene.h"
 #include "Assets/TextureStreaming.h"
@@ -181,6 +182,13 @@ namespace Kurenai
         // G-Bufferの自発光には掛からない(鏡面が光源を直接見ているのは二重計上ではない)
         void SetEmissiveLights(int enabled, float cutoffIrradiance, int maxCount, int doubleCountGI);
 
+        // 段階2: 発光面を三角形のまま面積分するか(0=無効 / 正=有効 / 負=既定のまま)。
+        //
+        // 【MegaLights 経路でのみ効く】DX11・非DXR・MegaLights無効のときは何も起きず、
+        // 段階1のプロキシがそのまま光る。エミッシブ光源そのものが無効なら三角形も出ない。
+        // **いまは参照実装(全三角形総当たり)しか無いので実シーンでは回らない。**
+        void SetMeshLights(int enabled);
+
         // シーン全体の自発光の強度倍率(ImGuiの「自発光の強度」と同じ値)。0以下で既定のまま。
         //
         // 【検証に要る】glTFのemissiveFactorは[0,1]に収まるため、面積の小さい器具は
@@ -271,7 +279,7 @@ namespace Kurenai
         // 複数回呼べば1回の起動で複数枚を同じフレームから落とす(GUIの起動は共有資源なので、
         // 1回の起動で必要な数値が全部取れる形にすること)。
         // 未知の名前・存在しないテクスチャ・非対応フォーマットはログを出して無視する
-        void AddTextureDump(const wchar_t* name, const wchar_t* path, int mipLevel, int arraySlice);
+        void AddTextureDump(const wchar_t* name, const wchar_t* path, int mipLevel, int arraySlice, int frames, int stride);
 
         // 何フレーム目のものを書き出すか。負なら既定(kMegaLightsAccumWarmup)。
         // **整定を待たずに撮ると、内部解像度が既定値のままの絵を掴む**(実際に起きた)
@@ -311,6 +319,10 @@ namespace Kurenai
         // 候補プールが1タイルあたりに抽出する灯の数(K)。
         // kMegaLightsTilePoolMinCapacity 〜 kMegaLightsTilePoolCapacity
         void SetMegaLightsTilePoolCapacity(int capacity);
+        // 候補プールのタイル格子を画素単位でずらすモード。
+        // 0=無効(従来とビット同一)、1=Halton(2,3)、2=有効だが検証用にオフセット0固定。
+        // 範囲外はログを出して無視し、負の値では既定値の状態をログへ残す
+        void SetMegaLightsTileJitter(int mode);
 
         // 【検証専用】蓄積が始まった瞬間にシーンへ摂動を加える。時間再利用の「追従」を
         // 測るためのもので、静止した絵をいくら撮っても測れない側を測る入口。
@@ -429,6 +441,11 @@ namespace Kurenai
         // これがfalseのときDirectLighting.hlslは従来のライトループへ戻る ―― 「パスを積むか」と
         // 「ライトループを止めるか」がずれると、ライトが二重に加算されるか、逆に全部消える
         bool ShouldRunMegaLights() const;
+        // このフレームでタイルライトカリングパスを実行するか。上と同じ作法で1か所に集約している。
+        // **ライトグリッドを実際に読む者が居るときだけ積む** ―― 読み手は
+        // DirectLighting.hlsl のローカルライトのループと Present.hlsl のライトグリッド表示
+        // (Mode 11)の2つしかなく、MegaLightsが走るフレームは前者がLightCount.wで止まっている
+        bool ShouldRunLightCulling() const;
         // いま1画素あたり何本の標本(リザーバ)を引くか。**バッファの確保も定数バッファも
         // 必ずこの関数を通すこと** ―― 2か所で別々に計算すると静かに食い違う。
         // 手法3以外は常に1(手法2の再利用が1画素1リザーバを前提にしているため)
@@ -491,6 +508,8 @@ namespace Kurenai
         {
             Assets::Scene Scene;
             Assets::RaytracingScene RaytracingScene;
+            // メッシュライトの三角形テーブル(段階2)。RaytracingSceneと同じ扱い
+            Assets::MeshLightScene MeshLightScene;
             std::unique_ptr<RHI::IRHITexture> SkyboxTexture;
             // 水面法線マップ版。SkyboxTextureとまったく同じ扱い
             std::unique_ptr<RHI::IRHITexture> WaterNormalMapTexture;
@@ -501,6 +520,7 @@ namespace Kurenai
         {
             Assets::Scene Scene;
             Assets::RaytracingScene RaytracingScene;
+            Assets::MeshLightScene MeshLightScene;
             size_t SceneIndex = 0;
             // シーンの[Scene]Skyboxが読み込み済みのものと異なる場合のみ非nullptr。
             // nullptrなら現在のスカイボックスを維持する
@@ -1552,6 +1572,9 @@ namespace Kurenai
         // タイル内の全画素が同じK個から引くので、プールの引き方のばらつきはタイル内で
         // 共通のオフセットとして乗る(根拠は EngineDefaults.h)
         int32_t m_MegaLightsTilePoolCapacity = Defaults::MegaLightsTilePoolCapacity;
+        // タイル格子を動かすと共通誤差が時間方向に別の画面位置へ移る。
+        // boolではなくモードなのは、+1タイルの経路を保ったままオフセットだけ0にする対照実験を行うため
+        int32_t m_MegaLightsTileJitterMode = Defaults::MegaLightsTileJitterEnabled ? 1 : 0;
         // いまリザーババッファを確保したときの標本数。**定数バッファへ渡す値と必ず一致させる**。
         // 食い違うと Initial が確保外へ書くか Resolve が別画素の標本を読み、
         // 例外もログも出ないまま絵だけが壊れる
@@ -1634,24 +1657,63 @@ namespace Kurenai
         // **毎フレーム焼かない** —— 43本のSetNameを60回/秒で呼ぶ意味がない
         bool m_DebugNamesDirty = true;
 
+        // 連番ダンプの受け皿1枚ぶん。
+        //
+        // 【なぜ1枚では足りないのか】コピーを積んでから読めるようになるまで
+        // kTextureDumpReadDelayFrames ぶん空ける必要がある。受け皿が1枚しか無いと、
+        // 毎フレーム積んだときに**まだ読んでいない中身へ次のコピーを上書きしてしまう**。
+        // エラーにはならず、静かに同じ絵が並ぶ or 途中のフレームが消えるという形で出る
+        struct TextureDumpSlot
+        {
+            // 受け皿。m_DeviceはKurenaiEngineBase(基底)のメンバで、派生クラスのメンバは
+            // 基底より先に破棄されるため、デバイスより後に解放される心配は無い
+            // (m_MegaLightsAccumReadbackが同じ場所に置かれているのと同じ理由)
+            std::unique_ptr<RHI::IRHITexture> Readback;
+            // 【寸法は積むときに控える】あとで引き直すと、その間のリサイズで
+            // 受け皿の中身と食い違う値をヘッダへ書いてしまう
+            RHI::TextureReadbackDesc Desc{};
+            // コピーを積んだフレーム番号。GPUの実行はCPUより数フレーム遅れるので、
+            // 積んだ直後に読んではいけない(IRHICommandList::CopyTextureToReadback のコメント)。
+            // **ファイルのFrameIndex欄にもこの値を書く** —— 画素の中身が属するのはこのフレーム
+            uint32_t CopyFrame = 0;
+            // 連番の何枚目か。ファイル名の _%04u になる
+            uint32_t SequenceIndex = 0;
+            // 読み戻しに失敗し続けたフレーム数。**無人実行が静かに固まるのを防ぐための打ち切り用**
+            uint32_t FailedFrames = 0;
+            // 積んであり、まだ回収していない
+            bool Busy = false;
+        };
+
         struct TextureDumpRequest
         {
             std::string Name; // 表の名前(ファイルのヘッダにも書く)
             std::wstring Path;
             uint32_t MipLevel = 0;
             uint32_t ArraySlice = 0;
-            // 受け皿。m_DeviceはKurenaiEngineBase(基底)のメンバで、派生クラスのメンバは
-            // 基底より先に破棄されるため、デバイスより後に解放される心配は無い
-            // (m_MegaLightsAccumReadbackが同じ場所に置かれているのと同じ理由)
-            std::unique_ptr<RHI::IRHITexture> Readback;
-            RHI::TextureReadbackDesc Desc{};
-            // コピーを積んだフレーム番号。GPUの実行はCPUより数フレーム遅れるので、
-            // 積んだ直後に読んではいけない(IRHICommandList::CopyTextureToReadback のコメント)
-            uint32_t CopyFrame = 0;
-            bool Issued = false;
+            // 何枚撮るか。**既定1のときは受け皿も深さ1**なので、連番を使わない従来の
+            // 呼び出しはメモリ使用量も発行のタイミングも1ミリも変わらない
+            uint32_t TargetFrames = 1;
+            // 何フレームおきに撮るか。1なら連続フレーム。
+            // 【間隔を記録できることに意味がある】画面キャプチャの連写は撮影間隔が
+            // 撮る側の都合で揺れ、同じ構成の2回で時間統計が3〜4倍動いた(61.7i)。
+            // ここでは間隔が指定値として決まり、ファイルのFrameIndexから検算もできる
+            uint32_t Stride = 1;
+            // 実際に確保した受け皿の枚数。解像度が大きいと上限で削られるので、
+            // kTextureDumpRingDepth とは一致しないことがある
+            uint32_t RingDepth = 0;
+            // 連番に異なる寸法の画像を混在させないため、最初の読み戻し形式を固定する。
+            RHI::TextureReadbackDesc FirstDesc{};
+            std::vector<TextureDumpSlot> Slots;
+            // 積んだ枚数と、実際にファイルへ書けた枚数。
+            // 【2つ分けて数える】これまでは「諦めた」も完了として扱われ、1枚も書けなくても
+            // -exitafterdump が正常終了していた。書けた数を別に持って報告する
+            uint32_t IssuedCount = 0;
+            uint32_t WrittenCount = 0;
+            // 直近で積んだフレーム(Strideの間引き用)と、最初に積んだフレーム(打ち切りの起点)
+            uint32_t LastIssueFrame = 0;
+            uint32_t FirstIssueFrame = 0;
+            bool AnyIssued = false;
             bool Done = false;
-            // 読み戻しに失敗し続けたフレーム数。**無人実行が静かに固まるのを防ぐための打ち切り用**
-            uint32_t FailedFrames = 0;
         };
         std::vector<TextureDumpRequest> m_TextureDumps;
         // 何フレーム目で撮るか。負なら kMegaLightsAccumWarmup を使う
@@ -1665,12 +1727,17 @@ namespace Kurenai
         static constexpr uint32_t kTextureDumpMaxFailedFrames = 60;
         // コピーを積んでから読むまでに空けるフレーム数(MegaLightsのダンプと同じ値)
         static constexpr uint32_t kTextureDumpReadDelayFrames = 5;
+        // 遅延中のコピーを連続発行できる深さ。これ以上は回収より先に増えてメモリだけを使う。
+        static constexpr uint32_t kTextureDumpRingDepth = kTextureDumpReadDelayFrames + 1;
+        // 高解像度バッファの連番が無制限にメモリを消費しないための上限。
+        static constexpr size_t kTextureDumpRingMaxBytes = 512ull * 1024 * 1024;
 
         // ダンプの発行(コピーを積む)と、読み戻し・ファイル書き出し。Render()から呼ぶ
         void IssueTextureDumps(Core::RenderGraph& graph);
         void ResolveTextureDumps();
         // 1件ぶんをファイルへ書く。書けたらtrue
-        bool WriteTextureDumpFile(const TextureDumpRequest& request, const std::vector<uint8_t>& pixels) const;
+        bool WriteTextureDumpFile(
+            const TextureDumpRequest& request, const TextureDumpSlot& slot, const std::vector<uint8_t>& pixels) const;
 
         // --- 雲(低解像度の専用パス) ---
         // Lightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。積雲と巻雲だけを
@@ -1682,6 +1749,11 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_SkyCloudPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_SkyCloudPipelineState;
         std::unique_ptr<RHI::IRHITexture> m_SkyCloudTexture;
+        // 上のパスが同時に書く fogInFront(雲に最初に当たった位置の霞の透過率、P18b)。
+        // Lightingパスが CloudAirlightCorrection をフル解像度で掛けるためだけに要る。
+        // 【なぜm_SkyCloudTextureのaに同居できないか】aには既に雲の透過率が入っており、
+        // 補正式に必要な画素ごとの量は (透過率, fogInFront) の2スカラ + 散乱光3成分=5chになる
+        std::unique_ptr<RHI::IRHITexture> m_SkyCloudFogTexture;
         // m_SkyCloudTextureの実寸(内部レンダー解像度を割った後の値。奇数解像度の切り捨てと
         // 最低1pxの下限があるため、割り算をその場でやり直さずここへ保存する)。
         // パスのビューポート指定に使う
@@ -2218,6 +2290,11 @@ namespace Kurenai
         static constexpr uint32_t kSkyViewLUTHeight = 108;
         static constexpr uint32_t kCloudShapeNoiseSize = 128;
         static constexpr uint32_t kCloudDetailNoiseSize = 32;
+        // ウェザーマップ(H3)。ノイズ空間の1周期(256セル=358km)を1枚で覆うので、
+        // 4096なら88m/テクセル。**CloudNoiseGenerate.hlsl の kWeatherNoiseSize と同じ値であること**
+        // (片方だけ変えるとテクセル中心がずれ、バイリニアが半テクセル分ぼける)。
+        // R8G8B8A8で4096^2 = 67MB。解像度の実測はSky.hlsliのウェザーマップの節
+        static constexpr uint32_t kCloudWeatherNoiseSize = 4096;
         // 手続き空(SkyGenerate.hlsl): Perez分布をGPUで評価してキューブマップを生成する。
         // オフラインで焼いたDDS(Sky.dds)と違い、太陽が動くと空の輝度分布の「形」も追従する
         // (circumsolarの明るい領域が太陽と一緒に動く)。詳細はSkyGenerate.hlsl冒頭。
@@ -2247,6 +2324,41 @@ namespace Kurenai
         float m_LastBakedTurbidity = 0.0f;
         // 最後に焼いたときの空の彩度。タービディティと同じ理由で、動いたら焼き直す
         float m_LastBakedSkySaturation = 0.0f;
+
+        // P18: 雲込みの空の照度(SkyIntegrateのCloudSkyLight)とIBLキューブの平均透過率
+        // (m_ActiveCloudTransmittance)は、どちらもベイクのタイミングでしか更新されない。
+        // ところが焼き直しの判定に雲のパラメータが入っていなかったため、被覆率を動かしても
+        // 古い値が残り続けていた。ここへ「ベイク時点の雲のパラメータ」を覚えておき、
+        // 変化したら焼き直す(Render()の焼き直し判定を参照)。
+        // **風のスクロールとカメラ位置は入れない**——毎フレーム動くので入れると毎フレーム
+        // 焼き直しになる。求めているのは半球平均なので、雲の場の平行移動では値がほとんど動かない
+        struct CloudBakeSignature
+        {
+            float CumulusCoverage = -1.0f;   // 無効(m_CloudEnabled=false)なら0
+            float CumulusAltitude = 0.0f;
+            float CumulusUvScale = 0.0f;
+            float CumulusDensity = 0.0f;
+            float CumulusForwardG = 0.0f;
+            float CumulusThickness = 0.0f;   // ボリューム無効なら0(FrameConstantsと同じ扱い)
+            float CloudTypeBias = 0.0f;
+            float CirrusCoverage = 0.0f;     // 無効(m_CirrusEnabled=false)なら0
+            float CirrusAltitude = 0.0f;
+            float CirrusUvScale = 0.0f;
+            float CirrusDensity = 0.0f;
+            float CirrusAnisotropy = 0.0f;
+            float FogSigma0 = 0.0f;          // 霞は雲の見え方(打ち切り)を変えるので入れる
+            float FogScaleHeight = 0.0f;
+            float FogRefHeight = 0.0f;
+            float FogEnabled = 0.0f;
+
+            bool operator==(const CloudBakeSignature&) const = default;
+        };
+        // 現在の設定からシグネチャを作る。**FrameConstants/SkyIntegrateConstantsへ詰めるのと
+        // 同じ有効/無効の潰し方をすること**(m_CloudEnabled=falseなら被覆率0、など)。
+        // 揃っていないと「無効にしたのに焼き直しが走らない」取りこぼしが出る
+        CloudBakeSignature MakeCloudBakeSignature() const;
+        CloudBakeSignature m_LastBakedCloudSignature{};
+        bool m_HasBakedCloudSignature = false;
         // 焼き直しの角度閾値(度)。Auto Advance既定(1h/s)では太陽は15度/秒動くので、
         // 1.0度なら毎秒15回の焼き直しになる。空の見た目は15Hz更新でも連続に見える
         float m_SkyBakeAngleThresholdDegrees = 1.0f;
@@ -2279,6 +2391,9 @@ namespace Kurenai
         // GPU専用(UAV/SRV)のDEFAULTヒープに確保しておりCPUから書き込む経路を持たないため、
         // UpdateBufferを呼ぶとクラッシュする(m_SkyParametersBuffer作成箇所のコメント参照)
         bool m_SkyParametersBufferInitialized = false;
+        // 雲のノイズテクスチャが無くP18(雲込みの空の照度)を積めなかったことを1度だけログへ出す。
+        // 毎ベイクで出すとログが埋まるため(m_PlanarReflectionMultipleWaterLoggedと同じ扱い)
+        bool m_SkyIntegrateCloudMissingLogged = false;
 
         bool m_IBLBaked = false;
         // BRDF積分LUTを焼き終えたか(m_IBLBakedとは別管理)。このLUTは(NdotV, ラフネス)の
@@ -2311,12 +2426,20 @@ namespace Kurenai
         //
         // 【なぜ2枚に分けるか】Shapeは雲の大まかな塊、Detailはその縁を削る高周波成分で、
         // 必要な解像度が2桁違う。1枚にまとめると細かい側に合わせた巨大なテクスチャが要る
+        //
+        // 【3枚目: ウェザーマップ(H3)】雲がどこに立つかを決める2Dの場。上の2枚と同じく
+        // 純粋な手続き生成なので同じパスで一度だけ焼く。**これはレイマーチの高速化が目的**で、
+        // 実測ではマーチの1歩あたりコストの91%がこの2Dのfbmだった(根拠と解像度の実測は
+        // Shaders/3D/Sky.hlsli のウェザーマップの節)
         std::unique_ptr<RHI::IRHITexture> m_CloudShapeNoiseTexture;
         std::unique_ptr<RHI::IRHITexture> m_CloudDetailNoiseTexture;
+        std::unique_ptr<RHI::IRHITexture> m_CloudWeatherNoiseTexture;
         std::unique_ptr<RHI::IRHIShader> m_CloudShapeNoiseComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_CloudShapeNoisePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_CloudDetailNoiseComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_CloudDetailNoisePipelineState;
+        std::unique_ptr<RHI::IRHIShader> m_CloudWeatherNoiseComputeShader;
+        std::unique_ptr<RHI::IRHIPipelineState> m_CloudWeatherNoisePipelineState;
         bool m_CloudNoiseBaked = false;
 
         // --- 大気散乱のLUT(Hillaire 2020) ---
@@ -2494,6 +2617,9 @@ namespace Kurenai
         // 判定し、メッシュ側はEmissiveClustersの有無で見る
         std::vector<bool> m_EmissiveProxyInstances;
         bool m_EmissiveLightsEnabled = Defaults::EmissiveLightsEnabled;
+        // 段階2: 発光面を三角形のまま面積分するか。MegaLights 経路でのみ効く
+        // (有効なフレームは参照実装が型3のプロキシを読み飛ばし、代わりに三角形を積む)
+        bool m_MeshLightsEnabled = Defaults::MeshLightsEnabled;
         // DDGIにも自発光を加算したままにするか(=二重に数えるか)。既定は抑止する
         bool m_EmissiveLightsDoubleCountGI = Defaults::EmissiveLightsDoubleCountGI;
         float m_EmissiveLightsCutoffIrradiance = Defaults::EmissiveLightsCutoffIrradiance;
@@ -3055,10 +3181,25 @@ namespace Kurenai
         // 被覆率。0.40は写真の見た目に寄せて選んだ値であり、物理的な導出ではない
         // (実測で調整可能。EngineDefaults.h参照)
         float m_CloudCoverage = Defaults::CloudCoverage;
-        // 雲底の高度[m](カメラのワールドY基準。Sky.hlsli EvaluateCloudLayerが視線との交点を
-        // 求めるのに使う)
+        // 雲底の高度[m](**ワールドYの絶対高度**。Sky.hlsli EvaluateCloudLayerがレイと
+        // 雲層スラブの交差を解くのに使う)。
+        // 【P17で意味が変わった】以前は「カメラのワールドY基準」の相対高度で、雲層がカメラの
+        // Yに追従していた(上空へ飛んでも雲の上に出られなかった)。渡す値そのものは変えていない
+        // ため、カメラが地表付近にいる従来の構図では見た目は実質変わらない
         float m_CloudAltitude = Defaults::CloudAltitude;
+        // ワールド1mあたりのノイズ空間の距離(= 1/セルの広さ[m])。
+        // 【C7で厚みに比例させたが撤去した】厚みを上げるとセルも広がる形にしていたが、
+        // 「厚みを上げても横幅が広がったように見えない」という判断で外した。
+        // 実際には測ると実効セル幅は厚みに正確に比例していた(厚み600/1200/2400で
+        // 493/997/1988m)ものの、**同時に雲の背が高くなって空が埋まる**ため、
+        // 幅の変化が埋まり具合の変化に飲み込まれて見えなかった。
+        // 根本の問題は別にあり、密度がウェザーマップ(2次元)の掛け算で決まるので
+        // **雲の輪郭が高さによって変わらない**(同じ形が積み上がるだけ)ことである
         float m_CloudUvScale = Defaults::CloudUvScale;
+        // 雲の種類の偏り(C4)。FrameConstants.CloudParams3.wへ載る。
+        // Sky.hlsliのCloudTypeAtが場所ごとの種類(層雲/積雲/雄大積雲)を決めるとき、
+        // 空全体をどちらへ寄せるかのバイアスになる。0.5が中立
+        float m_CloudTypeBias = Defaults::CloudTypeBias;
         float m_CloudDensity = Defaults::CloudDensity;
         // 風速[m/s]。実世界の速度としてUIで直感的に扱えるようにしてあり、ノイズ空間の移動量への
         // 換算(CloudUvScaleを掛ける)はRenderThreadMainのm_CloudScrollOffset更新側で行う
@@ -3097,6 +3238,7 @@ namespace Kurenai
         // 被覆率0を渡し、Sky.hlsli側の早期脱出(SkyColor、判断C)を通す
         bool m_CirrusEnabled = Defaults::CirrusEnabled;
         float m_CirrusCoverage = Defaults::CirrusCoverage;
+        // 雲底の高度[m](**ワールドYの絶対高度**。積雲と同じ規約。m_CloudAltitude参照)
         float m_CirrusAltitude = Defaults::CirrusAltitude;
         float m_CirrusUvScale = Defaults::CirrusUvScale;
         float m_CirrusDensity = Defaults::CirrusDensity;
@@ -3385,6 +3527,8 @@ namespace Kurenai
         // 【破棄順】m_Sceneより後に宣言することで、メンバ破棄順(宣言の逆順)により
         // m_Sceneの頂点/インデックスバッファより先に破棄される
         Assets::RaytracingScene m_RaytracingScene;
+        // メッシュライトの三角形テーブル(段階2)。段階1のプロキシと同じ集合から作られる
+        Assets::MeshLightScene m_MeshLightScene;
         // テクスチャの常駐ミップ制御。自前のワーカースレッドを持ち、そこがm_Sceneの
         // IRHITexture*を掴む。
         //

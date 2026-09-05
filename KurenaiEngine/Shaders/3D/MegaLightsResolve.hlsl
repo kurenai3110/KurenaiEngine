@@ -254,7 +254,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             // 空(候補が無かった)か、可視レイで殺された標本は寄与0のまま
             if (!MegaLightsReservoirIsEmpty(reservoir))
             {
-                const uint lightIndex = MegaLightsUnpackLight(reservoir.LightAndFlags);
+                const uint lightIndex = MegaLightsUnpackLight(reservoir.IndexAndFlags);
                 const GPULight light = Lights[lightIndex];
                 // 【借りた灯は必ず自分の面で評価し直す】隣で良かった灯がここで良いとは限らない。
                 // スポットの円錐外・Range 外・背向きなら寄与は0(それが真の値)
@@ -266,7 +266,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                     // 影レイを撃たない構成(Params0.w == 0。恒等テスト)や、レイトレース影を
                     // 落とさない灯では Initial が可視フラグを立てているので V=1 になる
                     const float visibility =
-                        MegaLightsUnpackVisible(reservoir.LightAndFlags) ? 1.0f : 0.0f;
+                        MegaLightsUnpackVisible(reservoir.IndexAndFlags) ? 1.0f : 0.0f;
                     term = EvaluatePunctualContribution(
                                light, geometry, N, V, NdotV, albedo, metallic, roughness, translucency,
                                energy, visibility) *

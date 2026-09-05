@@ -476,6 +476,12 @@ namespace Kurenai::Assets
         // 「写真に寄せたい」シーンだけが明示的に上げる
         float SkySaturation = 1.0f;
 
+        // 大気の濁り具合(Preethamのタービディティ)。大きいほど地平線が白く霞み、天頂の青が薄くなる。
+        // **指定されたときだけ**エンジンの設定を上書きする(SkySaturationのような無条件の反映に
+        // しないのは、動かすと大気LUTの焼き直しが走るため)。定義域はおおむね1.7〜10
+        bool HasSkyTurbidity = false;
+        float SkyTurbidity = 2.5f;   // EngineDefaults.h の SkyTurbidity と同じ値にすること
+
         // シーン全体の露出(EV100)。**指定されたときだけ**エンジンの設定を上書きする
         // (IBLIntensityと同じ扱い)。Tonemap/SkySaturationのような無条件の反映にしないのは、
         // 露出はUIでも頻繁に触る値で、Exposureを持たないシーンを読み直すたびに
@@ -500,11 +506,28 @@ namespace Kurenai::Assets
         float CloudThickness = 400.0f;      // 雲底から雲頂までの厚み[m]
         bool HasCloudDensity = false;
         float CloudDensity = 8.0f;          // 光学的な濃さ。上げるほど不透明で白い塊になる
+        bool HasCloudTypeBias = false;
+        float CloudTypeBias = 0.5f;         // 雲の種類の偏り(C4)。0=層雲寄り / 0.5=中立 / 1=雄大積雲寄り
         bool HasCloudCellSize = false;
         float CloudCellSize = 1000.0f;      // 雲の塊1つぶんのワールド上の大きさ[m]。
                                              // エンジン側はこの逆数(UvScale)を持つ
+        // 高層の巻雲(P11)。積雲と同じく**指定されたキーだけ**上書きする。
+        // 【被覆率以外も持たせた理由】巻雲は「白い筋」ではなく灰色の薄膜として出ており、
+        // 明るさが未較正のまま出荷設定に0.5で入っていた。詰めるには濃さ・高度・筋の強さを
+        // シーンから振れる必要がある(シェーダ定数と違いホットリロードで振れる)
         bool HasCirrusCoverage = false;
-        float CirrusCoverage = 0.5f;        // 高層の巻雲。0で消える
+        float CirrusCoverage = 0.5f;        // 0で消える(このとき巻雲の計算経路自体を通らない)
+        bool HasCirrusAltitude = false;
+        float CirrusAltitude = 8000.0f;     // 雲底の高度[m]
+        bool HasCirrusCellSize = false;
+        float CirrusCellSize = 2000.0f;     // 筋1本ぶんのワールド上の大きさ[m]。
+                                             // 積雲のCellSizeと同じくエンジン側は逆数を持つ
+        bool HasCirrusDensity = false;
+        float CirrusDensity = 2.0f;         // 消散係数。巻雲は光学的に薄いので積雲より1桁小さい
+        bool HasCirrusAnisotropy = false;
+        float CirrusAnisotropy = 3.0f;      // fBmのUVをU方向へ伸ばす倍率。1で積雲と同じ等方な塊
+        bool HasCirrusWindSpeed = false;
+        float CirrusWindSpeed = 15.0f;      // 風速[m/s]。風向きは積雲と共有する
 
         // --- [Fog]セクション。大気の澄み具合はシーンが持つべき性質なので、[Cloud]と同じく
         // 指定されたキーだけエンジンの設定を上書きする。

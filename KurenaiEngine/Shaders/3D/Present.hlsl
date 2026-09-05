@@ -85,10 +85,11 @@ cbuffer PresentConstants : register(b1)
     // 意味があるモードへ掛けると、かえって読み取れなくなるため)
     float Gain;
     // Mode 11(タイルライトカリングのヒートマップ)専用。
-    // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=ヒートマップの上限ライト数
+    // x=タイル数X(Mode 21では候補プールの有効幅)、y=タイルの1辺のピクセル数、
+    // z=1タイルあたりの容量, w=ヒートマップの上限ライト数
     float4 TileParams;
-    // Mode 11/14が使う。xy=レンダー解像度(Mode 11はUVからタイル座標を求めるのに、
-    // Mode 14はUV単位の速度をピクセル単位へ換算するのに使う), zw=未使用
+    // Mode 11/14/21/22が使う。xy=レンダー解像度(タイル座標・画素添字・速度換算用)、
+    // zw=Mode 21の候補プール格子の画素オフセット。同じ格子を表示しないとA/Bの比較結果が嘘になる
     float4 TileRenderSize;
     // Mode 22(MegaLightsの蓄積平均)専用。x=これまでに足したフレーム数, yzw=未使用
     float4 AccumParams;
@@ -299,7 +300,9 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         const uint2 pixelCoord = uint2(saturate(input.UV) * TileRenderSize.xy);
         const uint tileSize = max((uint)TileParams.y, 1u);
-        const uint2 tileCoord = pixelCoord / tileSize;
+        // zwは候補プールを書いた格子の画素オフセット。C++側のTileParams.xも有効タイル幅である
+        const uint2 tileOffset = uint2(TileRenderSize.zw);
+        const uint2 tileCoord = (pixelCoord + tileOffset) / tileSize;
         // 候補プールのレイアウトは MegaLightsTilePool.hlsl 冒頭を参照。
         // base = tileIndex * (6 + 2K)、届いたライト数は [base + 1](MegaLightsCommon.hlsli 参照)
         const uint candidateCount = (uint)TileParams.z;

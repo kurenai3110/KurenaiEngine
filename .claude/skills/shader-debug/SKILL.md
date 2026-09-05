@@ -97,6 +97,8 @@ Sample3D.exe -dx12 -scene MaterialTest -taa 0 -dumpframe 200 -exitafterdump ^
 |---|---|
 | `-dumptex <名前> <パス>` | **繰り返し可**。1回の起動で複数枚を同じフレームから落とす |
 | `-dumptexmip <N>` / `-dumptexslice <N>` | **直前の** `-dumptex` に掛かる(既定0) |
+| `-dumptexframes <N>` | **直前の** `-dumptex` をNフレーム連番で撮る(既定1)。Nが1を超えるときは `normal_0000.bin` のように連番になる。受け皿はリングなので、読み戻し遅延中の中身を次のコピーが上書きしない |
+| `-dumptexstride <S>` | 連番の捕獲間隔をフレーム数で指定する(既定1)。撮ったフレームは各ファイルの `FrameIndex` に残るので、間隔を後から検算できる |
 | `-dumpframe <N>` | 何フレーム目で撮るか。既定180 |
 | `-exitafterdump` | 書き終えたら自動終了 |
 | `-taa <0/1>` | TAAの有無 |
@@ -119,6 +121,7 @@ python Tools/texdump_inspect.py selftest              # まずこれを通す
 python Tools/texdump_inspect.py stat  <dump.bin>
 python Tools/texdump_inspect.py where <dump.bin> --pred nan
 python Tools/texdump_inspect.py diff  <a.bin> <b.bin>
+python Tools/texdump_inspect.py noise <dump_*.bin> --tile 16 --channel luma
 ```
 
 **`selftest` を通してから使う。** 自分で作った物差しで自分の成果を測ると、
@@ -144,6 +147,13 @@ python Tools/texdump_inspect.py diff  <a.bin> <b.bin>
 - 両側に散っていて、大きさが量子化の刻み未満ならULP(コンパイラのコード生成差)
 - **「1ビットも動いていない」と出たチャンネル**は、変えたつもりが効いていない
 - **差がゼロは合格ではない。** 「片方が実行されていない」を先に潰す(下の7節)
+
+**時間方向のばらつきを見たいときは `noise` を使う。** `-dumptexframes` で撮った同じRTの
+連番を渡すと、タイル空間平均の時間stdをタイル間、各画素からそのフレームのタイル平均を
+引いた残差の時間stdをタイル内として、それぞれ中央値で出す。格子の位置を確かめるには
+`--offset Y,X`、位置によるぶれも見るなら `--offset-sweep` を付ける。成分は `--channel`、
+未点灯タイルの別集計の閾値は `--lit-threshold` で選ぶ。`FrameIndex` が連番の捕獲間隔を
+示すため、時間軸も出力から検算できる。
 
 ## 7. 対照実験(これ無しに結論を書かない)
 

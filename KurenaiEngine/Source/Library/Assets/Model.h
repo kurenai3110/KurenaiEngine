@@ -140,6 +140,26 @@ namespace Kurenai::Assets
     //
     // 【ワールド空間へ移すのは SceneLoader】Model は複数インスタンスから共有されうるので、
     // ここはローカル空間のまま持つ(MeshWorldBounds と同じ方針)。
+    // BuildEmissiveClusters が「どのかたまりにも属さない」三角形へ入れる番号。
+    // 面積0の縮退三角形がこれになる
+    inline constexpr uint32_t kEmissiveTriangleUnassigned = 0xFFFFFFFFu;
+
+    // メッシュライト(段階2)が面積分する三角形1枚。**モデルのローカル空間**。
+    //
+    // 【辺で持つ理由】p = P0 + b1*E1 + b2*E2 で重心座標からそのまま点が出て、
+    // 幾何法線も cross(E1,E2) で出る。GPU側(GPUEmissiveTriangle)と同じ持ち方にしてある。
+    //
+    // 【段階1のプロキシと同じ集合から作ること】判定が2箇所にあると、片方にしか入らない
+    // メッシュが「二重に光る」か「まったく光らない」かのどちらかになり、どちらも絵は出る
+    struct EmissiveTriangle
+    {
+        float P0[3] = { 0.0f, 0.0f, 0.0f };
+        float E1[3] = { 0.0f, 0.0f, 0.0f }; // P1 - P0
+        float E2[3] = { 0.0f, 0.0f, 0.0f }; // P2 - P0
+        // 属するかたまり(Mesh::EmissiveClusters の添字)
+        uint32_t ClusterIndex = 0;
+    };
+
     struct EmissiveCluster
     {
         // 面積で重み付けした重心 Σ(A_i c_i) / ΣA_i。フラックスの1次モーメントそのもの
@@ -173,6 +193,10 @@ namespace Kurenai::Assets
         float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
         // 何枚の三角形から作ったか(診断用。0のクラスタは作らない)
         uint32_t TriangleCount = 0;
+        // このかたまりに属する三角形が Mesh::EmissiveTriangles の何番目から何枚か。
+        // 三角形は必ずかたまりごとに連続して並べてある(段階2の2段目の提案分布が
+        // 「かたまりを選んでから、その中を面積比で引く」形になるため)
+        uint32_t TriangleOffset = 0;
     };
 
     struct Mesh
@@ -291,6 +315,13 @@ namespace Kurenai::Assets
         // 【Mesh のメンバとして持つこと】ModelLoader の SortMeshesByMaterial が std::sort で
         // メッシュを入れ替えるため、メッシュ番号で引く並列配列にすると対応が黙って崩れる
         std::vector<EmissiveCluster> EmissiveClusters;
+        // 上のかたまりを構成する三角形(ローカル空間)。**かたまりごとに連続して並ぶ**
+        // (EmissiveCluster::TriangleOffset / TriangleCount がその範囲)。
+        //
+        // 【段階2のメッシュライトが積分する実体】段階1のプロキシはこの集合を重心1点で
+        // 近似したもので、遠方では両者が一致しなければならない。その突き合わせが
+        // 「段階2が要る理由」と「段階1で足りる範囲」を同時に決める
+        std::vector<EmissiveTriangle> EmissiveTriangles;
         // 0以下ならアルファカットアウト無効(常に不透明)。glTFのalphaMode=MASKのマテリアルのみ
         // alphaCutoff(既定0.5)が設定される
         float AlphaCutoff = 0.0f;

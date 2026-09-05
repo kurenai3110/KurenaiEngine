@@ -204,6 +204,10 @@ namespace Kurenai::Defaults
     // 既定の雲底1,500mと合わせると雲頂は2,500mになる。晴天時によく見る「もこもこした綿雲」の
     // 縦横比(1セル=1,000mに対して縦1,000m)に相当する。精密な気象観測値ではなく目安からの採用
     inline constexpr float CloudThickness = 400.0f;
+    // 雲の種類の偏り(C4)。0=層雲寄り / 0.5=中立 / 1=雄大積雲寄り。
+    // 場所ごとの縦プロファイル(層雲・積雲・雄大積雲)の選択を空全体でどちらへ寄せるかを決める。
+    // 0.5は「値ノイズの平均が0.5なので、そのまま3種が均等に散らばる」という中立点
+    inline constexpr float CloudTypeBias = 0.5f;
     // シーンに依存しないUIつまみ(m_WaterTimeFrozenと同じ位置づけ)。
     // 積雲・巻雲の両方に効く(片方だけ凍結できるとA/B比較の対照が取れなくなるため)
     inline constexpr bool CloudTimeFrozen = false;
@@ -570,6 +574,10 @@ namespace Kurenai::Defaults
     // (バッファの確保がコンパイル時の kMegaLightsTilePoolCapacity で決まるため、
     // 振るにはビルドが要る)
     inline constexpr int MegaLightsTilePoolCapacity = 128;
+    // 候補プールの16x16格子をフレームごとにずらし、タイル内で共通する抽出誤差を
+    // 時間累積後の同じ画面位置へ固定しない。1フレームのノイズ量を減らす機能ではない。
+    // 無効時は従来のタイル添字・乱数の種・ディスパッチ数を保つため既定は無効
+    inline constexpr bool MegaLightsTileJitterEnabled = false;
 
     // --- シャドウ(スクリーンスペース) ---
     // ポイント/スポットライトの影。深度バッファに写っている面しか遮蔽物にできず、
@@ -795,6 +803,19 @@ namespace Kurenai::Defaults
     // 【つまみとして残す理由】どちらが正しいかではなく、**どれだけ二重に入っていたかを
     // 測るための対照**が要る。差分がゼロなら「抑止が効いていない」を先に疑うこと
     inline constexpr bool EmissiveLightsDoubleCountGI = false;
+
+    // --- メッシュライト(段階2: 発光面を三角形のまま積分する) ---
+    // 段階1のプロキシが発光クラスタを重心1点へ潰すのに対し、こちらは同じクラスタを
+    // 三角形の束のまま面積分する。遠方では両者は一致しなければならず、それが検証になる。
+    //
+    // 【MegaLights 経路だけが切り替わる】プロキシは m_LightBuffer に積んだままで、
+    // MegaLights の参照実装と候補プールだけが型3を読み飛ばす。DDGI・反射プローブ・
+    // RT反射・半透明・平面反射は面光源を扱えないのでプロキシが要る ―― 消すと
+    // それらから発光体の照明だけが消え、しかもそれらしく見える。
+    // DX11 / 非DXR は ShouldRunMegaLights() が偽なので自動的にプロキシへ落ちる。
+    //
+    // 【既定で無効】まだ参照実装(全三角形総当たり)しか無く、実シーンでは回らない
+    inline constexpr bool MeshLightsEnabled = false;
 
     // --- 星空 ---
     // 夜空に星を描くか。既定はtrueだが、昼は太陽の仰角で完全に0までフェードするため

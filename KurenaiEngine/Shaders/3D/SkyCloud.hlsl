@@ -37,6 +37,9 @@
 // ここで定義しないとボリュームの経路がコンパイルされず平面の雲に化ける
 #define KURENAI_CLOUD_SHAPE_REGISTER t1
 #define KURENAI_CLOUD_DETAIL_REGISTER t2
+// 焼いた雲のウェザーマップ(H3)。定義しない場合は手続きで評価する経路が残るので絵は出るが、
+// レイマーチの1歩が約10倍高くつく。**雲の本体を評価するのはこのパス**なのでここで定義する
+#define KURENAI_CLOUD_WEATHER_REGISTER t4
 #include "Sky.hlsli"
 
 // C++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること。
@@ -130,7 +133,7 @@ float3 ReconstructWorldPos(float2 uv, float depth)
 // MakeSkyParametersと完全に同一の内容であること。5つのシェーダーはcbufferをそれぞれ別に
 // 宣言しているため関数そのものは共有できず複製しているが、中身がずれると
 // 「背景に見える雲」「水面に映る雲」が食い違ってしまうため、変える場合は必ず5つとも同時に直すこと
-SkyParameters MakeSkyParameters()
+SkyParameters MakeSkyParameters(float2 pixelPosition)
 {
     SkyParameters params;
     params.SunDirection = normalize(SkySunDirection.xyz);
@@ -149,11 +152,18 @@ SkyParameters MakeSkyParameters()
     params.CirrusDensity = CloudParams2.w;
     params.CirrusScrollOffset = CloudParams3.xy;
     params.CirrusAnisotropy = CloudParams3.z;
+    // 雲の種類の偏り(C4)。CloudParams3.wはこれまで未使用だった枠なので、FrameConstantsは1バイトも増えない
+    params.CloudTypeBias = CloudParams3.w;
     // ボリューム経路のレイマーチ段数。**このシェーダーだけが上書きする**
     // (他のシェーダーはApplySkyParametersFromBufferが入れた0のままで、
     //  Sky.hlsliのコンパイル時の既定へ落ちる。SkyParameters::CloudRaymarchSteps参照)
     params.CloudRaymarchSteps = (int)CloudQualityParams.x;
-    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.y);
+    // 【P17でfloat3を渡す】雲層はワールド座標に固定されており、レイの起点(視点)の
+    // XZまで要る。ここをCameraPosition.yに戻すと雲が視点に追従して破綻する
+    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
+    // レイマーチの開始位置を画素ごとにずらす量(C2)。スライスの縞をディザへ変える。
+    // このパスは低解像度なので、ずらしの粒度も低解像度の画素になる
+    params.RaymarchJitter = CloudRaymarchDither(pixelPosition);
     params.StarsIntensity = StarsParams.x;
     params.StarsDensity = StarsParams.y;
     params.StarsTwinkle = StarsParams.z;
@@ -162,7 +172,23 @@ SkyParameters MakeSkyParameters()
     return params;
 }
 
-float4 PSMain(PSInput input) : SV_TARGET
+// 2枚出す。
+//   SV_TARGET0 … rgb=事前乗算済みの散乱光 / a=透過率
+//   SV_TARGET1 … fogInFront(雲に最初に当たった位置の霞の透過率)
+//
+// 【なぜ1枚に収まらないか】合成側は
+//   clearColor * T + S + clearColor * (CloudSkyLight - 1) * (1 - fogInFront)
+// を行う(P18b。Sky.hlsliのCloudAirlightCorrection参照)。CloudSkyLightはフレーム定数だが
+// float3なので、この式に必要な画素ごとの量は (T, fogInFront) の2スカラ + S の3成分=5chになる。
+// 補正項はclearColorに比例するため、こちら側で畳み込むと補正項の中の太陽・星だけが
+// 低解像度化してぼける。だからfogInFrontは畳み込まずそのまま持ち出す
+struct PSOutput
+{
+    float4 Cloud : SV_TARGET0;
+    float  FogInFront : SV_TARGET1;
+};
+
+PSOutput PSMain(PSInput input)
 {
     // 背景(遠平面)方向の視線ベクトル。Reverse-Zのため遠平面はNDC z=0.0
     const float3 farPoint = ReconstructWorldPos(input.UV, 0.0f);
@@ -170,8 +196,12 @@ float4 PSMain(PSInput input) : SV_TARGET
 
     float transmittance;
     float3 scatteredLight;
-    SkyCloudLayers(rayDir, MakeSkyParameters(), transmittance, scatteredLight);
+    float fogInFront;
+    SkyCloudLayers(
+        rayDir, MakeSkyParameters(input.Position.xy), transmittance, scatteredLight, fogInFront);
 
-    // rgb=事前乗算済みの散乱光 / a=透過率。合成側が clearColor * a + rgb を行う
-    return float4(scatteredLight, transmittance);
+    PSOutput output;
+    output.Cloud = float4(scatteredLight, transmittance);
+    output.FogInFront = fogInFront;
+    return output;
 }

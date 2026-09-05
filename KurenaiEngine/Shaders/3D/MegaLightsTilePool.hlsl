@@ -44,13 +44,15 @@ cbuffer MegaLightsTilePoolConstants : register(b0)
 {
     // ワールド座標をView空間へ変換する行列(ライトをタイル錐台と同じ空間へ持ち込むため)
     float4x4 View;
-    // x=タイル数X, y=タイル数Y, z=有効ライト数, w=1タイルあたりの候補数K
+    // xy=候補プールの有効タイル数(格子ジッター有効時だけ通常のタイル数+1)、
+    // z=有効ライト数, w=1タイルあたりの候補数K
     uint4 TileParams;
     // x=レンダー解像度の幅, y=同 高さ, zw=未使用
     uint4 RenderSize;
     // x=射影行列の(0,0)成分, y=同(1,1)成分、z=深度リニアライズ定数a, w=同b(viewZ = b / (depth - a))
     float4 ProjParams;
-    // x=フレーム番号(サンプルを毎フレーム変えるための乱数の種)、yzw=未使用
+    // x=フレーム番号(サンプルを毎フレーム変えるための乱数の種)、
+    // yz=タイル格子の画素オフセット(各0〜15)、w=未使用
     uint4 PoolParams;
 };
 
@@ -116,7 +118,8 @@ float Luminance(float3 c)
 }
 
 [numthreads(16, 16, 1)]
-void CSMain(uint3 groupID : SV_GroupID, uint3 dispatchThreadID : SV_DispatchThreadID, uint groupIndex : SV_GroupIndex)
+void CSMain(
+    uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
 {
     const uint tileCountX = TileParams.x;
     const uint tileCountY = TileParams.y;
@@ -139,9 +142,12 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 dispatchThreadID : SV_DispatchThre
     GroupMemoryBarrierWithGroupSync();
 
     // --- タイル内の深度範囲を求める(LightCulling.hlsl と同じ手順) ---
-    if (dispatchThreadID.x < RenderSize.x && dispatchThreadID.y < RenderSize.y)
+    // 格子の規約は [tile*16-offset, tile*16-offset+16)。左上では負になるため符号付きで組み立てる
+    const int2 tilePixelOrigin = int2(groupID.xy * kTileSize) - int2(PoolParams.yz);
+    const int2 pixel = tilePixelOrigin + int2(groupThreadID.xy);
+    if (all(pixel >= int2(0, 0)) && all(pixel < int2(RenderSize.xy)))
     {
-        const float depth = DepthTexture.Load(int3(dispatchThreadID.xy, 0));
+        const float depth = DepthTexture.Load(int3(pixel, 0));
         if (depth > 0.0f)
         {
             const uint depthBits = asuint(depth);
@@ -179,13 +185,14 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 dispatchThreadID : SV_DispatchThre
     const float nearestViewZ = TileViewZFromDepth(asfloat(gsMaxDepthBits), ProjParams.z, ProjParams.w);
     const float farthestViewZ = TileViewZFromDepth(asfloat(gsMinDepthBits), ProjParams.z, ProjParams.w);
 
-    const TileFrustum frustum = MakeTileFrustum(
-        groupID.xy, RenderSize.xy, ProjParams.x, ProjParams.y, nearestViewZ, farthestViewZ);
+    const TileFrustum frustum = MakeTileFrustumFromPixelOrigin(
+        tilePixelOrigin, RenderSize.xy, ProjParams.x, ProjParams.y, nearestViewZ, farthestViewZ);
 
     float3 aabbMin;
     float3 aabbMax;
-    TileViewSpaceAABB(
-        groupID.xy, RenderSize.xy, ProjParams.x, ProjParams.y, nearestViewZ, farthestViewZ, aabbMin, aabbMax);
+    TileViewSpaceAABBFromPixelOrigin(
+        tilePixelOrigin, RenderSize.xy, ProjParams.x, ProjParams.y,
+        nearestViewZ, farthestViewZ, aabbMin, aabbMax);
 
     // --- 各ライトの重みを求める ---
     // スレッドgroupIndexが groupIndex, groupIndex+256, ... 番のライトを担当する

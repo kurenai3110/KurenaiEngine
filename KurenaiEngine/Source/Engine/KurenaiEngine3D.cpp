@@ -406,7 +406,7 @@ namespace Kurenai
             // 同じ順・同じ型であること(2つのシェーダーが背景と水面反射で同じ雲を描くための前提。
             // Sky.hlsli冒頭のコメント・各シェーダーのMakeSkyParametersのコメント参照)。
             // CloudParams0: x=被覆率(0で雲なし。Sky.hlsliのSkyColorが早期脱出する)、
-            //               y=雲底の高度[m](カメラのワールドY基準)、
+            //               y=雲底の高度[m](**ワールドYの絶対高度**。P17より前はカメラ相対だった)、
             //               z=UVスケール[ノイズ空間の距離/m]、w=消散係数
             DirectX::XMFLOAT4 CloudParams0;
             // CloudParams1: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
@@ -417,12 +417,14 @@ namespace Kurenai
             // FrameConstants宣言と同じ順・同じ型であること(3シェーダーすべてを更新すること。
             // 末尾のPlanarReflectionPlaneを含めて1フィールドずつ突き合わせて一致を確認すること)。
             // CloudParams2: x=巻雲の被覆率(0で巻雲なし。Sky.hlsliのSkyColorが早期脱出する)、
-            //               y=雲底の高度[m](カメラのワールドY基準)、
+            //               y=雲底の高度[m](**ワールドYの絶対高度**。P17より前はカメラ相対だった)、
             //               z=UVスケール[ノイズ空間の距離/m]、w=消散係数
             DirectX::XMFLOAT4 CloudParams2;
             // CloudParams3: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
             //               同じ周期でstd::fmod済み。m_CirrusScrollOffset参照)、
-            //               z=fBmのUV(U方向)を伸ばす異方性スケール(m_CirrusAnisotropy)、w=未使用
+            //               z=fBmのUV(U方向)を伸ばす異方性スケール(m_CirrusAnisotropy)、
+            //               w=積雲の種類の偏り(m_CloudTypeBias、C4)。C4より前は未使用だった枠なので
+            //               FrameConstantsは1バイトも増えていない
             DirectX::XMFLOAT4 CloudParams3;
             // 平面反射(さらに末尾に追加)。xyz=水面平面の法線(現状は常に(0,1,0))、
             // w=平面の距離項。PlanarReflection.hlslのVSMainが
@@ -1170,7 +1172,8 @@ namespace Kurenai
             // Mode==11(タイルライトカリングのヒートマップ)専用。
             // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=ヒートマップの上限ライト数
             DirectX::XMFLOAT4 TileParams;
-            // Mode==11専用。xy=レンダー解像度(UVからタイル座標を求めるのに使う), zw=未使用
+            // xy=レンダー解像度。zw=Mode 21の候補プール格子オフセット。
+            // デバッグ表示も書き手と同じ格子を読まないとA/Bの比較結果が嘘になる
             DirectX::XMFLOAT4 TileRenderSize;
             // Mode==22(MegaLightsの蓄積平均)専用。x=これまでに足したフレーム数, yzw=未使用。
             // **末尾に足すこと** ―― cbufferは宣言順レイアウトなので、途中へ挿すと
@@ -1270,6 +1273,10 @@ namespace Kurenai
             // Preetham xyYモデル用のパラメータ。x=タービディティ、y=Preethamの重み
             // (0=従来ティントのみ、1=Preethamのみ)、zw=予備
             DirectX::XMFLOAT4 ModelParams;
+            // xyz=雲による空の明かりの変化(P18)。「雲込みの空の照度 ÷ 晴天の空の照度」。
+            // 被覆率0で厳密に(1,1,1)。w=予備。大気遠近のin-scatterへ掛ける
+            // (意味と、なぜ天頂輝度に混ぜないのかはSky.hlsliのCloudSkyLightのコメント参照)
+            DirectX::XMFLOAT4 CloudSkyLight;
         };
 
         // SkyIntegrate.hlsl側のcbuffer SkyIntegrateConstantsと一致させる必要がある
@@ -1278,8 +1285,19 @@ namespace Kurenai
             // xyz=太陽が「ある」向き(正規化済み。光が進む向きとは符号が逆)、w=未使用
             DirectX::XMFLOAT4 SunDirection;
             // x=目標照度[lx](SunLighting::SkyIlluminanceLux)、y=実効プリ露出(effectiveExposure)、
-            // z=タービディティ(m_SkyTurbidity)、w=未使用
+            // z=タービディティ(m_SkyTurbidity)、w=空の彩度(m_SkySaturation)
             DirectX::XMFLOAT4 IntegrateParams;
+
+            // --- 以下はP18の第2段(雲込みの空の照度)専用。**FrameConstantsの同名の枠と
+            //     完全に同じ値を入れること**。食い違うと「背景に見えている雲」と
+            //     「大気遠近が想定している雲」が別物になる ---
+            DirectX::XMFLOAT4 CloudParams0;  // x=積雲の被覆率、y=雲底高度[m]、z=UVスケール、w=消散係数
+            DirectX::XMFLOAT4 CloudParams1;  // xy=スクロール量、z=前方散乱g、w=厚み[m]
+            DirectX::XMFLOAT4 CloudParams2;  // x=巻雲の被覆率、y=高度[m]、z=UVスケール、w=消散係数
+            DirectX::XMFLOAT4 CloudParams3;  // xy=スクロール量、z=異方スケール、w=雲の種類の偏り
+            DirectX::XMFLOAT4 FogParams0;    // x=消散係数[1/m]、y=スケールハイト[m]、z=基準高度[m]、w=有効フラグ
+            // xyz=視点のワールド座標(レイの起点)、w=太陽照度/空照度比
+            DirectX::XMFLOAT4 ViewerAndSunRatio;
         };
 
         // AtmosphereLUT.hlsl側のcbuffer AtmosphereConstantsと一致させる必要がある。
@@ -1515,13 +1533,15 @@ namespace Kurenai
         struct alignas(16) MegaLightsTilePoolConstants
         {
             DirectX::XMFLOAT4X4 View;
-            // x=タイル数X, y=タイル数Y, z=有効ライト数, w=1タイルあたりの候補数K
+            // xy=候補プールの有効タイル数(格子ジッター有効時だけ通常のタイル数+1)、
+            // z=有効ライト数, w=1タイルあたりの候補数K
             DirectX::XMUINT4 TileParams;
             // x=レンダー解像度の幅, y=同 高さ, zw=未使用
             DirectX::XMUINT4 RenderSize;
             // x=射影行列の(0,0)成分, y=同(1,1)成分、z=深度リニアライズ定数a, w=同b
             DirectX::XMFLOAT4 ProjParams;
-            // x=フレーム番号(候補を毎フレーム引き直すための乱数の種)、yzw=未使用
+            // x=フレーム番号(候補を毎フレーム引き直すための乱数の種)、
+            // yz=タイル格子の画素オフセット(各0〜15)、w=未使用
             DirectX::XMUINT4 PoolParams;
         };
 
@@ -1541,7 +1561,8 @@ namespace Kurenai
         {
             // x=出力幅, y=出力高, z=1ピクセルあたりの初期候補数M, w=影レイを撃つか(0で撃たない)
             DirectX::XMUINT4 Params0;
-            // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
+            // x=候補プールの有効タイル数X(格子ジッター有効時だけ+1)、
+            // y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
             DirectX::XMUINT4 Params1;
             // x=借りる近傍の数, y=探す半径(ピクセル),
             // z=空間再利用の結合方式(0=confidence重み, 1=不偏化のZ),
@@ -1566,6 +1587,9 @@ namespace Kurenai
             // 「1画素1リザーバ」を前提に添字を組み立てているため。
             // yzw=未使用
             DirectX::XMUINT4 Params5;
+            // xy=候補プールのタイル格子オフセット(画素、各0〜15)、zw=未使用。
+            // 書き手と全読み手で同じ値を使わないと、別タイルの候補を静かに読むため必ず末尾へ置く
+            DirectX::XMUINT4 Params6;
         };
 
         // MegaLightsDenoise.hlsl側のcbuffer MegaLightsDenoiseConstantsと一致させること
@@ -1589,7 +1613,13 @@ namespace Kurenai
             // x: フレーム番号。球光源のサンプル列を毎フレーム回すのに使う。
             // 【混ぜないと蓄積が効かない】固定すると毎フレーム同じ点を引き、
             // 何枚足しても可視率のばらつきが残る(MegaLightsReference.hlsl)
+            // y: 発光三角形の枚数(0ならメッシュライト無効。段階1のプロキシがそのまま光る)
+            // z/w: 未使用
             DirectX::XMUINT4 Params1;
+            // x: シーン全体の自発光の強度倍率。三角形テーブルには焼けない(毎フレーム変わる)。
+            // 【露出ではない】自発光は露出を通らない経路で、段階1のプロキシも露出抜き。
+            // 露出を掛けるとEV100=15で1/39322倍になる。y/z/w: 未使用
+            DirectX::XMFLOAT4 Params2;
         };
 
         // RTAO.hlsl側のcbuffer RTAOConstantsと一致させる必要がある
@@ -2452,7 +2482,13 @@ namespace Kurenai
         skyCloudPipelineDesc.VertexShader = m_SkyCloudVertexShader.get();
         skyCloudPipelineDesc.PixelShader = m_SkyCloudPixelShader.get();
         skyCloudPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        skyCloudPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        // 2枚目は fogInFront(雲に最初に当たった位置の霞の透過率、P18b)。並びはSkyCloud.hlslの
+        // PSOutputおよびSkyCloudパスのRenderTargetsと一致させること。
+        // 1チャンネルなのでDDGIResolveの低解像度深度と同じR32_Floatにする
+        skyCloudPipelineDesc.RenderTargetFormats = {
+            RHI::Format::R16G16B16A16_Float,
+            RHI::Format::R32_Float,
+        };
         m_SkyCloudPipelineState = m_Device->CreatePipelineState(skyCloudPipelineDesc);
 
         // DDGIの低解像度解決パス(雲パスと同じ作り。拡散イラディアンスとinsideWeightを書く)
@@ -3160,10 +3196,14 @@ namespace Kurenai
             kCloudShapeNoiseSize, kCloudShapeNoiseSize, kCloudShapeNoiseSize, RHI::Format::R8G8B8A8_UNorm);
         m_CloudDetailNoiseTexture = m_Device->CreateUAVTexture3D(
             kCloudDetailNoiseSize, kCloudDetailNoiseSize, kCloudDetailNoiseSize, RHI::Format::R8G8B8A8_UNorm);
-        if (!m_CloudShapeNoiseTexture || !m_CloudDetailNoiseTexture)
+        // ウェザーマップ(H3)。2Dなので CreateUAVTexture。8bitで足りることは実測済み
+        // (同じ解像度なら16bitとの誤差の差は0.0002。効くのは空間の刻みだけ)
+        m_CloudWeatherNoiseTexture = m_Device->CreateUAVTexture(
+            kCloudWeatherNoiseSize, kCloudWeatherNoiseSize, RHI::Format::R8G8B8A8_UNorm);
+        if (!m_CloudShapeNoiseTexture || !m_CloudDetailNoiseTexture || !m_CloudWeatherNoiseTexture)
         {
             Core::Logger::Error("KurenaiEngine3D",
-                "雲の3Dノイズテクスチャの作成に失敗しました(ボリュメトリック雲が正しく描画されません)");
+                "雲のノイズテクスチャの作成に失敗しました(ボリュメトリック雲が正しく描画されません)");
         }
 
         RHI::ShaderDesc cloudShapeNoiseCsDesc;
@@ -3194,7 +3234,21 @@ namespace Kurenai
         m_CloudDetailNoisePipelineState =
             m_Device->CreateComputePipelineState({ m_CloudDetailNoiseComputeShader.get() });
 
-        // 大気散乱のLUT(Hillaire 2020)。TransmittanceとMultiScatteringはカメラにも太陽にも
+        RHI::ShaderDesc cloudWeatherNoiseCsDesc;
+        cloudWeatherNoiseCsDesc.Stage = RHI::ShaderStage::Compute;
+        cloudWeatherNoiseCsDesc.FilePath = shaderDirectory + L"CloudNoiseGenerate.kshader";
+        cloudWeatherNoiseCsDesc.EntryPoint = "CSGenerateWeather";
+        m_CloudWeatherNoiseComputeShader = m_Device->CreateShader(cloudWeatherNoiseCsDesc);
+        if (!m_CloudWeatherNoiseComputeShader)
+        {
+            Core::Logger::Error("KurenaiEngine3D",
+                "CloudNoiseGenerate.hlsl CSGenerateWeather のコンパイルに失敗しました"
+                "(ウェザーマップが焼かれず、雲がまったく立ちません)");
+        }
+        m_CloudWeatherNoisePipelineState =
+            m_Device->CreateComputePipelineState({ m_CloudWeatherNoiseComputeShader.get() });
+
+        // 大気散乱のLUT(P14a: Hillaire 2020)。TransmittanceとMultiScatteringはカメラにも太陽にも
         // 依存せず、大気パラメータ(濁りを含む)だけの関数なので、濁りが変わらない限り焼き直さない
         // (m_AtmosphereLUTBakedTurbidity)。SkyViewは太陽の位置と濁りで変わるため、
         // そのどちらかが動いたときに焼き直す(m_SkyViewBakedSunPosition)。
@@ -3680,6 +3734,25 @@ namespace Kurenai
         return m_MegaLightsReferencePipelineState != nullptr;
     }
 
+    bool KurenaiEngine3D::ShouldRunLightCulling() const
+    {
+        if (!m_LightCullingEnabled)
+        {
+            return false;
+        }
+        // ライトグリッドのデバッグ表示は、MegaLightsが走っていてもグリッドそのものを見せるものなので
+        // 実行が要る。**ここを落とすと表示が前フレームの残骸か未初期化の中身になる**
+        if (m_DebugView == DebugView::LightTiles)
+        {
+            return true;
+        }
+        // MegaLightsが走るフレームはポイント/スポットの寄与をあちらが出しており、
+        // DirectLighting.hlslのローカルライトのループはLightCount.wで止まっている。
+        // それでもグリッドだけは毎フレーム作り続けていた ―― 誰も読まない出力で、
+        // 灯数に比例して増える(1026灯で0.198ms。docs 61.7e.3)
+        return !ShouldRunMegaLights();
+    }
+
     bool KurenaiEngine3D::ShouldRunRaytracedAO() const
     {
         return m_AOTechnique == AOTechnique::Raytraced && m_RaytracingScene.IsValid() &&
@@ -3717,8 +3790,10 @@ namespace Kurenai
             m_EmissiveLightsEnabled = (enabled > 0);
         }
         // 0以下は「既定のまま」。OverrideMegaLightsの負値と同じ約束にしてある
+        bool cutoffChanged = false;
         if (cutoffIrradiance > 0.0f)
         {
+            cutoffChanged = (m_EmissiveLightsCutoffIrradiance != cutoffIrradiance);
             m_EmissiveLightsCutoffIrradiance = cutoffIrradiance;
         }
         if (maxCount > 0)
@@ -3729,6 +3804,15 @@ namespace Kurenai
         {
             m_EmissiveLightsDoubleCountGI = (doubleCountGI > 0);
         }
+        // 【三角形テーブルを焼き直す】メッシュライトの影響半径は読み込み時に焼くので、
+        // τを変えても焼き直さないと**つまみが静かに効かない**。シーンの読み込みは
+        // 設定の適用より先に走るため、ここで焼き直さないと起動引数すら届かない
+        // (実際に踏んだ。τを100分の1にしてもダンプがバイト完全一致した)
+        if (cutoffChanged && m_Device && !m_Scene.Instances.empty())
+        {
+            m_MeshLightScene.Build(*m_Device, m_Scene, m_EmissiveLightsCutoffIrradiance);
+        }
+
         // 上限の警告は設定を変えたら出し直す(τを上げてRangeを縮めた結果を見たいため)
         m_EmissiveLightsCapLogged = false;
         Core::Logger::Info(
@@ -3738,6 +3822,40 @@ namespace Kurenai
                 std::to_string(m_EmissiveLightsMaxCount) + "個 / プロキシ " +
                 std::to_string(m_EmissiveProxies.size()) + "個 / DDGIの自発光 " +
                 (ShouldSuppressEmissiveForGI() ? "抑止" : "そのまま(二重計上)"));
+    }
+
+    void KurenaiEngine3D::SetMeshLights(int enabled)
+    {
+        // 負は「既定のまま」(SetEmissiveLights と同じ約束)
+        if (enabled < 0)
+        {
+            return;
+        }
+        m_MeshLightsEnabled = (enabled > 0);
+
+        // 【効かない組み合わせを黙って受け付けない】有効にしたのに何も起きない状態は、
+        // 「実装が壊れている」と「前提が揃っていない」の区別がつかない。
+        // 実際にどちらへ落ちるかをここで言い切る
+        std::string note;
+        if (m_MeshLightsEnabled)
+        {
+            if (!m_EmissiveLightsEnabled)
+            {
+                note = " ※エミッシブ光源が無効なので三角形は出ない";
+            }
+            else if (!m_MeshLightScene.IsValid())
+            {
+                note = " ※三角形テーブルが空(発光メッシュが無いか読み込み前)";
+            }
+            else if (!ShouldRunMegaLights())
+            {
+                note = " ※MegaLightsが走らない構成(DX11/非DXR/無効)なので段階1のプロキシが光る";
+            }
+        }
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("メッシュライト: ") + (m_MeshLightsEnabled ? "有効" : "無効") + " / 三角形 " +
+                std::to_string(m_MeshLightScene.GetTriangleCount()) + "枚" + note);
     }
 
     void KurenaiEngine3D::SetEmissiveIntensity(float intensity)
@@ -4132,6 +4250,41 @@ namespace Kurenai
             "KurenaiEngine3D",
             "MegaLightsの候補プールの容量を " + std::to_string(m_MegaLightsTilePoolCapacity) +
                 " にしました");
+    }
+
+    void KurenaiEngine3D::SetMegaLightsTileJitter(int mode)
+    {
+        // 負の値は「既定のまま」。未指定時も現在値を起動ログへ残すためreturnしない
+        if (mode >= 0)
+        {
+            if (mode > 2)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "MegaLightsのタイル格子ジッターのモードが範囲外のため無視します: " +
+                        std::to_string(mode) + " (0〜2)");
+            }
+            else
+            {
+                m_MegaLightsTileJitterMode = mode;
+            }
+        }
+
+        if (m_MegaLightsTileJitterMode == 1)
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsのタイル格子ジッター: 有効 (m_TAAFrameIndexのHalton(2,3)を16段階へ量子化)");
+        }
+        else if (m_MegaLightsTileJitterMode == 2)
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D", "MegaLightsのタイル格子ジッター: 有効 (検証用オフセット(0,0)固定)");
+        }
+        else
+        {
+            Core::Logger::Info("KurenaiEngine3D", "MegaLightsのタイル格子ジッター: 無効");
+        }
     }
 
     int32_t KurenaiEngine3D::MegaLightsSamplesPerPixel() const
@@ -4694,6 +4847,33 @@ namespace Kurenai
         return useProcedural ? m_ProceduralSkyTexture.get() : m_SkyboxTexture.get();
     }
 
+    KurenaiEngine3D::CloudBakeSignature KurenaiEngine3D::MakeCloudBakeSignature() const
+    {
+        // 【FrameConstants/SkyIntegrateConstantsと同じ潰し方をすること】無効化のときに
+        // 何が0になるかが揃っていないと、「無効にしたのに焼き直しが走らない」取りこぼしが出る。
+        // 対応するのはRender()のconstants.CloudParams0〜3・FogParams0の組み立て箇所
+        CloudBakeSignature s;
+        s.CumulusCoverage = m_CloudEnabled ? m_CloudCoverage : 0.0f;
+        s.CumulusAltitude = m_CloudAltitude;
+        s.CumulusUvScale = m_CloudUvScale;
+        s.CumulusDensity = m_CloudDensity;
+        s.CumulusForwardG = m_CloudForwardG;
+        s.CumulusThickness = m_CloudVolumetric ? m_CloudThickness : 0.0f;
+        s.CloudTypeBias = m_CloudTypeBias;
+        s.CirrusCoverage = m_CirrusEnabled ? m_CirrusCoverage : 0.0f;
+        s.CirrusAltitude = m_CirrusAltitude;
+        s.CirrusUvScale = m_CirrusUvScale;
+        s.CirrusDensity = m_CirrusDensity;
+        s.CirrusAnisotropy = m_CirrusAnisotropy;
+        s.FogSigma0 = m_FogDensity;
+        s.FogScaleHeight = m_FogScaleHeight;
+        s.FogRefHeight = m_FogRefHeight;
+        // 【usingProceduralSkyを掛けない】FrameConstants側のfogEnabledFlagはそれも見るが、
+        // この判定自体が手続き空のときにしか走らない(呼び出し元のifを参照)ので同じ値になる
+        s.FogEnabled = (m_FogEnabled && m_FogDensity > 0.0f) ? 1.0f : 0.0f;
+        return s;
+    }
+
     void KurenaiEngine3D::CreateRenderTargets(uint32_t width, uint32_t height)
     {
         if (width == 0 || height == 0)
@@ -4744,6 +4924,14 @@ namespace Kurenai
             m_SkyCloudHeight = std::max(1u, height / 2);
             m_SkyCloudTexture =
                 m_Device->CreateRenderTexture(m_SkyCloudWidth, m_SkyCloudHeight, RHI::Format::R16G16B16A16_Float);
+            // 上のパスが同時に書く fogInFront(雲に最初に当たった位置の霞の透過率、P18b)。
+            // 合成側(DeferredLighting.hlsl)が clearColor * (CloudSkyLight - 1) * (1 - fogInFront) を
+            // フル解像度で掛けるためだけに要る。1チャンネルなのでDDGIResolveの低解像度深度と
+            // 同じR32_Floatにする。
+            // 【t19/t21と同じ理由で常に確保する】雲パスが登録されないフレーム(DDSスカイボックス)でも
+            // t22を空のままにできない(DX12のディスクリプタテーブルを埋め切るため)
+            m_SkyCloudFogTexture =
+                m_Device->CreateRenderTexture(m_SkyCloudWidth, m_SkyCloudHeight, RHI::Format::R32_Float);
             // DDGIの低解像度解決パスの出力(rgb=イラディアンス、a=insideWeight)。雲と同じく1/2解像度。
             // 【常に確保する】m_DDGIHalfResolutionが無効でもシェーダーのt19には何かを
             // バインドしておく必要がある(DX12のディスクリプタテーブルを埋め切るため)。
@@ -4830,8 +5018,11 @@ namespace Kurenai
             {
                 RHI::BufferDesc tilePoolBufferDesc;
                 tilePoolBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+                // ジッター有効時は右端・下端のタイル座標が1つ増える。トグル変更でGPUを
+                // 待って再確保しなくて済むよう、無効時も常に+1ぶんを確保しておく
                 tilePoolBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) *
-                                                 kMegaLightsTilePoolStride * m_LightTileCountX * m_LightTileCountY;
+                                                 kMegaLightsTilePoolStride * (m_LightTileCountX + 1u) *
+                                                 (m_LightTileCountY + 1u);
                 tilePoolBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
                 m_MegaLightsTilePoolBuffer = m_Device->CreateBuffer(tilePoolBufferDesc);
 
@@ -5090,6 +5281,7 @@ namespace Kurenai
             { "HiZTexture", m_HiZTexture.get() },
             // 空と大気
             { "SkyCloudTexture", m_SkyCloudTexture.get() },
+            { "SkyCloudFogTexture", m_SkyCloudFogTexture.get() },
             { "AerialPerspectiveTexture", m_AerialPerspectiveTexture.get() },
             { "TransmittanceLUT", m_TransmittanceLUT.get() },
             { "MultiScatteringLUT", m_MultiScatteringLUT.get() },
@@ -5145,7 +5337,30 @@ namespace Kurenai
         return names;
     }
 
-    void KurenaiEngine3D::AddTextureDump(const wchar_t* name, const wchar_t* path, int mipLevel, int arraySlice)
+    std::wstring MakeTextureDumpSequencePath(const std::wstring& path, uint32_t targetFrames, uint32_t sequenceIndex)
+    {
+        if (targetFrames <= 1)
+        {
+            return path;
+        }
+
+        wchar_t suffix[16] = {};
+        if (swprintf_s(suffix, L"_%04u", sequenceIndex) < 0)
+        {
+            Core::Logger::Error("KurenaiEngine3D", "テクスチャの書き出し: 連番ファイル名を作れませんでした");
+            return path;
+        }
+        const size_t slash = path.find_last_of(L"\\/");
+        const size_t dot = path.find_last_of(L'.');
+        if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash))
+        {
+            return path.substr(0, dot) + suffix + path.substr(dot);
+        }
+        return path + suffix;
+    }
+
+    void KurenaiEngine3D::AddTextureDump(
+        const wchar_t* name, const wchar_t* path, int mipLevel, int arraySlice, int frames, int stride)
     {
         if (name == nullptr || path == nullptr || name[0] == L'\0' || path[0] == L'\0')
         {
@@ -5158,13 +5373,17 @@ namespace Kurenai
         request.Path = path;
         request.MipLevel = mipLevel > 0 ? static_cast<uint32_t>(mipLevel) : 0u;
         request.ArraySlice = arraySlice > 0 ? static_cast<uint32_t>(arraySlice) : 0u;
+        request.TargetFrames = frames > 0 ? static_cast<uint32_t>(frames) : 1u;
+        request.Stride = stride > 0 ? static_cast<uint32_t>(stride) : 1u;
         m_TextureDumps.push_back(std::move(request));
 
         Core::Logger::Info(
             "KurenaiEngine3D",
             "テクスチャの書き出しを予約しました: " + m_TextureDumps.back().Name + " -> " +
                 Core::WideToUtf8(path) + " (mip=" + std::to_string(m_TextureDumps.back().MipLevel) +
-                ", slice=" + std::to_string(m_TextureDumps.back().ArraySlice) + ")");
+                ", slice=" + std::to_string(m_TextureDumps.back().ArraySlice) +
+                ", frames=" + std::to_string(m_TextureDumps.back().TargetFrames) +
+                ", stride=" + std::to_string(m_TextureDumps.back().Stride) + ")");
     }
 
     void KurenaiEngine3D::SetTextureDumpFrame(int frame)
@@ -5211,6 +5430,7 @@ namespace Kurenai
         struct PendingCopy
         {
             size_t RequestIndex = 0;
+            size_t SlotIndex = 0;
             RHI::IRHITexture* Source = nullptr;
         };
         std::vector<PendingCopy> pending;
@@ -5219,8 +5439,20 @@ namespace Kurenai
         for (size_t i = 0; i < m_TextureDumps.size(); ++i)
         {
             TextureDumpRequest& request = m_TextureDumps[i];
-            if (request.Issued || request.Done)
+            if (request.Done || request.IssuedCount >= request.TargetFrames ||
+                (request.AnyIssued && m_TAAFrameIndex - request.LastIssueFrame < request.Stride))
             {
+                continue;
+            }
+
+            size_t slotIndex = request.Slots.size();
+            for (size_t j = 0; j < request.Slots.size(); ++j)
+            {
+                if (!request.Slots[j].Busy) { slotIndex = j; break; }
+            }
+            if (slotIndex == request.Slots.size() && request.RingDepth != 0 && request.Slots.size() >= request.RingDepth)
+            {
+                // 全受け皿が遅延中なら、未回収のコピーを壊さず次フレームへ回す。
                 continue;
             }
 
@@ -5265,23 +5497,82 @@ namespace Kurenai
                 continue;
             }
 
-            request.Readback = m_Device->CreateReadbackTexture(found->Texture, request.MipLevel);
-            if (!request.Readback)
+            if (slotIndex == request.Slots.size())
+            {
+                request.Slots.emplace_back();
+            }
+            TextureDumpSlot& slot = request.Slots[slotIndex];
+            slot.Readback = m_Device->CreateReadbackTexture(found->Texture, request.MipLevel);
+            if (!slot.Readback)
             {
                 // CreateReadbackTextureが理由をログへ出している(非対応フォーマット・範囲外のミップ等)
                 Core::Logger::Error(
                     "KurenaiEngine3D", "テクスチャの書き出し: 受け皿を作れませんでした: " + request.Name);
                 request.Done = true;
+                for (TextureDumpSlot& releaseSlot : request.Slots)
+                {
+                    releaseSlot.Readback.reset();
+                }
                 continue;
             }
 
             // 【寸法は今ここで控える】あとで生ポインタから引き直すと、その間にリサイズが起きた場合に
             // 受け皿の中身と食い違う値をヘッダへ書いてしまう
-            request.Desc = request.Readback->GetReadbackDesc(0);
-            request.Issued = true;
-            request.CopyFrame = m_TAAFrameIndex;
+            slot.Desc = slot.Readback->GetReadbackDesc(0);
+            if (request.IssuedCount == 0)
+            {
+                request.FirstDesc = slot.Desc;
+                const size_t bytesPerSlot =
+                    static_cast<size_t>(slot.Desc.Width) * slot.Desc.BytesPerTexel * slot.Desc.Height;
+                const uint32_t desiredDepth = std::min(request.TargetFrames, kTextureDumpRingDepth);
+                const uint32_t memoryDepth = bytesPerSlot == 0 ? 1u :
+                    static_cast<uint32_t>(std::max<size_t>(1, kTextureDumpRingMaxBytes / bytesPerSlot));
+                const uint32_t ringDepth = std::min(desiredDepth, memoryDepth);
+                request.RingDepth = ringDepth;
+                if (ringDepth < desiredDepth)
+                {
+                    Core::Logger::Warning("KurenaiEngine3D", "テクスチャの書き出し: リング深さを " + std::to_string(ringDepth) +
+                        " へ下げました。実効レートが 1/(遅延+1) に落ちます: " + request.Name);
+                }
+            }
+            else if (slot.Desc.Width != request.FirstDesc.Width ||
+                     slot.Desc.Height != request.FirstDesc.Height ||
+                     slot.Desc.ChannelCount != request.FirstDesc.ChannelCount ||
+                     slot.Desc.ElementType != request.FirstDesc.ElementType)
+            {
+                // 【寸法の違う絵を1つの連番に混ぜない】混ざったまま時間方向の平均や分散を取ると、
+                // エラーにならず静かに間違った数字が出る。ここで打ち切って、何が変わったかを数値で残す
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "テクスチャの書き出し: 連番の途中で寸法か形式が変わったので打ち切ります: " + request.Name +
+                        " (" + std::to_string(request.FirstDesc.Width) + "x" +
+                        std::to_string(request.FirstDesc.Height) +
+                        " ch=" + std::to_string(request.FirstDesc.ChannelCount) +
+                        " elem=" + std::to_string(static_cast<uint32_t>(request.FirstDesc.ElementType)) +
+                        " から " + std::to_string(slot.Desc.Width) + "x" + std::to_string(slot.Desc.Height) +
+                        " ch=" + std::to_string(slot.Desc.ChannelCount) +
+                        " elem=" + std::to_string(static_cast<uint32_t>(slot.Desc.ElementType)) +
+                        " へ変化。" + std::to_string(request.WrittenCount) + "枚まで書けています)");
+                request.Done = true;
+                for (TextureDumpSlot& releaseSlot : request.Slots)
+                {
+                    releaseSlot.Readback.reset();
+                }
+                continue;
+            }
+            slot.CopyFrame = m_TAAFrameIndex;
+            slot.SequenceIndex = request.IssuedCount;
+            slot.FailedFrames = 0;
+            slot.Busy = true;
+            ++request.IssuedCount;
+            request.LastIssueFrame = m_TAAFrameIndex;
+            if (!request.AnyIssued)
+            {
+                request.FirstIssueFrame = m_TAAFrameIndex;
+            }
+            request.AnyIssued = true;
 
-            pending.push_back(PendingCopy{ i, found->Texture });
+            pending.push_back(PendingCopy{ i, slotIndex, found->Texture });
             reads.push_back(found->Texture);
         }
 
@@ -5300,8 +5591,13 @@ namespace Kurenai
                 for (const PendingCopy& copy : pending)
                 {
                     TextureDumpRequest& request = m_TextureDumps[copy.RequestIndex];
+                    if (copy.SlotIndex >= request.Slots.size() || !request.Slots[copy.SlotIndex].Readback)
+                    {
+                        Core::Logger::Error("KurenaiEngine3D", "テクスチャの書き出し: コピー先スロットが無効です: " + request.Name);
+                        continue;
+                    }
                     cmd->CopyTextureToReadback(
-                        request.Readback.get(), copy.Source, request.MipLevel, request.ArraySlice);
+                        request.Slots[copy.SlotIndex].Readback.get(), copy.Source, request.MipLevel, request.ArraySlice);
                 }
             },
         });
@@ -5313,7 +5609,6 @@ namespace Kurenai
         {
             return;
         }
-
         bool allDone = true;
         for (TextureDumpRequest& request : m_TextureDumps)
         {
@@ -5321,56 +5616,97 @@ namespace Kurenai
             {
                 continue;
             }
-            if (!request.Issued)
-            {
-                allDone = false;
-                continue;
-            }
 
-            // 【積んだ直後に読まない】GPUの実行はCPUより数フレーム遅れる。
-            // 待ちが足りないとエラーにならず、静かに古い/未初期化の中身が返る
-            if (m_TAAFrameIndex - request.CopyFrame < kTextureDumpReadDelayFrames)
+            // 【必ず打ち切る】対象のテクスチャがそのフレームで作られなくなると連番は永久に揃わない。
+            // -exitafterdump と組み合わせた無人実行が静かに固まるのが最悪の失敗なので、
+            // 上限を決めて諦める(kTextureDumpMaxFailedFrames が置かれているのと同じ理由)
+            const uint64_t timeout = static_cast<uint64_t>(request.TargetFrames) *
+                std::max(request.Stride, kTextureDumpReadDelayFrames + 1) + kTextureDumpMaxFailedFrames + 120;
+            bool abortedByTimeout = false;
+            if (request.AnyIssued && static_cast<uint64_t>(m_TAAFrameIndex - request.FirstIssueFrame) > timeout)
             {
-                allDone = false;
-                continue;
-            }
-
-            const uint32_t rowPitch = request.Desc.Width * request.Desc.BytesPerTexel;
-            const size_t totalBytes = static_cast<size_t>(rowPitch) * request.Desc.Height;
-            if (totalBytes == 0)
-            {
-                Core::Logger::Error(
-                    "KurenaiEngine3D", "テクスチャの書き出し: 中身のサイズが0です: " + request.Name);
+                Core::Logger::Error("KurenaiEngine3D", "テクスチャの書き出し: " + std::to_string(request.TargetFrames) +
+                    "枚要求のうち" + std::to_string(request.WrittenCount) + "枚しか書けないまま打ち切りました: " + request.Name);
                 request.Done = true;
-                continue;
+                abortedByTimeout = true;
             }
 
-            std::vector<uint8_t> pixels(totalBytes);
-            if (!request.Readback->ReadbackData(pixels.data(), static_cast<uint32_t>(totalBytes)))
+            bool anyBusy = false;
+            for (TextureDumpSlot& slot : request.Slots)
             {
-                // DX11のMap(DO_NOT_WAIT)はGPUが詰まっていると失敗する。**1回で諦めない**が、
-                // 永遠に待ってもいけない ―― -exitafterdump と組み合わせた無人実行が
-                // 静かに固まるのが最悪の失敗なので、上限を決めて打ち切る
-                ++request.FailedFrames;
-                if (request.FailedFrames >= kTextureDumpMaxFailedFrames)
+                if (!slot.Busy)
                 {
-                    Core::Logger::Error(
-                        "KurenaiEngine3D",
-                        "テクスチャの書き出し: " + std::to_string(kTextureDumpMaxFailedFrames) +
-                            "フレーム続けて読み戻せませんでした。中止します: " + request.Name);
-                    request.Done = true;
+                    continue;
                 }
-                else
+                if (m_TAAFrameIndex - slot.CopyFrame < kTextureDumpReadDelayFrames)
                 {
                     allDone = false;
+                    continue;
                 }
-                continue;
+                const uint32_t rowPitch = slot.Desc.Width * slot.Desc.BytesPerTexel;
+                const size_t totalBytes = static_cast<size_t>(rowPitch) * slot.Desc.Height;
+                if (totalBytes == 0 || totalBytes > std::numeric_limits<uint32_t>::max())
+                {
+                    Core::Logger::Error("KurenaiEngine3D", "テクスチャの書き出し: 中間のサイズが不正です: " + request.Name);
+                    slot.Busy = false;
+                    continue;
+                }
+                std::vector<uint8_t> pixels(totalBytes);
+                if (!slot.Readback || !slot.Readback->ReadbackData(pixels.data(), static_cast<uint32_t>(totalBytes)))
+                {
+                    ++slot.FailedFrames;
+                    if (slot.FailedFrames >= kTextureDumpMaxFailedFrames)
+                    {
+                        Core::Logger::Error("KurenaiEngine3D", "テクスチャの書き出し: " +
+                            std::to_string(kTextureDumpMaxFailedFrames) + "フレーム続けて読み戻せませんでした。中止します: " + request.Name);
+                        slot.Busy = false;
+                    }
+                    else
+                    {
+                        allDone = false;
+                    }
+                    continue;
+                }
+                if (WriteTextureDumpFile(request, slot, pixels))
+                {
+                    ++request.WrittenCount;
+                }
+                slot.Busy = false;
             }
 
-            WriteTextureDumpFile(request, pixels);
-            request.Done = true;
-            // 受け皿はもう要らない。数十MBになることがあるので抱え続けない
-            request.Readback.reset();
+            anyBusy = std::any_of(request.Slots.begin(), request.Slots.end(),
+                [](const TextureDumpSlot& slot) { return slot.Busy; });
+            if (!request.Done && request.IssuedCount >= request.TargetFrames && !anyBusy)
+            {
+                request.Done = true;
+            }
+            if (request.Done)
+            {
+                for (TextureDumpSlot& slot : request.Slots)
+                {
+                    slot.Readback.reset();
+                }
+                // 打ち切りのログに枚数がもう入っているので、そのときはサマリを重ねない
+                if (!abortedByTimeout)
+                {
+                    // 【「書けた枚数」を必ず出す】これまでは「諦めた」も完了として扱われ、
+                    // 1枚も書けなくても -exitafterdump が正常終了していた
+                    const std::string summary = "テクスチャの書き出し完了: " + std::to_string(request.TargetFrames) +
+                        "枚中" + std::to_string(request.WrittenCount) + "枚書けました: " + request.Name;
+                    if (request.WrittenCount == 0)
+                    {
+                        Core::Logger::Error("KurenaiEngine3D", summary);
+                    }
+                    else
+                    {
+                        Core::Logger::Info("KurenaiEngine3D", summary);
+                    }
+                }
+            }
+            else
+            {
+                allDone = false;
+            }
         }
 
         if (allDone && m_ExitAfterDump && !m_ExitAfterDumpRequested)
@@ -5396,7 +5732,7 @@ namespace Kurenai
     }
 
     bool KurenaiEngine3D::WriteTextureDumpFile(
-        const TextureDumpRequest& request, const std::vector<uint8_t>& pixels) const
+        const TextureDumpRequest& request, const TextureDumpSlot& slot, const std::vector<uint8_t>& pixels) const
     {
         // ファイル形式(Tools/texdump_inspect.py と一致させること):
         //   off  size  内容
@@ -5434,7 +5770,8 @@ namespace Kurenai
 
         uint32_t elementType = 0;
         uint32_t bytesPerElement = 0;
-        switch (request.Desc.ElementType)
+        const std::wstring outputPath = MakeTextureDumpSequencePath(request.Path, request.TargetFrames, slot.SequenceIndex);
+        switch (slot.Desc.ElementType)
         {
         case RHI::TextureElementType::UNorm8:
             elementType = 1;
@@ -5466,12 +5803,12 @@ namespace Kurenai
             return false;
         }
 
-        std::ofstream file(request.Path, std::ios::binary | std::ios::trunc);
+        std::ofstream file(outputPath, std::ios::binary | std::ios::trunc);
         if (!file)
         {
             Core::Logger::Error(
                 "KurenaiEngine3D",
-                "テクスチャを書き出せませんでした(ファイルを開けない): " + Core::WideToUtf8(request.Path));
+                "テクスチャを書き出せませんでした(ファイルを開けない): " + Core::WideToUtf8(outputPath));
             return false;
         }
 
@@ -5481,12 +5818,13 @@ namespace Kurenai
             // 上げずに黙って読ませると、名前の先頭4文字がBackendとして解釈される
             2u,                        // Version
             kHeaderBytes,              // HeaderBytes
-            request.Desc.Width,        // Width
-            request.Desc.Height,       // Height
-            request.Desc.ChannelCount, // ChannelCount
+            slot.Desc.Width,           // Width
+            slot.Desc.Height,          // Height
+            slot.Desc.ChannelCount,    // ChannelCount
             elementType,               // ElementType
             bytesPerElement,           // BytesPerElement
-            m_TAAFrameIndex,           // FrameIndex
+            // 読み戻し完了時ではなく、画素が属するコピー発行時のフレームを記録する。
+            slot.CopyFrame,            // FrameIndex
             request.MipLevel,          // MipLevel
             request.ArraySlice,        // ArraySlice
             m_GraphicsAPI == GraphicsAPI::DX12 ? 2u : 1u, // Backend
@@ -5507,7 +5845,7 @@ namespace Kurenai
         {
             Core::Logger::Error(
                 "KurenaiEngine3D",
-                "テクスチャを書き出せませんでした(書き込みに失敗): " + Core::WideToUtf8(request.Path));
+                "テクスチャを書き出せませんでした(書き込みに失敗): " + Core::WideToUtf8(outputPath));
             return false;
         }
 
@@ -5515,11 +5853,11 @@ namespace Kurenai
         // 呼び出し側(スキルの手順)はこの行が出てからプロセスを落とす
         Core::Logger::Info(
             "KurenaiEngine3D",
-            "テクスチャを書き出しました: " + Core::WideToUtf8(request.Path) + " (" + request.Name + " " +
-                std::to_string(request.Desc.Width) + "x" + std::to_string(request.Desc.Height) +
-                " ch=" + std::to_string(request.Desc.ChannelCount) + " elem=" + std::to_string(elementType) +
+            "テクスチャを書き出しました: " + Core::WideToUtf8(outputPath) + " (" + request.Name + " " +
+                std::to_string(slot.Desc.Width) + "x" + std::to_string(slot.Desc.Height) +
+                " ch=" + std::to_string(slot.Desc.ChannelCount) + " elem=" + std::to_string(elementType) +
                 " mip=" + std::to_string(request.MipLevel) + " slice=" + std::to_string(request.ArraySlice) +
-                " frame=" + std::to_string(m_TAAFrameIndex) + ")");
+                " frame=" + std::to_string(slot.CopyFrame) + ")");
         return true;
     }
 
@@ -6198,6 +6536,7 @@ namespace Kurenai
         RetiredAssets retired;
         retired.Scene = std::move(m_Scene);
         retired.RaytracingScene = std::move(m_RaytracingScene);
+        retired.MeshLightScene = std::move(m_MeshLightScene);
         m_Scene = Assets::Scene{};
         m_RaytracingScene = Assets::RaytracingScene{};
         RetireAssets(std::move(retired));
@@ -7361,6 +7700,19 @@ namespace Kurenai
             }
         }
 
+        // メッシュライトの三角形テーブル(段階2)。
+        //
+        // 【DXRの有無に関係なく作る】使うのは MegaLights の経路(DX12+DXR)だけだが、
+        // 構築そのものは頂点の変換とバッファ確保しかしておらず、レイトレーシングに依存しない。
+        // 対応環境でだけ作る形にすると、非対応機で「三角形が出ない」のか
+        // 「そもそも作っていない」のかがログから切り分けられなくなる。
+        // 【打ち切り照度はフレーム不変の定数を渡す】露出や現在のτから導くと、
+        // 参照実装が非決定的になって「同じ入力で同じ真値」が崩れる
+        // 【打ち切り照度は実効値を渡すこと】既定の定数を渡すと -emissivelightscutoff や
+        // ImGui の指定が三角形テーブルへ一切届かず、**つまみが静かに効かなくなる**
+        // (実際に踏んだ。τを100分の1にしてもダンプがバイト完全一致した)
+        loaded->MeshLightScene.Build(*m_Device, loaded->Scene, m_EmissiveLightsCutoffIrradiance);
+
         loaded->Camera = ComputeInitialCamera(loaded->Scene);
         return loaded;
     }
@@ -7375,6 +7727,7 @@ namespace Kurenai
 
         m_Scene = std::move(loaded.Scene);
         m_RaytracingScene = std::move(loaded.RaytracingScene);
+        m_MeshLightScene = std::move(loaded.MeshLightScene);
         m_CurrentSceneIndex = loaded.SceneIndex;
 
         // ストリーミングの状態もシーンに紐づく。世代を進めることで、切り替え前に発注して
@@ -7483,6 +7836,9 @@ namespace Kurenai
         // 黒の締め。Tonemap/SkySaturationと同じく無条件に反映する(既定0で恒等のため)
         m_TonemapBlackPoint = m_Scene.TonemapBlackPoint;
         m_SkySaturation = m_Scene.SkySaturation;
+        // タービディティは指定されたときだけ上書きする(Scene.h の HasSkyTurbidity 参照)。
+        // 値が動けばRender()側のturbidityMoved判定が大気LUTを焼き直す
+        if (m_Scene.HasSkyTurbidity) { m_SkyTurbidity = m_Scene.SkyTurbidity; }
         if (m_Scene.HasIBLIntensityOverride)
         {
             m_IBLIntensity = m_Scene.IBLIntensity;
@@ -7501,8 +7857,15 @@ namespace Kurenai
         if (m_Scene.HasCloudAltitude)  { m_CloudAltitude = m_Scene.CloudAltitude; }
         if (m_Scene.HasCloudThickness) { m_CloudThickness = m_Scene.CloudThickness; }
         if (m_Scene.HasCloudDensity)   { m_CloudDensity = m_Scene.CloudDensity; }
+        if (m_Scene.HasCloudTypeBias) { m_CloudTypeBias = m_Scene.CloudTypeBias; }
         if (m_Scene.HasCloudCellSize)  { m_CloudUvScale = 1.0f / std::max(m_Scene.CloudCellSize, 1.0f); }
-        if (m_Scene.HasCirrusCoverage) { m_CirrusCoverage = m_Scene.CirrusCoverage; }
+        // 巻雲(P11)。CirrusCellSizeも積雲のCellSizeと同じく逆数へ直す
+        if (m_Scene.HasCirrusCoverage)   { m_CirrusCoverage = m_Scene.CirrusCoverage; }
+        if (m_Scene.HasCirrusAltitude)   { m_CirrusAltitude = m_Scene.CirrusAltitude; }
+        if (m_Scene.HasCirrusCellSize)   { m_CirrusUvScale = 1.0f / std::max(m_Scene.CirrusCellSize, 1.0f); }
+        if (m_Scene.HasCirrusDensity)    { m_CirrusDensity = m_Scene.CirrusDensity; }
+        if (m_Scene.HasCirrusAnisotropy) { m_CirrusAnisotropy = m_Scene.CirrusAnisotropy; }
+        if (m_Scene.HasCirrusWindSpeed)  { m_CirrusWindSpeed = m_Scene.CirrusWindSpeed; }
         // 大気遠近。[Cloud]と同じく指定されたキーだけを上書きする。
         // 【この値は遠景の霞だけの設定ではない】消散係数は雲がどれだけ空から浮き上がって
         // 見えるかも一手に決める(Scene.h の HasFogDensity 付近のコメントに実測を残してある)
@@ -9542,6 +9905,30 @@ namespace Kurenai
         // ようにする。TAAが複数フレームぶんを蓄積することで実質的なスーパーサンプリングになる。
         // TAA無効時はジッターも必ず0にすること(ジッターだけ残ると画面が振動するだけになる)
         ++m_TAAFrameIndex;
+
+        // --- MegaLights候補プールのタイル格子ジッター ---
+        // 書き手・Initial/Spatial・Presentへ配る値をここで一度だけ決める。
+        // 各パスが個別にフレーム番号から導くと、式の片側だけを直した際に別タイルを静かに読むため
+        const bool megaLightsTileJitterEnabled = m_MegaLightsTileJitterMode != 0;
+        DirectX::XMUINT2 megaLightsTileOffset{ 0u, 0u };
+        if (m_MegaLightsTileJitterMode == 1)
+        {
+            // Halton(2,3)を16段階へ量子化する。RadicalInverseは[0,1)だが、丸め誤差でも
+            // 16にならないようタイル幅-1で明示的に押さえる
+            megaLightsTileOffset.x = std::min<uint32_t>(
+                static_cast<uint32_t>(RadicalInverse(m_TAAFrameIndex, 2u) * kLightTileSize),
+                kLightTileSize - 1u);
+            megaLightsTileOffset.y = std::min<uint32_t>(
+                static_cast<uint32_t>(RadicalInverse(m_TAAFrameIndex, 3u) * kLightTileSize),
+                kLightTileSize - 1u);
+        }
+        // 無効時だけ従来のタイル数をそのまま使い、添字・乱数の種・ディスパッチ数を保存する。
+        // モード2は対照実験なので、オフセット0でも有効側と同じ+1タイルを通す
+        const uint32_t megaLightsEffectiveTilesX =
+            megaLightsTileJitterEnabled ? (m_LightTileCountX + 1u) : m_LightTileCountX;
+        const uint32_t megaLightsEffectiveTilesY =
+            megaLightsTileJitterEnabled ? (m_LightTileCountY + 1u) : m_LightTileCountY;
+
         DirectX::XMFLOAT2 jitterOffsetPixels{ 0.0f, 0.0f };
         if (m_TAAEnabled)
         {
@@ -9919,7 +10306,10 @@ namespace Kurenai
         // ここで分かるのは「シーンのライト数が容量を超えているので、1つのタイルに集中すれば
         // 超過し得る」という条件までである。実際の超過はデバッグ表示(DebugView::LightTiles)の
         // マゼンタで確認する
-        if (m_LightCullingEnabled && gpuLights.size() > kLightTileCapacity && !m_LightTileOverflowLogged)
+        // 【条件はパスを積む述語と揃える】グリッドを作っていないフレームで警告すると、
+        // 実際には起きない欠落を知らせることになる(MegaLightsが走っていればローカルライトは
+        // グリッドを経由しない)
+        if (ShouldRunLightCulling() && gpuLights.size() > kLightTileCapacity && !m_LightTileOverflowLogged)
         {
             Core::Logger::Warning(
                 "KurenaiEngine3D",
@@ -9958,7 +10348,26 @@ namespace Kurenai
             const bool turbidityMoved = std::abs(m_SkyTurbidity - m_LastBakedTurbidity) > 0.01f;
             // 空の彩度(アート指定)もPreethamの色度を動かすため、タービディティと同じ扱いで焼き直す
             const bool saturationMoved = std::abs(m_SkySaturation - m_LastBakedSkySaturation) > 0.005f;
-            if (sunMoved || exposureMoved || turbidityMoved || saturationMoved)
+            // 雲のパラメータが動いたら焼き直す(P18)。
+            //
+            // 【なぜ要るか】ここまでの4つは晴天の空の形を決める値だけで、雲は「晴天の空を
+            // 変えない」ため入っていなかった。P18でSkyIntegrateが雲込みの空の照度を積むように
+            // なったので、被覆率を動かしても焼き直しが走らないと**古い被覆率で積んだ
+            // CloudSkyLightが残り続ける**。実際これで被覆率0でも比が1にならず、雲を持たない
+            // シーンの遠景が動いた(切り分け: SkyIntegrateへ1を直書きした絵と、消費側で1へ
+            // 潰した絵は画素まで一致した=経路は正しく、値だけが古かった)。
+            //
+            // 【風のスクロールを入れない】スクロール量は毎フレーム動くので、入れると毎フレーム
+            // 焼き直しになる。求めているのは半球平均なので、雲の場が平行移動しても値はほとんど
+            // 変わらない。同じ理由でカメラ位置も入れない。
+            //
+            // 【IBLの雲減光もこれで直る】m_ActiveCloudTransmittance(キューブへ焼く平均透過率)も
+            // このブロックの中でしか更新されないため、被覆率を動かしても環境光が追従しない
+            // という同じ形の取りこぼしがあった
+            const CloudBakeSignature cloudSignature = MakeCloudBakeSignature();
+            const bool cloudChanged = !m_HasBakedCloudSignature
+                                      || cloudSignature != m_LastBakedCloudSignature;
+            if (sunMoved || exposureMoved || turbidityMoved || saturationMoved || cloudChanged)
             {
                 m_SkyBakeDirty = true;
             }
@@ -9997,6 +10406,11 @@ namespace Kurenai
             // Sky.hlsli側のSkyColorがそこへさらに雲を重ねることで二重に暗くなってしまう
             m_ActiveCloudTransmittance = ComputeCloudAverageTransmittance(
                 m_CloudEnabled, m_CloudCoverage, m_CirrusEnabled, m_CirrusCoverage);
+
+            // P18: この焼き直しがどの雲パラメータで行われたかを覚えておく。
+            // 上の焼き直し判定(cloudChanged)がこれと比べる
+            m_LastBakedCloudSignature = MakeCloudBakeSignature();
+            m_HasBakedCloudSignature = true;
 
             // 空が変わったのでプリフィルタ済み鏡面も焼き直す必要がある。
             // 焼き直し要否のフラグ更新はここ(キャッシュを書いた場所)に一本化し、
@@ -10365,8 +10779,8 @@ namespace Kurenai
             m_CirrusUvScale,
             m_CirrusDensity,
         };
-        constants.CloudParams3 = { m_CirrusScrollOffset.x, m_CirrusScrollOffset.y, m_CirrusAnisotropy, 0.0f };
-        // 平面反射。このフィールドを参照するのはPlanarReflection.hlslだけで、そちらは
+        constants.CloudParams3 = { m_CirrusScrollOffset.x, m_CirrusScrollOffset.y, m_CirrusAnisotropy, m_CloudTypeBias };
+        // 平面反射(P6)。このフィールドを参照するのはPlanarReflection.hlslだけで、そちらは
         // 専用のm_PlanarReflectionConstantBufferで明示的に上書きした値を使う(下のPlanarReflection
         // パス登録箇所参照)。共有のm_FrameConstantBufferにも一貫した値を入れておく
         constants.PlanarReflectionPlane = { 0.0f, 1.0f, 0.0f, hasWaterInstance ? -waterPlaneY : 0.0f };
@@ -10526,7 +10940,10 @@ namespace Kurenai
             m_LightTileCountX,
             kLightTileSize,
             kLightTileCapacity,
-            m_LightCullingEnabled ? 1u : 0u,
+            // 「このフレームのライトグリッドは有効か」。**パスを積む述語と同じものを使う** ――
+            // トグルの状態(m_LightCullingEnabled)ではなく実際に書いたかどうかで決める。
+            // なおMegaLightsが走るフレームはLightCount.wが先に効くのでこの枝には入らない
+            ShouldRunLightCulling() ? 1u : 0u,
         };
 
         // ライトリストの中身の更新。**直接光パスや半透明パスの中で呼んではいけない** ――
@@ -10661,21 +11078,65 @@ namespace Kurenai
         //     理由はm_SkyParametersBuffer作成箇所とskyIntegrateThisFrame宣言のコメント参照) ---
         if (skyIntegrateThisFrame)
         {
+            // 第2段(P18: 雲込みの空の照度)へ渡す値。**FrameConstants(constants)から
+            // そのまま複製する**——別々に組み立てると、背景に見えている雲と大気遠近が
+            // 想定している雲が食い違いうる。ここで値を作り、ラムダへは値渡しで捕まえる
+            SkyIntegrateConstants integrateConstants{};
+            integrateConstants.SunDirection = {
+                sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
+            };
+            integrateConstants.IntegrateParams = {
+                sunLighting.SkyIlluminanceLux, effectiveExposure, m_SkyTurbidity, m_SkySaturation
+            };
+            integrateConstants.CloudParams0 = constants.CloudParams0;
+            integrateConstants.CloudParams1 = constants.CloudParams1;
+            integrateConstants.CloudParams2 = constants.CloudParams2;
+            integrateConstants.CloudParams3 = constants.CloudParams3;
+            integrateConstants.FogParams0 = constants.FogParams0;
+            // レイの起点はカメラ。wはSkyParams.zと同じ太陽照度/空照度比
+            // (雲の明るさを太陽照度基準にするためにEvaluateCloudLayerが使う)
+            integrateConstants.ViewerAndSunRatio = {
+                constants.CameraPosition.x, constants.CameraPosition.y, constants.CameraPosition.z,
+                constants.SkyParams.z
+            };
+
+            // 雲の3Dノイズとウェザーマップ(P18の第2段)。
+            // **Readsへ入れることが順序の保証そのもの**——CloudNoiseBakeパスはこのパスより
+            // 後に登録されるが、レンダーグラフのKahn法が依存を見て焼き込みを先へ回す。
+            // 宣言を外すと初回フレームで未初期化のノイズを読み、雲込みの照度が意味の無い値になる。
+            //
+            // 【テクスチャの作成に失敗していた場合】バインドを外して縮退させる。SRVが
+            // 張られていなければサンプルは0を返し、ウェザーマップが0なら密度も0、つまり
+            // 「雲が無い」と積分される。結果CloudSkyLightは(1,1,1)になり、大気遠近は
+            // P18より前とまったく同じ振る舞いへ戻る。作成失敗そのものはInitialize側で
+            // 既にエラーを出しているので、ここでは1度だけ「P18が効いていない」ことを残す
+            const bool cloudNoiseReady = m_CloudShapeNoiseTexture && m_CloudDetailNoiseTexture
+                                         && m_CloudWeatherNoiseTexture;
+            if (!cloudNoiseReady && !m_SkyIntegrateCloudMissingLogged)
+            {
+                Core::Logger::Error("KurenaiEngine3D",
+                    "雲のノイズテクスチャが無いためSkyIntegrateへ束ねられません"
+                    "(大気遠近が曇り空へ追従せず、被覆率を上げても遠景に晴天の青い散乱光が残ります)");
+                m_SkyIntegrateCloudMissingLogged = true;
+            }
+
+            std::vector<RHI::IRHITexture*> integrateReads = { m_SkyViewLUT.get() };
+            if (cloudNoiseReady)
+            {
+                integrateReads.push_back(m_CloudShapeNoiseTexture.get());
+                integrateReads.push_back(m_CloudDetailNoiseTexture.get());
+                integrateReads.push_back(m_CloudWeatherNoiseTexture.get());
+            }
+
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyIntegrate",
                 // 日中の空はSkyView LUTを引くため、このパスもLUTを読む。
-                // これによりレンダーグラフがSkyViewBakeより後へ自動で並べてくれる
-                .Reads = { m_SkyViewLUT.get() },
+                // これによりレンダーグラフがSkyViewBakeより後へ自動で並べてくれる。
+                // 雲の3枚(P18)も同じ仕組みでCloudNoiseBakeより後へ並ぶ
+                .Reads = integrateReads,
                 .BufferWrites = { m_SkyParametersBuffer.get() },
-                .Execute = [this, &sunLighting, effectiveExposure](RHI::IRHICommandList* cmd)
+                .Execute = [this, integrateConstants, cloudNoiseReady](RHI::IRHICommandList* cmd)
                 {
-                    SkyIntegrateConstants integrateConstants{};
-                    integrateConstants.SunDirection = {
-                        sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
-                    };
-                    integrateConstants.IntegrateParams = {
-                        sunLighting.SkyIlluminanceLux, effectiveExposure, m_SkyTurbidity, m_SkySaturation
-                    };
                     cmd->UpdateBuffer(m_SkyIntegrateConstantBuffer.get(), &integrateConstants, sizeof(integrateConstants));
 
                     cmd->SetComputePipelineState(m_SkyIntegratePipelineState.get());
@@ -10683,6 +11144,16 @@ namespace Kurenai
                     // SkyView LUT(t0)とサンプラー(s1 ColorSampler)。日中の空はこのLUTから
                     // 引くため、積分側も同じLUTを読む必要がある
                     cmd->SetComputeTexture(0, m_SkyViewLUT.get());
+                    if (cloudNoiseReady)
+                    {
+                        // 雲(P18)。形状t1・ディテールt2・ウェザーマップt3。SkyIntegrate.hlslの
+                        // KURENAI_CLOUD_*_REGISTERと**同じ番号**であること
+                        cmd->SetComputeTexture(1, m_CloudShapeNoiseTexture.get());
+                        cmd->SetComputeTexture(2, m_CloudDetailNoiseTexture.get());
+                        cmd->SetComputeTexture(3, m_CloudWeatherNoiseTexture.get());
+                    }
+                    // s3 VolumeSamplerがLinear+Wrapで入っている(Samplers.hlsliの役割表参照)。
+                    // 雲の3Dノイズとウェザーマップはこれで引く
                     cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
                     cmd->SetComputeUnorderedAccessBuffer(0, m_SkyParametersBuffer.get());
                     // 1グループ×256スレッド固定(SkyIntegrate.hlsl参照)
@@ -10770,11 +11241,13 @@ namespace Kurenai
         //     まったく同じ理由で焼き直さない。2枚は互いに独立なので1パスの中で連続して
         //     ディスパッチしてよい(SRVとして読み合う関係が無く、BRDFLUTの2パス構成のような
         //     中間バッファも要らない) ---
-        if (!m_CloudNoiseBaked && m_CloudShapeNoisePipelineState && m_CloudDetailNoisePipelineState)
+        if (!m_CloudNoiseBaked && m_CloudShapeNoisePipelineState && m_CloudDetailNoisePipelineState
+            && m_CloudWeatherNoisePipelineState)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "CloudNoiseBake",
-                .Writes = { m_CloudShapeNoiseTexture.get(), m_CloudDetailNoiseTexture.get() },
+                .Writes = { m_CloudShapeNoiseTexture.get(), m_CloudDetailNoiseTexture.get(),
+                            m_CloudWeatherNoiseTexture.get() },
                 .Execute = [this](RHI::IRHICommandList* cmd)
                 {
                     // スレッドグループは4x4x4。3次元なのでグループあたり64スレッドで、
@@ -10792,6 +11265,15 @@ namespace Kurenai
                     cmd->SetComputeUnorderedAccessTexture(0, m_CloudDetailNoiseTexture.get(), 0);
                     const uint32_t detailGroups = (kCloudDetailNoiseSize + kGroupSize - 1) / kGroupSize;
                     cmd->Dispatch(detailGroups, detailGroups, detailGroups);
+
+                    // ウェザーマップ(H3)は2Dなのでスレッドグループが8x8(=64。上の4x4x4と同じ粒度)。
+                    // 4096^2 = 1,678万テクセルを一度だけ焼く
+                    constexpr uint32_t kWeatherGroupSize = 8;
+                    cmd->SetComputePipelineState(m_CloudWeatherNoisePipelineState.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_CloudWeatherNoiseTexture.get(), 0);
+                    const uint32_t weatherGroups =
+                        (kCloudWeatherNoiseSize + kWeatherGroupSize - 1) / kWeatherGroupSize;
+                    cmd->Dispatch(weatherGroups, weatherGroups, 1);
                 },
             });
             m_CloudNoiseBaked = true;
@@ -13128,8 +13610,11 @@ namespace Kurenai
         // --- タイルライトカリングパス: 画面を16x16のタイルに分け、タイルごとに「そのタイルに届くライト」の
         //     インデックスリストをコンピュートシェーダーで作る。直接光パスはそのリストだけをループする。
         //     BufferReads/BufferWritesを宣言しているのは、このパスと直接光パスがどちらもm_GBufferDepthを
-        //     Readsするだけの「読み手同士」で、テクスチャの依存だけでは両者の間に順序が張られないため ---
-        if (m_LightCullingEnabled)
+        //     Readsするだけの「読み手同士」で、テクスチャの依存だけでは両者の間に順序が張られないため。
+        //     **積むかどうかはShouldRunLightCullingが決める。** グリッドの読み手は直接光パスと
+        //     Presentのデバッグ表示しか無く、MegaLightsが走るフレームは前者が止まっているため、
+        //     通常表示では丸ごと無駄になる ---
+        if (ShouldRunLightCulling())
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "LightCull",
@@ -13187,14 +13672,15 @@ namespace Kurenai
                 .Reads = { m_GBufferDepth.get() },
                 .BufferReads = { m_LightBuffer.get() },
                 .BufferWrites = { m_MegaLightsTilePoolBuffer.get() },
-                .Execute = [this, &gpuLights, viewMatrix, jitteredProj](RHI::IRHICommandList* cmd)
+                .Execute = [this, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX,
+                            megaLightsEffectiveTilesY, megaLightsTileOffset](RHI::IRHICommandList* cmd)
                 {
                     MegaLightsTilePoolConstants poolConstants{};
                     DirectX::XMStoreFloat4x4(&poolConstants.View, DirectX::XMMatrixTranspose(viewMatrix));
                     poolConstants.TileParams =
                     {
-                        m_LightTileCountX,
-                        m_LightTileCountY,
+                        megaLightsEffectiveTilesX,
+                        megaLightsEffectiveTilesY,
                         static_cast<uint32_t>(gpuLights.size()),
                         // 【書き手と読み手で必ず同じKを使うこと】プールの1タイルぶんの
                         // 要素数はKから決まるので、食い違うと別タイルの領域を読み書きする
@@ -13215,7 +13701,13 @@ namespace Kurenai
                     };
                     // 候補を毎フレーム引き直すための種。TAAのフレーム番号を流用する
                     // (単調増加していればよく、ジッターの位相とは無関係)
-                    poolConstants.PoolParams = { m_TAAFrameIndex, 0u, 0u, 0u };
+                    poolConstants.PoolParams =
+                    {
+                        m_TAAFrameIndex,
+                        megaLightsTileOffset.x,
+                        megaLightsTileOffset.y,
+                        0u,
+                    };
 
                     cmd->UpdateBuffer(m_MegaLightsTilePoolConstantBuffer.get(), &poolConstants, sizeof(poolConstants));
 
@@ -13225,7 +13717,7 @@ namespace Kurenai
                     cmd->SetComputeTexture(1, m_GBufferDepth.get());
                     // UAVはDispatch直後に解除されるため毎回バインドし直す
                     cmd->SetComputeUnorderedAccessBuffer(0, m_MegaLightsTilePoolBuffer.get());
-                    cmd->Dispatch(m_LightTileCountX, m_LightTileCountY, 1);
+                    cmd->Dispatch(megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, 1);
                 },
             });
         }
@@ -13243,6 +13735,19 @@ namespace Kurenai
         RHI::IRHIBuffer* const tilePoolBufferForBinding =
             m_MegaLightsTilePoolBuffer ? m_MegaLightsTilePoolBuffer.get() : m_LightTileBuffer.get();
 
+        // 段階2のメッシュライトを、このフレームで三角形として積むかどうか。
+        // 【フレーム単位の1変数に閉じること】画素やタイルごとに切り替えると境界で
+        // 二重計上し、静止画では見えない。DX11/非DXR は ShouldRunMegaLights() が偽なので
+        // 自動的に段階1のプロキシへ落ちる ―― 分岐を追加で書かない
+        const bool meshLightsActive = m_MeshLightsEnabled && m_MeshLightScene.IsValid();
+        const uint32_t meshLightTriangleCount =
+            meshLightsActive ? m_MeshLightScene.GetTriangleCount() : 0u;
+        // t8 に張る三角形テーブル。無効なフレームでも何かを張る必要がある
+        // (DX12はPSO切替でルート引数が無効化されるため)。読まれないダミーとして
+        // ライトリストを張る ―― 三角形数0なのでループが1周も回らない
+        RHI::IRHIBuffer* const meshLightBufferForBinding =
+            meshLightsActive ? m_MeshLightScene.GetTriangleBuffer() : m_LightBuffer.get();
+
         if (ShouldRunMegaLights() && m_MegaLightsMode == MegaLightsMode::Reference)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
@@ -13259,8 +13764,9 @@ namespace Kurenai
                 // というこのコードベースの規約に従う。候補プールは確率的サンプリングのときだけ
                 // 読むが、宣言しておくことで候補プールパスより後ろへ順序付けられる
                 // (参照実装のフレームでは辺が1本余分に張られるだけで無害)
-                .BufferReads = { m_LightBuffer.get(), tilePoolBufferForBinding },
-                .Execute = [this, &gpuLights, tilePoolBufferForBinding](RHI::IRHICommandList* cmd)
+                .BufferReads = { m_LightBuffer.get(), tilePoolBufferForBinding, meshLightBufferForBinding },
+                .Execute = [this, &gpuLights, tilePoolBufferForBinding, meshLightBufferForBinding,
+                            meshLightTriangleCount](RHI::IRHICommandList* cmd)
                 {
                     MegaLightsConstants megaLightsConstants{};
                     megaLightsConstants.Params0 =
@@ -13272,7 +13778,14 @@ namespace Kurenai
                     };
                     // 球光源のサンプル列を毎フレーム回す種。確率的サンプリング側と同じ
                     // フレーム番号を使う(あちらは Params1.w)
-                    megaLightsConstants.Params1 = { m_TAAFrameIndex, 0u, 0u, 0u };
+                    megaLightsConstants.Params1 = { m_TAAFrameIndex, meshLightTriangleCount, 0u, 0u };
+                    // 段階1が MakeGPULightFromEmissiveProxy で毎フレーム掛けているのと同じ倍率。
+                    // これで ImGui の「自発光の強度」がメッシュライトにもライブに効く
+                    // y は影響半径の伸縮。半径は倍率1で焼いてあり、段階1の Range は
+                    // peak ∝ intensity から解かれるので R ∝ sqrt(intensity) で伸ばす
+                    megaLightsConstants.Params2 = {
+                        m_EmissiveIntensity, std::sqrt(std::max(m_EmissiveIntensity, 0.0f)),
+                        0.0f, 0.0f };
                     cmd->UpdateBuffer(m_MegaLightsConstantBuffer.get(), &megaLightsConstants,
                                       sizeof(megaLightsConstants));
 
@@ -13299,6 +13812,8 @@ namespace Kurenai
                     // 無効化されるため、確率的サンプリングのときは必ずバインドする必要がある。
                     // 常に張っても害は無いので分岐させない
                     cmd->SetComputeShaderResourceBuffer(7, tilePoolBufferForBinding);
+                    // 発光三角形テーブル。三角形数0のフレームでもダミーを張る(同上)
+                    cmd->SetComputeShaderResourceBuffer(8, meshLightBufferForBinding);
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
                     cmd->SetComputeUnorderedAccessTexture(0, m_MegaLightsTexture.get());
@@ -13327,7 +13842,8 @@ namespace Kurenai
             // 2パスで同じ定数バッファを共有する。中身はグラフ構築のこの時点で確定しているので、
             // Initial側のExecuteで1回だけ更新すればよい
             const auto buildStochasticConstants =
-                [this, &jitteredProj, megaLightsQuadShared](uint32_t spatialIteration)
+                [this, &jitteredProj, megaLightsQuadShared, megaLightsEffectiveTilesX,
+                 megaLightsTileOffset](uint32_t spatialIteration)
             {
                 MegaLightsStochasticConstants stochasticConstants{};
                 stochasticConstants.Params0 =
@@ -13341,7 +13857,7 @@ namespace Kurenai
                 };
                 stochasticConstants.Params1 =
                 {
-                    m_LightTileCountX,
+                    megaLightsEffectiveTilesX,
                     kLightTileSize,
                     // 候補プールを書いたときと同じKでなければならない(上のTileParams.wと同値)
                     static_cast<uint32_t>(m_MegaLightsTilePoolCapacity),
@@ -13406,6 +13922,11 @@ namespace Kurenai
                 // (どちらも例外にならず、絵が「それらしく」出るので気付けない)
                 stochasticConstants.Params5 = {
                     static_cast<uint32_t>(MegaLightsSamplesPerPixel()), 0u, 0u, 0u
+                };
+                // 候補プールを書いたときと同じ格子オフセット。末尾へ足して、途中までしか
+                // 宣言しない Shade / Temporal / Resolve の既存レイアウトを変えない
+                stochasticConstants.Params6 = {
+                    megaLightsTileOffset.x, megaLightsTileOffset.y, 0u, 0u
                 };
                 return stochasticConstants;
             };
@@ -14323,8 +14844,14 @@ namespace Kurenai
                 .Name = "SkyCloud",
                 // SkyViewBakeより後に順序付けさせる(SkyCloudLayers自体はLUTを引かないが、
                 // Sky.hlsliの宣言上バインドが必要で、パスの前後関係も揃えておく)
-                .Reads = { m_SkyViewLUT.get(), m_CloudShapeNoiseTexture.get(), m_CloudDetailNoiseTexture.get() },
-                .RenderTargets = { m_SkyCloudTexture.get() },
+                .Reads = {
+                    m_SkyViewLUT.get(), m_CloudShapeNoiseTexture.get(), m_CloudDetailNoiseTexture.get(),
+                    // 焼いたウェザーマップ(H3)。レイマーチの1歩を約8倍安くするためのもので、
+                    // ボリューム経路を持つこのパスだけが引く
+                    m_CloudWeatherNoiseTexture.get(),
+                },
+                // 2枚出す。0=散乱光rgb+透過率a、1=fogInFront(P18b。SkyCloud.hlslのPSOutput参照)
+                .RenderTargets = { m_SkyCloudTexture.get(), m_SkyCloudFogTexture.get() },
                 // 空パラメータ。SkyIntegrateパスより後に順序付けさせる
                 .BufferReads = { m_SkyParametersBuffer.get() },
                 .Execute = [this, skyCloudViewport](RHI::IRHICommandList* cmd)
@@ -14337,6 +14864,7 @@ namespace Kurenai
                     cmd->SetTexture(1, m_CloudShapeNoiseTexture.get());
                     cmd->SetTexture(2, m_CloudDetailNoiseTexture.get());
                     cmd->SetShaderResourceBuffer(3, m_SkyParametersBuffer.get());
+                    cmd->SetTexture(4, m_CloudWeatherNoiseTexture.get());
                     cmd->Draw(3, 0);
                 },
             });
@@ -14397,7 +14925,7 @@ namespace Kurenai
                 m_SkyViewLUT.get(),
                 // 低解像度で評価済みの雲。SkyCloudパスより後に順序付けさせるために挙げる
                 // (パスが登録されないフレームでは書き手が居ないので依存も張られない)
-                m_SkyCloudTexture.get(),
+                m_SkyCloudTexture.get(), m_SkyCloudFogTexture.get(),
                 // 同じく低解像度で評価済みのDDGI。DDGIResolveパスより後に順序付けさせる
                 m_DDGIResolveTexture.get(), m_DDGIResolveDepthTexture.get(),
             },
@@ -14444,6 +14972,9 @@ namespace Kurenai
                 // このシェーダーは雲を自前で評価しなくなったため、3Dノイズが使っていたt18を
                 // そのまま流用している(DeferredLighting.hlsl冒頭のコメント参照)
                 cmd->SetTexture(18, m_SkyCloudTexture.get());
+                // 同じパスが書いた fogInFront(P18b)。雲の手前の霞の色を晴天から曇天へ直す
+                // 補正にだけ使う。t19/t21と同じ理由で、雲パスが走らないフレームでも常にバインドする
+                cmd->SetTexture(22, m_SkyCloudFogTexture.get());
                 // 低解像度で評価済みのDDGI(rgb=イラディアンス、a=insideWeight)。
                 // 【無効時も常にバインドする】シェーダーはDDGIParams4.yで読むかどうかを分けるが、
                 // DX12のディスクリプタテーブルは21スロットぶんをまとめてコピーするため、
@@ -14901,6 +15432,9 @@ namespace Kurenai
                     // 大気散乱のSkyView LUT。雲と同じ理由で、水面に映る空も
                     // 背景とまったく同じものでなければならない
                     cmd->SetTexture(15, m_SkyViewLUT.get());
+                    // 焼いたウェザーマップ(H3)。**Lightingパスと同じものを渡さないと、
+                    // 水面に映る雲と空の雲が別の場所に立つ**
+                    cmd->SetTexture(17, m_CloudWeatherNoiseTexture.get());
                     // bent normal(34章)。Lightingパスとまったく同じものを読まないと、
                     // SSRが適用される領域とされない領域の境界に段差が出る。
                     // **t11は平面反射が使っているためt16へ移した**
@@ -15772,12 +16306,16 @@ namespace Kurenai
             presentUsesTilePool ? m_MegaLightsTilePoolBuffer.get() : m_LightTileBuffer.get();
         const uint32_t presentTileCapacity =
             presentUsesTilePool ? static_cast<uint32_t>(m_MegaLightsTilePoolCapacity) : kLightTileCapacity;
+        // Mode 21だけは候補プールを書いた有効タイル幅を使う。Mode 11は従来のライトグリッドなので
+        // m_LightTileCountXのままにし、デバッグ表示が実データと別の添字を読まないようにする
+        const uint32_t presentTileCountX =
+            presentUsesTilePool ? megaLightsEffectiveTilesX : m_LightTileCountX;
 
         PresentConstants presentConstants{};
         presentConstants.Mode = presentMode;
         presentConstants.TileParams =
         {
-            static_cast<float>(m_LightTileCountX),
+            static_cast<float>(presentTileCountX),
             static_cast<float>(kLightTileSize),
             static_cast<float>(presentTileCapacity),
             // ヒートマップで赤に振り切る基準のライト数。容量そのものを基準にすると
@@ -15788,8 +16326,8 @@ namespace Kurenai
         {
             static_cast<float>(m_RenderWidth),
             static_cast<float>(m_RenderHeight),
-            0.0f,
-            0.0f,
+            presentUsesTilePool ? static_cast<float>(megaLightsTileOffset.x) : 0.0f,
+            presentUsesTilePool ? static_cast<float>(megaLightsTileOffset.y) : 0.0f,
         };
         // Mode 22(蓄積平均)が割る数。0で割らないよう下限1
         presentConstants.AccumParams =

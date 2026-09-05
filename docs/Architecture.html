@@ -8088,6 +8088,14 @@ DX11の<code>RowPitch</code>はMapするまで分からず、上位層に持た�
 既に契約になっているためです(根拠は<code>docs/ImplementationDetail.md</code> 63.5)。
 </p>
 <p>
+<code>-dumptexframes &lt;N&gt;</code>は直前の<code>-dumptex</code>をNフレーム連番で撮り、
+<code>-dumptexstride &lt;S&gt;</code>で捕獲間隔をフレーム数で指定します(どちらも既定は1)。
+Nが1を超えるときだけ出力名は拡張子の手前に<code>_%04u</code>を付け、各ファイルは従来どおり
+KTXD v2の1フレーム分です。ヘッダの<code>FrameIndex</code>は撮ったフレームを記録するので、
+連番の間隔を後から検算できます。受け皿は読み戻し遅延+1のリングで、512MBを超えない範囲まで
+自動で浅くします。
+</p>
+<p>
 コピーの発行はPresentパスの直前(<code>Reads</code>だけを持つパスとして積むので、
 書き手より後に順序付き、新たな循環依存は作らない)、読み戻しとファイル書き出しは
 <code>graph.Execute()</code>より後の<strong>毎フレーム走る場所</strong>です。

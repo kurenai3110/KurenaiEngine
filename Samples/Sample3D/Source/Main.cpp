@@ -387,6 +387,8 @@ namespace
         std::wstring Path;
         int MipLevel = 0;
         int ArraySlice = 0;
+        int Frames = 1;
+        int Stride = 1;
     };
 
     // -dumptex を全部拾う。直後に続く -dumptexmip / -dumptexslice は「直前の -dumptex」に掛かる。
@@ -440,10 +442,17 @@ namespace
                 continue;
             }
 
-            if (_wcsicmp(argv[i], L"-dumptexmip") == 0 || _wcsicmp(argv[i], L"-dumptexslice") == 0)
+            if (_wcsicmp(argv[i], L"-dumptexmip") == 0 || _wcsicmp(argv[i], L"-dumptexslice") == 0 ||
+                _wcsicmp(argv[i], L"-dumptexframes") == 0 || _wcsicmp(argv[i], L"-dumptexstride") == 0)
             {
                 const bool isMip = _wcsicmp(argv[i], L"-dumptexmip") == 0;
-                const char* optionName = isMip ? "-dumptexmip" : "-dumptexslice";
+                const bool isSlice = _wcsicmp(argv[i], L"-dumptexslice") == 0;
+                const bool isFrames = _wcsicmp(argv[i], L"-dumptexframes") == 0;
+                const bool isStride = _wcsicmp(argv[i], L"-dumptexstride") == 0;
+                const char* optionName = isMip      ? "-dumptexmip"
+                                         : isSlice  ? "-dumptexslice"
+                                         : isFrames ? "-dumptexframes"
+                                                    : "-dumptexstride";
                 if (dumps.empty())
                 {
                     // 直前に -dumptex が無ければ掛ける相手がいない。黙って捨てると
@@ -458,7 +467,23 @@ namespace
                         "Main", std::string(optionName) + "の後に値が指定されていないため、無視します");
                     break;
                 }
-                parseIntArg(argv[i + 1], optionName, isMip ? dumps.back().MipLevel : dumps.back().ArraySlice);
+                int value = 0;
+                if (parseIntArg(argv[i + 1], optionName, value))
+                {
+                    // 枚数と間隔は0だと「撮らない」「無限に待つ」の意味になってしまうので1へ寄せる。
+                    // ミップと配列スライスは0が正当な既定値なのでここには含めない
+                    if ((isFrames || isStride) && value <= 0)
+                    {
+                        Kurenai::Core::Logger::Warning(
+                            "Main", std::string(optionName) + " は1以上で指定してください。1へ補正します: " +
+                                Kurenai::Core::WideToUtf8(argv[i + 1]));
+                        value = 1;
+                    }
+                    if (isMip) dumps.back().MipLevel = value;
+                    else if (isSlice) dumps.back().ArraySlice = value;
+                    else if (isFrames) dumps.back().Frames = value;
+                    else dumps.back().Stride = value;
+                }
                 ++i;
                 continue;
             }
@@ -686,6 +711,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -megalightspool <8〜128>。候補プールが1タイルあたりに抽出する灯の数(K)。
         // 1画素あたりの標本数では減らない「タイル間」のノイズがここで決まる
         const int megaLightsPoolCapacity = ParseIntOption(L"-megalightspool", -1);
+        // -megalightstilejitter <0|1|2>。1=Halton(2,3)で格子をずらす、2=有効だがオフセット0固定
+        const int megaLightsTileJitter = ParseIntOption(L"-megalightstilejitter", -1);
         // -megalightstemporal <0|1> / -megalightstemporalmclamp <上限>。時間再利用
         const int megaLightsTemporal = ParseIntOption(L"-megalightstemporal", -1);
         const int megaLightsTemporalMClamp = ParseIntOption(L"-megalightstemporalmclamp", -1);
@@ -704,6 +731,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const float emissiveLightsCutoff = ParseFloatOption(L"-emissivelightscutoff", -1.0f);
         const int emissiveLightsMax = ParseIntOption(L"-emissivelightsmax", -1);
         const int emissiveLightsDDGI = ParseIntOption(L"-emissivelightsddgi", -1);
+        // -meshlights <0|1>。段階2。発光面を三角形のまま面積分する(既定は無効)。
+        // MegaLights 経路でのみ効き、有効なフレームは参照実装が段階1のプロキシ(型3)を
+        // 読み飛ばして三角形を積む。**いまは全三角形総当たりの参照実装しか無い**ので
+        // 実シーンでは回らない(小さな専用シーン用)
+        const int meshLights = ParseIntOption(L"-meshlights", -1);
         // -emissiveintensity <倍率>。シーン全体の自発光の強度(ImGuiの同名スライダと同じ値)。
         // glTFのemissiveFactorは[0,1]に収まるため、既定の1.0では小さな器具が1階調に届かない
         const float emissiveIntensity = ParseFloatOption(L"-emissiveintensity", -1.0f);        // -megalightsdenoisesigma <値>。輝度のエッジ停止の強さ(SVGFのσ_l)
@@ -814,6 +846,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetMegaLightsTilePoolCapacity(megaLightsPoolCapacity);
             }
+            // 未指定時も呼び、既定の無効状態を起動ログへ1行残す
+            engine.SetMegaLightsTileJitter(megaLightsTileJitter);
             if (megaLightsTemporal >= 0 || megaLightsTemporalMClamp > 0)
             {
                 engine.SetMegaLightsTemporal(megaLightsTemporal, megaLightsTemporalMClamp);
@@ -837,6 +871,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (emissiveIntensity > 0.0f)
             {
                 engine.SetEmissiveIntensity(emissiveIntensity);
+            }
+            if (meshLights >= 0)
+            {
+                engine.SetMeshLights(meshLights);
             }            if (megaLightsDenoiseSigma > 0.0f)
             {
                 engine.SetMegaLightsDenoiseSigmaLuminance(megaLightsDenoiseSigma);
@@ -857,7 +895,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             // (debugViewIndexを毎回適用しているのと同じ理由)
             for (const TextureDumpArg& dump : textureDumps)
             {
-                engine.AddTextureDump(dump.Name.c_str(), dump.Path.c_str(), dump.MipLevel, dump.ArraySlice);
+                engine.AddTextureDump(
+                    dump.Name.c_str(), dump.Path.c_str(), dump.MipLevel, dump.ArraySlice, dump.Frames, dump.Stride);
             }
             if (!textureDumps.empty())
             {
