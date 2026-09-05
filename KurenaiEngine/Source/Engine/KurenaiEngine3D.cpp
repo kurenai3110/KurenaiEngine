@@ -3742,8 +3742,10 @@ namespace Kurenai
             m_EmissiveLightsEnabled = (enabled > 0);
         }
         // 0以下は「既定のまま」。OverrideMegaLightsの負値と同じ約束にしてある
+        bool cutoffChanged = false;
         if (cutoffIrradiance > 0.0f)
         {
+            cutoffChanged = (m_EmissiveLightsCutoffIrradiance != cutoffIrradiance);
             m_EmissiveLightsCutoffIrradiance = cutoffIrradiance;
         }
         if (maxCount > 0)
@@ -3754,6 +3756,15 @@ namespace Kurenai
         {
             m_EmissiveLightsDoubleCountGI = (doubleCountGI > 0);
         }
+        // 【三角形テーブルを焼き直す】メッシュライトの影響半径は読み込み時に焼くので、
+        // τを変えても焼き直さないと**つまみが静かに効かない**。シーンの読み込みは
+        // 設定の適用より先に走るため、ここで焼き直さないと起動引数すら届かない
+        // (実際に踏んだ。τを100分の1にしてもダンプがバイト完全一致した)
+        if (cutoffChanged && m_Device && !m_Scene.Instances.empty())
+        {
+            m_MeshLightScene.Build(*m_Device, m_Scene, m_EmissiveLightsCutoffIrradiance);
+        }
+
         // 上限の警告は設定を変えたら出し直す(τを上げてRangeを縮めた結果を見たいため)
         m_EmissiveLightsCapLogged = false;
         Core::Logger::Info(
@@ -7428,7 +7439,10 @@ namespace Kurenai
         // 「そもそも作っていない」のかがログから切り分けられなくなる。
         // 【打ち切り照度はフレーム不変の定数を渡す】露出や現在のτから導くと、
         // 参照実装が非決定的になって「同じ入力で同じ真値」が崩れる
-        loaded->MeshLightScene.Build(*m_Device, loaded->Scene, Defaults::EmissiveLightsCutoffIrradiance);
+        // 【打ち切り照度は実効値を渡すこと】既定の定数を渡すと -emissivelightscutoff や
+        // ImGui の指定が三角形テーブルへ一切届かず、**つまみが静かに効かなくなる**
+        // (実際に踏んだ。τを100分の1にしてもダンプがバイト完全一致した)
+        loaded->MeshLightScene.Build(*m_Device, loaded->Scene, m_EmissiveLightsCutoffIrradiance);
 
         loaded->Camera = ComputeInitialCamera(loaded->Scene);
         return loaded;
@@ -13368,7 +13382,11 @@ namespace Kurenai
                     megaLightsConstants.Params1 = { m_TAAFrameIndex, meshLightTriangleCount, 0u, 0u };
                     // 段階1が MakeGPULightFromEmissiveProxy で毎フレーム掛けているのと同じ倍率。
                     // これで ImGui の「自発光の強度」がメッシュライトにもライブに効く
-                    megaLightsConstants.Params2 = { m_EmissiveIntensity, 0.0f, 0.0f, 0.0f };
+                    // y は影響半径の伸縮。半径は倍率1で焼いてあり、段階1の Range は
+                    // peak ∝ intensity から解かれるので R ∝ sqrt(intensity) で伸ばす
+                    megaLightsConstants.Params2 = {
+                        m_EmissiveIntensity, std::sqrt(std::max(m_EmissiveIntensity, 0.0f)),
+                        0.0f, 0.0f };
                     cmd->UpdateBuffer(m_MegaLightsConstantBuffer.get(), &megaLightsConstants,
                                       sizeof(megaLightsConstants));
 

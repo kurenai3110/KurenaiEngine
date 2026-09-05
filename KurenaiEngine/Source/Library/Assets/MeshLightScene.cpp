@@ -112,6 +112,15 @@ namespace Kurenai::Assets
             // 総フラックスは正しいが「暗い背景に明るいグリフ」の看板では位置が広がりすぎる
             const float luminance = Luminance(proxy.RadianceBase);
 
+            // かたまり全体の軸上光度 I(0) = max(RadianceBase) * A。影響半径をここから解く。
+            // 【段階1の MakeGPULightFromEmissiveProxy と同じ量にすること】あちらは
+            // peak = max(ColorRange.rgb) = max(RadianceBase) * intensity * Area を使う。
+            // 自発光の強度倍率は毎フレーム変わるのでここでは 1 として焼き、
+            // シェーダ側で sqrt(intensity) を掛けて伸縮させる(MeshLighting.hlsli)
+            const float clusterPeakIntensity =
+                std::max({ proxy.RadianceBase[0], proxy.RadianceBase[1], proxy.RadianceBase[2] }) *
+                proxy.Area;
+
             // 両面発光は glTF の doubleSided に対応させたいが、Assets::Mesh はその情報を
             // 持っていない(KurenaiPacker が落としている)。**片面を既定にする**と、
             // 裏から見た面が光らない。いまは全部片面で焼き、2 系の検証で必要になったら
@@ -147,10 +156,25 @@ namespace Kurenai::Assets
                     continue;
                 }
 
-                // 片面ランバート発光体の光束(輝度換算) Φ = π L A。
-                // そこから、打ち切り照度 ε まで落ちる距離を等方近似で解く
+                // 影響半径は**かたまり全体**の強さから解く。三角形ごとの光束から解いてはいけない。
+                //
+                // 【なぜ三角形ごとではいけないか】三角形ごとにすると、同じ発光体でも
+                // 分割数を増やすほど1枚あたりの光束が減り、**届く距離がテッセレーションの
+                // 細かさで変わる**。実測: 2m角のパネル(A=4)を2枚に割ると三角形ごとでは
+                // R=22.4m だが、段階1のプロキシは 56.6m 届く。同じ発光体が段階1と段階2で
+                // 別の距離まで照らすことになり、遠方で一致するはずの突き合わせが壊れる。
+                // しかも減る側なので**エネルギーを黙って捨てる**。
+                //
+                // 【段階1と同じ式にする】あちらは Range = sqrt(peak / τ) で、
+                // peak は光度 max(RadianceBase)*A(片面ランバートの軸上光度 I(0)=L*A)。
+                // 同じ量から解けば、両者の定義域が構成上そろう。
+                // **等方近似 Φ/(4πd²) は使わない** ―― 片面発光の軸上照度は等方平均の4倍で、
+                // 距離にすると2倍の食い違いになる
+                // 片面ランバート発光体の光束(輝度換算) Φ = π L A。集計の報告にだけ使う
+                // (影響半径はここからは解かない。上の理由を参照)
                 const float flux = 3.14159265358979f * luminance * area;
-                float radius = std::sqrt(flux / (4.0f * 3.14159265358979f * cutoffIrradiance));
+
+                float radius = std::sqrt(clusterPeakIntensity / cutoffIrradiance);
                 const float minRadius = kMinInfluenceScale * std::sqrt(area);
                 if (radius < minRadius)
                 {

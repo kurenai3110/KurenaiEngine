@@ -70,7 +70,9 @@ cbuffer MegaLightsConstants : register(b1)
     // y=発光三角形の枚数(**0ならメッシュライトは無効**。段階1のプロキシがそのまま光る),
     // zw=未使用
     uint4 Params1;
-    // x=シーン全体の自発光の強度倍率(ImGuiの「自発光の強度」), yzw=未使用
+    // x=シーン全体の自発光の強度倍率(ImGuiの「自発光の強度」),
+    // y=影響半径の伸縮 sqrt(倍率)。半径は倍率1で焼いてあるので、
+    //   倍率を上げたときに段階1のRangeと同じだけ伸びるようにする, zw=未使用
     //
     // 【露出ではない】自発光は露出を通らない経路で、段階1のプロキシも露出抜きで
     // ColorRange を作っている。ここで露出を掛けるとEV100=15で1/39322倍になり、
@@ -314,6 +316,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 【実シーンでは動かない】10万三角形 × 影レイは総当たりでは回らない。
     // 真値が取れるのは小さな専用シーンだけで、これは検証計画の実質的な上限でもある
     const float meshEmissiveIntensity = Params2.x;
+    const float meshRangeScale = Params2.y;
     [loop]
     for (uint t = 0u; t < triangleCount; ++t)
     {
@@ -335,7 +338,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             const float2 bary = MeshLightSampleBarycentric(u);
 
             const MeshLightGeometry geometry =
-                EvaluateMeshLightGeometry(tri, bary, worldPos, N, translucency);
+                EvaluateMeshLightGeometry(tri, bary, worldPos, N, translucency, meshRangeScale);
             if (!geometry.Contributes)
             {
                 continue;

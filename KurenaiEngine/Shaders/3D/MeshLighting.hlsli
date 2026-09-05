@@ -117,8 +117,15 @@ struct MeshLightGeometry
 // EvaluatePunctualGeometry とまったく同じ。early-out の並びは寄与の値を変えないが、
 // **どの三角形が寄与0とみなされるかを決めている**ので、式そのものと同じ重さで
 // 一致させる必要がある。定義域がずれると期待値がずれる(=バイアス)
+// rangeScale は影響半径の伸縮。sqrt(自発光の強度倍率) を渡す。
+//
+// 【なぜ伸縮が要るのか】影響半径は読み込み時に「倍率1」で焼いてある。段階1の Range は
+// peak = max(RadianceBase) * intensity * Area から毎フレーム解き直されるので、
+// 倍率を上げると伸びる。こちらが固定のままだと、倍率を上げたときだけ段階1と段階2で
+// 届く距離が食い違う。R ∝ sqrt(peak) なので sqrt(intensity) を掛ければ一致する
 MeshLightGeometry EvaluateMeshLightGeometry(
-    GPUEmissiveTriangle tri, float2 bary, float3 worldPos, float3 N, float translucency)
+    GPUEmissiveTriangle tri, float2 bary, float3 worldPos, float3 N, float translucency,
+    float rangeScale)
 {
     MeshLightGeometry result;
     result.L = float3(0.0f, 1.0f, 0.0f);
@@ -135,7 +142,7 @@ MeshLightGeometry EvaluateMeshLightGeometry(
     // 候補プールが成立しない。正しさの契約は「参照実装と確率的サンプリングで定義域が
     // 一致すること」であって「物理的に無限遠まで積むこと」ではない(punctual も Range で
     // 既に切っている)
-    const float range = tri.P0AndRadius.w;
+    const float range = tri.P0AndRadius.w * rangeScale;
     if (distSq > range * range)
     {
         return result;
