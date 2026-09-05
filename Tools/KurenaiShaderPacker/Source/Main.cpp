@@ -335,6 +335,14 @@ int wmain(int argc, wchar_t** argv)
                     PrintErr("エラー: サブフォルダの .hlsl には対応していません: " + WideToUtf8(sub.path().wstring()) + "\n");
                     return 2;
                 }
+                // サブフォルダの .hlsli は増分判定の基準に必ず含める。
+                // **ここを落とすと ShaderInterop の .hlsli を直しても焼き直されず、
+                // 古いバイトコードのまま起動する** —— 下の newestSource のコメントにある、
+                // 一番気付きにくい壊れ方そのものになる
+                if (sub.is_regular_file() && sub.path().extension() == L".hlsli")
+                {
+                    allSources.push_back(sub.path());
+                }
             }
             continue;
         }
