@@ -28,6 +28,12 @@
 namespace Kurenai
 {
     struct SunLighting;
+    struct GPULight;
+}
+
+namespace Kurenai::Passes
+{
+    struct LightingConstants;
 }
 
 namespace Kurenai::RHI
@@ -78,6 +84,17 @@ namespace Kurenai::Rendering
 
         // 水面の高さ[m]。鏡映の基準になる平面
         float WaterPlaneY = 0.0f;
+
+        // 主カメラの位置とジッタ無しのビュー射影
+        DirectX::XMFLOAT3 CameraPosition{ 0.0f, 0.0f, 0.0f };
+        DirectX::XMMATRIX ViewProj{};
+
+        // GPUへ送るライト配列と、直接光の定数。**どちらもRender()のローカルを指す**
+        const std::vector<GPULight>* Lights = nullptr;
+        const Passes::LightingConstants* Lighting = nullptr;
+
+        // MegaLightsのデノイズを今フレーム走らせるか(合成パスが読む先が変わる)
+        bool MegaLightsDenoiseRuns = false;
 
         // このフレームのTAAジッタ量[UV]
         DirectX::XMFLOAT2 JitterUv{ 0.0f, 0.0f };

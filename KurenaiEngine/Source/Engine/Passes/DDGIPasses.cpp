@@ -599,4 +599,49 @@ namespace Kurenai::Passes
             m_Engine.m_DDGIUpdateCursor = nextCursor % m_Engine.m_DDGIProbeCount;
         }
     }
+
+    void DDGIPasses::RegisterResolve(
+        Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
+    {
+        // 【フレームの値をここで写し取る】Render()から機械的に移した登録コードなので、
+        // 参照している名前を変えずに済むよう同じ名前で受け直す
+        const FrameConstants& constants = *frame.Constants;
+
+        // --- DDGIの低解像度解決パス(有効なときだけ) ---
+        // 拡散イラディアンスとinsideWeightを1/2解像度で求め、Lightingパスが深度を見て
+        // アップサンプルする。雲と違い厳密ではない近似のため既定は無効(DDGIResolve.hlsl冒頭参照)
+        const bool ddgiResolvePassRuns =
+            m_Engine.m_DDGISettings.HalfResolution && m_Engine.m_DDGIResolveTexture && m_Engine.m_DDGISettings.Enabled && m_Engine.m_HasGIVolume && m_Engine.m_DDGIBaked;
+        if (ddgiResolvePassRuns)
+        {
+            RHI::Viewport ddgiResolveViewport;
+            ddgiResolveViewport.Width = static_cast<float>(m_Engine.m_DDGIResolveWidth);
+            ddgiResolveViewport.Height = static_cast<float>(m_Engine.m_DDGIResolveHeight);
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "DDGIResolve",
+                // アトラスはDDGIUpdateパスが書くので、それより後に順序付けさせる。
+                // 深度と法線はG-Bufferパスより後
+                .Reads = {
+                    m_Engine.m_DDGIIrradianceAtlas.get(), m_Engine.m_DDGIDistanceAtlas.get(),
+                    m_Engine.m_GBufferDepth.get(), m_Engine.m_GBufferNormal.get(),
+                },
+                // 2枚目は合成側のGatherRed用の低解像度深度(41.24節)。
+                // 並びはDDGIResolve.hlslのPSOutputおよびPSOのRenderTargetFormatsと一致させること
+                .RenderTargets = { m_Engine.m_DDGIResolveTexture.get(), m_Engine.m_DDGIResolveDepthTexture.get() },
+                .Execute = [this, ddgiResolveViewport](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetViewport(ddgiResolveViewport);
+                    cmd->SetPipelineState(m_Engine.m_DDGIResolvePipelineState.get());
+                    cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                    cmd->SetSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetTexture(0, m_Engine.m_DDGIIrradianceAtlas.get());
+                    cmd->SetTexture(1, m_Engine.m_DDGIDistanceAtlas.get());
+                    cmd->SetTexture(2, m_Engine.m_GBufferDepth.get());
+                    cmd->SetTexture(3, m_Engine.m_GBufferNormal.get());
+                    cmd->Draw(3, 0);
+                },
+            });
+        }
+    }
 }

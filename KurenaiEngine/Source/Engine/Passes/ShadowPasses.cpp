@@ -7,7 +7,9 @@
 #include "../Rendering/GeometryDrawLoop.h"
 #include "../Rendering/ObjectConstants.h"
 #include "../Rendering/RenderFrameContext.h"
+#include "LightingConstants.h"
 #include "../ShaderInterop/CascadeConstants.h"
+#include "../ShaderInterop/FrameConstants.h"
 #include "../ShaderInterop/GroupSizes.h"
 
 namespace Kurenai::Passes
@@ -17,6 +19,7 @@ namespace Kurenai::Passes
         using Rendering::FrustumPlanes;
         using Rendering::ExtractFrustumPlanes;
         using ShaderInterop::CascadeConstants;
+        using ShaderInterop::FrameConstants;
     }
 
     void ShadowPasses::RegisterCascades(
@@ -205,6 +208,51 @@ namespace Kurenai::Passes
                                 return true;
                             });
                     }
+                },
+            });
+        }
+    }
+
+    void ShadowPasses::RegisterRaytraced(
+        Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
+    {
+        // 【フレームの値をここで写し取る】Render()から機械的に移した登録コードなので、
+        // 参照している名前を変えずに済むよう同じ名前で受け直す
+        const FrameConstants& constants = *frame.Constants;
+
+        // --- RTシャドウパス: TLASへ太陽の見かけの円盤方向へ影レイを撃ち、可視率(0〜1)を
+        //     単チャンネルのテクスチャへ書く。直後の直接光パスがt6でこれを読む ---
+        if (m_Engine.ShouldRunRaytracedShadow())
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "RTShadow",
+                .Reads = { m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferDepth.get() },
+                .Writes = { m_Engine.m_RTShadowTexture.get() },
+                .Execute = [this](RHI::IRHICommandList* cmd)
+                {
+                    Passes::RTShadowConstants rtShadowConstants{};
+                    rtShadowConstants.Params0 =
+                    {
+                        static_cast<float>(m_Engine.m_RenderWidth),
+                        static_cast<float>(m_Engine.m_RenderHeight),
+                        DirectX::XMConvertToRadians(m_Engine.m_ShadowSettings.RTSunAngularRadiusDegrees),
+                        static_cast<float>(std::max(1, m_Engine.m_ShadowSettings.RTSampleCount)),
+                    };
+                    cmd->UpdateBuffer(m_Engine.m_RTShadowConstantBuffer.get(), &rtShadowConstants, sizeof(rtShadowConstants));
+
+                    cmd->SetComputePipelineState(m_Engine.m_RTShadowPipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(1, m_Engine.m_RTShadowConstantBuffer.get());
+
+                    // レジスタ割り当てはRTShadow.hlsl側の宣言と一致させること。
+                    // このシェーダはLoad(整数座標)しか使わないためサンプラーはバインドしない
+                    cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
+                    cmd->SetComputeTexture(1, m_Engine.m_GBufferNormal.get());
+                    cmd->SetComputeTexture(2, m_Engine.m_GBufferDepth.get());
+
+                    // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
+                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RTShadowTexture.get());
+                    cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
                 },
             });
         }

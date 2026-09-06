@@ -106,6 +106,9 @@
     <ClInclude Include="Source\Engine\Passes\EnvironmentPasses.h" />
     <ClInclude Include="Source\Engine\Rendering\SunLighting.h" />
     <ClInclude Include="Source\Engine\Passes\PostProcessConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\LightingConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\LightingPasses.h" />
+    <ClInclude Include="Source\Engine\Rendering\GPULight.h" />
     <ClInclude Include="Source\Engine\Passes\ReflectionConstants.h" />
     <ClInclude Include="Source\Engine\Passes\ReflectionPasses.h" />
     <ClInclude Include="Source\Engine\Passes\ReflectionProbePasses.h" />
@@ -149,6 +152,7 @@
     <ClCompile Include="Source\Engine\Passes\DDGIPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\EnvironmentPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\PostProcessPasses.cpp" />
+    <ClCompile Include="Source\Engine\Passes\LightingPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\ReflectionPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\ReflectionProbePasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\ShadowPasses.cpp" />

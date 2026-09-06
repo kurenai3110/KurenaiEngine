@@ -84,6 +84,7 @@ namespace Kurenai::Passes
     // そちらはこのヘッダをインクルードするため、ここでは前方宣言で止める
     class DDGIPasses;
     class EnvironmentPasses;
+    class LightingPasses;
     class PostProcessPasses;
     class ReflectionPasses;
     class ReflectionProbePasses;
@@ -138,6 +139,7 @@ namespace Kurenai
         // m_Engine越しに触る。所有権を群へ移し終えたらこのfriendは外す(段階6)
         friend class Passes::DDGIPasses;
         friend class Passes::EnvironmentPasses;
+        friend class Passes::LightingPasses;
         friend class Passes::PostProcessPasses;
         friend class Passes::ReflectionPasses;
         friend class Passes::ReflectionProbePasses;
@@ -777,6 +779,7 @@ namespace Kurenai
         // 不完全型のままにするため、デストラクタは.cpp側で定義する
         std::unique_ptr<Passes::DDGIPasses> m_DDGIPasses;
         std::unique_ptr<Passes::EnvironmentPasses> m_EnvironmentPasses;
+        std::unique_ptr<Passes::LightingPasses> m_LightingPasses;
         std::unique_ptr<Passes::PostProcessPasses> m_PostProcessPasses;
         std::unique_ptr<Passes::ReflectionPasses> m_ReflectionPasses;
         std::unique_ptr<Passes::ReflectionProbePasses> m_ReflectionProbePasses;

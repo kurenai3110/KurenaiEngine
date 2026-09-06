@@ -38,6 +38,9 @@ namespace Kurenai
                 const Rendering::RenderFrameContext& frame,
                 const Rendering::RenderBlackboard& bb);
 
+            // 格子から画面へ解決する(DDGIResolve)。捕捉・更新とは登録位置が離れている
+            void RegisterResolve(Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame);
+
         private:
             KurenaiEngine3D& m_Engine;
         };

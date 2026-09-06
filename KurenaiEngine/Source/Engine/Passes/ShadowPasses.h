@@ -29,6 +29,9 @@ namespace Kurenai
             // カスケードシャドウマップ(Shadow0..Shadow3)
             void RegisterCascades(Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame);
 
+            // RTシャドウ(DXR対応環境のみ)。カスケードとは登録位置が離れている
+            void RegisterRaytraced(Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame);
+
         private:
             KurenaiEngine3D& m_Engine;
         };
