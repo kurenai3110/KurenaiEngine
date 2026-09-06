@@ -123,7 +123,24 @@ namespace Kurenai::RHI
         // このフレームの完了を示すフェンス値をシグナルしてから、CPUはGPUの完了を待たずに
         // 次のフレームスロットの記録へ進む(CPU/GPUがオーバーラップして動作する)
         m_Device->SignalFrame();
-        ThrowIfFailed(m_SwapChain->Present(vsync ? 1 : 0, 0), "Presentに失敗しました");
+        const HRESULT presentResult = m_SwapChain->Present(vsync ? 1 : 0, 0);
+        if (FAILED(presentResult))
+        {
+            // 【デバイス喪失の本当の理由を残す】Presentが返す 0x887A0005(DXGI_ERROR_DEVICE_REMOVED)は
+            // 「デバイスが無くなった」としか言っておらず、GPUのハングなのかドライバ内部エラーなのかを
+            // 区別できない。GetDeviceRemovedReason()だけがそれを持っているので、例外を投げる前に
+            // 必ず読んでログへ出す(投げたあとでは、次のフレームの別の失敗に上書きされて追えなくなる)
+            if (ID3D12Device* device = m_Device ? m_Device->GetDevice() : nullptr)
+            {
+                char reasonText[16];
+                std::snprintf(
+                    reasonText, sizeof(reasonText), "0x%08X",
+                    static_cast<unsigned int>(device->GetDeviceRemovedReason()));
+                Core::Logger::Error(
+                    "DX12", std::string("デバイス喪失の理由 (GetDeviceRemovedReason): ") + reasonText);
+            }
+        }
+        ThrowIfFailed(presentResult, "Presentに失敗しました");
         m_Device->AdvanceToNextFrame();
     }
 
