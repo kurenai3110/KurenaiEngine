@@ -307,7 +307,7 @@ namespace Kurenai::Passes
                 .Name = std::move(passName),
                 // Hi-Zを読む。前フレームのものを読む側では、それより前に書き手がいないので
                 // 辺は張られない(RenderGraphのReadsは登録順で解決する)
-                .Reads = { m_Engine.m_HiZTexture.get() },
+                .Reads = { m_Engine.m_RenderTargets.HiZTexture.get() },
                 .BufferWrites = { m_Engine.m_ModelCullCounterBuffer.get(), m_Engine.m_ModelCullDrawArgsBuffer.get() },
                 .Execute = [this, beginIndex, count, initializeBuffers, useCurrentFrameHiZ, occlusionEnabled, regionStride, statsBeginIndex, cameraMoveDistance, modelCullIndirectActive, &viewProj, &modelCullDraws, renderWidth, renderHeight, objectConstantBuffer](RHI::IRHICommandList* cmd)
                 {
@@ -408,7 +408,7 @@ namespace Kurenai::Passes
                     cmd->SetComputePipelineState(m_Engine.m_ModelCullPipelineState.get());
                     cmd->SetComputeConstantBuffer(0, m_Engine.m_ModelCullConstantBuffer.get());
                     cmd->SetComputeShaderResourceBuffer(0, m_Engine.m_ModelCullInstanceBuffer.get());
-                    cmd->SetComputeTexture(1, m_Engine.m_HiZTexture.get());
+                    cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.HiZTexture.get());
                     cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_ModelCullCounterBuffer.get());
                     cmd->SetComputeUnorderedAccessBuffer(1, m_Engine.m_ModelCullDrawArgsBuffer.get());
 
@@ -427,7 +427,7 @@ namespace Kurenai::Passes
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "HiZ",
                 .Reads = { m_Engine.m_RenderTargets.GBufferDepth.get() },
-                .Writes = { m_Engine.m_HiZTexture.get() },
+                .Writes = { m_Engine.m_RenderTargets.HiZTexture.get() },
                 .Execute = [this, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     HiZConstants hizConstants{};
@@ -438,7 +438,7 @@ namespace Kurenai::Passes
                     cmd->SetComputePipelineState(m_Engine.m_HiZCopyPipelineState.get());
                     cmd->SetComputeConstantBuffer(0, m_Engine.m_HiZConstantBuffer.get());
                     cmd->SetComputeTexture(0, m_Engine.m_RenderTargets.GBufferDepth.get());
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_HiZTexture.get(), 0);
+                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RenderTargets.HiZTexture.get(), 0);
                     cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
 
                     cmd->SetComputePipelineState(m_Engine.m_HiZDownsamplePipelineState.get());
@@ -453,8 +453,8 @@ namespace Kurenai::Passes
                         hizConstants.DstSize = { hizDstWidth, hizDstHeight };
                         cmd->UpdateBuffer(m_Engine.m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
                         cmd->SetComputeConstantBuffer(0, m_Engine.m_HiZConstantBuffer.get());
-                        cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_HiZTexture.get(), mip - 1);
-                        cmd->SetComputeUnorderedAccessTexture(1, m_Engine.m_HiZTexture.get(), mip);
+                        cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RenderTargets.HiZTexture.get(), mip - 1);
+                        cmd->SetComputeUnorderedAccessTexture(1, m_Engine.m_RenderTargets.HiZTexture.get(), mip);
                         cmd->Dispatch((hizDstWidth + 7) / 8, (hizDstHeight + 7) / 8, 1);
 
                         hizSrcWidth = hizDstWidth;
@@ -481,7 +481,7 @@ namespace Kurenai::Passes
                 .Name = "DepthPrepass",
                 // 増幅シェーダーのHi-Zオクルージョンカリングが読む
                 // (G-Bufferパスと同じ理由で循環にはならない)
-                .Reads = { m_Engine.m_HiZTexture.get() },
+                .Reads = { m_Engine.m_RenderTargets.HiZTexture.get() },
                 // レンダーターゲットは持たない(深度だけを書く)
                 .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
                 // 間接描画の引数(直前のModelCullパスが書いたもの)
@@ -502,7 +502,7 @@ namespace Kurenai::Passes
                     // プリパスだけが描いた面は「深度はあるのに色が無い」穴になる
                     if (occlusionCullingActive)
                     {
-                        cmd->SetTextureAllStages(8, m_Engine.m_HiZTexture.get());
+                        cmd->SetTextureAllStages(8, m_Engine.m_RenderTargets.HiZTexture.get());
                     }
 
                     RHI::IRHIPipelineState* currentPipelineState = nullptr;
@@ -719,7 +719,7 @@ namespace Kurenai::Passes
             // 書き手」がいるときにだけ辺を張る規則で、Hi-Zパスの登録はこのパスより後なので
             // 辺は張られない(RenderGraph::ResolveExecutionOrder)。実行順も登録順のまま、
             // 読むのは前フレームに書かれた内容になる ―― それがこの判定の前提そのもの
-            .Reads = { m_Engine.m_HiZTexture.get() },
+            .Reads = { m_Engine.m_RenderTargets.HiZTexture.get() },
             // 深度プリパス(直前に登録される)を通したときは、ここへ来る時点で深度が埋まっており、
             // PSOのDepthAllowEqual(GREATER_EQUAL)によって最前面の断片だけがテストを通る。
             //
@@ -776,7 +776,7 @@ namespace Kurenai::Passes
                 // 「バインドされていないのに間引き率が出た」という取り違えを起こせなくする
                 if (occlusionCullingActive)
                 {
-                    cmd->SetTextureAllStages(8, m_Engine.m_HiZTexture.get());
+                    cmd->SetTextureAllStages(8, m_Engine.m_RenderTargets.HiZTexture.get());
                 }
 
                 // ミラーリング(Worldの行列式が負)されたインスタンス・水面(ModelInstance::IsWater)

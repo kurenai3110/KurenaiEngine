@@ -87,7 +87,7 @@ namespace Kurenai::Passes
                 // Readsに挙げることでRenderGraphがBRDFLUTBakeパス(このLUTのWriter)より後に順序付ける
                 m_Engine.m_BRDFLUTTexture.get(),
             },
-            .RenderTargets = { m_Engine.m_DirectLightTexture.get() },
+            .RenderTargets = { m_Engine.m_RenderTargets.DirectLightTexture.get() },
             .Execute = [this, gbufferViewport, &gpuLights, &lightingConstants, rtShadowTextureForBinding, megaLightsTextureForBinding, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
@@ -142,7 +142,7 @@ namespace Kurenai::Passes
                     .Name = "RTAO",
                     // 直接光バッファは、バウンス面が画面に映っているときの再放射の放射輝度として読む
                     // (SSILと同じ理由でDirectLightパスより後に順序付けられる。RTAO.hlsl参照)
-                    .Reads = { m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_DirectLightTexture.get() },
+                    .Reads = { m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_RenderTargets.DirectLightTexture.get() },
                     .Writes = { aoRawTexture },
                     .Execute = [this, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                     {
@@ -183,7 +183,7 @@ namespace Kurenai::Passes
                         {
                             cmd->SetComputeShaderResourceBuffer(9, meshletBuffer);
                         }
-                        cmd->SetComputeTexture(8, m_Engine.m_DirectLightTexture.get());
+                        cmd->SetComputeTexture(8, m_Engine.m_RenderTargets.DirectLightTexture.get());
 
                         // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
                         cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RTAORawTexture.get());
@@ -196,7 +196,7 @@ namespace Kurenai::Passes
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "AO",
                     .Reads = useSSIL
-                        ? std::vector<RHI::IRHITexture*>{ m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_DirectLightTexture.get() }
+                        ? std::vector<RHI::IRHITexture*>{ m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_RenderTargets.DirectLightTexture.get() }
                         : std::vector<RHI::IRHITexture*>{ m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get() },
                     .RenderTargets = { aoRawTexture },
                     .Execute = [this, gbufferViewport, useSSIL, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
@@ -216,7 +216,7 @@ namespace Kurenai::Passes
                             cmd->SetConstantBuffer(1, m_Engine.m_SSILConstantBuffer.get());
                             cmd->SetTexture(0, m_Engine.m_RenderTargets.GBufferNormal.get());
                             cmd->SetTexture(1, m_Engine.m_RenderTargets.GBufferDepth.get());
-                            cmd->SetTexture(2, m_Engine.m_DirectLightTexture.get());
+                            cmd->SetTexture(2, m_Engine.m_RenderTargets.DirectLightTexture.get());
                             cmd->Draw(3, 0);
                         }
                         else
@@ -353,7 +353,7 @@ namespace Kurenai::Passes
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Lighting",
             .Reads = {
-                m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_DirectLightTexture.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
+                m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.DirectLightTexture.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
                 skyTexture, activeAOTexture, m_Engine.m_RenderTargets.GBufferEmissive.get(), m_Engine.m_RenderTargets.GBufferNormal.get(),
                 m_Engine.m_IrradianceTexture.get(), m_Engine.m_PrefilteredEnvTexture.get(), m_Engine.m_BRDFLUTTexture.get(),
                 m_Engine.m_RenderTargets.GBufferBentNormal.get(),
@@ -371,7 +371,7 @@ namespace Kurenai::Passes
                 // 同じく低解像度で評価済みのDDGI。DDGIResolveパスより後に順序付けさせる
                 m_Engine.m_DDGIResolveTexture.get(), m_Engine.m_DDGIResolveDepthTexture.get(),
             },
-            .RenderTargets = { m_Engine.m_SceneColor.get() },
+            .RenderTargets = { m_Engine.m_RenderTargets.SceneColor.get() },
             // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
             // (実際のバインドはExecute内)
             .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
@@ -386,7 +386,7 @@ namespace Kurenai::Passes
                 cmd->SetConstantBuffer(0, frameConstantBuffer);
                 cmd->SetSamplerSet(screenSpaceSamplers);
                 cmd->SetTexture(0, m_Engine.m_RenderTargets.GBufferAlbedo.get());
-                cmd->SetTexture(1, m_Engine.m_DirectLightTexture.get());
+                cmd->SetTexture(1, m_Engine.m_RenderTargets.DirectLightTexture.get());
                 cmd->SetTexture(2, m_Engine.m_RenderTargets.GBufferMaterial.get());
                 cmd->SetTexture(3, m_Engine.m_RenderTargets.GBufferDepth.get());
                 cmd->SetTexture(4, skyTexture);
@@ -448,7 +448,7 @@ namespace Kurenai::Passes
                 m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_ProbeDistanceArray.get(),
                 m_Engine.m_DDGIIrradianceAtlas.get(), m_Engine.m_DDGIDistanceAtlas.get(),
             },
-            .RenderTargets = { m_Engine.m_SceneColor.get() },
+            .RenderTargets = { m_Engine.m_RenderTargets.SceneColor.get() },
             .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
             .Execute = [this, gbufferViewport, &gpuLights, &cameraPosition, &viewProj, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
             {

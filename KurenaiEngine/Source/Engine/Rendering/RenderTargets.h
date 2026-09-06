@@ -29,6 +29,27 @@ namespace Kurenai::Rendering
         // bent normal(ワールド空間の正規化しない可視方向の平均)。.rgb = bRaw、.a = 有効フラグ
         std::unique_ptr<RHI::IRHITexture> GBufferBentNormal;
 
+        // 直接光(シャドウ適用済みのPBR直接光をHDRで持つ)。DeferredLightingパスと
+        // SSIL_VisibilityBitmask.hlslの両方が読むため、G-Bufferと同じレンダー解像度で保つ
+        std::unique_ptr<RHI::IRHITexture> DirectLightTexture;
+        // AO/GIの生バッファとブラー後。フォーマットはどちらもGetAOFormat()に従う
+        // (バッファ精度の設定に追従する)
+        std::unique_ptr<RHI::IRHITexture> SSAORawTexture;
+        std::unique_ptr<RHI::IRHITexture> SSAOTexture;
+        std::unique_ptr<RHI::IRHITexture> SSILRawTexture;
+        std::unique_ptr<RHI::IRHITexture> SSILTexture;
+        // ライティングパスの出力。トーンマッピング前のHDR値をそのまま持つ
+        std::unique_ptr<RHI::IRHITexture> SceneColor;
+        // SSRの出力。後段(Tonemap)から見るとSceneColorと入れ替え可能なバッファになる
+        std::unique_ptr<RHI::IRHITexture> SSRTexture;
+        // Tonemapの出力(LDR)。内部レンダー解像度で、超解像の出力とは作り直す契機が違う
+        std::unique_ptr<RHI::IRHITexture> TonemapTexture;
+        // TAAの履歴2枚。読みながら同じテクスチャへ書けないので毎フレーム役割を入れ替える
+        // (どちらが今フレームの書き込み先かはKurenaiEngine3D::m_TAAHistoryIndexが持つ)
+        std::unique_ptr<RHI::IRHITexture> TAAHistory[2];
+        // 階層深度。ミップ段数はKurenaiEngine3D側が決めてCreateHiZへ渡す
+        std::unique_ptr<RHI::IRHITexture> HiZTexture;
+
         // G-Buffer の生成は元の位置ごとに3つへ分ける。間に他のテクスチャ生成があるため、
         // 順序を変えるとDX12のディスクリプタ枠の割り当て順が変わり、意味の無い差分になる。
         // 呼び出し元のtry内から呼ぶこと。確保失敗時のHDR→Legacy8bitフォールバックは
@@ -36,5 +57,9 @@ namespace Kurenai::Rendering
         void CreateGBufferCore(RHI::IRHIDevice& device, uint32_t width, uint32_t height, RHI::Format emissiveFormat);
         void CreateGBufferVelocity(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         void CreateGBufferBentNormal(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+        void CreateLightingChain(RHI::IRHIDevice& device, uint32_t width, uint32_t height, RHI::Format aoFormat);
+        void CreateTonemap(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+        void CreateTAAHistory(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+        void CreateHiZ(RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t mipLevels);
     };
 }

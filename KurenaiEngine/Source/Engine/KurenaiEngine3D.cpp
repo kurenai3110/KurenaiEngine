@@ -3276,10 +3276,10 @@ namespace Kurenai
         }
         if (m_AmbientOcclusionSettings.Technique == AOTechnique::SSILVisibilityBitmask)
         {
-            return m_SSILTexture.get();
+            return m_RenderTargets.SSILTexture.get();
         }
         // SSAO、およびRaytracedを選んでいても実行できないフレーム(高速化構造が無い等)
-        return m_SSAOTexture.get();
+        return m_RenderTargets.SSAOTexture.get();
     }
 
     RHI::IRHITexture* KurenaiEngine3D::GetActiveAORawTexture() const
@@ -3294,23 +3294,23 @@ namespace Kurenai
         }
         if (m_AmbientOcclusionSettings.Technique == AOTechnique::SSILVisibilityBitmask)
         {
-            return m_SSILRawTexture.get();
+            return m_RenderTargets.SSILRawTexture.get();
         }
-        return m_SSAORawTexture.get();
+        return m_RenderTargets.SSAORawTexture.get();
     }
 
     RHI::IRHITexture* KurenaiEngine3D::GetActiveReflectionOutput() const
     {
         if (m_ReflectionSettings.Mode == ReflectionMode::ScreenSpace)
         {
-            return m_SSRTexture.get();
+            return m_RenderTargets.SSRTexture.get();
         }
         if (ShouldRunRaytracedReflection())
         {
             return m_RTReflectionTexture.get();
         }
         // 反射なし、またはRT反射を実行しなかった場合はLightingパスの結果をそのまま後段へ渡す
-        return m_SceneColor.get();
+        return m_RenderTargets.SceneColor.get();
     }
 
     void KurenaiEngine3D::CreatePrecisionDependentPipelineStates()
@@ -3601,14 +3601,8 @@ namespace Kurenai
         try
         {
             m_RenderTargets.CreateGBufferCore(*m_Device, width, height, emissiveFormat);
-            m_DirectLightTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R32G32B32A32_Float);
-            m_SSAORawTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
-            m_SSAOTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
-            m_SSILRawTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
-            m_SSILTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
-            m_SceneColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
-            m_SSRTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
-            // 大気遠近パスの出力。m_SSRTextureと同じ作法(HDR、R16G16B16A16_Float)で永続確保する
+            m_RenderTargets.CreateLightingChain(*m_Device, width, height, aoFormat);
+            // 大気遠近パスの出力。m_RenderTargets.SSRTextureと同じ作法(HDR、R16G16B16A16_Float)で永続確保する
             m_AerialPerspectiveTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
             // 雲パスの出力(rgb=事前乗算済みの散乱光、a=透過率)。内部レンダー解像度の1/2で持つ。
             // 【R16G16B16A16_Float固定にする理由】平面反射(CreatePlanarReflectionTargets)と同じで、
@@ -3667,21 +3661,17 @@ namespace Kurenai
                 // 帯域が問題になったら、参照実装とは別の出力先を用意して測ってから決めること
                 m_MegaLightsTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
             }
-            m_TonemapTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+            m_RenderTargets.CreateTonemap(*m_Device, width, height);
 
             m_RenderTargets.CreateGBufferVelocity(*m_Device, width, height);
 
             m_RenderTargets.CreateGBufferBentNormal(*m_Device, width, height);
 
-            // TAAの履歴バッファ2枚。読みながら同じテクスチャへ書けないので、毎フレーム役割を入れ替える
-            // (m_TAAHistoryIndexが今フレームの書き込み先)。バッファ精度をLegacy8bitに落としても
-            // m_SceneColorと同じく常にfp16のままにする。履歴は何十フレームぶんもの蓄積結果であり、
-            // ここを8bitにすると量子化誤差が積み上がってバンディングになるため
-            m_TAAHistory[0] = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
-            m_TAAHistory[1] = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+            // m_TAAHistoryIndexが今フレームの書き込み先。
+            m_RenderTargets.CreateTAAHistory(*m_Device, width, height);
 
             m_HiZMipLevels = ComputeMipLevelCount(width, height);
-            m_HiZTexture = m_Device->CreateHiZTexture(width, height, m_HiZMipLevels);
+            m_RenderTargets.CreateHiZ(*m_Device, width, height, m_HiZMipLevels);
             m_DebugViewSettings.HiZDebugMipLevel = 0;
             // 作り直した直後の中身は未定義。Hi-Zパスが1回走るまでオクルージョン判定を止める
             m_HiZValid = false;

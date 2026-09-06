@@ -84,7 +84,7 @@ namespace Kurenai::Passes
         //  ・TAAより前: ここに置くとRenderGraphがtaaInputColorのRead-after-Write依存で
         //    自動的にTAAの前へ順序付ける。機体がTAA・自動露出・ブルーム・トーンマップを
         //    一貫して通るため、シーンの他の発光物とまったく同じ扱いになる。
-        //    TAAの後(=m_TAAHistoryへ直接加算)にしてはいけない ―― 履歴を汚し、
+        //    TAAの後(=RenderTargets::TAAHistoryへ直接加算)にしてはいけない ―― 履歴を汚し、
         //    次フレーム以降に尾を引く
         //
         // 書き込み先をtaaInputColorにしているのは、反射やフォグの有無でHDRシーン色の実体が
@@ -138,14 +138,14 @@ namespace Kurenai::Passes
             // 今フレームの書き込み先と、前フレームの結果(履歴)。Render()の末尾で役割が入れ替わる
             const uint32_t historyWriteIndex = m_Engine.m_TAAHistoryIndex;
             const uint32_t historyReadIndex = 1u - historyWriteIndex;
-            RHI::IRHITexture* const historyTexture = m_Engine.m_TAAHistory[historyReadIndex].get();
+            RHI::IRHITexture* const historyTexture = m_Engine.m_RenderTargets.TAAHistory[historyReadIndex].get();
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "TAA",
                 // 履歴(historyTexture)は今フレーム誰も書かないので依存の辺は張られないが、
                 // 実際にバインドするテクスチャはReadsにも宣言しておくというRenderGraphの規約に従う
                 .Reads = { taaInputColor, historyTexture, m_Engine.m_RenderTargets.GBufferVelocity.get(), m_Engine.m_RenderTargets.GBufferDepth.get() },
-                .RenderTargets = { m_Engine.m_TAAHistory[historyWriteIndex].get() },
+                .RenderTargets = { m_Engine.m_RenderTargets.TAAHistory[historyWriteIndex].get() },
                 .Execute = [this, gbufferViewport, taaInputColor, historyTexture, invViewProj, jitterUv, effectiveExposure, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     TAAConstants taaConstants{};
@@ -201,7 +201,7 @@ namespace Kurenai::Passes
         //     常に実行する ---
         // この行はTAAパスのAddPassより後に置くこと。ラムダは値キャプチャなので、先に差し替えると
         // TAAが自分の出力を入力として読む形になる(RenderGraphが循環を検出して例外を投げる)
-        RHI::IRHITexture* hdrSceneColor = m_Engine.m_PostProcessSettings.TAAEnabled ? m_Engine.m_TAAHistory[m_Engine.m_TAAHistoryIndex].get() : taaInputColor;
+        RHI::IRHITexture* hdrSceneColor = m_Engine.m_PostProcessSettings.TAAEnabled ? m_Engine.m_RenderTargets.TAAHistory[m_Engine.m_TAAHistoryIndex].get() : taaInputColor;
         // 【TAAパスの登録より後で確定させること】上のコメントの理由がそのまま効くため、
         // ブラックボードへ載せるのもこの位置にする
         bb.HdrSceneColor = hdrSceneColor;
@@ -384,7 +384,7 @@ namespace Kurenai::Passes
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Tonemap",
             .Reads = { hdrSceneColor, m_Engine.m_ExposureTexture.get(), bloomResultTexture },
-            .RenderTargets = { m_Engine.m_TonemapTexture.get() },
+            .RenderTargets = { m_Engine.m_RenderTargets.TonemapTexture.get() },
             .Execute = [this, gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale, keyReferenceEV100, upscaleActive, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 TonemapConstants tonemapConstants{};
@@ -448,7 +448,7 @@ namespace Kurenai::Passes
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "UpscaleEASU",
-                .Reads = { m_Engine.m_TonemapTexture.get() },
+                .Reads = { m_Engine.m_RenderTargets.TonemapTexture.get() },
                 .Writes = { m_Engine.m_UpscaleTexture.get() },
                 .Execute = [this, upscaleConstants, upscaleOutputWidth, upscaleOutputHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
@@ -457,7 +457,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
                     cmd->UpdateBuffer(m_Engine.m_UpscaleConstantBuffer.get(), &upscaleConstants, sizeof(upscaleConstants));
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_UpscaleConstantBuffer.get());
-                    cmd->SetComputeTexture(0, m_Engine.m_TonemapTexture.get());
+                    cmd->SetComputeTexture(0, m_Engine.m_RenderTargets.TonemapTexture.get());
                     // UAVはDispatch直後に解除されるため毎回バインドし直す
                     cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_UpscaleTexture.get());
                     cmd->Dispatch((upscaleOutputWidth + 7) / 8, (upscaleOutputHeight + 7) / 8, 1);

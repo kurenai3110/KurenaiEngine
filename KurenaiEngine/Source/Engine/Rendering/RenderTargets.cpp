@@ -31,4 +31,35 @@ namespace Kurenai::Rendering
         // 半球の半分の方向を表現できなくなる。1080pで約16MB増える(34章)
         GBufferBentNormal = device.CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
     }
+
+    void RenderTargets::CreateLightingChain(
+        RHI::IRHIDevice& device, uint32_t width, uint32_t height, RHI::Format aoFormat)
+    {
+        DirectLightTexture = device.CreateRenderTexture(width, height, RHI::Format::R32G32B32A32_Float);
+        SSAORawTexture = device.CreateRenderTexture(width, height, aoFormat);
+        SSAOTexture = device.CreateRenderTexture(width, height, aoFormat);
+        SSILRawTexture = device.CreateRenderTexture(width, height, aoFormat);
+        SSILTexture = device.CreateRenderTexture(width, height, aoFormat);
+        SceneColor = device.CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+        SSRTexture = device.CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+    }
+
+    void RenderTargets::CreateTonemap(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        TonemapTexture = device.CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+    }
+
+    void RenderTargets::CreateTAAHistory(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        // 読みながら同じテクスチャへ書けないため、毎フレーム役割を入れ替える履歴バッファ2枚。
+        // Legacy8bitに落としてもSceneColorと同じくfp16を保つ。何十フレームぶんもの蓄積で
+        // 量子化誤差が積み上がり、8bitではバンディングになるため。
+        TAAHistory[0] = device.CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+        TAAHistory[1] = device.CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+    }
+
+    void RenderTargets::CreateHiZ(RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t mipLevels)
+    {
+        HiZTexture = device.CreateHiZTexture(width, height, mipLevels);
+    }
 }

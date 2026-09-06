@@ -56,7 +56,7 @@ namespace Kurenai::Passes
         // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
         // デバッグ表示(Render Targets UI)で選択されたバッファに応じて表示ソースを切り替える。
         // 深度バッファ(GBuffer深度・シャドウマップ)はPresent.hlsl側でグレースケール化するためMode=1を渡す
-        RHI::IRHITexture* presentSourceTexture = m_Engine.m_TonemapTexture.get();
+        RHI::IRHITexture* presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
         // Mode 9(IBL Irradiance/Prefilterのキューブマップ表示)専用。他のModeでは使われないが、
         // t1には常に何らかの有効なTextureCubeをバインドしておく必要があるため既定値を持たせる
         RHI::IRHITexture* presentDebugCubeTexture = bb.SkyTexture;
@@ -88,7 +88,7 @@ namespace Kurenai::Passes
             }
             else
             {
-                presentSourceTexture = m_Engine.m_TonemapTexture.get();
+                presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
             }
             break;
         case DebugView::Albedo:
@@ -113,7 +113,7 @@ namespace Kurenai::Passes
             presentMode = 5; // 生の深度値(0〜1)を加工せずそのまま表示(reverse-z等の生値確認用)
             break;
         case DebugView::DirectLight:
-            presentSourceTexture = m_Engine.m_DirectLightTexture.get();
+            presentSourceTexture = m_Engine.m_RenderTargets.DirectLightTexture.get();
             presentMode = 4; // HDRのためトーンマッピング(Reinhard)+ガンマ補正して表示
             break;
         case DebugView::MegaLights:
@@ -166,10 +166,10 @@ namespace Kurenai::Passes
         case DebugView::SSR:
             // 反射がOffのときは反射パスをスキップしているため、Tonemapパスの入力もSceneColorになり
             // 結果的にFinalと同一表示になる(SSR / RT反射のどちらでも同じ扱い)
-            presentSourceTexture = m_Engine.m_TonemapTexture.get();
+            presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
             break;
         case DebugView::HiZ:
-            presentSourceTexture = m_Engine.m_HiZTexture.get();
+            presentSourceTexture = m_Engine.m_RenderTargets.HiZTexture.get();
             presentMode = 6; // 指定ミップをSampleLevelで読みグレースケール表示
             presentSourceWidth = std::max(1u, renderWidth >> m_Engine.m_DebugViewSettings.HiZDebugMipLevel);
             presentSourceHeight = std::max(1u, renderHeight >> m_Engine.m_DebugViewSettings.HiZDebugMipLevel);
@@ -195,7 +195,7 @@ namespace Kurenai::Passes
         case DebugView::ProbeInfluence:
             // 塗り分けはDeferredLighting.hlsl側(FrameConstants.ProbeParams.y)で行うため、
             // Presentは通常どおり最終結果を表示するだけでよい
-            presentSourceTexture = m_Engine.m_TonemapTexture.get();
+            presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
             break;
         case DebugView::ProbeDistance:
             // 距離キューブ(19.12節)。格納値はワールド距離なので専用のMode 13でGain倍して
@@ -222,15 +222,15 @@ namespace Kurenai::Passes
         case DebugView::LightTiles:
             // ライトグリッドは構造化バッファなのでSourceTexture(t0)では受け取れず、専用のt3から読む
             // (Present.hlsl Mode 11)。t0には何かをバインドしておく必要があるため、
-            // 解像度だけ合わせてm_TonemapTextureをそのまま渡す(Mode 11では読まれない)
-            presentSourceTexture = m_Engine.m_TonemapTexture.get();
+            // 解像度だけ合わせてRenderTargets::TonemapTextureをそのまま渡す(Mode 11では読まれない)
+            presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
             presentMode = 11;
             break;
         case DebugView::MegaLightsAverage:
             // 蓄積した平均。1フレームも足していないうちは中身が未定義なので切り替えない
             if (m_Engine.m_MegaLightsAccumFrames > 0u && m_Engine.m_MegaLightsAccumBuffer)
             {
-                presentSourceTexture = m_Engine.m_TonemapTexture.get();
+                presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
                 presentMode = 22;
             }
             break;
@@ -240,7 +240,7 @@ namespace Kurenai::Passes
             // 最終結果のまま何も切り替えない(他のMegaLights系の表示と同じ方針)
             if (m_Engine.ShouldRunMegaLights() && m_Engine.m_MegaLightsTilePoolBuffer)
             {
-                presentSourceTexture = m_Engine.m_TonemapTexture.get();
+                presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
                 presentMode = 21;
             }
             break;

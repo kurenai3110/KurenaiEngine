@@ -45,17 +45,17 @@ namespace Kurenai
             { "GBufferVelocity", m_RenderTargets.GBufferVelocity.get() },
             { "GBufferBentNormal", m_RenderTargets.GBufferBentNormal.get() },
             // ライティングと間接光
-            { "DirectLightTexture", m_DirectLightTexture.get() },
-            { "SSAORawTexture", m_SSAORawTexture.get() },
-            { "SSAOTexture", m_SSAOTexture.get() },
-            { "SSILRawTexture", m_SSILRawTexture.get() },
-            { "SSILTexture", m_SSILTexture.get() },
+            { "DirectLightTexture", m_RenderTargets.DirectLightTexture.get() },
+            { "SSAORawTexture", m_RenderTargets.SSAORawTexture.get() },
+            { "SSAOTexture", m_RenderTargets.SSAOTexture.get() },
+            { "SSILRawTexture", m_RenderTargets.SSILRawTexture.get() },
+            { "SSILTexture", m_RenderTargets.SSILTexture.get() },
             { "RTAORawTexture", m_RTAORawTexture.get() },
             { "RTAOTexture", m_RTAOTexture.get() },
             { "RTShadowTexture", m_RTShadowTexture.get() },
-            { "SceneColor", m_SceneColor.get() },
+            { "SceneColor", m_RenderTargets.SceneColor.get() },
             // 反射
-            { "SSRTexture", m_SSRTexture.get() },
+            { "SSRTexture", m_RenderTargets.SSRTexture.get() },
             { "RTReflectionTexture", m_RTReflectionTexture.get() },
             { "PlanarReflectionColor", m_PlanarReflectionColor.get() },
             { "PlanarReflectionDepth", m_PlanarReflectionDepth.get() },
@@ -64,7 +64,7 @@ namespace Kurenai
             { "MegaLightsDenoisedTexture", m_MegaLightsDenoisedTexture.get() },
             // 影・Hi-Z
             { "ShadowCascadeArray", m_ShadowCascadeArray.get() },
-            { "HiZTexture", m_HiZTexture.get() },
+            { "HiZTexture", m_RenderTargets.HiZTexture.get() },
             // 空と大気
             { "SkyCloudTexture", m_SkyCloudTexture.get() },
             { "SkyCloudFogTexture", m_SkyCloudFogTexture.get() },
@@ -80,14 +80,14 @@ namespace Kurenai
             // IBL
             { "BRDFLUTTexture", m_BRDFLUTTexture.get() },
             // ポストプロセスと最終段
-            { "TonemapTexture", m_TonemapTexture.get() },
+            { "TonemapTexture", m_RenderTargets.TonemapTexture.get() },
             { "UpscaleTexture", m_UpscaleTexture.get() },
             { "UpscaleSharpTexture", m_UpscaleSharpTexture.get() },
             { "ExposureTexture", m_ExposureTexture.get() },
             // TAAの履歴。今フレームの書き込み先が m_TAAHistoryIndex なので、
             // 「前フレームの履歴」を見たいときは Prev のほうを指定する
-            { "TAAHistory", m_TAAHistory[m_TAAHistoryIndex].get() },
-            { "TAAHistoryPrev", m_TAAHistory[m_TAAHistoryIndex ^ 1u].get() },
+            { "TAAHistory", m_RenderTargets.TAAHistory[m_TAAHistoryIndex].get() },
+            { "TAAHistoryPrev", m_RenderTargets.TAAHistory[m_TAAHistoryIndex ^ 1u].get() },
             // 自前ソフトウェアラスタライザ
             { "SoftwareRasterColor", m_SoftwareRasterColor.get() },
             { "SoftwareRasterDepth", m_SoftwareRasterDepth.get() },

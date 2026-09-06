@@ -637,7 +637,7 @@ namespace Kurenai
         RHI::IRHITexture* GetActiveAOTexture() const;
         RHI::IRHITexture* GetActiveAORawTexture() const;
         // このフレームでHDRのシーン色として後段(自動露出・ブルーム・トーンマップ)が読むべき
-        // テクスチャを返す。反射パスを実行したならその出力、していなければm_SceneColor
+        // テクスチャを返す。反射パスを実行したならその出力、していなければRenderTargets::SceneColor
         RHI::IRHITexture* GetActiveReflectionOutput() const;
         // このフレームで空として使うキューブマップを返す。手続き空が有効で、かつ.ksceneが
         // スカイボックスを明示していないときだけ手続き空を使う(明示しているシーンは
@@ -1219,7 +1219,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_DirectLightVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_DirectLightPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_DirectLightPipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_DirectLightTexture;
 
         AmbientOcclusionSettings m_AmbientOcclusionSettings;
         std::unique_ptr<RHI::IRHITexture> m_AODisabledTexture; // AO無効時に使う、遮蔽なし・間接光なしのテクスチャ
@@ -1232,16 +1231,12 @@ namespace Kurenai
         // SSAOパス(G-BufferのNormal/Depthから遮蔽率を計算する。G-Bufferと同じレンダー解像度)
         std::unique_ptr<RHI::IRHIShader> m_SSAOPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_SSAOPipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_SSAORawTexture;
-        std::unique_ptr<RHI::IRHITexture> m_SSAOTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_SSAOConstantBuffer;
         std::vector<DirectX::XMFLOAT4> m_SSAOKernel;
 
         // SSILパス(Visibility Bitmask): G-BufferのAlbedo/Normal/Depthから遮蔽率と間接拡散光を計算する
         std::unique_ptr<RHI::IRHIShader> m_SSILPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_SSILPipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_SSILRawTexture;
-        std::unique_ptr<RHI::IRHITexture> m_SSILTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_SSILConstantBuffer;
 
         // RTAOパス: 法線周りの半球へ余弦重みでレイを撃ち、遮蔽率と1バウンスの間接拡散光を求める
@@ -1261,7 +1256,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_LightingVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_LightingPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_LightingPipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_SceneColor;
 
         // 半透明フォワードパス: Deferred(G-Buffer)には書き込まれなかったBLENDマテリアルのメッシュを、
         // Lightingパスの後にSceneColorへ直接フォワードシェーディングしてアルファブレンド合成する
@@ -1343,11 +1337,10 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_HiZCopyPipelineState;
         std::unique_ptr<RHI::IRHIShader> m_HiZDownsampleComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_HiZDownsamplePipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_HiZTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_HiZConstantBuffer;
         uint32_t m_HiZMipLevels = 1;
         // デバッグ表示(Render Targets - Hi-Z)で確認するミップレベルはm_DebugViewSettings.HiZDebugMipLevelへ移した
-        // m_HiZTextureの中身が「1回でも構築されたHi-Z」になっているか。
+        // RenderTargets::HiZTextureの中身が「1回でも構築されたHi-Z」になっているか。
         //
         // 【オクルージョン判定の門番】CreateHiZTextureが作った直後の中身は未定義で、
         // それを深度として判定すると視界内のほぼ全部を「隠れている」と誤判定しうる。
@@ -1363,16 +1356,15 @@ namespace Kurenai
 
         // SSR(Screen Space Reflections)パス: LightingパスのSceneColorを反射先の環境色として
         // 再利用し、G-Buffer(Normal/Material/Depth)からワールド空間でレイマーチングして
-        // 鏡面反射を加算する。無効時はこのパスをスキップし、Presentが直接m_SceneColorを参照する
+        // 鏡面反射を加算する。無効時はこのパスをスキップし、Presentが直接RenderTargets::SceneColorを参照する
         std::unique_ptr<RHI::IRHIShader> m_SSRVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_SSRPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_SSRPipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_SSRTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_SSRConstantBuffer;
 
         // RT反射パス: TLASへ鏡面レイを撃ち、ヒット面を陰影計算して反射色を求めるコンピュートパス。
         // 出力はSSRと同じ「SceneColor + 反射の差し替え」なので、後段(Tonemap)から見ると
-        // m_SSRTextureと完全に等価な入れ替え可能なバッファになる。
+        // RenderTargets::SSRTextureと完全に等価な入れ替え可能なバッファになる。
         // シェーダーとパイプラインステートはm_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る
         std::unique_ptr<RHI::IRHIShader> m_RTReflectionComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_RTReflectionPipelineState;
@@ -1728,7 +1720,6 @@ namespace Kurenai
         // 履歴バッファ2枚。読みながら同じテクスチャへ書けないため役割を毎フレーム入れ替える。
         // m_TAAHistoryIndexが今フレームの書き込み先で、もう一方が前フレームの結果(=履歴)。
         // このパスの出力がそのまま後段(自動露出/ブルーム/トーンマップ)の入力にもなる
-        std::unique_ptr<RHI::IRHITexture> m_TAAHistory[2];
         uint32_t m_TAAHistoryIndex = 0;
         // 履歴の内容が信用できるか。falseの間、TAAは履歴を「サンプルすらせず」今フレームの色を返す。
         // ブレンド率を0にするだけでは不十分で、未初期化fp16のNaNはlerp(NaN, x, 1.0)でもNaNのまま
@@ -1761,19 +1752,18 @@ namespace Kurenai
         // 露出が動いている間ずっと履歴が古い明るさを引きずり、明るさの尾を引く
         float m_TAAPrevEffectiveExposureEV100 = 0.0f;
 
-        // Tonemapパス: SceneColor(SSR有効時はm_SSRTexture)のHDR値をReinhardトーンマッピング+
+        // Tonemapパス: SceneColor(SSR有効時はRenderTargets::SSRTexture)のHDR値をReinhardトーンマッピング+
         // ガンマ補正でLDRへ変換し、Presentパスへ渡す。SSR等のHDR演算より後、Present直前の
         // 独立したステージとして置くことで、反射や将来のブルーム/露出制御(M7)がトーンマップの
         // 影響を受けないHDR値の上に成立できるようにする
         std::unique_ptr<RHI::IRHIShader> m_TonemapVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_TonemapPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_TonemapPipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_TonemapTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_TonemapConstantBuffer;
 
         // 超解像パス(Upscale.hlsl): Tonemapが出したLDR画像を、EASUで出力解像度へ再構成し、
         // RCASでシャープ化してからPresentへ渡す。2つのテクスチャはどちらも出力解像度で、
-        // 内部解像度用のm_TonemapTextureとは作り直す契機が違うためCreateRenderTargets()の外にある。
+        // 内部解像度用のRenderTargets::TonemapTextureとは作り直す契機が違うためCreateRenderTargets()の外にある。
         // 分けているのはRCASがEASUの結果を読むためで、同一リソースのSRV/UAV同時バインドを避ける
         std::unique_ptr<RHI::IRHIShader> m_UpscaleEASUComputeShader;
         std::unique_ptr<RHI::IRHIShader> m_UpscaleRCASComputeShader;

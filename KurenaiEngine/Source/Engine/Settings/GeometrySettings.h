@@ -21,7 +21,7 @@ namespace Kurenai
         //
         // 【メッシュレット経路でしか効かない】判定を書いてあるのは増幅シェーダーなので、
         // メッシュシェーダー非対応の環境(基準機のIntel UHD 620を含む)では一切走らない。
-        // これが有効なフレームだけHi-Zパスも構築される(m_HiZTextureのコメント参照)
+        // これが有効なフレームだけHi-Zパスも構築される(RenderTargets::HiZTextureのコメント参照)
         bool OcclusionCullingEnabled = Defaults::OcclusionCullingEnabled;
         // オクルージョン判定でバウンディング球を膨らませる倍率。
         //

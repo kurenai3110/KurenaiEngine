@@ -238,7 +238,7 @@ namespace Kurenai::Passes
 
         // --- 反射パス: Lightingパスが適用した鏡面IBLを、実際に追跡した反射で差し替える(20章)。
         //     ScreenSpaceならSSR(レイマーチ)、RaytracedならRT反射(RayQuery)。
-        //     Offならスキップし、後段のTonemapが直接m_SceneColorを読む ---
+        //     Offならスキップし、後段のTonemapが直接RenderTargets::SceneColorを読む ---
         if (m_Engine.m_ReflectionSettings.Mode == ReflectionMode::ScreenSpace)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
@@ -249,7 +249,7 @@ namespace Kurenai::Passes
                 // 手続き空はm_PrefilteredEnvTextureの焼き込み経由で入ってくるため、
                 // 空のキューブマップをここで直接バインドする必要はない
                 .Reads = {
-                    m_Engine.m_SceneColor.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
+                    m_Engine.m_RenderTargets.SceneColor.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
                     m_Engine.m_RenderTargets.GBufferAlbedo.get(), activeAOTexture, m_Engine.m_BRDFLUTTexture.get(), m_Engine.m_PrefilteredEnvTexture.get(),
                     m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_ProbeDistanceArray.get(),
                     // 平面反射。パスが登録されなかったフレームでもこのReadsは無害
@@ -260,7 +260,7 @@ namespace Kurenai::Passes
                     // bent normal(34章)。スペキュラ遮蔽をLightingパスと同じ規則で求めるために読む
                     m_Engine.m_RenderTargets.GBufferBentNormal.get(),
                 },
-                .RenderTargets = { m_Engine.m_SSRTexture.get() },
+                .RenderTargets = { m_Engine.m_RenderTargets.SSRTexture.get() },
                 // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
                 // (実際のバインドはExecute内)
                 .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
@@ -289,7 +289,7 @@ namespace Kurenai::Passes
                     cmd->SetConstantBuffer(0, frameConstantBuffer);
                     cmd->SetConstantBuffer(1, m_Engine.m_SSRConstantBuffer.get());
                     cmd->SetSamplerSet(screenSpaceSamplers);
-                    cmd->SetTexture(0, m_Engine.m_SceneColor.get());
+                    cmd->SetTexture(0, m_Engine.m_RenderTargets.SceneColor.get());
                     cmd->SetTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
                     cmd->SetTexture(2, m_Engine.m_RenderTargets.GBufferMaterial.get());
                     cmd->SetTexture(3, m_Engine.m_RenderTargets.GBufferDepth.get());
@@ -332,7 +332,7 @@ namespace Kurenai::Passes
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "RTReflection",
                 .Reads = {
-                    m_Engine.m_SceneColor.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
+                    m_Engine.m_RenderTargets.SceneColor.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
                     m_Engine.m_RenderTargets.GBufferAlbedo.get(), activeAOTexture, m_Engine.m_BRDFLUTTexture.get(), m_Engine.m_PrefilteredEnvTexture.get(),
                     m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_RenderTargets.GBufferBentNormal.get(),
                 },
@@ -368,7 +368,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_RTReflectionConstantBuffer.get());
 
                     cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
-                    cmd->SetComputeTexture(1, m_Engine.m_SceneColor.get());
+                    cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.SceneColor.get());
                     cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferNormal.get());
                     cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferMaterial.get());
                     cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferDepth.get());
