@@ -48,7 +48,7 @@ namespace Kurenai::Passes
 
         // --- タイルライトカリングパス: 画面を16x16のタイルに分け、タイルごとに「そのタイルに届くライト」の
         //     インデックスリストをコンピュートシェーダーで作る。直接光パスはそのリストだけをループする。
-        //     BufferReads/BufferWritesを宣言しているのは、このパスと直接光パスがどちらもm_GBufferDepthを
+        //     BufferReads/BufferWritesを宣言しているのは、このパスと直接光パスがどちらもm_RenderTargets.GBufferDepthを
         //     Readsするだけの「読み手同士」で、テクスチャの依存だけでは両者の間に順序が張られないため。
         //     **積むかどうかはShouldRunLightCullingが決める。** グリッドの読み手は直接光パスと
         //     Presentのデバッグ表示しか無く、MegaLightsが走るフレームは前者が止まっているため、
@@ -57,7 +57,7 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "LightCull",
-                .Reads = { m_Engine.m_GBufferDepth.get() },
+                .Reads = { m_Engine.m_RenderTargets.GBufferDepth.get() },
                 .BufferReads = { m_Engine.m_LightBuffer.get() },
                 .BufferWrites = { m_Engine.m_LightTileBuffer.get() },
                 .Execute = [this, &gpuLights, viewMatrix, jitteredProj, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
@@ -93,7 +93,7 @@ namespace Kurenai::Passes
                     cmd->SetComputePipelineState(m_Engine.m_LightCullingPipelineState.get());
                     cmd->SetComputeConstantBuffer(0, m_Engine.m_LightCullingConstantBuffer.get());
                     cmd->SetComputeShaderResourceBuffer(0, m_Engine.m_LightBuffer.get());
-                    cmd->SetComputeTexture(1, m_Engine.m_GBufferDepth.get());
+                    cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferDepth.get());
                     cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_LightTileBuffer.get());
                     cmd->Dispatch(m_Engine.m_LightTileCountX, m_Engine.m_LightTileCountY, 1);
                 },
@@ -108,7 +108,7 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLightsPool",
-                .Reads = { m_Engine.m_GBufferDepth.get() },
+                .Reads = { m_Engine.m_RenderTargets.GBufferDepth.get() },
                 .BufferReads = { m_Engine.m_LightBuffer.get() },
                 .BufferWrites = { m_Engine.m_MegaLightsTilePoolBuffer.get() },
                 .Execute = [this, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
@@ -152,7 +152,7 @@ namespace Kurenai::Passes
                     cmd->SetComputePipelineState(m_Engine.m_MegaLightsTilePoolPipelineState.get());
                     cmd->SetComputeConstantBuffer(0, m_Engine.m_MegaLightsTilePoolConstantBuffer.get());
                     cmd->SetComputeShaderResourceBuffer(0, m_Engine.m_LightBuffer.get());
-                    cmd->SetComputeTexture(1, m_Engine.m_GBufferDepth.get());
+                    cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferDepth.get());
                     // UAVはDispatch直後に解除されるため毎回バインドし直す
                     cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_MegaLightsTilePoolBuffer.get());
                     cmd->Dispatch(megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, 1);
@@ -192,7 +192,7 @@ namespace Kurenai::Passes
                 .Name = "MegaLights",
                 .Reads =
                 {
-                    m_Engine.m_GBufferAlbedo.get(), m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferMaterial.get(), m_Engine.m_GBufferDepth.get(),
+                    m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
                     // スペキュラのエネルギー補正でEssを引く。Readsへ挙げることでBRDFLUTBakeパス
                     // (このLUTの書き手)より後ろに順序付けられる
                     m_Engine.m_BRDFLUTTexture.get(),
@@ -236,10 +236,10 @@ namespace Kurenai::Passes
 
                     // レジスタ割り当てはMegaLightsReference.hlsl側の宣言と一致させること
                     cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
-                    cmd->SetComputeTexture(1, m_Engine.m_GBufferNormal.get());
-                    cmd->SetComputeTexture(2, m_Engine.m_GBufferDepth.get());
-                    cmd->SetComputeTexture(3, m_Engine.m_GBufferAlbedo.get());
-                    cmd->SetComputeTexture(4, m_Engine.m_GBufferMaterial.get());
+                    cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
+                    cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
+                    cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
+                    cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
                     cmd->SetComputeTexture(5, m_Engine.m_BRDFLUTTexture.get());
                     // ライトが0灯のフレームでも必ずバインドする(DX12はSetPipelineStateのたびに
                     // ルート引数が無効化されるため、シェーダが宣言しているリソースを未バインドで
@@ -435,7 +435,7 @@ namespace Kurenai::Passes
                 .Name = "MegaLightsInitial",
                 .Reads =
                 {
-                    m_Engine.m_GBufferAlbedo.get(), m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferMaterial.get(), m_Engine.m_GBufferDepth.get(),
+                    m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
                     m_Engine.m_BRDFLUTTexture.get(),
                 },
                 .BufferReads = { m_Engine.m_LightBuffer.get(), tilePoolBufferForBinding },
@@ -452,10 +452,10 @@ namespace Kurenai::Passes
                     // レジスタ割り当てはMegaLightsInitialSample.hlsl側の宣言と一致させること。
                     // 初期可視レイ(選んだサンプルが遮蔽されていたら殺す)を撃つのでTLASが要る
                     cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
-                    cmd->SetComputeTexture(1, m_Engine.m_GBufferNormal.get());
-                    cmd->SetComputeTexture(2, m_Engine.m_GBufferDepth.get());
-                    cmd->SetComputeTexture(3, m_Engine.m_GBufferAlbedo.get());
-                    cmd->SetComputeTexture(4, m_Engine.m_GBufferMaterial.get());
+                    cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
+                    cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
+                    cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
+                    cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
                     cmd->SetComputeTexture(5, m_Engine.m_BRDFLUTTexture.get());
                     cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
                     cmd->SetComputeShaderResourceBuffer(7, tilePoolBufferForBinding);
@@ -475,8 +475,8 @@ namespace Kurenai::Passes
                     .Name = "MegaLightsTemporal",
                     .Reads =
                     {
-                        m_Engine.m_GBufferAlbedo.get(), m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferMaterial.get(), m_Engine.m_GBufferDepth.get(),
-                        m_Engine.m_BRDFLUTTexture.get(), m_Engine.m_GBufferVelocity.get(),
+                        m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
+                        m_Engine.m_BRDFLUTTexture.get(), m_Engine.m_RenderTargets.GBufferVelocity.get(),
                     },
                     // 【読むのは前フレームが書いた側】今フレームが書くのはもう片方なので、
                     // 同じバッファへの読み書きが同一フレーム内で起きない(WARが生じない)。
@@ -499,10 +499,10 @@ namespace Kurenai::Passes
                         // 【使わないフレームでも必ずバインドする】DX12は宣言された
                         // リソースが未バインドだと壊れる
                         cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
-                        cmd->SetComputeTexture(1, m_Engine.m_GBufferNormal.get());
-                        cmd->SetComputeTexture(2, m_Engine.m_GBufferDepth.get());
-                        cmd->SetComputeTexture(3, m_Engine.m_GBufferAlbedo.get());
-                        cmd->SetComputeTexture(4, m_Engine.m_GBufferMaterial.get());
+                        cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
+                        cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
+                        cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
+                        cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
                         cmd->SetComputeTexture(5, m_Engine.m_BRDFLUTTexture.get());
                         cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
                         cmd->SetComputeShaderResourceBuffer(7, m_Engine.m_MegaLightsReservoirBuffer.get());
@@ -510,7 +510,7 @@ namespace Kurenai::Passes
                             8, m_Engine.m_MegaLightsReservoirHistory[historyReadIndex].get());
                         cmd->SetComputeShaderResourceBuffer(9, m_Engine.m_MegaLightsHistoryGuide[historyReadIndex].get());
                         // 再投影はTAAとまったく同じ引き方をする(historyUv = uv - velocity)
-                        cmd->SetComputeTexture(10, m_Engine.m_GBufferVelocity.get());
+                        cmd->SetComputeTexture(10, m_Engine.m_RenderTargets.GBufferVelocity.get());
 
                         cmd->SetComputeUnorderedAccessBuffer(
                             0, m_Engine.m_MegaLightsReservoirHistory[historyWriteIndex].get());
@@ -540,7 +540,7 @@ namespace Kurenai::Passes
                     .Name = "MegaLightsSpatial",
                     .Reads =
                     {
-                        m_Engine.m_GBufferAlbedo.get(), m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferMaterial.get(), m_Engine.m_GBufferDepth.get(),
+                        m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
                         m_Engine.m_BRDFLUTTexture.get(),
                     },
                     // 入力は「時間再利用を挟んだならその出力、挟まないならInitialの出力」。
@@ -566,10 +566,10 @@ namespace Kurenai::Passes
                         // 【使わないフレームでも必ずバインドする】DX12は宣言された
                         // リソースが未バインドだと壊れる
                         cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
-                        cmd->SetComputeTexture(1, m_Engine.m_GBufferNormal.get());
-                        cmd->SetComputeTexture(2, m_Engine.m_GBufferDepth.get());
-                        cmd->SetComputeTexture(3, m_Engine.m_GBufferAlbedo.get());
-                        cmd->SetComputeTexture(4, m_Engine.m_GBufferMaterial.get());
+                        cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
+                        cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
+                        cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
+                        cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
                         cmd->SetComputeTexture(5, m_Engine.m_BRDFLUTTexture.get());
                         cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
                         cmd->SetComputeShaderResourceBuffer(7, spatialInput);
@@ -603,8 +603,8 @@ namespace Kurenai::Passes
                     .Name = "MegaLightsResolve",
                     .Reads =
                     {
-                        m_Engine.m_GBufferAlbedo.get(), m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferMaterial.get(),
-                        m_Engine.m_GBufferDepth.get(), m_Engine.m_BRDFLUTTexture.get(),
+                        m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(),
+                        m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_BRDFLUTTexture.get(),
                     },
                     .Writes = { m_Engine.m_MegaLightsTexture.get() },
                     .BufferReads = { m_Engine.m_LightBuffer.get(), m_Engine.m_MegaLightsReservoirBuffer.get() },
@@ -620,10 +620,10 @@ namespace Kurenai::Passes
 
                         // レジスタ割り当てはMegaLightsResolve.hlsl側の宣言と一致させること。
                         // **t0(TLAS)は宣言していない** ―― レイを撃たないパスなので張らない
-                        cmd->SetComputeTexture(1, m_Engine.m_GBufferNormal.get());
-                        cmd->SetComputeTexture(2, m_Engine.m_GBufferDepth.get());
-                        cmd->SetComputeTexture(3, m_Engine.m_GBufferAlbedo.get());
-                        cmd->SetComputeTexture(4, m_Engine.m_GBufferMaterial.get());
+                        cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
+                        cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
+                        cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
+                        cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
                         cmd->SetComputeTexture(5, m_Engine.m_BRDFLUTTexture.get());
                         cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
                         cmd->SetComputeShaderResourceBuffer(7, m_Engine.m_MegaLightsReservoirBuffer.get());
@@ -640,7 +640,7 @@ namespace Kurenai::Passes
                 .Name = "MegaLightsShade",
                 .Reads =
                 {
-                    m_Engine.m_GBufferAlbedo.get(), m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferMaterial.get(), m_Engine.m_GBufferDepth.get(),
+                    m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
                     m_Engine.m_BRDFLUTTexture.get(),
                 },
                 .Writes = { m_Engine.m_MegaLightsTexture.get() },
@@ -656,10 +656,10 @@ namespace Kurenai::Passes
 
                     // レジスタ割り当てはMegaLightsShade.hlsl側の宣言と一致させること
                     cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
-                    cmd->SetComputeTexture(1, m_Engine.m_GBufferNormal.get());
-                    cmd->SetComputeTexture(2, m_Engine.m_GBufferDepth.get());
-                    cmd->SetComputeTexture(3, m_Engine.m_GBufferAlbedo.get());
-                    cmd->SetComputeTexture(4, m_Engine.m_GBufferMaterial.get());
+                    cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
+                    cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
+                    cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
+                    cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
                     cmd->SetComputeTexture(5, m_Engine.m_BRDFLUTTexture.get());
                     cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
                     // 空間再利用を挟んだフレームはその出力を、挟まないフレームはInitialの出力を読む
@@ -748,11 +748,11 @@ namespace Kurenai::Passes
                 }
                 cmd->SetComputeConstantBuffer(1, m_Engine.m_MegaLightsDenoiseConstantBuffer.get());
                 cmd->SetComputeSamplerSet(screenSpaceSamplers);
-                cmd->SetComputeTexture(1, m_Engine.m_GBufferNormal.get());
-                cmd->SetComputeTexture(2, m_Engine.m_GBufferDepth.get());
-                cmd->SetComputeTexture(3, m_Engine.m_GBufferAlbedo.get());
-                cmd->SetComputeTexture(4, m_Engine.m_GBufferMaterial.get());
-                cmd->SetComputeTexture(5, m_Engine.m_GBufferVelocity.get());
+                cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
+                cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
+                cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
+                cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
+                cmd->SetComputeTexture(5, m_Engine.m_RenderTargets.GBufferVelocity.get());
             };
 
             // --- 時間累積: 生出力を復調して履歴と混ぜる ---
@@ -763,8 +763,8 @@ namespace Kurenai::Passes
                 .Name = "MegaLightsDenoiseTemporal",
                 .Reads =
                 {
-                    m_Engine.m_MegaLightsTexture.get(), m_Engine.m_GBufferAlbedo.get(), m_Engine.m_GBufferNormal.get(),
-                    m_Engine.m_GBufferMaterial.get(), m_Engine.m_GBufferDepth.get(), m_Engine.m_GBufferVelocity.get(),
+                    m_Engine.m_MegaLightsTexture.get(), m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(),
+                    m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_RenderTargets.GBufferVelocity.get(),
                     m_Engine.m_MegaLightsDenoiseHistory[denoiseRead].get(),
                     m_Engine.m_MegaLightsDenoiseMoments[denoiseRead].get(),
                 },
@@ -807,8 +807,8 @@ namespace Kurenai::Passes
                     {
                         m_Engine.m_MegaLightsDenoisePing[atrousSrc].get(),
                         m_Engine.m_MegaLightsDenoiseMomentPing[atrousSrc].get(),
-                        m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferDepth.get(), m_Engine.m_GBufferAlbedo.get(),
-                        m_Engine.m_GBufferMaterial.get(), m_Engine.m_GBufferVelocity.get(),
+                        m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_RenderTargets.GBufferAlbedo.get(),
+                        m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferVelocity.get(),
                     },
                     .Writes =
                     {
@@ -843,8 +843,8 @@ namespace Kurenai::Passes
                 {
                     m_Engine.m_MegaLightsDenoisePing[denoiseFinalSrc].get(),
                     m_Engine.m_MegaLightsDenoiseMomentPing[denoiseFinalSrc].get(),
-                    m_Engine.m_GBufferAlbedo.get(), m_Engine.m_GBufferMaterial.get(), m_Engine.m_GBufferDepth.get(),
-                    m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferVelocity.get(),
+                    m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
+                    m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferVelocity.get(),
                 },
                 .Writes = { m_Engine.m_MegaLightsDenoisedTexture.get() },
                 .Execute = [this, denoiseFinalSrc, updateDenoiseConstants, bindDenoiseCommon, renderWidth, renderHeight](RHI::IRHICommandList* cmd)

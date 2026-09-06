@@ -92,24 +92,24 @@ namespace Kurenai::Passes
             }
             break;
         case DebugView::Albedo:
-            presentSourceTexture = m_Engine.m_GBufferAlbedo.get();
+            presentSourceTexture = m_Engine.m_RenderTargets.GBufferAlbedo.get();
             break;
         case DebugView::Normal:
-            presentSourceTexture = m_Engine.m_GBufferNormal.get();
+            presentSourceTexture = m_Engine.m_RenderTargets.GBufferNormal.get();
             presentMode = 7; // オクタヘドラルエンコードをデコードして[0,1]へ再マップして表示
             break;
         case DebugView::Material:
-            presentSourceTexture = m_Engine.m_GBufferMaterial.get();
+            presentSourceTexture = m_Engine.m_RenderTargets.GBufferMaterial.get();
             break;
         case DebugView::Emissive:
-            presentSourceTexture = m_Engine.m_GBufferEmissive.get();
+            presentSourceTexture = m_Engine.m_RenderTargets.GBufferEmissive.get();
             break;
         case DebugView::Depth:
-            presentSourceTexture = m_Engine.m_GBufferDepth.get();
+            presentSourceTexture = m_Engine.m_RenderTargets.GBufferDepth.get();
             presentMode = 2;
             break;
         case DebugView::DepthRaw:
-            presentSourceTexture = m_Engine.m_GBufferDepth.get();
+            presentSourceTexture = m_Engine.m_RenderTargets.GBufferDepth.get();
             presentMode = 5; // 生の深度値(0〜1)を加工せずそのまま表示(reverse-z等の生値確認用)
             break;
         case DebugView::DirectLight:
@@ -250,14 +250,14 @@ namespace Kurenai::Passes
             // 【15ではなく19】15はDDGIのイラディアンスアトラスが使っている。Present.hlslの
             // PSMainではそちらの分岐が先にreturnするため、15を割り当てるとbent normalの
             // 表示へ到達できない(Present.hlsl冒頭のMode一覧を参照)
-            presentSourceTexture = m_Engine.m_GBufferBentNormal.get();
+            presentSourceTexture = m_Engine.m_RenderTargets.GBufferBentNormal.get();
             presentMode = 19;
             break;
         case DebugView::MotionVector:
             // 速度バッファ。格納値はUV単位(1画素ぶんの移動で1/解像度、1920幅なら約0.0005)と
             // 極端に小さく、そのまま色として出しても真っ黒にしか見えない。専用のMode 14で
             // ピクセル単位へ換算してから中間灰色を原点に色付けする
-            presentSourceTexture = m_Engine.m_GBufferVelocity.get();
+            presentSourceTexture = m_Engine.m_RenderTargets.GBufferVelocity.get();
             presentMode = 14;
             break;
         case DebugView::SceneColorRaw:
@@ -297,7 +297,7 @@ namespace Kurenai::Passes
         case DebugView::WaterMask:
             // G-BufferのMaterial.a(水面のマテリアルID)をそのままグレースケール表示する。
             // 0/1の二値なのでMode 3(Gain倍する遮蔽率表示)ではなく専用のMode 17を使う
-            presentSourceTexture = m_Engine.m_GBufferMaterial.get();
+            presentSourceTexture = m_Engine.m_RenderTargets.GBufferMaterial.get();
             presentMode = 17;
             break;
         case DebugView::PlanarReflection:

@@ -54,14 +54,14 @@ namespace Kurenai::Passes
         // 必要がある(nullptrはSetTextureが受け付けない)。非対応環境では読まれないダミーとして
         // 深度テクスチャを張る(Presentのデバッグ用t1/t2/t4に既定値を持たせているのと同じ理由)
         RHI::IRHITexture* const rtShadowTextureForBinding =
-            m_Engine.m_RTShadowTexture ? m_Engine.m_RTShadowTexture.get() : m_Engine.m_GBufferDepth.get();
+            m_Engine.m_RTShadowTexture ? m_Engine.m_RTShadowTexture.get() : m_Engine.m_RenderTargets.GBufferDepth.get();
 
         // 直接光パスがt7へバインドするMegaLightsの寄与。上と同じ理由で、読まれないフレームでも
         // 何かを張る必要がある(非対応環境ではそもそもテクスチャを確保していない)
         // デノイズを通したフレームはその出力を、通さないフレームは生出力を読む。
         // **DirectLighting.hlsl 側は変わらない**(同じ t7)ので、非MegaLights経路には影響しない
         RHI::IRHITexture* megaLightsTextureForBinding =
-            m_Engine.m_MegaLightsTexture ? m_Engine.m_MegaLightsTexture.get() : m_Engine.m_GBufferDepth.get();
+            m_Engine.m_MegaLightsTexture ? m_Engine.m_MegaLightsTexture.get() : m_Engine.m_RenderTargets.GBufferDepth.get();
         if (megaLightsDenoiseRuns && m_Engine.m_MegaLightsDenoisedTexture)
         {
             megaLightsTextureForBinding = m_Engine.m_MegaLightsDenoisedTexture.get();
@@ -74,14 +74,14 @@ namespace Kurenai::Passes
             .Name = "DirectLight",
             .Reads =
             {
-                m_Engine.m_GBufferAlbedo.get(), m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferMaterial.get(), m_Engine.m_GBufferDepth.get(),
+                m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
                 m_Engine.m_ShadowCascadeArray.get(),
-                // RTシャドウの可視率。RTシャドウパスを実行しないフレームではm_GBufferDepthと
+                // RTシャドウの可視率。RTシャドウパスを実行しないフレームではm_RenderTargets.GBufferDepthと
                 // 同じポインタになるが、RenderGraphは同じ書き手への多重エッジを弾くため無害
                 rtShadowTextureForBinding,
                 // MegaLightsの寄与。MegaLightsパスはこれより前に登録してあるので、
                 // ここに挙げることでRAWの辺が張られる(実行しないフレームでは
-                // m_GBufferDepthと同じポインタになるが、多重エッジは無害)
+                // m_RenderTargets.GBufferDepthと同じポインタになるが、多重エッジは無害)
                 megaLightsTextureForBinding,
                 // スペキュラのエネルギー補正(14.9節)でEss=brdf.x+brdf.yを引くためBRDF積分LUTを読む。
                 // Readsに挙げることでRenderGraphがBRDFLUTBakeパス(このLUTのWriter)より後に順序付ける
@@ -101,10 +101,10 @@ namespace Kurenai::Passes
                 cmd->SetConstantBuffer(1, m_Engine.m_LightingConstantBuffer.get());
 
                 cmd->SetSamplerSet(screenSpaceSamplers);
-                cmd->SetTexture(0, m_Engine.m_GBufferAlbedo.get());
-                cmd->SetTexture(1, m_Engine.m_GBufferNormal.get());
-                cmd->SetTexture(2, m_Engine.m_GBufferMaterial.get());
-                cmd->SetTexture(3, m_Engine.m_GBufferDepth.get());
+                cmd->SetTexture(0, m_Engine.m_RenderTargets.GBufferAlbedo.get());
+                cmd->SetTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
+                cmd->SetTexture(2, m_Engine.m_RenderTargets.GBufferMaterial.get());
+                cmd->SetTexture(3, m_Engine.m_RenderTargets.GBufferDepth.get());
                 cmd->SetTexture(4, m_Engine.m_ShadowCascadeArray.get());
                 // RTシャドウの可視率。LightCount.zがRaytracedのときだけ読まれる
                 cmd->SetTexture(6, rtShadowTextureForBinding);
@@ -142,7 +142,7 @@ namespace Kurenai::Passes
                     .Name = "RTAO",
                     // 直接光バッファは、バウンス面が画面に映っているときの再放射の放射輝度として読む
                     // (SSILと同じ理由でDirectLightパスより後に順序付けられる。RTAO.hlsl参照)
-                    .Reads = { m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferDepth.get(), m_Engine.m_DirectLightTexture.get() },
+                    .Reads = { m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_DirectLightTexture.get() },
                     .Writes = { aoRawTexture },
                     .Execute = [this, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                     {
@@ -167,8 +167,8 @@ namespace Kurenai::Passes
                         cmd->SetComputeConstantBuffer(1, m_Engine.m_RTAOConstantBuffer.get());
 
                         cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
-                        cmd->SetComputeTexture(1, m_Engine.m_GBufferNormal.get());
-                        cmd->SetComputeTexture(2, m_Engine.m_GBufferDepth.get());
+                        cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
+                        cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
                         cmd->SetComputeShaderResourceBuffer(3, m_Engine.m_RaytracingScene.GetVertexAttributeBuffer());
                         cmd->SetComputeShaderResourceBuffer(4, m_Engine.m_RaytracingScene.GetIndexBuffer());
                         cmd->SetComputeShaderResourceBuffer(5, m_Engine.m_RaytracingScene.GetMeshInfoBuffer());
@@ -196,8 +196,8 @@ namespace Kurenai::Passes
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "AO",
                     .Reads = useSSIL
-                        ? std::vector<RHI::IRHITexture*>{ m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferDepth.get(), m_Engine.m_DirectLightTexture.get() }
-                        : std::vector<RHI::IRHITexture*>{ m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferDepth.get() },
+                        ? std::vector<RHI::IRHITexture*>{ m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_DirectLightTexture.get() }
+                        : std::vector<RHI::IRHITexture*>{ m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get() },
                     .RenderTargets = { aoRawTexture },
                     .Execute = [this, gbufferViewport, useSSIL, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
@@ -214,8 +214,8 @@ namespace Kurenai::Passes
 
                             cmd->SetPipelineState(m_Engine.m_SSILPipelineState.get());
                             cmd->SetConstantBuffer(1, m_Engine.m_SSILConstantBuffer.get());
-                            cmd->SetTexture(0, m_Engine.m_GBufferNormal.get());
-                            cmd->SetTexture(1, m_Engine.m_GBufferDepth.get());
+                            cmd->SetTexture(0, m_Engine.m_RenderTargets.GBufferNormal.get());
+                            cmd->SetTexture(1, m_Engine.m_RenderTargets.GBufferDepth.get());
                             cmd->SetTexture(2, m_Engine.m_DirectLightTexture.get());
                             cmd->Draw(3, 0);
                         }
@@ -240,8 +240,8 @@ namespace Kurenai::Passes
 
                             cmd->SetPipelineState(m_Engine.m_SSAOPipelineState.get());
                             cmd->SetConstantBuffer(1, m_Engine.m_SSAOConstantBuffer.get());
-                            cmd->SetTexture(0, m_Engine.m_GBufferNormal.get());
-                            cmd->SetTexture(1, m_Engine.m_GBufferDepth.get());
+                            cmd->SetTexture(0, m_Engine.m_RenderTargets.GBufferNormal.get());
+                            cmd->SetTexture(1, m_Engine.m_RenderTargets.GBufferDepth.get());
                             cmd->Draw(3, 0);
                         }
                     },
@@ -353,10 +353,10 @@ namespace Kurenai::Passes
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Lighting",
             .Reads = {
-                m_Engine.m_GBufferAlbedo.get(), m_Engine.m_DirectLightTexture.get(), m_Engine.m_GBufferMaterial.get(), m_Engine.m_GBufferDepth.get(),
-                skyTexture, activeAOTexture, m_Engine.m_GBufferEmissive.get(), m_Engine.m_GBufferNormal.get(),
+                m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_DirectLightTexture.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
+                skyTexture, activeAOTexture, m_Engine.m_RenderTargets.GBufferEmissive.get(), m_Engine.m_RenderTargets.GBufferNormal.get(),
                 m_Engine.m_IrradianceTexture.get(), m_Engine.m_PrefilteredEnvTexture.get(), m_Engine.m_BRDFLUTTexture.get(),
-                m_Engine.m_GBufferBentNormal.get(),
+                m_Engine.m_RenderTargets.GBufferBentNormal.get(),
                 // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)。
                 // 反射プローブは鏡面専任なので拡散イラディアンス側の配列は無い
                 m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_ProbeDistanceArray.get(),
@@ -385,14 +385,14 @@ namespace Kurenai::Passes
                 cmd->SetPipelineState(m_Engine.m_LightingPipelineState.get());
                 cmd->SetConstantBuffer(0, frameConstantBuffer);
                 cmd->SetSamplerSet(screenSpaceSamplers);
-                cmd->SetTexture(0, m_Engine.m_GBufferAlbedo.get());
+                cmd->SetTexture(0, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                 cmd->SetTexture(1, m_Engine.m_DirectLightTexture.get());
-                cmd->SetTexture(2, m_Engine.m_GBufferMaterial.get());
-                cmd->SetTexture(3, m_Engine.m_GBufferDepth.get());
+                cmd->SetTexture(2, m_Engine.m_RenderTargets.GBufferMaterial.get());
+                cmd->SetTexture(3, m_Engine.m_RenderTargets.GBufferDepth.get());
                 cmd->SetTexture(4, skyTexture);
                 cmd->SetTexture(5, activeAOTexture);
-                cmd->SetTexture(6, m_Engine.m_GBufferEmissive.get());
-                cmd->SetTexture(7, m_Engine.m_GBufferNormal.get());
+                cmd->SetTexture(6, m_Engine.m_RenderTargets.GBufferEmissive.get());
+                cmd->SetTexture(7, m_Engine.m_RenderTargets.GBufferNormal.get());
                 cmd->SetTexture(8, m_Engine.m_IrradianceTexture.get());
                 cmd->SetTexture(9, m_Engine.m_PrefilteredEnvTexture.get());
                 cmd->SetTexture(10, m_Engine.m_BRDFLUTTexture.get());
@@ -409,7 +409,7 @@ namespace Kurenai::Passes
                 // 空パラメータ。t11に置く(t17はbent normalが使う)
                 cmd->SetShaderResourceBuffer(11, m_Engine.m_SkyParametersBuffer.get());
                 // bent normal(34章)
-                cmd->SetTexture(17, m_Engine.m_GBufferBentNormal.get());
+                cmd->SetTexture(17, m_Engine.m_RenderTargets.GBufferBentNormal.get());
                 // 低解像度で評価済みの雲(rgb=事前乗算済みの散乱光、a=透過率)。
                 // このシェーダーは雲を自前で評価しなくなったため、3Dノイズが使っていたt18を
                 // そのまま流用している(DeferredLighting.hlsl冒頭のコメント参照)
@@ -449,7 +449,7 @@ namespace Kurenai::Passes
                 m_Engine.m_DDGIIrradianceAtlas.get(), m_Engine.m_DDGIDistanceAtlas.get(),
             },
             .RenderTargets = { m_Engine.m_SceneColor.get() },
-            .DepthTarget = m_Engine.m_GBufferDepth.get(),
+            .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
             .Execute = [this, gbufferViewport, &gpuLights, &cameraPosition, &viewProj, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
             {
                 // 半透明メッシュをインスタンス単位でカメラからの距離降順(奥から手前)に並べる。

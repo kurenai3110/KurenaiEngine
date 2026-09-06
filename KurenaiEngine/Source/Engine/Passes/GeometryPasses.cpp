@@ -426,7 +426,7 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "HiZ",
-                .Reads = { m_Engine.m_GBufferDepth.get() },
+                .Reads = { m_Engine.m_RenderTargets.GBufferDepth.get() },
                 .Writes = { m_Engine.m_HiZTexture.get() },
                 .Execute = [this, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
@@ -437,7 +437,7 @@ namespace Kurenai::Passes
 
                     cmd->SetComputePipelineState(m_Engine.m_HiZCopyPipelineState.get());
                     cmd->SetComputeConstantBuffer(0, m_Engine.m_HiZConstantBuffer.get());
-                    cmd->SetComputeTexture(0, m_Engine.m_GBufferDepth.get());
+                    cmd->SetComputeTexture(0, m_Engine.m_RenderTargets.GBufferDepth.get());
                     cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_HiZTexture.get(), 0);
                     cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
 
@@ -483,7 +483,7 @@ namespace Kurenai::Passes
                 // (G-Bufferパスと同じ理由で循環にはならない)
                 .Reads = { m_Engine.m_HiZTexture.get() },
                 // レンダーターゲットは持たない(深度だけを書く)
-                .DepthTarget = m_Engine.m_GBufferDepth.get(),
+                .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
                 // 間接描画の引数(直前のModelCullパスが書いたもの)
                 .BufferReads = { m_Engine.m_ModelCullDrawArgsBuffer.get() },
                 .Execute = [this, gbufferViewport, &viewProj, modelCullIndirectActive, occlusionCullingActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
@@ -725,9 +725,9 @@ namespace Kurenai::Passes
             //
             // 6枚目のbent normalまで含め、並びはGBuffer.hlslのPSOutputおよび
             // CreatePrecisionDependentPipelineStatesのRenderTargetFormatsと一致させること
-            .RenderTargets = { m_Engine.m_GBufferAlbedo.get(), m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferMaterial.get(),
-                               m_Engine.m_GBufferEmissive.get(), m_Engine.m_GBufferVelocity.get(), m_Engine.m_GBufferBentNormal.get() },
-            .DepthTarget = m_Engine.m_GBufferDepth.get(),
+            .RenderTargets = { m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(),
+                               m_Engine.m_RenderTargets.GBufferEmissive.get(), m_Engine.m_RenderTargets.GBufferVelocity.get(), m_Engine.m_RenderTargets.GBufferBentNormal.get() },
+            .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
             // 間接描画の引数を読む(ModelCullパスが書いたもの)
             .BufferReads = { m_Engine.m_ModelCullDrawArgsBuffer.get() },
             .Execute = [this, gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive, meshletCullStatsActive, modelCullIndirectActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)

@@ -249,8 +249,8 @@ namespace Kurenai::Passes
                 // 手続き空はm_PrefilteredEnvTextureの焼き込み経由で入ってくるため、
                 // 空のキューブマップをここで直接バインドする必要はない
                 .Reads = {
-                    m_Engine.m_SceneColor.get(), m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferMaterial.get(), m_Engine.m_GBufferDepth.get(),
-                    m_Engine.m_GBufferAlbedo.get(), activeAOTexture, m_Engine.m_BRDFLUTTexture.get(), m_Engine.m_PrefilteredEnvTexture.get(),
+                    m_Engine.m_SceneColor.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
+                    m_Engine.m_RenderTargets.GBufferAlbedo.get(), activeAOTexture, m_Engine.m_BRDFLUTTexture.get(), m_Engine.m_PrefilteredEnvTexture.get(),
                     m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_ProbeDistanceArray.get(),
                     // 平面反射。パスが登録されなかったフレームでもこのReadsは無害
                     // (今フレームのWriterが無いため単に依存辺が張られないだけ)
@@ -258,7 +258,7 @@ namespace Kurenai::Passes
                     // 大気散乱のSkyView LUT。水面に映る空をここから引く
                     m_Engine.m_SkyViewLUT.get(),
                     // bent normal(34章)。スペキュラ遮蔽をLightingパスと同じ規則で求めるために読む
-                    m_Engine.m_GBufferBentNormal.get(),
+                    m_Engine.m_RenderTargets.GBufferBentNormal.get(),
                 },
                 .RenderTargets = { m_Engine.m_SSRTexture.get() },
                 // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
@@ -290,10 +290,10 @@ namespace Kurenai::Passes
                     cmd->SetConstantBuffer(1, m_Engine.m_SSRConstantBuffer.get());
                     cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, m_Engine.m_SceneColor.get());
-                    cmd->SetTexture(1, m_Engine.m_GBufferNormal.get());
-                    cmd->SetTexture(2, m_Engine.m_GBufferMaterial.get());
-                    cmd->SetTexture(3, m_Engine.m_GBufferDepth.get());
-                    cmd->SetTexture(4, m_Engine.m_GBufferAlbedo.get());
+                    cmd->SetTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
+                    cmd->SetTexture(2, m_Engine.m_RenderTargets.GBufferMaterial.get());
+                    cmd->SetTexture(3, m_Engine.m_RenderTargets.GBufferDepth.get());
+                    cmd->SetTexture(4, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                     cmd->SetTexture(5, activeAOTexture);
                     cmd->SetTexture(6, m_Engine.m_BRDFLUTTexture.get());
                     cmd->SetTexture(7, m_Engine.m_PrefilteredEnvTexture.get());
@@ -319,7 +319,7 @@ namespace Kurenai::Passes
                     // bent normal(34章)。Lightingパスとまったく同じものを読まないと、
                     // SSRが適用される領域とされない領域の境界に段差が出る。
                     // **t11は平面反射が使っているためt16へ移した**
-                    cmd->SetTexture(16, m_Engine.m_GBufferBentNormal.get());
+                    cmd->SetTexture(16, m_Engine.m_RenderTargets.GBufferBentNormal.get());
                     cmd->Draw(3, 0);
                 },
             });
@@ -332,9 +332,9 @@ namespace Kurenai::Passes
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "RTReflection",
                 .Reads = {
-                    m_Engine.m_SceneColor.get(), m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferMaterial.get(), m_Engine.m_GBufferDepth.get(),
-                    m_Engine.m_GBufferAlbedo.get(), activeAOTexture, m_Engine.m_BRDFLUTTexture.get(), m_Engine.m_PrefilteredEnvTexture.get(),
-                    m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_GBufferBentNormal.get(),
+                    m_Engine.m_SceneColor.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
+                    m_Engine.m_RenderTargets.GBufferAlbedo.get(), activeAOTexture, m_Engine.m_BRDFLUTTexture.get(), m_Engine.m_PrefilteredEnvTexture.get(),
+                    m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_RenderTargets.GBufferBentNormal.get(),
                 },
                 .Writes = { m_Engine.m_RTReflectionTexture.get() },
                 .Execute = [this, activeAOTexture, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
@@ -369,10 +369,10 @@ namespace Kurenai::Passes
 
                     cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
                     cmd->SetComputeTexture(1, m_Engine.m_SceneColor.get());
-                    cmd->SetComputeTexture(2, m_Engine.m_GBufferNormal.get());
-                    cmd->SetComputeTexture(3, m_Engine.m_GBufferMaterial.get());
-                    cmd->SetComputeTexture(4, m_Engine.m_GBufferDepth.get());
-                    cmd->SetComputeTexture(5, m_Engine.m_GBufferAlbedo.get());
+                    cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferNormal.get());
+                    cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferMaterial.get());
+                    cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferDepth.get());
+                    cmd->SetComputeTexture(5, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                     cmd->SetComputeTexture(6, activeAOTexture);
                     cmd->SetComputeTexture(7, m_Engine.m_BRDFLUTTexture.get());
                     cmd->SetComputeTexture(8, m_Engine.m_PrefilteredEnvTexture.get());
@@ -393,7 +393,7 @@ namespace Kurenai::Passes
                     }
                     // bent normal(34章)。t0〜t15が埋まっているためt16。
                     // SSR.hlslと同じくスペキュラ遮蔽の方向依存を再現するために要る
-                    cmd->SetComputeTexture(16, m_Engine.m_GBufferBentNormal.get());
+                    cmd->SetComputeTexture(16, m_Engine.m_RenderTargets.GBufferBentNormal.get());
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
                     cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RTReflectionTexture.get());

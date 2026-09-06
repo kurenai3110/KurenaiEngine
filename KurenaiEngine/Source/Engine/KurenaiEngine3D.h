@@ -42,6 +42,7 @@
 #include "Settings/QualitySettings.h"
 #include "Settings/ReflectionProbeSettings.h"
 #include "Settings/ReflectionSettings.h"
+#include "Rendering/RenderTargets.h"
 #include "Settings/ShadowSettings.h"
 #include "Settings/SkySettings.h"
 #include "Settings/StarsSettings.h"
@@ -1209,22 +1210,8 @@ namespace Kurenai
         uint32_t m_ModelCullComparedCpuFrustumCulled = 0;
         uint32_t m_ModelCullComparedCandidateCount = 0;
 
-        std::unique_ptr<RHI::IRHITexture> m_GBufferAlbedo;
-        std::unique_ptr<RHI::IRHITexture> m_GBufferNormal;
-        std::unique_ptr<RHI::IRHITexture> m_GBufferMaterial;
-        // 自発光(エミッシブ)。AO/シャドウの影響を受けずライティングパスで常に加算される
-        std::unique_ptr<RHI::IRHITexture> m_GBufferEmissive;
-        std::unique_ptr<RHI::IRHITexture> m_GBufferDepth;
-        // モーションベクター(速度バッファ)。「この画素に映っているものが前フレームでは画面の
-        // どこにいたか」をUV単位の2Dベクトルで持ち、TAAが履歴を引く位置の決定に使う。
-        // 現在のシーンは全インスタンスが静的(ModelInstance::Worldは読み込み時に確定し以降
-        // 変わらない)なので、速度の発生源はカメラの移動・回転だけである。そのためGBuffer.hlslは
-        // 同じワールド座標を今フレームと前フレームのビュー射影行列で投影して差を取るだけでよく、
-        // インスタンスごとの前フレームのワールド行列(PrevWorld)を持つ必要がない。
-        // 動的オブジェクトを入れる際はObjectConstantsへPrevWorldを追加すること
-        std::unique_ptr<RHI::IRHITexture> m_GBufferVelocity;
-        // bent normal(ワールド空間の正規化しない可視方向の平均)。.rgb = bRaw、.a = 有効フラグ
-        std::unique_ptr<RHI::IRHITexture> m_GBufferBentNormal;
+        // G-Bufferは複数のパス群が共有するため、特定のパス群ではなく唯一の所有者へ集める。
+        Rendering::RenderTargets m_RenderTargets;
 
         // 直接光パス(G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
         // 計算しHDRで書き出す。DeferredLightingパスとSSIL_VisibilityBitmask.hlslの両方から
@@ -2707,7 +2694,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterVisibilityBuffer;
         std::unique_ptr<RHI::IRHITexture> m_SoftwareRasterColor;
         std::unique_ptr<RHI::IRHITexture> m_SoftwareRasterDepth;
-        // m_GBufferNormalとまったく同じR16G16_Floatのオクタヘドラル符号化。
+        // RenderTargets::GBufferNormalとまったく同じR16G16_Floatのオクタヘドラル符号化。
         // Present.hlslのMode 7で並べて差分を取れるようにするため
         std::unique_ptr<RHI::IRHITexture> m_SoftwareRasterNormal;
 

@@ -22,7 +22,7 @@ namespace Kurenai
         // 名前 -> 中間テクスチャ。AddTextureDump(起動オプション -dumptex)が引く。
         //
         // 【DebugViewの番号と共有しない】あちらは「表示モード」でテクスチャと1対1ではない
-        // (DepthとDepthRawは同じm_GBufferDepth、LightTilesはテクスチャではなくバッファを読む)。
+        // (DepthとDepthRawは同じm_RenderTargets.GBufferDepth、LightTilesはテクスチャではなくバッファを読む)。
         // さらに切り分けで見たいもの ―― SSILRaw / TransmittanceLUT / TAAHistory / ExposureTexture ――
         // はDebugViewに存在せず、足すにはPresent.hlslの表示モードを増やすことになる。
         // 加えてDebugViewの番号は -debugview N として既に契約になっており、
@@ -37,13 +37,13 @@ namespace Kurenai
         // 呼び出し側にそれぞれ別のログを出させるため
         return {
             // G-Buffer
-            { "GBufferAlbedo", m_GBufferAlbedo.get() },
-            { "GBufferNormal", m_GBufferNormal.get() },
-            { "GBufferMaterial", m_GBufferMaterial.get() },
-            { "GBufferEmissive", m_GBufferEmissive.get() },
-            { "GBufferDepth", m_GBufferDepth.get() },
-            { "GBufferVelocity", m_GBufferVelocity.get() },
-            { "GBufferBentNormal", m_GBufferBentNormal.get() },
+            { "GBufferAlbedo", m_RenderTargets.GBufferAlbedo.get() },
+            { "GBufferNormal", m_RenderTargets.GBufferNormal.get() },
+            { "GBufferMaterial", m_RenderTargets.GBufferMaterial.get() },
+            { "GBufferEmissive", m_RenderTargets.GBufferEmissive.get() },
+            { "GBufferDepth", m_RenderTargets.GBufferDepth.get() },
+            { "GBufferVelocity", m_RenderTargets.GBufferVelocity.get() },
+            { "GBufferBentNormal", m_RenderTargets.GBufferBentNormal.get() },
             // ライティングと間接光
             { "DirectLightTexture", m_DirectLightTexture.get() },
             { "SSAORawTexture", m_SSAORawTexture.get() },

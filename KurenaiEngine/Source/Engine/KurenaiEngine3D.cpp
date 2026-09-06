@@ -3600,12 +3600,7 @@ namespace Kurenai
 
         try
         {
-            m_GBufferAlbedo = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-            m_GBufferNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16_Float);
-            m_GBufferMaterial = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-            m_GBufferEmissive = m_Device->CreateRenderTexture(width, height, emissiveFormat);
-            // Reverse-Zのため近平面側(NDC z=1.0)ではなく遠平面側(NDC z=0.0)にクリアする
-            m_GBufferDepth = m_Device->CreateDepthTexture(width, height, 0.0f);
+            m_RenderTargets.CreateGBufferCore(*m_Device, width, height, emissiveFormat);
             m_DirectLightTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R32G32B32A32_Float);
             m_SSAORawTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
             m_SSAOTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
@@ -3674,18 +3669,9 @@ namespace Kurenai
             }
             m_TonemapTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
 
-            // モーションベクター(速度バッファ)。G-Bufferの5枚目として、GBuffer.hlslが
-            // 「この画素に映っているものが前フレームでは画面のどこにいたか」をUV単位の2Dベクトルで書く。
-            // 2成分しか要らないのでR16G16_Float。1画素ぶんの移動量が1/解像度(1920幅なら約0.00052)と
-            // 小さいため、絶対精度ではなく相対精度で効く浮動小数点フォーマットが適している
-            m_GBufferVelocity = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16_Float);
+            m_RenderTargets.CreateGBufferVelocity(*m_Device, width, height);
 
-            // bent normal(正規化しない可視方向の平均、ワールド空間)。G-Bufferの6枚目。
-            // .rgb = bRaw、.a = 有効フラグ。
-            //
-            // R11G11B10_Floatにはできない ―― 符号なしのため負の成分が落ち、
-            // 半球の半分の方向を表現できなくなる。1080pで約16MB増える(34章)
-            m_GBufferBentNormal = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+            m_RenderTargets.CreateGBufferBentNormal(*m_Device, width, height);
 
             // TAAの履歴バッファ2枚。読みながら同じテクスチャへ書けないので、毎フレーム役割を入れ替える
             // (m_TAAHistoryIndexが今フレームの書き込み先)。バッファ精度をLegacy8bitに落としても
@@ -3868,7 +3854,7 @@ namespace Kurenai
                     m_SoftwareRasterVisibilityBuffer = m_Device->CreateBuffer(visibilityDesc);
 
                     // 【フォーマットはハードウェア側と揃える】色はHDR(Present Mode 4)、
-                    // 深度は生値(Mode 5)、法線はm_GBufferNormalと同じR16G16_Floatの
+                    // 深度は生値(Mode 5)、法線はGBufferNormalと同じR16G16_Floatの
                     // オクタヘドラル符号化(Mode 7)。揃えていないと差分が取れない
                     m_SoftwareRasterColor =
                         m_Device->CreateUAVTexture(width, height, RHI::Format::R16G16B16A16_Float);

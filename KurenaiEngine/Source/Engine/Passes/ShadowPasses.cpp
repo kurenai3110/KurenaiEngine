@@ -233,7 +233,7 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "RTShadow",
-                .Reads = { m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferDepth.get() },
+                .Reads = { m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get() },
                 .Writes = { m_Engine.m_RTShadowTexture.get() },
                 .Execute = [this, renderWidth, renderHeight, frameConstantBuffer](RHI::IRHICommandList* cmd)
                 {
@@ -254,8 +254,8 @@ namespace Kurenai::Passes
                     // レジスタ割り当てはRTShadow.hlsl側の宣言と一致させること。
                     // このシェーダはLoad(整数座標)しか使わないためサンプラーはバインドしない
                     cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
-                    cmd->SetComputeTexture(1, m_Engine.m_GBufferNormal.get());
-                    cmd->SetComputeTexture(2, m_Engine.m_GBufferDepth.get());
+                    cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
+                    cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
                     cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RTShadowTexture.get());

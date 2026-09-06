@@ -629,7 +629,7 @@ namespace Kurenai::Passes
                 // 深度と法線はG-Bufferパスより後
                 .Reads = {
                     m_Engine.m_DDGIIrradianceAtlas.get(), m_Engine.m_DDGIDistanceAtlas.get(),
-                    m_Engine.m_GBufferDepth.get(), m_Engine.m_GBufferNormal.get(),
+                    m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_RenderTargets.GBufferNormal.get(),
                 },
                 // 2枚目は合成側のGatherRed用の低解像度深度(41.24節)。
                 // 並びはDDGIResolve.hlslのPSOutputおよびPSOのRenderTargetFormatsと一致させること
@@ -642,8 +642,8 @@ namespace Kurenai::Passes
                     cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, m_Engine.m_DDGIIrradianceAtlas.get());
                     cmd->SetTexture(1, m_Engine.m_DDGIDistanceAtlas.get());
-                    cmd->SetTexture(2, m_Engine.m_GBufferDepth.get());
-                    cmd->SetTexture(3, m_Engine.m_GBufferNormal.get());
+                    cmd->SetTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
+                    cmd->SetTexture(3, m_Engine.m_RenderTargets.GBufferNormal.get());
                     cmd->Draw(3, 0);
                 },
             });

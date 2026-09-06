@@ -45,7 +45,7 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AerialPerspective",
-                .Reads = { reflectionOutput, m_Engine.m_GBufferDepth.get(), m_Engine.m_SkyViewLUT.get() },
+                .Reads = { reflectionOutput, m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_SkyViewLUT.get() },
                 .RenderTargets = { m_Engine.m_AerialPerspectiveTexture.get() },
                 // 空パラメータ。SkyIntegrateパスの後へ順序付けさせるために挙げる
                 // (実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
@@ -57,7 +57,7 @@ namespace Kurenai::Passes
                     cmd->SetConstantBuffer(0, frameConstantBuffer);
                     cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, reflectionOutput);
-                    cmd->SetTexture(1, m_Engine.m_GBufferDepth.get());
+                    cmd->SetTexture(1, m_Engine.m_RenderTargets.GBufferDepth.get());
                     cmd->SetShaderResourceBuffer(2, m_Engine.m_SkyParametersBuffer.get());
                     // 大気散乱のSkyView LUT。in-scatter項に背景と同じ空の色を
                     // 使うのがこのパスの要点なので、当然同じLUTを読む
@@ -96,7 +96,7 @@ namespace Kurenai::Passes
                 .Name = "DroneShow",
                 .RenderTargets = { taaInputColor },
                 // 島や地形の後ろに回った機体を隠すために深度テストを行う(書き込みはしない)
-                .DepthTarget = m_Engine.m_GBufferDepth.get(),
+                .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
                 .BufferReads = { m_Engine.m_DroneBuffer.get() },
                 .Execute = [this, gbufferViewport, viewMatrix, jitteredProj, effectiveExposure, droneCount](
                                RHI::IRHICommandList* cmd)
@@ -144,7 +144,7 @@ namespace Kurenai::Passes
                 .Name = "TAA",
                 // 履歴(historyTexture)は今フレーム誰も書かないので依存の辺は張られないが、
                 // 実際にバインドするテクスチャはReadsにも宣言しておくというRenderGraphの規約に従う
-                .Reads = { taaInputColor, historyTexture, m_Engine.m_GBufferVelocity.get(), m_Engine.m_GBufferDepth.get() },
+                .Reads = { taaInputColor, historyTexture, m_Engine.m_RenderTargets.GBufferVelocity.get(), m_Engine.m_RenderTargets.GBufferDepth.get() },
                 .RenderTargets = { m_Engine.m_TAAHistory[historyWriteIndex].get() },
                 .Execute = [this, gbufferViewport, taaInputColor, historyTexture, invViewProj, jitterUv, effectiveExposure, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
@@ -189,8 +189,8 @@ namespace Kurenai::Passes
                     // 省くと直前のパスが張ったテクスチャを読んでしまう
                     cmd->SetTexture(0, taaInputColor);
                     cmd->SetTexture(1, historyTexture);
-                    cmd->SetTexture(2, m_Engine.m_GBufferVelocity.get());
-                    cmd->SetTexture(3, m_Engine.m_GBufferDepth.get());
+                    cmd->SetTexture(2, m_Engine.m_RenderTargets.GBufferVelocity.get());
+                    cmd->SetTexture(3, m_Engine.m_RenderTargets.GBufferDepth.get());
                     cmd->Draw(3, 0);
                 },
             });
@@ -217,7 +217,7 @@ namespace Kurenai::Passes
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AutoExposure",
-                .Reads = { hdrSceneColor, m_Engine.m_GBufferDepth.get() },
+                .Reads = { hdrSceneColor, m_Engine.m_RenderTargets.GBufferDepth.get() },
                 .Writes = { m_Engine.m_ExposureTexture.get() },
                 .Execute = [this, hdrSceneColor, keyReferenceEV100, usingProceduralSky, resetAdaptation, renderWidth, renderHeight](
                     RHI::IRHICommandList* cmd)
@@ -268,7 +268,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_AutoExposureConstantBuffer.get());
                     cmd->SetComputeTexture(0, hdrSceneColor);
                     // 空(背景)を測光から外すために深度を読む(AutoExposure.hlsl参照)
-                    cmd->SetComputeTexture(1, m_Engine.m_GBufferDepth.get());
+                    cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferDepth.get());
                     cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_ExposureHistogramBuffer.get());
                     cmd->Dispatch((renderWidth + 15) / 16, (renderHeight + 15) / 16, 1);
 
