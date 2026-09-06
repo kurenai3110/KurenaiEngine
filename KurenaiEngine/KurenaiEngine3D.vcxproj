@@ -100,6 +100,9 @@
     <ClInclude Include="Source\Engine\Rendering\GeometryDrawLoop.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderBlackboard.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderFrameContext.h" />
+    <ClInclude Include="Source\Engine\Passes\PostProcessConstants.h" />
+    <ClInclude Include="Source\Engine\Rendering\ExposureMath.h" />
+    <ClInclude Include="Source\Engine\Passes\PostProcessPasses.h" />
     <ClInclude Include="Source\Engine\Passes\PresentPass.h" />
     <ClInclude Include="Source\Engine\Settings\ReflectionProbeSettings.h" />
     <ClInclude Include="Source\Engine\Settings\ReflectionSettings.h" />
@@ -132,6 +135,7 @@
     <ClCompile Include="Source\Engine\Scene\ModelResidencySystem.cpp" />
     <ClCompile Include="Source\Engine\Scene\SceneLoadService.cpp" />
     <ClCompile Include="Source\Engine\Rendering\GeometryDrawLoop.cpp" />
+    <ClCompile Include="Source\Engine\Passes\PostProcessPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\PresentPass.cpp" />
     <ClCompile Include="Source\Engine\DroneShow.cpp" />
     <ClCompile Include="Source\Engine\UI\UIManager.cpp" />

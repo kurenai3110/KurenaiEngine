@@ -21,7 +21,9 @@
 #include "Core/RenderGraph.h"
 #include "Core/StringUtil.h"
 #include "Diagnostics/RenderDumpService.h"
+#include "Passes/PostProcessPasses.h"
 #include "Passes/PresentPass.h"
+#include "Rendering/ExposureMath.h"
 #include "Rendering/GeometryDrawLoop.h"
 #include "Rendering/RenderBlackboard.h"
 #include "Rendering/RenderFrameContext.h"
@@ -370,17 +372,6 @@ namespace Kurenai
             const float cirrusTransmittance =
                 ComputeCloudLayerTransmittance(cirrusEnabled, cirrusCoverage, kCirrusOvercastTransmittance);
             return cumulusTransmittance * cirrusTransmittance;
-        }
-
-        // 実在の写真露出値(EV100)から露出係数を求める。絞り値・シャッター速度・ISO感度から一意に
-        // 定まる実在の量で、Lagarde & de Rousiers, "Moving Frostbite to Physically Based Rendering"
-        // (SIGGRAPH 2014 course notes)やGoogle FilamentのPhysically Based Cameraドキュメントが
-        // 採る標準式。カンデラ/ルクスの測光量に直接掛けることで表示レンジへ変換する
-        // (放射量(W)への変換は行わない。本エンジンには放射量ベースの大気モデルが無く、
-        // 変換段を増やす意味が無いため)
-        float ComputeExposure(float ev100)
-        {
-            return 1.0f / (1.2f * std::pow(2.0f, ev100));
         }
 
         // 環境の照度[lx]から「そのシーンの基準EV100」を求める。
@@ -874,119 +865,6 @@ namespace Kurenai
             return constants;
         }
 
-        // Tonemap.hlsl側のcbuffer TonemapConstantsと一致させる必要がある
-        struct alignas(16) TonemapConstants
-        {
-            // TonemapCurve(0=Reinhard, 1=ACES, 2=AgX)
-            int32_t Curve;
-            // 手動露出時に掛ける倍率。プリ露出は時刻連動で変動するため、ユーザー設定EV100との
-            // 差分 2^(実効EV100 - 設定EV100) を割り戻して固定露出の絵に戻す(1.0固定ではない)
-            float ExposureScale;
-            // ディザの強さ(0=無効、1=±1LSB)
-            float DitherStrength;
-            // 1.0=自動露出、0.0=手動
-            float UseAutoExposure;
-            // CPU側でライト強度へ事前乗算済みのEV100(プリ露出)
-            float PreExposureEV100;
-            // ブルームの合成比(0で無効)
-            float BloomStrength;
-            // 薄明視の適用量(0で無効、1で完全適用)
-            float MesopicStrength;
-            // 目が順応している明るさ(EV100)。構図にも露出設定にも依存しない
-            float MesopicAdaptationEV100;
-            // TAAの蓄積で失われた高域を戻すシャープネス(0で無効)。TAAが無効のときは常に0。
-            //
-            // 【なぜTAAではなくここなのか】TAAの入力へ掛けると、アンシャープマスクが
-            // 増幅する高域は「ジッターで毎フレーム変動する成分」そのものなので静止時のちらつきが
-            // 大きく増える。ここはトーンマップ後のLDR値に対して掛かるだけで
-            // どこへもフィードバックされないため、ちらつきにもリンギングの累積にも寄与しない
-            float Sharpness;
-            // シャープネスの近傍タップに使う1テクセルぶんのUV(1/レンダー解像度)
-            float InvRenderWidth;
-            float InvRenderHeight;
-            // 黒の締め(ブラックポイント)。0で恒等。詳細はTonemap.hlsl側のコメント参照
-            float BlackPoint;
-        };
-        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
-        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
-        // HLSL側を直さないかぎり黙って別の値を読むことになる。
-        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
-        //
-        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
-        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
-        static_assert(offsetof(TonemapConstants, Curve) == 0, "Curve のレイアウトが変わっている");
-        static_assert(offsetof(TonemapConstants, ExposureScale) == 4, "ExposureScale のレイアウトが変わっている");
-        static_assert(offsetof(TonemapConstants, DitherStrength) == 8, "DitherStrength のレイアウトが変わっている");
-        static_assert(offsetof(TonemapConstants, UseAutoExposure) == 12, "UseAutoExposure のレイアウトが変わっている");
-        static_assert(offsetof(TonemapConstants, PreExposureEV100) == 16, "PreExposureEV100 のレイアウトが変わっている");
-        static_assert(offsetof(TonemapConstants, BloomStrength) == 20, "BloomStrength のレイアウトが変わっている");
-        static_assert(offsetof(TonemapConstants, MesopicStrength) == 24, "MesopicStrength のレイアウトが変わっている");
-        static_assert(offsetof(TonemapConstants, MesopicAdaptationEV100) == 28, "MesopicAdaptationEV100 のレイアウトが変わっている");
-        static_assert(offsetof(TonemapConstants, Sharpness) == 32, "Sharpness のレイアウトが変わっている");
-        static_assert(offsetof(TonemapConstants, InvRenderWidth) == 36, "InvRenderWidth のレイアウトが変わっている");
-        static_assert(offsetof(TonemapConstants, InvRenderHeight) == 40, "InvRenderHeight のレイアウトが変わっている");
-        static_assert(offsetof(TonemapConstants, BlackPoint) == 44, "BlackPoint のレイアウトが変わっている");
-        static_assert(sizeof(TonemapConstants) == 48, "TonemapConstants の総サイズが変わっている");
-
-        // Upscale.hlsl側のcbuffer UpscaleConstantsと一致させる必要がある
-        struct alignas(16) UpscaleConstants
-        {
-            // EASUの事前計算定数。ComputeEasuConstants()が入力/出力解像度から作る
-            DirectX::XMFLOAT4 EasuCon0;
-            DirectX::XMFLOAT4 EasuCon1;
-            DirectX::XMFLOAT4 EasuCon2;
-            DirectX::XMFLOAT4 EasuCon3;
-            // 書き込み先のサイズ(出力解像度)
-            DirectX::XMUINT2 OutputSize;
-            // RCASのシャープネス(ComputeRcasSharpnessScaleで変換済みの線形値)
-            float RcasSharpnessScale;
-            float UpscalePadding;
-        };
-        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
-        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
-        // HLSL側を直さないかぎり黙って別の値を読むことになる。
-        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
-        //
-        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
-        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
-        static_assert(offsetof(UpscaleConstants, EasuCon0) == 0, "EasuCon0 のレイアウトが変わっている");
-        static_assert(offsetof(UpscaleConstants, EasuCon1) == 16, "EasuCon1 のレイアウトが変わっている");
-        static_assert(offsetof(UpscaleConstants, EasuCon2) == 32, "EasuCon2 のレイアウトが変わっている");
-        static_assert(offsetof(UpscaleConstants, EasuCon3) == 48, "EasuCon3 のレイアウトが変わっている");
-        static_assert(offsetof(UpscaleConstants, OutputSize) == 64, "OutputSize のレイアウトが変わっている");
-        static_assert(offsetof(UpscaleConstants, RcasSharpnessScale) == 72, "RcasSharpnessScale のレイアウトが変わっている");
-        static_assert(offsetof(UpscaleConstants, UpscalePadding) == 76, "UpscalePadding のレイアウトが変わっている");
-        static_assert(sizeof(UpscaleConstants) == 80, "UpscaleConstants の総サイズが変わっている");
-
-        // FSR1のFsrEasuCon()と同じ内容。出力画素の整数座標から入力画像の再構成位置を求めるための
-        // スケール/オフセットと、12タップぶんの4回のGather4の中心へのオフセットを作る。
-        //
-        // 参照実装はこれらをuintへビットキャストして渡すが、それはFP16パック経路(A_HALF)と
-        // 定数を共用するためで、SM5.0でも動く必要がある(=16bitパック経路を使わない)このエンジンでは
-        // floatのまま持つほうがCPU側の構造体と素直に対応する
-        void ComputeEasuConstants(
-            UpscaleConstants& constants, uint32_t inputWidth, uint32_t inputHeight,
-            uint32_t outputWidth, uint32_t outputHeight)
-        {
-            const float inputW = static_cast<float>(inputWidth);
-            const float inputH = static_cast<float>(inputHeight);
-            const float outputW = static_cast<float>(outputWidth);
-            const float outputH = static_cast<float>(outputHeight);
-
-            // 出力の整数座標 → 入力の画素座標。0.5を引いているのはテクセル中心合わせ
-            constants.EasuCon0 = {
-                inputW / outputW,
-                inputH / outputH,
-                0.5f * inputW / outputW - 0.5f,
-                0.5f * inputH / outputH - 0.5f,
-            };
-            // 入力の画素座標 → 正規化UV。zwは12タップの左上ブロック('F'タップ)へのオフセット
-            constants.EasuCon1 = { 1.0f / inputW, 1.0f / inputH, 1.0f / inputW, -1.0f / inputH };
-            // 残り3つのGather中心へのオフセット(いずれも'F'ではなく1つめのGather中心からの相対)
-            constants.EasuCon2 = { -1.0f / inputW, 2.0f / inputH, 1.0f / inputW, 2.0f / inputH };
-            constants.EasuCon3 = { 0.0f, 4.0f / inputH, 0.0f, 0.0f };
-        }
-
         // SkyGenerate.hlsl側のcbuffer SkyBakeConstantsと一致させる必要がある
         // SkyIntegrate.hlsl が書き、SkyGenerate.hlsl / DeferredLighting.hlsl / SSR.hlsl が読む
         // 構造化バッファ(要素数1)の1要素。Sky.hlsliのGPUSkyParametersと完全に一致させること
@@ -1103,99 +981,6 @@ namespace Kurenai
         static_assert(offsetof(SkyBakeConstants, Padding0) == 8, "Padding0 のレイアウトが変わっている");
         static_assert(offsetof(SkyBakeConstants, SunDirection) == 16, "SunDirection のレイアウトが変わっている");
         static_assert(sizeof(SkyBakeConstants) == 32, "SkyBakeConstants の総サイズが変わっている");
-
-        // Bloom.hlsl側のcbuffer BloomConstantsと一致させる必要がある
-        struct alignas(16) BloomConstants
-        {
-            DirectX::XMUINT2 SrcSize;
-            DirectX::XMUINT2 DstSize;
-
-            float Threshold;
-            float SoftKnee;
-            // 1.0なら最初のダウンサンプル(Karis平均としきい値を適用する)
-            float ApplyKarisAndThreshold;
-            // 1.0=自動露出、0.0=手動(Tonemapと同じ意味)
-            float UseAutoExposure;
-
-            // CPU側でライト強度へ事前乗算済みのEV100(プリ露出)
-            float PreExposureEV100;
-            // 手動露出時に掛ける倍率(TonemapConstants::ExposureScaleと同じ値)
-            float ExposureScale;
-            float Padding[2];
-        };
-        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
-        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
-        // HLSL側を直さないかぎり黙って別の値を読むことになる。
-        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
-        //
-        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
-        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
-        static_assert(offsetof(BloomConstants, SrcSize) == 0, "SrcSize のレイアウトが変わっている");
-        static_assert(offsetof(BloomConstants, DstSize) == 8, "DstSize のレイアウトが変わっている");
-        static_assert(offsetof(BloomConstants, Threshold) == 16, "Threshold のレイアウトが変わっている");
-        static_assert(offsetof(BloomConstants, SoftKnee) == 20, "SoftKnee のレイアウトが変わっている");
-        static_assert(offsetof(BloomConstants, ApplyKarisAndThreshold) == 24, "ApplyKarisAndThreshold のレイアウトが変わっている");
-        static_assert(offsetof(BloomConstants, UseAutoExposure) == 28, "UseAutoExposure のレイアウトが変わっている");
-        static_assert(offsetof(BloomConstants, PreExposureEV100) == 32, "PreExposureEV100 のレイアウトが変わっている");
-        static_assert(offsetof(BloomConstants, ExposureScale) == 36, "ExposureScale のレイアウトが変わっている");
-        static_assert(offsetof(BloomConstants, Padding) == 40, "Padding のレイアウトが変わっている");
-        static_assert(sizeof(BloomConstants) == 48, "BloomConstants の総サイズが変わっている");
-
-        // AutoExposure.hlsl側のcbuffer AutoExposureConstantsと一致させる必要がある
-        struct alignas(16) AutoExposureConstants
-        {
-            DirectX::XMUINT2 InputSize;
-            float MinEV100;
-            float MaxEV100;
-
-            float PreExposureEV100;
-            float DeltaTime;
-            float AdaptationSpeedUp;
-            float AdaptationSpeedDown;
-
-            float LowPercentile;
-            float HighPercentile;
-            float ExposureCompensation;
-
-            // 暗いシーンをわざと暗いまま写すための補正カーブ(AutoExposure.hlsl参照)
-            float NightRolloffEV;
-            float NightRolloffDarkEV100;
-            float NightRolloffBrightEV100;
-
-            // 測光値の上側クランプ(構図依存を抑える。AutoExposure.hlsl参照)
-            float KeyReferenceEV100;
-            float KeyCeilingEV;
-
-            // 0以外なら順応を飛ばして測光値へ即座に合わせる(シーン切り替え時。
-            // m_AutoExposureResetRequested参照)
-            float ResetAdaptation;
-            float Padding[3];
-        };
-        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
-        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
-        // HLSL側を直さないかぎり黙って別の値を読むことになる。
-        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
-        //
-        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
-        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
-        static_assert(offsetof(AutoExposureConstants, InputSize) == 0, "InputSize のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, MinEV100) == 8, "MinEV100 のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, MaxEV100) == 12, "MaxEV100 のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, PreExposureEV100) == 16, "PreExposureEV100 のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, DeltaTime) == 20, "DeltaTime のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, AdaptationSpeedUp) == 24, "AdaptationSpeedUp のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, AdaptationSpeedDown) == 28, "AdaptationSpeedDown のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, LowPercentile) == 32, "LowPercentile のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, HighPercentile) == 36, "HighPercentile のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, ExposureCompensation) == 40, "ExposureCompensation のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, NightRolloffEV) == 44, "NightRolloffEV のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, NightRolloffDarkEV100) == 48, "NightRolloffDarkEV100 のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, NightRolloffBrightEV100) == 52, "NightRolloffBrightEV100 のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, KeyReferenceEV100) == 56, "KeyReferenceEV100 のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, KeyCeilingEV) == 60, "KeyCeilingEV のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, ResetAdaptation) == 64, "ResetAdaptation のレイアウトが変わっている");
-        static_assert(offsetof(AutoExposureConstants, Padding) == 68, "Padding のレイアウトが変わっている");
-        static_assert(sizeof(AutoExposureConstants) == 80, "AutoExposureConstants の総サイズが変わっている");
 
         // HiZ.hlsl側のcbuffer HiZConstantsと一致させる必要がある
         struct alignas(16) HiZConstants
@@ -1553,40 +1338,6 @@ namespace Kurenai
         static_assert(offsetof(RTAOConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
         static_assert(sizeof(RTAOConstants) == 32, "RTAOConstants の総サイズが変わっている");
 
-        // TAA.hlsl側のcbuffer TAAConstants(register b1)と並びを一致させる必要がある。
-        // TAAパスはb0(FrameConstants)を使わず、必要な行列もすべてこちらへ入れている。
-        // FrameConstantsは末尾追加を重ねて700バイトを超えており、cbufferは途中のフィールドを
-        // 飛ばせないため、末尾の2つを読むためだけに全フィールドを宣言する羽目になるのを避けている
-        struct alignas(16) TAAConstants
-        {
-            DirectX::XMFLOAT4X4 InvViewProj;  // 今フレームのジッター済み逆VP(空の速度の補完に使う)
-            DirectX::XMFLOAT4X4 PrevViewProj; // 前フレームのジッター済みVP
-            DirectX::XMFLOAT4 JitterUv;       // xy=今フレームのジッター(UV単位), zw=前フレーム
-            DirectX::XMFLOAT4 ScreenParams;   // xy=レンダー解像度, zw=その逆数
-            // x: 今フレームの色を混ぜる割合(m_PostProcessSettings.TAABlendWeight)
-            // y: 近傍クリップのボックス幅(標準偏差の何倍か。m_PostProcessSettings.TAAClipGamma)
-            // z: 履歴が使えるか(0=使えない。TAA.hlslは履歴をサンプルすらしない)
-            // w: プリ露出の変化を打ち消す倍率(今フレームの露出 / 前フレームの露出)
-            DirectX::XMFLOAT4 Params0;
-            // x: 近傍クリップの方式(TAAClipMode)
-            // y: 静止時のちらつき抑制の強さ(m_PostProcessSettings.TAAAntiFlicker)。zwは未使用
-            DirectX::XMFLOAT4 Params1;
-        };
-        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
-        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
-        // HLSL側を直さないかぎり黙って別の値を読むことになる。
-        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
-        //
-        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
-        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
-        static_assert(offsetof(TAAConstants, InvViewProj) == 0, "InvViewProj のレイアウトが変わっている");
-        static_assert(offsetof(TAAConstants, PrevViewProj) == 64, "PrevViewProj のレイアウトが変わっている");
-        static_assert(offsetof(TAAConstants, JitterUv) == 128, "JitterUv のレイアウトが変わっている");
-        static_assert(offsetof(TAAConstants, ScreenParams) == 144, "ScreenParams のレイアウトが変わっている");
-        static_assert(offsetof(TAAConstants, Params0) == 160, "Params0 のレイアウトが変わっている");
-        static_assert(offsetof(TAAConstants, Params1) == 176, "Params1 のレイアウトが変わっている");
-        static_assert(sizeof(TAAConstants) == 192, "TAAConstants の総サイズが変わっている");
-
         // DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
         struct alignas(16) GPULight
         {
@@ -1638,37 +1389,6 @@ namespace Kurenai
         // (32バイト×4096 = 128KB。DEFAULTヒープ本体とステージングリングを足しても
         //  1.3MB程度で、機体数を増減しても作り直さずに済む)
         constexpr uint32_t kMaxDrones = 4096;
-
-        // DroneShow.hlsl側のcbuffer DroneShowConstantsと一致させる必要がある。
-        // b0のFrameConstantsには相乗りさせない(理由はDroneShow.hlsl冒頭。
-        // 巨大なcbufferの途中のフィールドを宣言し忘れるとオフセットが静かにずれる)
-        struct alignas(16) DroneShowConstants
-        {
-            // 転置済み。メイン描画ではカメラのビュー行列、平面反射では鏡映×カメラのビュー行列
-            DirectX::XMFLOAT4X4 View;
-            // 転置済み。どちらのパスでもメインカメラのジッター済みProj
-            DirectX::XMFLOAT4X4 Proj;
-            // x=明るさ倍率(実効プリ露出を乗算済み)、y=画面上の最小半径(NDC)、
-            // z=射影行列の[0][0]成分、w=未使用
-            DirectX::XMFLOAT4 Params0;
-            // 平面反射で水面より下の機体を落とすクリップ平面(xyz=法線、w=距離項)
-            DirectX::XMFLOAT4 ClipPlane;
-            // x=クリップ平面を使うか(0=メイン描画、1=平面反射)、yzw=未使用
-            DirectX::XMFLOAT4 Params1;
-        };
-        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
-        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
-        // HLSL側を直さないかぎり黙って別の値を読むことになる。
-        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
-        //
-        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
-        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
-        static_assert(offsetof(DroneShowConstants, View) == 0, "View のレイアウトが変わっている");
-        static_assert(offsetof(DroneShowConstants, Proj) == 64, "Proj のレイアウトが変わっている");
-        static_assert(offsetof(DroneShowConstants, Params0) == 128, "Params0 のレイアウトが変わっている");
-        static_assert(offsetof(DroneShowConstants, ClipPlane) == 144, "ClipPlane のレイアウトが変わっている");
-        static_assert(offsetof(DroneShowConstants, Params1) == 160, "Params1 のレイアウトが変わっている");
-        static_assert(sizeof(DroneShowConstants) == 176, "DroneShowConstants の総サイズが変わっている");
 
         // DirectLighting.hlsl側のcbuffer LightingConstantsと一致させる必要がある。
         // b0はFrameConstantsが使っており定数バッファスロットは2本しか無いため、
@@ -1960,6 +1680,7 @@ namespace Kurenai
 
         // Render()から切り出したパス群(段階6)。CreateSceneResources()より前に作ってよい
         // ―― 群はまだリソースを持たず、登録時にエンジン側を参照するだけである
+        m_PostProcessPasses = std::make_unique<Passes::PostProcessPasses>(*this);
         m_PresentPass = std::make_unique<Passes::PresentPass>(*this);
 
         // アスペクト比はm_RenderAspectを唯一の出所にする(解像度は実行時に変わるため)。
@@ -2254,7 +1975,7 @@ namespace Kurenai
 
         RHI::BufferDesc droneShowConstantBufferDesc;
         droneShowConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        droneShowConstantBufferDesc.SizeInBytes = sizeof(DroneShowConstants);
+        droneShowConstantBufferDesc.SizeInBytes = sizeof(Passes::DroneShowConstants);
         m_DroneShowConstantBuffer = m_Device->CreateBuffer(droneShowConstantBufferDesc);
 
         RHI::BufferDesc droneBufferDesc;
@@ -2867,7 +2588,7 @@ namespace Kurenai
 
         RHI::BufferDesc taaConstantBufferDesc;
         taaConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        taaConstantBufferDesc.SizeInBytes = sizeof(TAAConstants);
+        taaConstantBufferDesc.SizeInBytes = sizeof(Passes::TAAConstants);
         m_TAAConstantBuffer = m_Device->CreateBuffer(taaConstantBufferDesc);
 
         // Tonemapパス(頂点バッファなしのフルスクリーン三角形。HDRのSceneColorをLDRへ変換する)
@@ -2892,7 +2613,7 @@ namespace Kurenai
 
         RHI::BufferDesc tonemapConstantBufferDesc;
         tonemapConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        tonemapConstantBufferDesc.SizeInBytes = sizeof(TonemapConstants);
+        tonemapConstantBufferDesc.SizeInBytes = sizeof(Passes::TonemapConstants);
         m_TonemapConstantBuffer = m_Device->CreateBuffer(tonemapConstantBufferDesc);
 
         // 超解像パス(EASU=拡大、RCAS=シャープ化。どちらもコンピュートシェーダー)。
@@ -2913,7 +2634,7 @@ namespace Kurenai
 
         RHI::BufferDesc upscaleConstantBufferDesc;
         upscaleConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        upscaleConstantBufferDesc.SizeInBytes = sizeof(UpscaleConstants);
+        upscaleConstantBufferDesc.SizeInBytes = sizeof(Passes::UpscaleConstants);
         m_UpscaleConstantBuffer = m_Device->CreateBuffer(upscaleConstantBufferDesc);
 
         // 自動露出パス(輝度ヒストグラムの構築→縮約→時間方向の順応。すべてコンピュートシェーダー)
@@ -2949,7 +2670,7 @@ namespace Kurenai
 
         RHI::BufferDesc autoExposureConstantBufferDesc;
         autoExposureConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        autoExposureConstantBufferDesc.SizeInBytes = sizeof(AutoExposureConstants);
+        autoExposureConstantBufferDesc.SizeInBytes = sizeof(Passes::AutoExposureConstants);
         m_AutoExposureConstantBuffer = m_Device->CreateBuffer(autoExposureConstantBufferDesc);
 
         // 露出の保存先。フレームをまたいで順応の履歴を保持するため、ウィンドウリサイズで
@@ -2977,7 +2698,7 @@ namespace Kurenai
 
         RHI::BufferDesc bloomConstantBufferDesc;
         bloomConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        bloomConstantBufferDesc.SizeInBytes = sizeof(BloomConstants);
+        bloomConstantBufferDesc.SizeInBytes = sizeof(Passes::BloomConstants);
         m_BloomConstantBuffer = m_Device->CreateBuffer(bloomConstantBufferDesc);
 
         // Presentパス(頂点バッファなしのフルスクリーン三角形。SceneColorをバックバッファへ拡大縮小表示)
@@ -6984,7 +6705,7 @@ namespace Kurenai
         //
         // 【エミッシブプロキシとは単位系が違う】プロキシは露出を掛けない(自発光がG-Bufferで
         // 露出を通らないため、I*exposure の中で相殺する)。一方ドローンのスプライトは
-        // DroneShowConstants.Params0.x = Brightness * effectiveExposure として露出を通っており、
+        // Passes::DroneShowConstants.Params0.x = Brightness * effectiveExposure として露出を通っており、
         // 単位系としては手置きライト(カンデラ)の側にいる。**ここは掛ける側が正しい**。
         // 向こうの慣習を写すと桁で外す(docs/ImplementationDetail.md 62.4の表)
         m_DroneShowLightUsedCount = 0;
@@ -7799,6 +7520,14 @@ namespace Kurenai
         frameContext.PlanarReflectionPassRuns = planarReflectionPassRuns;
         frameContext.MegaLightsEffectiveTilesX = megaLightsEffectiveTilesX;
         frameContext.MegaLightsTileOffset = megaLightsTileOffset;
+        frameContext.ManualExposureScale = manualExposureScale;
+        frameContext.KeyReferenceEV100 = keyReferenceEV100;
+        frameContext.ViewMatrix = viewMatrix;
+        frameContext.JitteredProj = jitteredProj;
+        frameContext.InvViewProj = invViewProj;
+        frameContext.JitterUv = jitterUv;
+        frameContext.UsingProceduralSky = usingProceduralSky;
+        frameContext.FogPassRuns = fogPassRuns;
 
         Rendering::RenderBlackboard blackboard{};
         blackboard.SkyTexture = skyTexture;
@@ -8238,6 +7967,7 @@ namespace Kurenai
         RHI::Viewport gbufferViewport;
         gbufferViewport.Width = static_cast<float>(m_RenderWidth);
         gbufferViewport.Height = static_cast<float>(m_RenderHeight);
+        frameContext.GBufferViewport = gbufferViewport;
 
         // --- シャドウパス: ライト視点から深度のみを描画する(常に固定のシャドウマップ解像度)。
         //     カスケードごとに1回ずつ、同じメッシュ群を異なるライト正射影で描き直す ---
@@ -12043,7 +11773,7 @@ namespace Kurenai
                         DirectX::XMFLOAT4X4 projection;
                         DirectX::XMStoreFloat4x4(&projection, jitteredProj);
 
-                        DroneShowConstants droneConstants{};
+                        Passes::DroneShowConstants droneConstants{};
                         // 鏡映×カメラのビュー行列。reflectedViewProjの分解と同じ組み合わせで、
                         // Projはメインカメラのジッター済みProjをそのまま使う
                         DirectX::XMStoreFloat4x4(
@@ -12240,456 +11970,10 @@ namespace Kurenai
             });
         }
 
-        // --- 大気遠近パス: 反射パス(SSR/RT反射)の後、TAAパスの直前に置く。
-        //     Lightingパスの中に入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl
-        //     冒頭のコメント参照。無効時はパス自体を登録せず、reflectionOutputがそのまま
-        //     TAA(またはTonemap)への入力になる ---
-        RHI::IRHITexture* const reflectionOutput = GetActiveReflectionOutput();
-        if (fogPassRuns)
-        {
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "AerialPerspective",
-                .Reads = { reflectionOutput, m_GBufferDepth.get(), m_SkyViewLUT.get() },
-                .RenderTargets = { m_AerialPerspectiveTexture.get() },
-                // 空パラメータ。SkyIntegrateパスの後へ順序付けさせるために挙げる
-                // (実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
-                .BufferReads = { m_SkyParametersBuffer.get() },
-                .Execute = [this, &gbufferViewport, reflectionOutput](RHI::IRHICommandList* cmd)
-                {
-                    cmd->SetViewport(gbufferViewport);
-                    cmd->SetPipelineState(m_AerialPerspectivePipelineState.get());
-                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
-                    cmd->SetTexture(0, reflectionOutput);
-                    cmd->SetTexture(1, m_GBufferDepth.get());
-                    cmd->SetShaderResourceBuffer(2, m_SkyParametersBuffer.get());
-                    // 大気散乱のSkyView LUT。in-scatter項に背景と同じ空の色を
-                    // 使うのがこのパスの要点なので、当然同じLUTを読む
-                    cmd->SetTexture(3, m_SkyViewLUT.get());
-                    cmd->Draw(3, 0);
-                },
-            });
-        }
-
-        // --- TAAパス: 前フレームのTAA結果をモーションベクターで再投影し、今フレームの色へ蓄積する。
-        //     ジッターで散らしたサンプルがここで平均され、実質的なスーパーサンプリングになる。
-        //     トーンマップ前のHDRの段階で行うのは、露出・ブルームがTAAで安定した絵を入力に
-        //     できるようにするため(逆順にするとブルームがフレームごとのちらつきを拾う)。
-        //     入力はGetActiveReflectionOutput()(反射Off/SSR/RT反射のいずれか、または大気遠近が
-        //     有効ならその出力)で、SSRだけを見ていた従来の判定ではRT反射有効時にTAAが古い
-        //     SceneColorを拾ってしまうため、ここも合わせて直す ---
-        RHI::IRHITexture* const taaInputColor = fogPassRuns ? m_AerialPerspectiveTexture.get() : reflectionOutput;
-
-        // --- ドローンショーパス: 夜空の機体を発光ビルボードとして加算合成で描く ---
-        //
-        // 【なぜここなのか(大気遠近より後・TAAより前)】
-        //  ・大気遠近より後: 機体は深度を書かないため、先に描くとAerialPerspectiveが
-        //    「背後の空の距離」で霞を掛けてしまい、光点が washout する
-        //  ・TAAより前: ここに置くとRenderGraphがtaaInputColorのRead-after-Write依存で
-        //    自動的にTAAの前へ順序付ける。機体がTAA・自動露出・ブルーム・トーンマップを
-        //    一貫して通るため、シーンの他の発光物とまったく同じ扱いになる。
-        //    TAAの後(=m_TAAHistoryへ直接加算)にしてはいけない ―― 履歴を汚し、
-        //    次フレーム以降に尾を引く
-        //
-        // 書き込み先をtaaInputColorにしているのは、反射やフォグの有無でHDRシーン色の実体が
-        // 移り変わるため。「今のHDRシーン色」を指す変数へ描くことでどの組み合わせでも成立する
-        if (m_DroneShowEnabled && !m_DroneInstances.empty())
-        {
-            const uint32_t droneCount = static_cast<uint32_t>(m_DroneInstances.size());
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "DroneShow",
-                .RenderTargets = { taaInputColor },
-                // 島や地形の後ろに回った機体を隠すために深度テストを行う(書き込みはしない)
-                .DepthTarget = m_GBufferDepth.get(),
-                .BufferReads = { m_DroneBuffer.get() },
-                .Execute = [this, &gbufferViewport, viewMatrix, jitteredProj, effectiveExposure, droneCount](
-                               RHI::IRHICommandList* cmd)
-                {
-                    DirectX::XMFLOAT4X4 projection;
-                    DirectX::XMStoreFloat4x4(&projection, jitteredProj);
-
-                    DroneShowConstants droneConstants{};
-                    DirectX::XMStoreFloat4x4(&droneConstants.View, DirectX::XMMatrixTranspose(viewMatrix));
-                    DirectX::XMStoreFloat4x4(&droneConstants.Proj, DirectX::XMMatrixTranspose(jitteredProj));
-                    droneConstants.Params0 = {
-                        // 実効プリ露出を掛ける。HDRバッファの中身はすべてプリ露出済みの値なので、
-                        // ここで掛けないと機体だけが露出に追従しない浮いた明るさになる
-                        m_DroneShow.Data().Brightness * effectiveExposure,
-                        m_DroneShowMinScreenRadius,
-                        // 射影行列の[0][0]。シェーダ側で最小画面サイズを世界半径へ逆算するのに使う
-                        projection._11,
-                        0.0f,
-                    };
-                    droneConstants.ClipPlane = { 0.0f, 1.0f, 0.0f, 0.0f };
-                    // メイン描画ではクリップしない(平面反射パスだけが使う)
-                    droneConstants.Params1 = { 0.0f, 0.0f, 0.0f, 0.0f };
-                    cmd->UpdateBuffer(m_DroneShowConstantBuffer.get(), &droneConstants, sizeof(droneConstants));
-
-                    cmd->SetViewport(gbufferViewport);
-                    cmd->SetPipelineState(m_DroneShowPipelineState.get());
-                    cmd->SetConstantBuffer(1, m_DroneShowConstantBuffer.get());
-                    // 機体データは頂点シェーダーが読む。通常のSetShaderResourceBufferが使う
-                    // SRVテーブルはピクセルシェーダーからしか見えないため専用の経路を使う
-                    cmd->SetVertexShaderResourceBuffer(0, m_DroneBuffer.get());
-                    // 1機につき2三角形。頂点バッファもインデックスバッファも要らない
-                    cmd->Draw(droneCount * 6u, 0);
-                },
-            });
-        }
-
-        if (m_PostProcessSettings.TAAEnabled)
-        {
-            // 今フレームの書き込み先と、前フレームの結果(履歴)。Render()の末尾で役割が入れ替わる
-            const uint32_t historyWriteIndex = m_TAAHistoryIndex;
-            const uint32_t historyReadIndex = 1u - historyWriteIndex;
-            RHI::IRHITexture* const historyTexture = m_TAAHistory[historyReadIndex].get();
-
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "TAA",
-                // 履歴(historyTexture)は今フレーム誰も書かないので依存の辺は張られないが、
-                // 実際にバインドするテクスチャはReadsにも宣言しておくというRenderGraphの規約に従う
-                .Reads = { taaInputColor, historyTexture, m_GBufferVelocity.get(), m_GBufferDepth.get() },
-                .RenderTargets = { m_TAAHistory[historyWriteIndex].get() },
-                .Execute = [this, &gbufferViewport, taaInputColor, historyTexture, invViewProj, jitterUv,
-                            effectiveExposure](RHI::IRHICommandList* cmd)
-                {
-                    TAAConstants taaConstants{};
-                    DirectX::XMStoreFloat4x4(&taaConstants.InvViewProj, DirectX::XMMatrixTranspose(invViewProj));
-                    taaConstants.PrevViewProj = m_TAAPrevViewProjValid ? m_TAAPrevViewProj : DirectX::XMFLOAT4X4{};
-                    taaConstants.JitterUv = { jitterUv.x, jitterUv.y, m_TAAPrevJitterUv.x, m_TAAPrevJitterUv.y };
-                    taaConstants.ScreenParams = {
-                        static_cast<float>(m_RenderWidth),
-                        static_cast<float>(m_RenderHeight),
-                        1.0f / static_cast<float>(m_RenderWidth),
-                        1.0f / static_cast<float>(m_RenderHeight),
-                    };
-
-                    // 履歴が無効な間は「サンプルすらするな」をシェーダへ伝える(TAA.hlsl参照)。
-                    // 作りたてのfp16バッファはNaNを含みうるため、混ぜる割合を0にするだけでは足りない
-                    const bool historyValid = m_TAAHistoryValid.load(std::memory_order_relaxed);
-
-                    // プリ露出はm_EffectiveExposureEV100の時間順応で毎フレーム変わる。履歴は前フレームの
-                    // 露出で焼かれた明るさのままなので、比率を掛けて今の露出へ揃える。
-                    // 揃えないと露出が動いている間ずっと明るさの尾を引く
-                    const float previousExposure = ComputeExposure(m_TAAPrevEffectiveExposureEV100);
-                    const float exposureRescale =
-                        (historyValid && previousExposure > 0.0f) ? (effectiveExposure / previousExposure) : 1.0f;
-
-                    taaConstants.Params0 = {
-                        m_PostProcessSettings.TAABlendWeight,
-                        m_PostProcessSettings.TAAClipGamma,
-                        historyValid ? 1.0f : 0.0f,
-                        exposureRescale,
-                    };
-                    taaConstants.Params1 = {
-                        static_cast<float>(m_PostProcessSettings.TAAClip), m_PostProcessSettings.TAAAntiFlicker, 0.0f, 0.0f
-                    };
-                    cmd->UpdateBuffer(m_TAAConstantBuffer.get(), &taaConstants, sizeof(taaConstants));
-
-                    cmd->SetViewport(gbufferViewport);
-                    cmd->SetPipelineState(m_TAAPipelineState.get());
-                    cmd->SetConstantBuffer(1, m_TAAConstantBuffer.get());
-                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
-                    // t0〜t3はすべて必ずバインドすること。SRVのバインドは上書きするまで維持されるため、
-                    // 省くと直前のパスが張ったテクスチャを読んでしまう
-                    cmd->SetTexture(0, taaInputColor);
-                    cmd->SetTexture(1, historyTexture);
-                    cmd->SetTexture(2, m_GBufferVelocity.get());
-                    cmd->SetTexture(3, m_GBufferDepth.get());
-                    cmd->Draw(3, 0);
-                },
-            });
-        }
-
-        // --- Tonemapパス: HDRのSceneColor(反射パス有効時はその出力、TAA有効時はさらにTAA適用後)を
-        //     LDRへ変換する。反射等のHDR演算がすべて完了した後、Present直前の独立したステージとして
-        //     常に実行する ---
-        // この行はTAAパスのAddPassより後に置くこと。ラムダは値キャプチャなので、先に差し替えると
-        // TAAが自分の出力を入力として読む形になる(RenderGraphが循環を検出して例外を投げる)
-        RHI::IRHITexture* hdrSceneColor = m_PostProcessSettings.TAAEnabled ? m_TAAHistory[m_TAAHistoryIndex].get() : taaInputColor;
-        // 【TAAパスの登録より後で確定させること】上のコメントの理由がそのまま効くため、
-        // ブラックボードへ載せるのもこの位置にする
-        blackboard.HdrSceneColor = hdrSceneColor;
-
-        // --- 自動露出パス: SceneColorの輝度ヒストグラムから目標EV100を求め、時間方向に順応させる。
-        //     結果はm_ExposureTextureへ書かれ、後段のTonemapパスが読む(AutoExposure.hlsl参照) ---
-        if (m_PostProcessSettings.AutoExposureEnabled)
-        {
-            // シーン切り替え直後の1回だけ順応を飛ばす。パスを積んだ時点で消費しておくことで、
-            // Executeが呼ばれる保証(グラフの枝刈り)に依存せず必ず1回で消える
-            const bool resetAdaptation = m_AutoExposureResetRequested;
-            m_AutoExposureResetRequested = false;
-
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "AutoExposure",
-                .Reads = { hdrSceneColor, m_GBufferDepth.get() },
-                .Writes = { m_ExposureTexture.get() },
-                .Execute = [this, hdrSceneColor, keyReferenceEV100, usingProceduralSky, resetAdaptation](
-                    RHI::IRHICommandList* cmd)
-                {
-                    AutoExposureConstants autoExposureConstants{};
-                    autoExposureConstants.InputSize = { m_RenderWidth, m_RenderHeight };
-                    // Min>Maxのような不正な範囲だとヒストグラムのビン割りが破綻するため順序を保証する
-                    autoExposureConstants.MinEV100 = std::min(m_PostProcessSettings.AutoExposureMinEV100, m_PostProcessSettings.AutoExposureMaxEV100);
-                    autoExposureConstants.MaxEV100 = std::max(m_PostProcessSettings.AutoExposureMinEV100, m_PostProcessSettings.AutoExposureMaxEV100);
-                    autoExposureConstants.PreExposureEV100 = m_EffectiveExposureEV100;
-                    // 一時停止やシーン読み込み直後の巨大なdtで順応が飛ばないよう上限を設ける
-                    autoExposureConstants.DeltaTime = std::clamp(m_RenderDeltaTime, 0.0f, 0.1f);
-                    autoExposureConstants.AdaptationSpeedUp = m_PostProcessSettings.AutoExposureSpeedUp;
-                    autoExposureConstants.AdaptationSpeedDown = m_PostProcessSettings.AutoExposureSpeedDown;
-                    autoExposureConstants.LowPercentile = std::min(m_PostProcessSettings.AutoExposureLowPercentile, m_PostProcessSettings.AutoExposureHighPercentile);
-                    autoExposureConstants.HighPercentile = std::max(m_PostProcessSettings.AutoExposureLowPercentile, m_PostProcessSettings.AutoExposureHighPercentile);
-                    autoExposureConstants.ExposureCompensation = m_PostProcessSettings.AutoExposureCompensation;
-                    autoExposureConstants.NightRolloffEV = m_PostProcessSettings.AutoExposureNightRolloffEV;
-                    // 折れ点は必ずDark < Brightにする(逆転すると補正が不連続になる)
-                    autoExposureConstants.NightRolloffDarkEV100 =
-                        std::min(m_PostProcessSettings.AutoExposureNightRolloffDarkEV100, m_PostProcessSettings.AutoExposureNightRolloffBrightEV100);
-                    autoExposureConstants.NightRolloffBrightEV100 =
-                        std::max(m_PostProcessSettings.AutoExposureNightRolloffDarkEV100, m_PostProcessSettings.AutoExposureNightRolloffBrightEV100);
-                    // 構図に依存しないシーンの基準EV。測光値の上限の足がかりになる。
-                    //
-                    // **手続き空を使っていないシーンではクランプを無効にする**。
-                    // 基準EVはこのエンジンの太陽・月・空モデルが出す照度から求めているので、
-                    // .ksceneが独自のスカイボックスを指定しているシーン(White Furnace Testなど)
-                    // では、そのシーンを実際に照らしている光と無関係な値になってしまう。
-                    // 実際、無効化前はWhite Furnace Testの一様グレーが107から208まで持ち上がり、
-                    // 白飛びまで余裕が無くなっていた(一様性そのものは保たれていたが、
-                    // 飽和させてしまうとエネルギー保存の検証が成立しなくなる)
-                    autoExposureConstants.KeyReferenceEV100 = keyReferenceEV100;
-                    autoExposureConstants.KeyCeilingEV =
-                        usingProceduralSky ? m_PostProcessSettings.AutoExposureKeyCeilingEV : 1.0e4f;
-                    autoExposureConstants.ResetAdaptation = resetAdaptation ? 1.0f : 0.0f;
-                    cmd->UpdateBuffer(m_AutoExposureConstantBuffer.get(), &autoExposureConstants, sizeof(autoExposureConstants));
-
-                    // 1) ヒストグラムをゼロクリア
-                    cmd->SetComputePipelineState(m_AutoExposureClearPipelineState.get());
-                    cmd->SetComputeConstantBuffer(1, m_AutoExposureConstantBuffer.get());
-                    cmd->SetComputeUnorderedAccessBuffer(0, m_ExposureHistogramBuffer.get());
-                    cmd->Dispatch(1, 1, 1);
-
-                    // 2) SceneColorから輝度ヒストグラムを構築
-                    //    (UAVはDispatch直後に解除されるため毎回バインドし直す。IRHICommandList.h参照)
-                    cmd->SetComputePipelineState(m_AutoExposureHistogramPipelineState.get());
-                    cmd->SetComputeConstantBuffer(1, m_AutoExposureConstantBuffer.get());
-                    cmd->SetComputeTexture(0, hdrSceneColor);
-                    // 空(背景)を測光から外すために深度を読む(AutoExposure.hlsl参照)
-                    cmd->SetComputeTexture(1, m_GBufferDepth.get());
-                    cmd->SetComputeUnorderedAccessBuffer(0, m_ExposureHistogramBuffer.get());
-                    cmd->Dispatch((m_RenderWidth + 15) / 16, (m_RenderHeight + 15) / 16, 1);
-
-                    // 3) 縮約して目標EV100を求め、前フレームの値から指数的に順応させて書き戻す
-                    cmd->SetComputePipelineState(m_AutoExposureResolvePipelineState.get());
-                    cmd->SetComputeConstantBuffer(1, m_AutoExposureConstantBuffer.get());
-                    cmd->SetComputeUnorderedAccessBuffer(0, m_ExposureHistogramBuffer.get());
-                    cmd->SetComputeUnorderedAccessTexture(1, m_ExposureTexture.get());
-                    cmd->Dispatch(1, 1, 1);
-                },
-            });
-        }
-
-        // --- ブルームパス: SceneColorから半解像度のピラミッドを作り、段階的にダウンサンプル→
-        //     3x3テントでアップサンプルしながら加算する。最終段(m_BloomUpTextures[0])をTonemapが読む ---
-        if (m_PostProcessSettings.BloomEnabled && !m_BloomDownTextures.empty())
-        {
-            std::vector<RHI::IRHITexture*> bloomWrites;
-            bloomWrites.reserve(m_BloomDownTextures.size() + m_BloomUpTextures.size());
-            for (const auto& texture : m_BloomDownTextures)
-            {
-                bloomWrites.push_back(texture.get());
-            }
-            for (const auto& texture : m_BloomUpTextures)
-            {
-                bloomWrites.push_back(texture.get());
-            }
-
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "Bloom",
-                .Reads = { hdrSceneColor, m_ExposureTexture.get() },
-                .Writes = std::move(bloomWrites),
-                .Execute = [this, hdrSceneColor, manualExposureScale](RHI::IRHICommandList* cmd)
-                {
-                    const uint32_t levelCount = static_cast<uint32_t>(m_BloomDownTextures.size());
-
-                    BloomConstants bloomConstants{};
-                    bloomConstants.Threshold = m_PostProcessSettings.BloomThreshold;
-                    bloomConstants.SoftKnee = m_PostProcessSettings.BloomSoftKnee;
-                    // しきい値を「表示上の白」基準の直感的な値のままにするため、
-                    // ピラミッドの入力段で露出を反映する(Bloom.hlsl ExposureScale()参照)。
-                    // Tonemapと同じ倍率でなければ、ブルームだけ露出がずれて合成比が狂う
-                    bloomConstants.UseAutoExposure = m_PostProcessSettings.AutoExposureEnabled ? 1.0f : 0.0f;
-                    bloomConstants.PreExposureEV100 = m_EffectiveExposureEV100;
-                    bloomConstants.ExposureScale = manualExposureScale;
-
-                    // --- ダウンサンプル: SceneColor -> down[0] -> down[1] -> ... ---
-                    cmd->SetComputePipelineState(m_BloomDownsamplePipelineState.get());
-                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
-                    for (uint32_t level = 0; level < levelCount; ++level)
-                    {
-                        const bool isFirst = (level == 0);
-                        RHI::IRHITexture* source = isFirst ? hdrSceneColor : m_BloomDownTextures[level - 1].get();
-                        const DirectX::XMUINT2 srcSize = isFirst
-                            ? DirectX::XMUINT2{ m_RenderWidth, m_RenderHeight }
-                            : m_BloomLevelSizes[level - 1];
-                        const DirectX::XMUINT2 dstSize = m_BloomLevelSizes[level];
-
-                        bloomConstants.SrcSize = srcSize;
-                        bloomConstants.DstSize = dstSize;
-                        // 最初のダウンサンプルだけKaris平均としきい値を適用する(理由はBloom.hlsl冒頭)
-                        bloomConstants.ApplyKarisAndThreshold = isFirst ? 1.0f : 0.0f;
-                        cmd->UpdateBuffer(m_BloomConstantBuffer.get(), &bloomConstants, sizeof(bloomConstants));
-
-                        cmd->SetComputeConstantBuffer(1, m_BloomConstantBuffer.get());
-                        cmd->SetComputeTexture(0, source);
-                        cmd->SetComputeTexture(2, m_ExposureTexture.get());
-                        // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
-                        cmd->SetComputeUnorderedAccessTexture(0, m_BloomDownTextures[level].get());
-                        cmd->Dispatch((dstSize.x + 7) / 8, (dstSize.y + 7) / 8, 1);
-                    }
-
-                    // --- アップサンプル: 最下段から上へ、down[level] + tent(1段下) を up[level] へ書く ---
-                    cmd->SetComputePipelineState(m_BloomUpsamplePipelineState.get());
-                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
-                    for (int32_t level = static_cast<int32_t>(levelCount) - 2; level >= 0; --level)
-                    {
-                        // 最下段の1つ上だけは、まだup[]が書かれていないのでdown[]の最下段を読む
-                        const bool readsDownChain = (level == static_cast<int32_t>(levelCount) - 2);
-                        RHI::IRHITexture* lower = readsDownChain
-                            ? m_BloomDownTextures[level + 1].get()
-                            : m_BloomUpTextures[level + 1].get();
-
-                        const DirectX::XMUINT2 srcSize = m_BloomLevelSizes[level + 1];
-                        const DirectX::XMUINT2 dstSize = m_BloomLevelSizes[level];
-
-                        bloomConstants.SrcSize = srcSize;
-                        bloomConstants.DstSize = dstSize;
-                        bloomConstants.ApplyKarisAndThreshold = 0.0f;
-                        cmd->UpdateBuffer(m_BloomConstantBuffer.get(), &bloomConstants, sizeof(bloomConstants));
-
-                        cmd->SetComputeConstantBuffer(1, m_BloomConstantBuffer.get());
-                        cmd->SetComputeTexture(0, m_BloomDownTextures[level].get());
-                        cmd->SetComputeTexture(1, lower);
-                        cmd->SetComputeUnorderedAccessTexture(0, m_BloomUpTextures[level].get());
-                        cmd->Dispatch((dstSize.x + 7) / 8, (dstSize.y + 7) / 8, 1);
-                    }
-                },
-            });
-        }
-
-        // Tonemapがブルームとして読むテクスチャ。無効時も有効なテクスチャを常にt2へバインドする
-        // 必要があるため、その場合はピラミッド最上段(内容は前フレームのまま)を渡し、
-        // BloomStrength=0で寄与しないようにする
-        RHI::IRHITexture* bloomResultTexture =
-            m_BloomUpTextures.empty() ? hdrSceneColor : m_BloomUpTextures[0].get();
-
-        // このフレームで超解像パスを走らせるか。デバッグ表示中は内部解像度の中間バッファを
-        // そのまま等倍で見たいので走らせない(拡大するとバッファの実際の解像度が分からなくなる)
-        const bool upscaleActive = IsUpscaleActive() && m_DebugViewSettings.View == DebugView::Final;
-        blackboard.UpscaleActive = upscaleActive;
-
-        graph.AddPass(Core::RenderGraphPassDesc{
-            .Name = "Tonemap",
-            .Reads = { hdrSceneColor, m_ExposureTexture.get(), bloomResultTexture },
-            .RenderTargets = { m_TonemapTexture.get() },
-            .Execute = [this, &gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale,
-                        keyReferenceEV100, upscaleActive](RHI::IRHICommandList* cmd)
-            {
-                TonemapConstants tonemapConstants{};
-                tonemapConstants.Curve = static_cast<int32_t>(m_PostProcessSettings.Curve);
-                // 手動露出時: プリ露出は時刻連動で変動するので、設定EV100との差分を割り戻して
-                // 「設定EV100で固定した絵」へ戻す(manualExposureScaleの算出箇所のコメント参照)
-                tonemapConstants.ExposureScale = manualExposureScale;
-                tonemapConstants.DitherStrength = m_PostProcessSettings.DitherEnabled ? 1.0f : 0.0f;
-                tonemapConstants.UseAutoExposure = m_PostProcessSettings.AutoExposureEnabled ? 1.0f : 0.0f;
-                tonemapConstants.PreExposureEV100 = m_EffectiveExposureEV100;
-                tonemapConstants.BloomStrength =
-                    (m_PostProcessSettings.BloomEnabled && !m_BloomUpTextures.empty()) ? m_PostProcessSettings.BloomStrength : 0.0f;
-                tonemapConstants.MesopicStrength = m_PostProcessSettings.MesopicStrength;
-                // 目の順応は画面の構図ではなくシーンの明るさで決まるので、
-                // 自動露出の測光値ではなくキー照度から求めた基準EVを使う
-                tonemapConstants.MesopicAdaptationEV100 = keyReferenceEV100;
-                // シャープネスはTAAの蓄積で失われた高域を戻すためのものなので、TAAが無効なら0。
-                // そうしないとTAA導入前の絵と変わってしまう。
-                //
-                // 【超解像が有効なときも0にする】ここのシャープネスは内部レンダー解像度で効く。
-                // その後EASUで拡大すると、戻した高域もオーバーシュートの縁も一緒に引き伸ばされて
-                // 太い縁取りになる。超解像時のシャープ化は出力解像度で効くRCASへ一本化し、
-                // ここは素直なトーンマップ出力をEASUへ渡すことに徹する
-                tonemapConstants.Sharpness = (m_PostProcessSettings.TAAEnabled && !upscaleActive) ? m_PostProcessSettings.TAASharpness : 0.0f;
-                tonemapConstants.InvRenderWidth = 1.0f / static_cast<float>(m_RenderWidth);
-                tonemapConstants.InvRenderHeight = 1.0f / static_cast<float>(m_RenderHeight);
-                tonemapConstants.BlackPoint = m_PostProcessSettings.TonemapBlackPoint;
-                cmd->UpdateBuffer(m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
-
-                cmd->SetViewport(gbufferViewport);
-                cmd->SetPipelineState(m_TonemapPipelineState.get());
-                cmd->SetConstantBuffer(1, m_TonemapConstantBuffer.get());
-                cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
-                cmd->SetTexture(0, hdrSceneColor);
-                cmd->SetTexture(1, m_ExposureTexture.get());
-                // t2は必ずバインドすること。SRVのバインドは上書きするまで維持されるため、
-                // ここを省くと直前のパスが張ったテクスチャをブルームとして読んでしまう
-                // (省くとG-Bufferのバッファを読んで画面全体が緑に転ぶ)
-                cmd->SetTexture(2, bloomResultTexture);
-                cmd->Draw(3, 0);
-            },
-        });
-
-        // --- 超解像パス(41.23節): Tonemapが出したLDR画像を出力解像度へ再構成する ---
-        //
-        // EASU(拡大)とRCAS(シャープ化)を別パスにしているのは、RCASがEASUの結果の
-        // 十字5タップを読むため。1つにまとめると同一リソースのSRV/UAV同時バインドになる。
-        //
-        // ここより後(Present)は出力解像度、ここより前はすべて内部レンダー解像度である。
-        // ImGuiはRenderGraphの外でバックバッファへ直接描かれるため、この拡大の影響を受けない
-        if (upscaleActive)
-        {
-            const uint32_t upscaleOutputWidth = m_UpscaleTargetWidth;
-            const uint32_t upscaleOutputHeight = m_UpscaleTargetHeight;
-
-            UpscaleConstants upscaleConstants{};
-            ComputeEasuConstants(
-                upscaleConstants, m_RenderWidth, m_RenderHeight, upscaleOutputWidth, upscaleOutputHeight);
-            upscaleConstants.OutputSize = { upscaleOutputWidth, upscaleOutputHeight };
-            upscaleConstants.RcasSharpnessScale = ComputeRcasSharpnessScale(m_PostProcessSettings.UpscaleSharpness);
-
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "UpscaleEASU",
-                .Reads = { m_TonemapTexture.get() },
-                .Writes = { m_UpscaleTexture.get() },
-                .Execute = [this, upscaleConstants, upscaleOutputWidth,
-                            upscaleOutputHeight](RHI::IRHICommandList* cmd)
-                {
-                    cmd->SetComputePipelineState(m_UpscaleEASUPipelineState.get());
-                    // Gather4のアドレスモードがClampであることがEASUの前提(Upscale.hlslのコメント参照)
-                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
-                    cmd->UpdateBuffer(m_UpscaleConstantBuffer.get(), &upscaleConstants, sizeof(upscaleConstants));
-                    cmd->SetComputeConstantBuffer(1, m_UpscaleConstantBuffer.get());
-                    cmd->SetComputeTexture(0, m_TonemapTexture.get());
-                    // UAVはDispatch直後に解除されるため毎回バインドし直す
-                    cmd->SetComputeUnorderedAccessTexture(0, m_UpscaleTexture.get());
-                    cmd->Dispatch((upscaleOutputWidth + 7) / 8, (upscaleOutputHeight + 7) / 8, 1);
-                },
-            });
-
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "UpscaleRCAS",
-                .Reads = { m_UpscaleTexture.get() },
-                .Writes = { m_UpscaleSharpTexture.get() },
-                .Execute = [this, upscaleConstants, upscaleOutputWidth,
-                            upscaleOutputHeight](RHI::IRHICommandList* cmd)
-                {
-                    cmd->SetComputePipelineState(m_UpscaleRCASPipelineState.get());
-                    // RCASはLoadで整数座標を引くのでサンプラーは使わないが、シェーダーが
-                    // Samplers.hlsliを取り込んで宣言している以上バインドはしておく
-                    cmd->SetComputeSamplerSet(m_ScreenSpaceSamplers.get());
-                    cmd->UpdateBuffer(m_UpscaleConstantBuffer.get(), &upscaleConstants, sizeof(upscaleConstants));
-                    cmd->SetComputeConstantBuffer(1, m_UpscaleConstantBuffer.get());
-                    cmd->SetComputeTexture(0, m_UpscaleTexture.get());
-                    cmd->SetComputeUnorderedAccessTexture(0, m_UpscaleSharpTexture.get());
-                    cmd->Dispatch((upscaleOutputWidth + 7) / 8, (upscaleOutputHeight + 7) / 8, 1);
-                },
-            });
-        }
+        // --- ポストプロセスのパス群(段階6で Passes/PostProcessPasses へ移設) ---
+        // 【この位置で登録すること】依存が同点のときRenderGraphは最小登録番号を選ぶ。
+        // 登録順そのものが実行順の一部になっている
+        m_PostProcessPasses->Register(graph, frameContext, blackboard);
 
         // --- Present パス群(段階6で Passes/PresentPass へ移設) ---
         // 【この位置で登録すること】RenderGraph は依存が同点のとき最小登録番号を選ぶため、

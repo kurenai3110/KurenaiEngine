@@ -4,6 +4,8 @@
 
 #include <DirectXMath.h>
 
+#include "RHI/IRHICommandList.h"
+
 // フレームの先頭で確定し、グラフ登録の間ずっと変わらない値をまとめたスナップショット(段階6)。
 //
 // 【なぜスナップショットにするか】Render() は 6,800 行あり、パス群を別クラスへ出すと
@@ -41,5 +43,29 @@ namespace Kurenai::Rendering
         // **書き手と読み手が同じ格子を読むこと** ―― デバッグ表示が別の格子を読むと
         // A/B の比較結果そのものが嘘になる
         DirectX::XMUINT2 MegaLightsTileOffset{ 0u, 0u };
+
+        // 手動露出時にTonemap/Bloomが割り戻す倍率
+        float ManualExposureScale = 1.0f;
+
+        // 自動露出の測光値を上側で止めるための、構図に依存しない基準EV
+        float KeyReferenceEV100 = 0.0f;
+
+        // 主カメラの行列。JitteredProjはTAAのジッタを含む
+        DirectX::XMMATRIX ViewMatrix{};
+        DirectX::XMMATRIX JitteredProj{};
+        DirectX::XMMATRIX InvViewProj{};
+
+        // このフレームのTAAジッタ量[UV]
+        DirectX::XMFLOAT2 JitterUv{ 0.0f, 0.0f };
+
+        // 内部レンダー解像度のビューポート。
+        // **ラムダへは値で渡すこと** ―― 登録関数を抜けたあとにExecuteが走る
+        RHI::Viewport GBufferViewport{};
+
+        // このフレームの空が手続き空か(.ksceneのDDSではないか)
+        bool UsingProceduralSky = false;
+
+        // 大気遠近パスを今フレーム走らせるか
+        bool FogPassRuns = false;
     };
 }

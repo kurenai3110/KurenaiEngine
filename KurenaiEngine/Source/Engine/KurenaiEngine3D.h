@@ -82,6 +82,7 @@ namespace Kurenai::Passes
 {
     // Render()から切り出したパス群(段階6)。実体はPasses/*.hにあり、
     // そちらはこのヘッダをインクルードするため、ここでは前方宣言で止める
+    class PostProcessPasses;
     class PresentPass;
 }
 
@@ -130,6 +131,7 @@ namespace Kurenai
     public:
         // 切り出したパス群は、まだエンジンのprivate(PSO・定数バッファ・統計カウンタ)を
         // m_Engine越しに触る。所有権を群へ移し終えたらこのfriendは外す(段階6)
+        friend class Passes::PostProcessPasses;
         friend class Passes::PresentPass;
 
         // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
@@ -763,6 +765,7 @@ namespace Kurenai
         // まず登録コードだけを機械的に移し、リソースの所有権は後から群へ移す。
         // それまでの間、群はここのprivateをm_Engine越しに触る(下のfriend宣言)。
         // 不完全型のままにするため、デストラクタは.cpp側で定義する
+        std::unique_ptr<Passes::PostProcessPasses> m_PostProcessPasses;
         std::unique_ptr<Passes::PresentPass> m_PresentPass;
 
         // SetExtraImGuiCallbackで登録された追加のImGui描画(Tools/KurenaiShowEditor)。
