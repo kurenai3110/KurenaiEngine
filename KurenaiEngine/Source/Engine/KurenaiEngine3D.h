@@ -1110,33 +1110,15 @@ namespace Kurenai
         // 視錐台とHi-Zで判定し、生き残ったものだけの ExecuteIndirect 引数を詰める。
         // 深度プリパスとG-Bufferは、その引数でまとめて描く。
         //
-        // 【行き先をPSOごとに分ける】1回のExecuteIndirectで切り替えられるのは引数に
-        // 含めたルートパラメータだけで、PSOは切り替えられない。ミラーリングの有無と
-        // 深度プリパスの不透明/カットアウトはPSOが違うため区画を分け、1区画につき
-        // 1回ずつ発行する。
-        //
-        // 【プリパスとG-Bufferを同じ引数で描く理由】片方だけ間引くと絵が壊れる。
-        // プリパスが深度を書いたものをG-Bufferが描かないと、その画素は
-        // 「深度はあるのに色が無い」穴になる
-        // 出所は Passes/GeometryConstants.h(移行中の別名)
+        // 【区画の分け方と、その理由】Passes/GeometryConstants.h が持つ。
+        // ここに並ぶ7本は移行中の別名で、あちらの値を引くだけ。
         static constexpr uint32_t kModelCullRegionGBuffer = Passes::kModelCullRegionGBuffer;
-        // 出所は Passes/GeometryConstants.h(移行中の別名)
         static constexpr uint32_t kModelCullRegionGBufferMirrored = Passes::kModelCullRegionGBufferMirrored;
-        // 出所は Passes/GeometryConstants.h(移行中の別名)
         static constexpr uint32_t kModelCullRegionPrepassOpaque = Passes::kModelCullRegionPrepassOpaque;
-        // 出所は Passes/GeometryConstants.h(移行中の別名)
         static constexpr uint32_t kModelCullRegionPrepassOpaqueMirrored = Passes::kModelCullRegionPrepassOpaqueMirrored;
-        // 出所は Passes/GeometryConstants.h(移行中の別名)
         static constexpr uint32_t kModelCullRegionPrepassCutout = Passes::kModelCullRegionPrepassCutout;
-        // 出所は Passes/GeometryConstants.h(移行中の別名)
         static constexpr uint32_t kModelCullRegionPrepassCutoutMirrored = Passes::kModelCullRegionPrepassCutoutMirrored;
-        // 出所は Passes/GeometryConstants.h(移行中の別名)
         static constexpr uint32_t kModelCullRegionCount = Passes::kModelCullRegionCount;
-        // 引数バッファの先頭に置く「区画ごとの発行数」の領域。ExecuteIndirectの
-        // 件数バッファとしてそのまま渡す(1区画あたりuint1つ)。
-        //
-        // 【256バイトに切り上げる】後ろに続く引数配列の先頭を、定数バッファのGPUアドレスが
-        // 8バイト境界に載る位置から始めるため
         // 出所は Passes/GeometryConstants.h(移行中の別名)
         static constexpr uint32_t kModelCullArgsBaseOffset = Passes::kModelCullArgsBaseOffset;
         static_assert(

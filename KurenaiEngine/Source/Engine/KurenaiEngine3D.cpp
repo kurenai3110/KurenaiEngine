@@ -433,35 +433,8 @@ namespace Kurenai
         static_assert(offsetof(GPUSkyParameters, CloudSkyLight) == 96, "CloudSkyLight のレイアウトが変わっている");
         static_assert(sizeof(GPUSkyParameters) == 112, "GPUSkyParameters の総サイズが変わっている");
 
-        // 間接描画の行き先の区画。**PSOごとに1区画**で、1区画につき1回ExecuteIndirectする。
-        // 1回のExecuteIndirectで切り替えられるのは引数に含めたルートパラメータだけで、
-        // PSOは切り替えられないため、まとめられない。
-        //
-        // 深度プリパスとG-Bufferの両方をここで面倒を見るのは、**片方だけ間引くと絵が壊れる**
-        // ため。プリパスが深度を書いたものをG-Bufferが描かないと、その画素は
-        // 「深度はあるのに色が無い」穴になる(逆向き ―― プリパスが描かずG-Bufferが描く ――
-        // は早期Zが効かなくなるだけで絵は正しい)
-        enum ModelCullRegion : uint32_t
-        {
-            kModelCullRegionGBuffer = 0,
-            kModelCullRegionGBufferMirrored,
-            kModelCullRegionPrepassOpaque,
-            kModelCullRegionPrepassOpaqueMirrored,
-            kModelCullRegionPrepassCutout,
-            kModelCullRegionPrepassCutoutMirrored,
-            kModelCullRegionCount,
-        };
-
-        // 引数バッファの先頭に置く「区画ごとの発行数」の領域。ExecuteIndirectの
-        // 件数バッファとしてそのまま渡す(1区画あたりuint1つ)。
-        //
-        // 【256バイトに切り上げる】後ろに続く引数配列の先頭を、GPU仮想アドレスが
-        // 8バイト境界に載る位置から始めるため。24バイト刻みの配列は先頭さえ揃えば
-        // 以降もすべて8の倍数になる(24は8の倍数)
-        constexpr uint32_t kModelCullArgsBaseOffset = 256;
-        static_assert(
-            kModelCullArgsBaseOffset >= sizeof(uint32_t) * kModelCullRegionCount,
-            "区画ごとの発行数が引数配列の領域へはみ出している");
+        // 間接引数の刻みが8の倍数であること。区画の定義と kModelCullArgsBaseOffset は
+        // Passes/GeometryConstants.h が持つ(ここに在った写しは消した)。
         static_assert(
             (RHI::IRHICommandList::kDispatchMeshIndirectArgStride % 8) == 0,
             "引数の刻みが8の倍数でないと、2件目以降のGPU仮想アドレスが境界を割る");

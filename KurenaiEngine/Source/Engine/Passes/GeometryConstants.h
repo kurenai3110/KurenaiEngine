@@ -12,10 +12,10 @@
 // 【なぜ独立したヘッダーなのか】パスの登録側(Passes/GeometryPasses.cpp)と、
 // 定数バッファを作る側(KurenaiEngine3D.cpp)の**両方**が sizeof で使う。
 //
-// 【KurenaiEngine3D.cpp にも同じ名前の写しが残っている】区画番号と
-// kModelCullArgsBaseOffset は、あちらの無名名前空間にも同じ値で宣言されている
-// (段階6以前からの重複)。値が同じなのでどちらを引いても結果は変わらないが、
-// **片方だけ直すと静かに食い違う**。消すのは別の関心事なので手を付けていない。
+// 【区画番号と kModelCullArgsBaseOffset の唯一の出所】段階6以前は
+// KurenaiEngine3D.cpp の無名名前空間にも同じ値の写しがあり、片方だけ直すと
+// 静かに食い違う状態だった。ここへ寄せて写しは消してある。
+// KurenaiEngine3D 側にあるのは移行中の別名で、この値を引くだけ。
 //
 // 【static_assert が守るのはC++側だけ】**通すために期待値を書き換えないこと。**
 namespace Kurenai::Passes
@@ -23,6 +23,15 @@ namespace Kurenai::Passes
         // 増幅シェーダーが数え上げる先。uint×3 = [判定, 視錐台+コーンで間引き, オクルージョンで間引き]
         inline constexpr uint32_t kMeshletCullStatsCount = 3;
 
+        // 間接描画の行き先の区画。**PSOごとに1区画**で、1区画につき1回ExecuteIndirectする。
+        // 1回のExecuteIndirectで切り替えられるのは引数に含めたルートパラメータだけで、
+        // PSOは切り替えられないため、まとめられない。ミラーリングの有無と、深度プリパスの
+        // 不透明/カットアウトはPSOが違うので区画を分ける。
+        //
+        // 【プリパスとG-Bufferを同じ引数で描く理由】片方だけ間引くと絵が壊れる。
+        // プリパスが深度を書いたものをG-Bufferが描かないと、その画素は
+        // 「深度はあるのに色が無い」穴になる(逆向き ―― プリパスが描かずG-Bufferが描く ――
+        // は早期Zが効かなくなるだけで絵は正しい)
         enum : uint32_t
         {
             kModelCullRegionGBuffer = 0,
@@ -37,7 +46,8 @@ namespace Kurenai::Passes
         // 件数バッファとしてそのまま渡す(1区画あたりuint1つ)。
         //
         // 【256バイトに切り上げる】後ろに続く引数配列の先頭を、定数バッファのGPUアドレスが
-        // 8バイト境界に載る位置から始めるため
+        // 8バイト境界に載る位置から始めるため。24バイト刻みの配列は先頭さえ揃えば
+        // 以降もすべて8の倍数になる(24は8の倍数)
         inline constexpr uint32_t kModelCullArgsBaseOffset = 256;
         // [判定, 視錐台で間引き, オクルージョンで間引き, 生き残り] + 区画ごとの発行数。
         //
