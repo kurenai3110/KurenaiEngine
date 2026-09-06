@@ -23,6 +23,16 @@
 // 【段階6の途中である】いまはパス群を1つずつ切り出している最中なので、
 // フィールドは切り出した群が必要とするぶんだけ載っている。
 // 群を切り出すたびにここへ足していく。
+namespace Kurenai
+{
+    struct SunLighting;
+}
+
+namespace Kurenai::ShaderInterop
+{
+    struct FrameConstants;
+}
+
 namespace Kurenai::Rendering
 {
     struct RenderFrameContext
@@ -67,5 +77,15 @@ namespace Kurenai::Rendering
 
         // 大気遠近パスを今フレーム走らせるか
         bool FogPassRuns = false;
+
+        // 太陽・月・空の状態と、GPUへ送った FrameConstants。
+        // **どちらもRender()のローカルを指す。** graph.Execute()が終わるまで生きているので
+        // 登録中に読んでよいが、Executeラムダへ渡すときは必要な値だけを値で写すこと
+        const SunLighting* Sun = nullptr;
+        const ShaderInterop::FrameConstants* Constants = nullptr;
+
+        // 手続き空を今フレーム焼き直すか / 空の照度を積分し直すか
+        bool BakeSkyThisFrame = false;
+        bool SkyIntegrateThisFrame = false;
     };
 }

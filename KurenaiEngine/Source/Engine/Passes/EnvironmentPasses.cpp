@@ -1,0 +1,482 @@
+#include "../KurenaiEngine3D.h"
+
+#include <algorithm>
+#include <vector>
+
+#include "Core/Logger.h"
+#include "Core/RenderGraph.h"
+#include "EnvironmentPasses.h"
+#include "../Rendering/RenderBlackboard.h"
+#include "../Rendering/RenderFrameContext.h"
+#include "../Rendering/SunLighting.h"
+#include "../ShaderInterop/FrameConstants.h"
+
+namespace Kurenai::Passes
+{
+    namespace
+    {
+        // 濁り(タービディティ)からMie(エアロゾル)密度の倍率を求める。
+        //
+        // 【Preethamの定義をそのまま持ち込んではいけない】Preethamのタービディティは
+        // 「エアロゾルを含む全光学的厚さ / 分子だけの光学的厚さ」と定義されており、
+        // その定義で現在の既定値2.5を換算すると τ_Mie = 1.5 × τ_Rayleigh となる。
+        // Hillaireの標準大気の垂直Mie光学的厚さは 0.003996 × 1.2 = 0.0048、
+        // Rayleigh(550nm)は 0.013558 × 8 = 0.1085 なので、比は0.044(タービディティ換算で1.04)。
+        // つまり定義どおり換算するとエアロゾルが約34倍になり、空が白く霞んでHillaireを
+        // 使う意味そのものが消える。
+        //
+        // そこでここでのタービディティは**Preethamの定義とは別物**として扱い、
+        // 「既定値2.5をHillaireの標準大気とする相対的な濁り」と定義し直す。
+        // スライダーを上げれば霞み、下げれば澄むという操作の意味は保たれる
+        float ComputeAtmosphereMieDensityScale(float turbidity)
+        {
+            // この値でMie密度の倍率がちょうど1.0(=Hillaireの標準大気)になる
+            constexpr float kReferenceTurbidity = 2.5f;
+            return std::max(turbidity, 0.0f) / kReferenceTurbidity;
+        }
+    }
+
+    void EnvironmentPasses::Register(
+        Core::RenderGraph& graph,
+        const Rendering::RenderFrameContext& frame,
+        const Rendering::RenderBlackboard& bb)
+    {
+        // 【フレームの値をここで写し取る】以下はRender()から機械的に移した登録コードなので、
+        // 参照している名前を変えずに済むよう同じ名前で受け直す。
+        //
+        // sunLighting と constants は Render() のローカルを指しており、
+        // graph.Execute() が終わるまで生きている。ここでの参照はその実体を指す
+        const SunLighting& sunLighting = *frame.Sun;
+        const ShaderInterop::FrameConstants& constants = *frame.Constants;
+        RHI::IRHITexture* const skyTexture = bb.SkyTexture;
+        const float effectiveExposure = frame.EffectiveExposure;
+        const bool bakeSkyThisFrame = frame.BakeSkyThisFrame;
+        const bool skyIntegrateThisFrame = frame.SkyIntegrateThisFrame;
+
+        // --- 大気散乱のLUTのベイクパス ---
+        //
+        //     AtmosphereLUTBake: Transmittance → MultiScattering の順。MultiScatteringは
+        //     TransmittanceをSRVで読むため順序が意味を持つ(BRDF積分LUTの2パス構成と同じ形)。
+        //     どちらも大気パラメータだけの関数なので、濁りが変わったときだけ焼き直す。
+        //
+        //     SkyViewBake: 空そのもの。太陽が動くと変わるので毎フレーム焼く。
+        //
+        //     【この2つは必ずSkyIntegrateより前に「登録」すること】RenderGraphの依存解決は
+        //     登録順に1回だけ舐める前方走査で、あるパスのReadsは**自分より前に登録された
+        //     書き手**しか見つけられない(RenderGraph::ResolveExecutionOrderのlastWriter)。
+        //     つまりグラフはパスを後ろへ遅らせることはできても前へ動かすことはできない。
+        //     この2つをSkyIntegrateより後ろに置くと、SkyIntegrateが.Reads = { m_Engine.m_SkyViewLUT }を
+        //     宣言していても辺が張られず、**未初期化のLUTを積分してしまう**。
+        //     太陽が静止したシーンではSkyIntegrateは起動直後の1回しか走らないため、
+        //     壊れた天頂輝度がそのまま最後まで残る(実測: 積分値が5.29ではなく1.58になり、
+        //     空が3.3倍明るくなって青が白く飛んでいた)。
+        //
+        //     【定数バッファは3つのエントリポイント共通】濁りはMieの密度としてTransmittanceにも
+        //     MultiScatteringにも効くため、AtmosphereConstantsを3者で共有している
+        const float atmosphereMieDensityScale = ComputeAtmosphereMieDensityScale(m_Engine.m_SkySettings.Turbidity);
+        const auto updateAtmosphereConstants = [this, &sunLighting, atmosphereMieDensityScale]
+            (RHI::IRHICommandList* cmd)
+        {
+            AtmosphereConstants atmosphereConstants{};
+            atmosphereConstants.SunDirection = {
+                sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
+            };
+            atmosphereConstants.Params0 = { atmosphereMieDensityScale, 0.0f, 0.0f, 0.0f };
+            cmd->UpdateBuffer(m_Engine.m_AtmosphereConstantBuffer.get(), &atmosphereConstants, sizeof(atmosphereConstants));
+            cmd->SetComputeConstantBuffer(0, m_Engine.m_AtmosphereConstantBuffer.get());
+        };
+
+        if (m_Engine.m_AtmosphereLUTBakedTurbidity != m_Engine.m_SkySettings.Turbidity &&
+            m_Engine.m_TransmittancePipelineState && m_Engine.m_MultiScatteringPipelineState)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "AtmosphereLUTBake",
+                .Writes = { m_Engine.m_TransmittanceLUT.get(), m_Engine.m_MultiScatteringLUT.get() },
+                .Execute = [this, updateAtmosphereConstants](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetComputePipelineState(m_Engine.m_TransmittancePipelineState.get());
+                    updateAtmosphereConstants(cmd);
+                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_TransmittanceLUT.get(), 0);
+                    cmd->Dispatch((KurenaiEngine3D::kTransmittanceLUTWidth + 7) / 8, (KurenaiEngine3D::kTransmittanceLUTHeight + 7) / 8, 1);
+
+                    // UAVはDispatch直後に自動で解除されるため張り直す。
+                    // ここでTransmittanceをSRV(t0)として読むので、上のDispatchより後でなければならない
+                    cmd->SetComputePipelineState(m_Engine.m_MultiScatteringPipelineState.get());
+                    updateAtmosphereConstants(cmd);
+                    cmd->SetComputeTexture(0, m_Engine.m_TransmittanceLUT.get());
+                    cmd->SetComputeSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_MultiScatteringLUT.get(), 0);
+                    const uint32_t groups = (KurenaiEngine3D::kMultiScatteringLUTSize + 7) / 8;
+                    cmd->Dispatch(groups, groups, 1);
+                },
+            });
+            m_Engine.m_AtmosphereLUTBakedTurbidity = m_Engine.m_SkySettings.Turbidity;
+        }
+
+        // SkyView LUTを焼き直すかどうか。CSSkyViewの入力は太陽の向きと濁りだけで、
+        // 視点位置はkSkyViewHeightKm固定(カメラ非依存)なので、この2つが動かなければ
+        // まったく同じ内容を焼き直すことになる。実測1.15〜1.53ms/フレームがまるごと無駄だった。
+        // 濁りは上のAtmosphereLUTBakeとまったく同じ条件で判定するため、濁りが動いたフレームでは
+        // Transmittance/MultiScatteringとSkyViewが同じフレームで焼き直され、実行順序は
+        // Reads/Writesの依存からレンダーグラフが決める
+        bool bakeSkyViewThisFrame = m_Engine.m_SkyViewBakedTurbidity != m_Engine.m_SkySettings.Turbidity;
+        if (!bakeSkyViewThisFrame)
+        {
+            const DirectX::XMVECTOR current = DirectX::XMLoadFloat3(&sunLighting.SunPosition);
+            const DirectX::XMVECTOR baked = DirectX::XMLoadFloat3(&m_Engine.m_SkyViewBakedSunPosition);
+            const float cosAngle = DirectX::XMVectorGetX(DirectX::XMVector3Dot(current, baked));
+            bakeSkyViewThisFrame =
+                cosAngle < std::cos(DirectX::XMConvertToRadians(KurenaiEngine3D::kSkyViewRebakeAngleDegrees));
+        }
+
+        if (m_Engine.m_SkyViewPipelineState && bakeSkyViewThisFrame)
+        {
+            m_Engine.m_SkyViewBakedSunPosition = sunLighting.SunPosition;
+            m_Engine.m_SkyViewBakedTurbidity = m_Engine.m_SkySettings.Turbidity;
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "SkyViewBake",
+                .Reads = { m_Engine.m_TransmittanceLUT.get(), m_Engine.m_MultiScatteringLUT.get() },
+                .Writes = { m_Engine.m_SkyViewLUT.get() },
+                .Execute = [this, updateAtmosphereConstants](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetComputePipelineState(m_Engine.m_SkyViewPipelineState.get());
+                    updateAtmosphereConstants(cmd);
+                    cmd->SetComputeTexture(0, m_Engine.m_TransmittanceLUT.get());
+                    cmd->SetComputeTexture(1, m_Engine.m_MultiScatteringLUT.get());
+                    cmd->SetComputeSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_SkyViewLUT.get(), 0);
+                    cmd->Dispatch((KurenaiEngine3D::kSkyViewLUTWidth + 7) / 8, (KurenaiEngine3D::kSkyViewLUTHeight + 7) / 8, 1);
+                },
+            });
+        }
+
+        // --- 空パラメータの積分パス: 色味の決定とθ64×φ256=16,384サンプルの照度正規化積分を
+        //     GPUで行い、結果(ティント4本+正規化済みの天頂輝度)をm_SkyParametersBufferへ書く。
+        //     **CPU側で計算してはいけない**(Sky.hlsli側の式と二重実装になる)。
+        //     このバッファをSkyGenerate/DeferredLighting/SSRの3者が読むため、下のSkyGenerateパスより
+        //     必ず先に実行する必要がある。実行条件はbakeSkyThisFrameではなくskyIntegrateThisFrame
+        //     (手続き空が無効なシーンでも初回の1回だけは走らせ、未初期化状態を解消する。
+        //     理由はm_SkyParametersBuffer作成箇所とskyIntegrateThisFrame宣言のコメント参照) ---
+        if (skyIntegrateThisFrame)
+        {
+            // 第2段(P18: 雲込みの空の照度)へ渡す値。**FrameConstants(constants)から
+            // そのまま複製する**——別々に組み立てると、背景に見えている雲と大気遠近が
+            // 想定している雲が食い違いうる。ここで値を作り、ラムダへは値渡しで捕まえる
+            SkyIntegrateConstants integrateConstants{};
+            integrateConstants.SunDirection = {
+                sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
+            };
+            integrateConstants.IntegrateParams = {
+                sunLighting.SkyIlluminanceLux, effectiveExposure, m_Engine.m_SkySettings.Turbidity, m_Engine.m_SkySettings.Saturation
+            };
+            integrateConstants.CloudParams0 = constants.CloudParams0;
+            integrateConstants.CloudParams1 = constants.CloudParams1;
+            integrateConstants.CloudParams2 = constants.CloudParams2;
+            integrateConstants.CloudParams3 = constants.CloudParams3;
+            integrateConstants.FogParams0 = constants.FogParams0;
+            // レイの起点はカメラ。wはSkyParams.zと同じ太陽照度/空照度比
+            // (雲の明るさを太陽照度基準にするためにEvaluateCloudLayerが使う)
+            integrateConstants.ViewerAndSunRatio = {
+                constants.CameraPosition.x, constants.CameraPosition.y, constants.CameraPosition.z,
+                constants.SkyParams.z
+            };
+
+            // 雲の3Dノイズとウェザーマップ(P18の第2段)。
+            // **Readsへ入れることが順序の保証そのもの**——CloudNoiseBakeパスはこのパスより
+            // 後に登録されるが、レンダーグラフのKahn法が依存を見て焼き込みを先へ回す。
+            // 宣言を外すと初回フレームで未初期化のノイズを読み、雲込みの照度が意味の無い値になる。
+            //
+            // 【テクスチャの作成に失敗していた場合】バインドを外して縮退させる。SRVが
+            // 張られていなければサンプルは0を返し、ウェザーマップが0なら密度も0、つまり
+            // 「雲が無い」と積分される。結果CloudSkyLightは(1,1,1)になり、大気遠近は
+            // P18より前とまったく同じ振る舞いへ戻る。作成失敗そのものはInitialize側で
+            // 既にエラーを出しているので、ここでは1度だけ「P18が効いていない」ことを残す
+            const bool cloudNoiseReady = m_Engine.m_CloudShapeNoiseTexture && m_Engine.m_CloudDetailNoiseTexture
+                                         && m_Engine.m_CloudWeatherNoiseTexture;
+            if (!cloudNoiseReady && !m_Engine.m_SkyIntegrateCloudMissingLogged)
+            {
+                Core::Logger::Error("KurenaiEngine3D",
+                    "雲のノイズテクスチャが無いためSkyIntegrateへ束ねられません"
+                    "(大気遠近が曇り空へ追従せず、被覆率を上げても遠景に晴天の青い散乱光が残ります)");
+                m_Engine.m_SkyIntegrateCloudMissingLogged = true;
+            }
+
+            std::vector<RHI::IRHITexture*> integrateReads = { m_Engine.m_SkyViewLUT.get() };
+            if (cloudNoiseReady)
+            {
+                integrateReads.push_back(m_Engine.m_CloudShapeNoiseTexture.get());
+                integrateReads.push_back(m_Engine.m_CloudDetailNoiseTexture.get());
+                integrateReads.push_back(m_Engine.m_CloudWeatherNoiseTexture.get());
+            }
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "SkyIntegrate",
+                // 日中の空はSkyView LUTを引くため、このパスもLUTを読む。
+                // これによりレンダーグラフがSkyViewBakeより後へ自動で並べてくれる。
+                // 雲の3枚(P18)も同じ仕組みでCloudNoiseBakeより後へ並ぶ
+                .Reads = integrateReads,
+                .BufferWrites = { m_Engine.m_SkyParametersBuffer.get() },
+                .Execute = [this, integrateConstants, cloudNoiseReady](RHI::IRHICommandList* cmd)
+                {
+                    cmd->UpdateBuffer(m_Engine.m_SkyIntegrateConstantBuffer.get(), &integrateConstants, sizeof(integrateConstants));
+
+                    cmd->SetComputePipelineState(m_Engine.m_SkyIntegratePipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_Engine.m_SkyIntegrateConstantBuffer.get());
+                    // SkyView LUT(t0)とサンプラー(s1 ColorSampler)。日中の空はこのLUTから
+                    // 引くため、積分側も同じLUTを読む必要がある
+                    cmd->SetComputeTexture(0, m_Engine.m_SkyViewLUT.get());
+                    if (cloudNoiseReady)
+                    {
+                        // 雲(P18)。形状t1・ディテールt2・ウェザーマップt3。SkyIntegrate.hlslの
+                        // KURENAI_CLOUD_*_REGISTERと**同じ番号**であること
+                        cmd->SetComputeTexture(1, m_Engine.m_CloudShapeNoiseTexture.get());
+                        cmd->SetComputeTexture(2, m_Engine.m_CloudDetailNoiseTexture.get());
+                        cmd->SetComputeTexture(3, m_Engine.m_CloudWeatherNoiseTexture.get());
+                    }
+                    // s3 VolumeSamplerがLinear+Wrapで入っている(Samplers.hlsliの役割表参照)。
+                    // 雲の3Dノイズとウェザーマップはこれで引く
+                    cmd->SetComputeSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_SkyParametersBuffer.get());
+                    // 1グループ×256スレッド固定(SkyIntegrate.hlsl参照)
+                    cmd->Dispatch(1, 1, 1);
+                },
+            });
+            m_Engine.m_SkyParametersBufferInitialized = true;
+        }
+
+        // --- 手続き空の生成パス: Perez分布をGPUで評価してキューブマップを焼く。
+        //     太陽が動くと空の輝度分布の形も変わるため、オフラインDDSと違い焼き直しが要る
+        //     (詳細はSkyGenerate.hlsl冒頭)。焼き直しの要否・雲の平均透過率のキャッシュ・
+        //     m_Engine.m_SkyBakeDirty等のフラグ更新はすべて上のbakeSkyThisFrameブロックで済ませてあるため、
+        //     ここではそのキャッシュ(m_Engine.m_ActiveCloudTransmittance)と、直前のSkyIntegrateパスが
+        //     書いたm_SkyParametersBufferを使ってパスを登録するだけでよい ---
+        if (bakeSkyThisFrame)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "SkyGenerate",
+                // IBLキューブへ焼く空もSkyView LUT経由なので読み手に加わる
+                .Reads = { m_Engine.m_SkyViewLUT.get() },
+                .Writes = { m_Engine.m_ProceduralSkyTexture.get() },
+                .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
+                .Execute = [this, &sunLighting](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetComputePipelineState(m_Engine.m_SkyGeneratePipelineState.get());
+                    cmd->SetComputeShaderResourceBuffer(0, m_Engine.m_SkyParametersBuffer.get());
+                    // SkyView LUT(t1)とサンプラー(s1 ColorSampler)。**サンプラーのバインドを
+                    // 外してはいけない** ―― LUTを線形補間で引くため、このパスにもサンプラーが要る
+                    cmd->SetComputeTexture(1, m_Engine.m_SkyViewLUT.get());
+                    cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+                    for (uint32_t face = 0; face < KurenaiEngine3D::kCubeFaceCount; ++face)
+                    {
+                        SkyBakeConstants skyConstants{};
+                        skyConstants.Face = face;
+                        // 雲(判断B)。SkyParametersBuffer側の天頂輝度は雲を考慮しない晴天の値の
+                        // ままで、キューブへ焼く値にだけm_ActiveCloudTransmittance(被覆率が
+                        // 変わらない限り1.0)を掛ける。理由はm_ActiveCloudTransmittanceの
+                        // 代入元(上のbakeSkyThisFrameブロック)のコメント参照
+                        skyConstants.CloudTransmittance = m_Engine.m_ActiveCloudTransmittance;
+                        skyConstants.SunDirection = {
+                            sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
+                        };
+                        cmd->UpdateBuffer(m_Engine.m_SkyBakeConstantBuffer.get(), &skyConstants, sizeof(skyConstants));
+                        cmd->SetComputeConstantBuffer(0, m_Engine.m_SkyBakeConstantBuffer.get());
+                        cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_ProceduralSkyTexture.get(), face, 0);
+                        cmd->Dispatch((KurenaiEngine3D::kProceduralSkySize + 7) / 8, (KurenaiEngine3D::kProceduralSkySize + 7) / 8, 1);
+                    }
+                },
+            });
+        }
+
+        // --- BRDF積分LUTのベイクパス: (NdotV, ラフネス)の2Dテーブルで、スカイボックスにも
+        //     太陽の位置にも一切依存しないため起動後に一度だけ焼く。
+        //     プリフィルタ済み鏡面(下記)が空の変化へ追従して焼き直されるようになっても、
+        //     こちらが巻き込まれないよう別パス・別フラグに分離してある(m_Engine.m_BRDFLUTBaked参照) ---
+        if (!m_Engine.m_BRDFLUTBaked)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "BRDFLUTBake",
+                // 2パス構成のためスクラッチも書き込み対象として挙げる(RenderGraphが
+                // パス内の依存を追えるように)。中身の説明はBRDFLUT.hlsl参照
+                .Writes = { m_Engine.m_BRDFLUTTexture.get(), m_Engine.m_BRDFLUTScratchTexture.get() },
+                .Execute = [this](RHI::IRHICommandList* cmd)
+                {
+                    // パス1: (A, B)をスクラッチへ焼く
+                    cmd->SetComputePipelineState(m_Engine.m_BRDFLUTPipelineState.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_BRDFLUTScratchTexture.get(), 0);
+                    cmd->Dispatch((KurenaiEngine3D::kIBLBRDFLUTSize + 7) / 8, (KurenaiEngine3D::kIBLBRDFLUTSize + 7) / 8, 1);
+
+                    // パス2: スクラッチをSRVで読み、Eavgを足した float4(A, B, Eavg, 0) を最終LUTへ。
+                    // UAVはDispatch直後に自動で解除されるため、ここで張り直す必要がある
+                    // (IRHICommandList.hのバインド寿命の説明を参照)
+                    cmd->SetComputePipelineState(m_Engine.m_BRDFLUTCombinePipelineState.get());
+                    cmd->SetComputeTexture(0, m_Engine.m_BRDFLUTScratchTexture.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_BRDFLUTTexture.get(), 0);
+                    cmd->Dispatch((KurenaiEngine3D::kIBLBRDFLUTSize + 7) / 8, (KurenaiEngine3D::kIBLBRDFLUTSize + 7) / 8, 1);
+                },
+            });
+            m_Engine.m_BRDFLUTBaked = true;
+        }
+
+        // --- 雲の3Dノイズのベイクパス: 形状(128^3)とディテール(32^3)を起動後に一度だけ焼く。
+        //     カメラにも太陽にも空の状態にも依存しない純粋な手続き生成なので、BRDF積分LUTと
+        //     まったく同じ理由で焼き直さない。2枚は互いに独立なので1パスの中で連続して
+        //     ディスパッチしてよい(SRVとして読み合う関係が無く、BRDFLUTの2パス構成のような
+        //     中間バッファも要らない) ---
+        if (!m_Engine.m_CloudNoiseBaked && m_Engine.m_CloudShapeNoisePipelineState && m_Engine.m_CloudDetailNoisePipelineState
+            && m_Engine.m_CloudWeatherNoisePipelineState)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "CloudNoiseBake",
+                .Writes = { m_Engine.m_CloudShapeNoiseTexture.get(), m_Engine.m_CloudDetailNoiseTexture.get(),
+                            m_Engine.m_CloudWeatherNoiseTexture.get() },
+                .Execute = [this](RHI::IRHICommandList* cmd)
+                {
+                    // スレッドグループは4x4x4。3次元なのでグループあたり64スレッドで、
+                    // 2次元パスの8x8(=64)と同じ粒度になる
+                    constexpr uint32_t kGroupSize = 4;
+
+                    cmd->SetComputePipelineState(m_Engine.m_CloudShapeNoisePipelineState.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_CloudShapeNoiseTexture.get(), 0);
+                    const uint32_t shapeGroups = (KurenaiEngine3D::kCloudShapeNoiseSize + kGroupSize - 1) / kGroupSize;
+                    cmd->Dispatch(shapeGroups, shapeGroups, shapeGroups);
+
+                    // UAVはDispatch直後に自動で解除されるため張り直す
+                    // (IRHICommandList.hのバインド寿命の説明を参照)
+                    cmd->SetComputePipelineState(m_Engine.m_CloudDetailNoisePipelineState.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_CloudDetailNoiseTexture.get(), 0);
+                    const uint32_t detailGroups = (KurenaiEngine3D::kCloudDetailNoiseSize + kGroupSize - 1) / kGroupSize;
+                    cmd->Dispatch(detailGroups, detailGroups, detailGroups);
+
+                    // ウェザーマップ(H3)は2Dなのでスレッドグループが8x8(=64。上の4x4x4と同じ粒度)。
+                    // 4096^2 = 1,678万テクセルを一度だけ焼く
+                    constexpr uint32_t kWeatherGroupSize = 8;
+                    cmd->SetComputePipelineState(m_Engine.m_CloudWeatherNoisePipelineState.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_CloudWeatherNoiseTexture.get(), 0);
+                    const uint32_t weatherGroups =
+                        (KurenaiEngine3D::kCloudWeatherNoiseSize + kWeatherGroupSize - 1) / kWeatherGroupSize;
+                    cmd->Dispatch(weatherGroups, weatherGroups, 1);
+                },
+            });
+            m_Engine.m_CloudNoiseBaked = true;
+        }
+
+        // --- プリフィルタ済み鏡面の畳み込みパス: スカイボックスを入力に、ミップごとに異なる
+        //     ラフネスで畳み込む(面×ミップの組み合わせごとに1回ずつディスパッチ) ---
+        if (!m_Engine.m_IBLBaked)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "IBLPrefilter",
+                .Reads = { skyTexture },
+                .Writes = { m_Engine.m_PrefilteredEnvTexture.get() },
+                .Execute = [this, skyTexture](RHI::IRHICommandList* cmd)
+                {
+                    cmd->SetComputePipelineState(m_Engine.m_PrefilterPipelineState.get());
+                    cmd->SetComputeTexture(0, skyTexture);
+                    cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+                    for (uint32_t mip = 0; mip < KurenaiEngine3D::kIBLPrefilterMipLevels; ++mip)
+                    {
+                        const uint32_t mipSize = std::max(1u, KurenaiEngine3D::kIBLPrefilterBaseSize >> mip);
+                        const float roughness = static_cast<float>(mip) / static_cast<float>(KurenaiEngine3D::kIBLPrefilterMipLevels - 1);
+                        for (uint32_t face = 0; face < KurenaiEngine3D::kCubeFaceCount; ++face)
+                        {
+                            IBLFaceConstants faceConstants{};
+                            faceConstants.Face = face;
+                            faceConstants.Roughness = roughness;
+                            cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                            cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
+                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_PrefilteredEnvTexture.get(), face, mip);
+                            cmd->Dispatch((mipSize + 7) / 8, (mipSize + 7) / 8, 1);
+                        }
+                    }
+                },
+            });
+            m_Engine.m_IBLBaked = true;
+        }
+
+        // --- 専用の拡散イラディアンスマップ(検証用に残している経路) ---
+        // 既定の描画経路はプリフィルタ済み鏡面の最終ミップ(roughness=1)である。CSPrefilterは
+        // V=R=Nを仮定しているためroughness=1のGGXはコサイン畳み込みへ厳密に退化し、専用マップと
+        // 同じE(N)/πを与える(14.10節。White Furnace Testで画素一致を確認済み)。そのため通常の
+        // 描画では1テクセルあたり約15,876サンプル(全体で約9,750万サンプル)のCSIrradianceを
+        // 一切実行しない。この畳み込み処理自体はいつでも検証できるよう残してあり、ImGuiの
+        // 「Use Dedicated Irradiance Map」トグルか、Render Targetsでイラディアンス表示を選んだ
+        // ときだけ焼く。RenderGraphがReads/Writesから順序付けるため、トグルを入れたその同じ
+        // フレームでLightingパスより先に実行される
+        const bool needIrradianceBake =
+            m_Engine.m_IBLSettings.UseDedicatedIrradiance || m_Engine.m_DebugViewSettings.View == DebugView::IBLIrradiance;
+        if (needIrradianceBake && !m_Engine.m_IBLIrradianceBaked)
+        {
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "IBLIrradianceBake",
+                .Reads = { skyTexture },
+                .Writes = { m_Engine.m_IrradianceTexture.get() },
+                .Execute = [this, skyTexture](RHI::IRHICommandList* cmd)
+                {
+                    // 拡散イラディアンス(本物のTextureCube、32x32x6面)。HLSLはリソースを動的に
+                    // スライス選択できないため、面ごとに1回ずつディスパッチする。
+                    //
+                    // m_Engine.m_IBLSettings.UseSHIrradianceでCSIrradiance(総当たり積分、約9,750万
+                    // サンプル)とSH L2経路(CSProjectSH→CSProjectSHFinal→CSEvaluateSH、
+                    // 射影は24,576テクセルを1回ずつ読むだけ)を切り替えられる。
+                    // 出力(m_Engine.m_IrradianceTexture)の形・規約はどちらの経路でも完全に同一
+                    if (m_Engine.m_IBLSettings.UseSHIrradiance)
+                    {
+                        IBLFaceConstants shConstants{};
+                        shConstants.SHProjectionSize = static_cast<float>(KurenaiEngine3D::kSHProjectionSize);
+                        shConstants.SHWindowLambda = m_Engine.m_IBLSettings.SHWindowLambda;
+
+                        // --- 1. 射影: ソースキューブ全体を1回だけ読んで9個の係数(RGB)へ集約する ---
+                        cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &shConstants, sizeof(shConstants));
+                        cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
+                        cmd->SetComputePipelineState(m_Engine.m_ProjectSHPipelineState.get());
+                        cmd->SetComputeTexture(0, skyTexture);
+                        cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+                        cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_SHPartialSumsBuffer.get());
+                        const uint32_t groupsPerSide = (KurenaiEngine3D::kSHProjectionSize + 7) / 8;
+                        cmd->Dispatch(groupsPerSide, groupsPerSide, KurenaiEngine3D::kCubeFaceCount);
+
+                        // --- 2. 最終合算: 全グループぶんの部分和を1ディスパッチでまとめる ---
+                        // (SHProjectionSizeはCSProjectSHと同じ値でなければグループ番号の対応がずれる)
+                        cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &shConstants, sizeof(shConstants));
+                        cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
+                        cmd->SetComputePipelineState(m_Engine.m_ProjectSHFinalPipelineState.get());
+                        cmd->SetComputeShaderResourceBuffer(1, m_Engine.m_SHPartialSumsBuffer.get());
+                        cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_SHCoefficientsBuffer.get());
+                        cmd->Dispatch(1, 1, 1);
+
+                        // --- 3. 評価: 9個の係数から出力テクセルごとのirradianceを求める ---
+                        cmd->SetComputePipelineState(m_Engine.m_EvaluateSHPipelineState.get());
+                        cmd->SetComputeShaderResourceBuffer(1, m_Engine.m_SHCoefficientsBuffer.get());
+                        for (uint32_t face = 0; face < KurenaiEngine3D::kCubeFaceCount; ++face)
+                        {
+                            IBLFaceConstants faceConstants{};
+                            faceConstants.Face = face;
+                            faceConstants.SHWindowLambda = m_Engine.m_IBLSettings.SHWindowLambda;
+                            cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                            cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
+                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_IrradianceTexture.get(), face, 0);
+                            cmd->Dispatch((KurenaiEngine3D::kIBLIrradianceSize + 7) / 8, (KurenaiEngine3D::kIBLIrradianceSize + 7) / 8, 1);
+                        }
+                    }
+                    else
+                    {
+                        cmd->SetComputePipelineState(m_Engine.m_IrradiancePipelineState.get());
+                        cmd->SetComputeTexture(0, skyTexture);
+                        cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+                        for (uint32_t face = 0; face < KurenaiEngine3D::kCubeFaceCount; ++face)
+                        {
+                            IBLFaceConstants faceConstants{};
+                            faceConstants.Face = face;
+                            cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
+                            cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
+                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_IrradianceTexture.get(), face, 0);
+                            cmd->Dispatch((KurenaiEngine3D::kIBLIrradianceSize + 7) / 8, (KurenaiEngine3D::kIBLIrradianceSize + 7) / 8, 1);
+                        }
+                    }
+                },
+            });
+            m_Engine.m_IBLIrradianceBaked = true;
+            Core::Logger::Info("KurenaiEngine3D", "検証用の拡散イラディアンスマップを焼きました(通常の描画経路では使用しません)");
+        }
+    }
+}
