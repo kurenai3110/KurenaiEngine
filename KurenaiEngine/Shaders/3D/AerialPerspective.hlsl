@@ -2,10 +2,10 @@
 //
 // 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
 // Lightingパスの中に入れなかったのは次の2点が実コードの制約として存在するため:
-//   1. SSR(Shaders/3D/SSR.hlsl)はm_SceneColorを「反射先の環境色」としてそのまま読む(t0)。
+//   1. SSR(Shaders/3D/SSR.hlsl)はRenderTargets::SceneColorを「反射先の環境色」としてそのまま読む(t0)。
 //      Lightingの中でフォグを掛けてしまうとSSRがフォグ済みの色を反射に使い、
 //      画面上でフォグが二重に(直接見えている分+反射に映った分)乗ってしまう
-//   2. 半透明パス(Transparent.hlsl)はLightingパスの後にm_SceneColorへ直接描き足す。
+//   2. 半透明パス(Transparent.hlsl)はLightingパスの後にRenderTargets::SceneColorへ直接描き足す。
 //      Lighting内でフォグを掛けるとその後に描かれる半透明サーフェスだけフォグを免れてしまう
 // TAAより前に置くのは、フォグが深度から決まる純関数で時間方向に揺れないため
 // (TAA自身が時間方向のノイズを均す側に回れる。逆にTAAの後ろへ置くと、フォグが作る
