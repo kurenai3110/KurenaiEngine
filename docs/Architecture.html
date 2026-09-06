@@ -4027,7 +4027,7 @@ TAAが無効なときはCPU側が<code>Sharpness = 0</code>を渡し、この分
 </p>
 <h3>23.8 履歴のピンポンとリセット条件</h3>
 <p>
-読みながら同じテクスチャへ書けないため、<code>m_TAAHistory[2]</code>を毎フレーム入れ替える
+読みながら同じテクスチャへ書けないため、<code>RenderTargets::TAAHistory[2]</code>を毎フレーム入れ替える
 (<code>m_TAAHistoryIndex</code>が今フレームの書き込み先)。バッファ精度を<code>Legacy8bit</code>に
 落としても<strong>履歴は常にfp16のまま</strong>にしている。履歴は何十フレームぶんもの蓄積結果であり、
 ここを8bitにすると量子化誤差が積み上がってバンディングになるため。
@@ -4058,7 +4058,7 @@ TAAが無効なときはCPU側が<code>Sharpness = 0</code>を渡し、この分
 <p>
 <strong>WAR(Write-after-Read)の辺は張られない。</strong>「あるパスが読んでいるテクスチャを、
 後から登録した別パスが書き潰す」形は保護されない。現在の構成はその形にならないが、
-<code>hdrSceneColor</code>をTAA出力へ差し替えたあとで別パスが<code>m_SceneColor</code>へ
+<code>hdrSceneColor</code>をTAA出力へ差し替えたあとで別パスが<code>RenderTargets::SceneColor</code>へ
 書き足すような変更を加えると静かに壊れる。
 </p>
 <p>
@@ -6517,7 +6517,7 @@ SGモデルも「<code>SO</code>は立体角比であってBRDF重み付き積�
 <li><strong>大気遠近より後</strong> &mdash;&mdash; 機体は深度を書かないため、先に描くと
 <code>AerialPerspective</code>が「背後の空の距離」で霞を掛けてしまい、光点がwashoutする</li>
 <li><strong>TAAより前</strong> &mdash;&mdash; RenderGraphが<code>taaInputColor</code>の
-Read-after-Write依存で自動的に順序付ける。TAAの後(=<code>m_TAAHistory</code>へ直接加算)にすると
+Read-after-Write依存で自動的に順序付ける。TAAの後(=<code>RenderTargets::TAAHistory</code>へ直接加算)にすると
 履歴を汚し、次フレーム以降に尾を引く</li>
 </ul>
 
