@@ -27,6 +27,13 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        const uint32_t renderWidth = frame.RenderWidth;
+        const uint32_t renderHeight = frame.RenderHeight;
+        RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
+        RHI::IRHIBuffer* const objectConstantBuffer = frame.ObjectConstantBuffer;
+        RHI::IRHISamplerSet* const materialSamplers = frame.MaterialSamplers;
+        RHI::IRHISamplerSet* const screenSpaceSamplers = frame.ScreenSpaceSamplers;
+
         // 【フレームの値をここで写し取る】以下はRender()から機械的に移した登録コードなので、
         // 参照している名前を変えずに済むよう同じ名前で受け直す。
         //
@@ -68,8 +75,7 @@ namespace Kurenai::Passes
                 // m_DroneBufferはこのパス末尾でドローンショーの機体を描き足すために読む
                 // (実際のバインドはExecute内)
                 .BufferReads = { m_Engine.m_LightBuffer.get(), m_Engine.m_SkyParametersBuffer.get(), m_Engine.m_DroneBuffer.get() },
-                .Execute = [this, &constants, planarReflectionViewport, reflectedViewProj, reflectMatrix,
-                            waterPlaneY, viewMatrix, jitteredProj, effectiveExposure](RHI::IRHICommandList* cmd)
+                .Execute = [this, &constants, planarReflectionViewport, reflectedViewProj, reflectMatrix, waterPlaneY, viewMatrix, jitteredProj, effectiveExposure, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     // captureProbeFaceとまったく同じ作法(constants.ViewProj/CameraPosition/
                     // PrevViewProj/TAAParams/PlanarReflectionPlaneだけをこのパス用に差し替える)。
@@ -104,7 +110,7 @@ namespace Kurenai::Passes
 
                     cmd->SetPipelineState(m_Engine.m_PlanarReflectionPipelineState.get());
                     cmd->SetConstantBuffer(0, m_Engine.m_PlanarReflectionConstantBuffer.get());
-                    cmd->SetSamplerSet(m_Engine.m_MaterialSamplers.get());
+                    cmd->SetSamplerSet(materialSamplers);
 
                     // captureProbeFaceと同じ順・同じレジスタでバインドする(PlanarReflection.hlsl参照)
                     cmd->SetTexture(4, m_Engine.m_ShadowCascadeArray.get());
@@ -132,7 +138,7 @@ namespace Kurenai::Passes
                         }
                         cmd->SetPipelineState(wanted);
                         cmd->SetConstantBuffer(0, m_Engine.m_PlanarReflectionConstantBuffer.get());
-                        cmd->SetSamplerSet(m_Engine.m_MaterialSamplers.get());
+                        cmd->SetSamplerSet(materialSamplers);
                         currentPipelineState = wanted;
                     };
 
@@ -168,8 +174,8 @@ namespace Kurenai::Passes
                                 MakeObjectConstants(instance, currentModel, mesh, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
                             objectConstants.InstanceBase = unit.InstanceBase;
                             objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
-                            cmd->UpdateBuffer(m_Engine.m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                            cmd->SetConstantBuffer(1, m_Engine.m_ObjectConstantBuffer.get());
+                            cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
+                            cmd->SetConstantBuffer(1, objectConstantBuffer);
 
                             // 【毎回張り直す】このパスはモデルのあとにドローンショーを描き、
                             // そちらが同じ頂点シェーダー用SRV(t0)へ自分のバッファを張る。
@@ -258,8 +264,7 @@ namespace Kurenai::Passes
                 // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
                 // (実際のバインドはExecute内)
                 .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
-                .Execute = [this, gbufferViewport, activeAOTexture, usingProceduralSky,
-                            planarReflectionPassRuns](RHI::IRHICommandList* cmd)
+                .Execute = [this, gbufferViewport, activeAOTexture, usingProceduralSky, planarReflectionPassRuns, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     // 水面の解析空フォールバック。手続き空が無効(.ksceneがDDSスカイボックスを
                     // 明示するシーン)なときは、m_WaterSettings.AnalyticSkyReflectionの値に関わらず必ず0にする
@@ -281,9 +286,9 @@ namespace Kurenai::Passes
 
                     cmd->SetViewport(gbufferViewport);
                     cmd->SetPipelineState(m_Engine.m_SSRPipelineState.get());
-                    cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                    cmd->SetConstantBuffer(0, frameConstantBuffer);
                     cmd->SetConstantBuffer(1, m_Engine.m_SSRConstantBuffer.get());
-                    cmd->SetSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, m_Engine.m_SceneColor.get());
                     cmd->SetTexture(1, m_Engine.m_GBufferNormal.get());
                     cmd->SetTexture(2, m_Engine.m_GBufferMaterial.get());
@@ -332,11 +337,11 @@ namespace Kurenai::Passes
                     m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_GBufferBentNormal.get(),
                 },
                 .Writes = { m_Engine.m_RTReflectionTexture.get() },
-                .Execute = [this, activeAOTexture](RHI::IRHICommandList* cmd)
+                .Execute = [this, activeAOTexture, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     RTReflectionConstants rtConstants{};
                     rtConstants.Params0 = {
-                        static_cast<float>(m_Engine.m_RenderWidth), static_cast<float>(m_Engine.m_RenderHeight),
+                        static_cast<float>(renderWidth), static_cast<float>(renderHeight),
                         m_Engine.m_ReflectionSettings.RTReflectionMaxDistance, m_Engine.m_ReflectionSettings.RTReflectionRoughnessCutoff
                     };
                     // yはメッシュレットのデバッグ表示。ラスタ側と同じトグルで駆動するので、
@@ -358,8 +363,8 @@ namespace Kurenai::Passes
                     // s1(色バッファ)・s2(データ)はどちらのセットでも中身が同じで、
                     // s0でこのシェーダーが他に引くのはキューブマップだけ(アドレスモードは
                     // 面をまたぐフィルタに使われないため無関係)なので、切り替えの影響はここだけ
-                    cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
-                    cmd->SetComputeConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                    cmd->SetComputeSamplerSet(materialSamplers);
+                    cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_RTReflectionConstantBuffer.get());
 
                     cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
@@ -392,7 +397,7 @@ namespace Kurenai::Passes
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
                     cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RTReflectionTexture.get());
-                    cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                    cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
         }

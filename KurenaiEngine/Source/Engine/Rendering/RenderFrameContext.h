@@ -38,6 +38,8 @@ namespace Kurenai::Passes
 
 namespace Kurenai::RHI
 {
+    class IRHIBuffer;
+    class IRHISamplerSet;
     class IRHITexture;
 }
 
@@ -50,6 +52,18 @@ namespace Kurenai::Rendering
 {
     struct RenderFrameContext
     {
+        // 内部レンダー解像度。フレーム先頭の作り直しブロックで確定し、登録中は変わらない
+        uint32_t RenderWidth = 0;
+        uint32_t RenderHeight = 0;
+
+        // フレーム全体で共有する定数バッファとサンプラー。所有権は KurenaiEngine3D にあり、
+        // 所有権を動かさない下ごしらえとして、ここでは借用する生ポインタだけを保持する
+        // フレーム先頭で確定し、登録中は作り直されない
+        RHI::IRHIBuffer* FrameConstantBuffer = nullptr;
+        RHI::IRHIBuffer* ObjectConstantBuffer = nullptr;
+        RHI::IRHISamplerSet* MaterialSamplers = nullptr;
+        RHI::IRHISamplerSet* ScreenSpaceSamplers = nullptr;
+
         // このフレームの実効プリ露出を線形倍率にしたもの(ComputeExposure の結果)。
         // Tonemap / Bloom / AutoExposure が割り戻すため、絵には出ない
         float EffectiveExposure = 1.0f;

@@ -48,6 +48,11 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        const uint32_t renderWidth = frame.RenderWidth;
+        const uint32_t renderHeight = frame.RenderHeight;
+        RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
+        RHI::IRHISamplerSet* const screenSpaceSamplers = frame.ScreenSpaceSamplers;
+
         // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
         // デバッグ表示(Render Targets UI)で選択されたバッファに応じて表示ソースを切り替える。
         // 深度バッファ(GBuffer深度・シャドウマップ)はPresent.hlsl側でグレースケール化するためMode=1を渡す
@@ -66,8 +71,8 @@ namespace Kurenai::Passes
         // 別スロット(t5)が要る。他と同じく常に有効なテクスチャをバインドしておく
         RHI::IRHITexture* presentDebugVolumeTexture = m_Engine.m_CloudShapeNoiseTexture.get();
         int32_t presentMode = 0;
-        uint32_t presentSourceWidth = m_Engine.m_RenderWidth;
-        uint32_t presentSourceHeight = m_Engine.m_RenderHeight;
+        uint32_t presentSourceWidth = renderWidth;
+        uint32_t presentSourceHeight = renderHeight;
         switch (m_Engine.m_DebugViewSettings.View)
         {
         case DebugView::Final:
@@ -166,22 +171,22 @@ namespace Kurenai::Passes
         case DebugView::HiZ:
             presentSourceTexture = m_Engine.m_HiZTexture.get();
             presentMode = 6; // 指定ミップをSampleLevelで読みグレースケール表示
-            presentSourceWidth = std::max(1u, m_Engine.m_RenderWidth >> m_Engine.m_DebugViewSettings.HiZDebugMipLevel);
-            presentSourceHeight = std::max(1u, m_Engine.m_RenderHeight >> m_Engine.m_DebugViewSettings.HiZDebugMipLevel);
+            presentSourceWidth = std::max(1u, renderWidth >> m_Engine.m_DebugViewSettings.HiZDebugMipLevel);
+            presentSourceHeight = std::max(1u, renderHeight >> m_Engine.m_DebugViewSettings.HiZDebugMipLevel);
             break;
         case DebugView::IBLIrradiance:
             // 本物のTextureCubeのため、SourceTexture(t0、Texture2D)ではなくDebugCubeTexture(t1)を
             // 現在のカメラ視線方向でサンプルする(Present.hlsl Mode 9、presentDebugCubeTexture参照)
             presentDebugCubeTexture = m_Engine.m_IrradianceTexture.get();
             presentMode = 9;
-            presentSourceWidth = m_Engine.m_RenderWidth;
-            presentSourceHeight = m_Engine.m_RenderHeight;
+            presentSourceWidth = renderWidth;
+            presentSourceHeight = renderHeight;
             break;
         case DebugView::IBLPrefilter:
             presentDebugCubeTexture = m_Engine.m_PrefilteredEnvTexture.get();
             presentMode = 9;
-            presentSourceWidth = m_Engine.m_RenderWidth;
-            presentSourceHeight = m_Engine.m_RenderHeight;
+            presentSourceWidth = renderWidth;
+            presentSourceHeight = renderHeight;
             break;
         case DebugView::ProbePrefilter:
             presentDebugCubeArrayTexture = m_Engine.m_ProbePrefilteredArray.get();
@@ -404,8 +409,8 @@ namespace Kurenai::Passes
         };
         presentConstants.TileRenderSize =
         {
-            static_cast<float>(m_Engine.m_RenderWidth),
-            static_cast<float>(m_Engine.m_RenderHeight),
+            static_cast<float>(renderWidth),
+            static_cast<float>(renderHeight),
             presentUsesTilePool ? static_cast<float>(frame.MegaLightsTileOffset.x) : 0.0f,
             presentUsesTilePool ? static_cast<float>(frame.MegaLightsTileOffset.y) : 0.0f,
         };
@@ -503,18 +508,16 @@ namespace Kurenai::Passes
             // 同じポインタになるだけで無害)
             .BufferReads = { m_Engine.m_LightTileBuffer.get(), presentTileBuffer, m_Engine.m_MegaLightsAccumBuffer.get() },
             .SwapChainTarget = m_Engine.m_SwapChain.get(),
-            .Execute = [this, letterboxViewport, presentSourceTexture, presentDebugCubeTexture,
-                        presentDebugArrayTexture, presentDebugCubeArrayTexture,
-                        presentDebugVolumeTexture, presentTileBuffer](RHI::IRHICommandList* cmd)
+            .Execute = [this, letterboxViewport, presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture, presentDebugCubeArrayTexture, presentDebugVolumeTexture, presentTileBuffer, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
                 cmd->ClearDepth(1.0f);
                 cmd->SetViewport(letterboxViewport);
 
                 cmd->SetPipelineState(m_Engine.m_PresentPipelineState.get());
-                cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                cmd->SetConstantBuffer(0, frameConstantBuffer);
                 cmd->SetConstantBuffer(1, m_Engine.m_PresentConstantBuffer.get());
-                cmd->SetSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                cmd->SetSamplerSet(screenSpaceSamplers);
                 cmd->SetTexture(0, presentSourceTexture);
                 cmd->SetTexture(1, presentDebugCubeTexture);
                 cmd->SetTexture(2, presentDebugArrayTexture);

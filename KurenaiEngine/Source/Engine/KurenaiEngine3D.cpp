@@ -6505,6 +6505,12 @@ namespace Kurenai
         // 【graph.Execute() が終わるまで生かすこと】パスの Execute ラムダはこの2つより
         // 長生きするので、ここより内側のスコープへ置くと参照が浮く
         Rendering::RenderFrameContext frameContext{};
+        frameContext.RenderWidth = m_RenderWidth;
+        frameContext.RenderHeight = m_RenderHeight;
+        frameContext.FrameConstantBuffer = m_FrameConstantBuffer.get();
+        frameContext.ObjectConstantBuffer = m_ObjectConstantBuffer.get();
+        frameContext.MaterialSamplers = m_MaterialSamplers.get();
+        frameContext.ScreenSpaceSamplers = m_ScreenSpaceSamplers.get();
         frameContext.EffectiveExposure = effectiveExposure;
         frameContext.PlanarReflectionPassRuns = planarReflectionPassRuns;
         frameContext.MegaLightsEffectiveTilesX = megaLightsEffectiveTilesX;

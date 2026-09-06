@@ -28,6 +28,12 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        const uint32_t renderWidth = frame.RenderWidth;
+        const uint32_t renderHeight = frame.RenderHeight;
+        RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
+        RHI::IRHIBuffer* const objectConstantBuffer = frame.ObjectConstantBuffer;
+        RHI::IRHISamplerSet* const materialSamplers = frame.MaterialSamplers;
+
         // 【フレームの値をここで写し取る】以下はRender()から機械的に移した登録コードなので、
         // 参照している名前を変えずに済むよう同じ名前で受け直す。
         //
@@ -303,9 +309,7 @@ namespace Kurenai::Passes
                 // 辺は張られない(RenderGraphのReadsは登録順で解決する)
                 .Reads = { m_Engine.m_HiZTexture.get() },
                 .BufferWrites = { m_Engine.m_ModelCullCounterBuffer.get(), m_Engine.m_ModelCullDrawArgsBuffer.get() },
-                .Execute = [this, beginIndex, count, initializeBuffers, useCurrentFrameHiZ, occlusionEnabled,
-                            regionStride, statsBeginIndex, cameraMoveDistance, modelCullIndirectActive,
-                            &viewProj, &modelCullDraws](RHI::IRHICommandList* cmd)
+                .Execute = [this, beginIndex, count, initializeBuffers, useCurrentFrameHiZ, occlusionEnabled, regionStride, statsBeginIndex, cameraMoveDistance, modelCullIndirectActive, &viewProj, &modelCullDraws, renderWidth, renderHeight, objectConstantBuffer](RHI::IRHICommandList* cmd)
                 {
                     if (initializeBuffers)
                     {
@@ -341,8 +345,8 @@ namespace Kurenai::Passes
                                     draw.RejectMask, draw.RequireMask, m_Engine.m_MeshletLODFrame,
                                     draw.CountCullStats, draw.DitherFade, draw.OcclusionMode);
                                 cmd->UpdateBuffer(
-                                    m_Engine.m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                                if (!m_Engine.m_ObjectConstantBuffer->GetLastUpdateGpuAddress(
+                                    objectConstantBuffer, &objectConstants, sizeof(objectConstants));
+                                if (!objectConstantBuffer->GetLastUpdateGpuAddress(
                                         candidate.CbvAddress[0], candidate.CbvAddress[1]))
                                 {
                                     // アドレスが取れないバックエンドはそもそも間接描画へ行かない。
@@ -393,7 +397,7 @@ namespace Kurenai::Passes
                         regionStride, KurenaiEngine3D::kModelCullRegionCount, beginIndex, statsBeginIndex
                     };
                     cullConstants.CullHiZScreenParams = {
-                        static_cast<float>(m_Engine.m_RenderWidth), static_cast<float>(m_Engine.m_RenderHeight), 0.0f, 0.0f
+                        static_cast<float>(renderWidth), static_cast<float>(renderHeight), 0.0f, 0.0f
                     };
                     // 今フレームのHi-Zなら視差のずれが無いので膨らませない
                     cullConstants.CullExpandParams = {
@@ -424,22 +428,22 @@ namespace Kurenai::Passes
                 .Name = "HiZ",
                 .Reads = { m_Engine.m_GBufferDepth.get() },
                 .Writes = { m_Engine.m_HiZTexture.get() },
-                .Execute = [this](RHI::IRHICommandList* cmd)
+                .Execute = [this, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     HiZConstants hizConstants{};
-                    hizConstants.SrcSize = { m_Engine.m_RenderWidth, m_Engine.m_RenderHeight };
-                    hizConstants.DstSize = { m_Engine.m_RenderWidth, m_Engine.m_RenderHeight };
+                    hizConstants.SrcSize = { renderWidth, renderHeight };
+                    hizConstants.DstSize = { renderWidth, renderHeight };
                     cmd->UpdateBuffer(m_Engine.m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
 
                     cmd->SetComputePipelineState(m_Engine.m_HiZCopyPipelineState.get());
                     cmd->SetComputeConstantBuffer(0, m_Engine.m_HiZConstantBuffer.get());
                     cmd->SetComputeTexture(0, m_Engine.m_GBufferDepth.get());
                     cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_HiZTexture.get(), 0);
-                    cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                    cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
 
                     cmd->SetComputePipelineState(m_Engine.m_HiZDownsamplePipelineState.get());
-                    uint32_t hizSrcWidth = m_Engine.m_RenderWidth;
-                    uint32_t hizSrcHeight = m_Engine.m_RenderHeight;
+                    uint32_t hizSrcWidth = renderWidth;
+                    uint32_t hizSrcHeight = renderHeight;
                     for (uint32_t mip = 1; mip < m_Engine.m_HiZMipLevels; ++mip)
                     {
                         const uint32_t hizDstWidth = std::max(1u, hizSrcWidth / 2);
@@ -482,8 +486,7 @@ namespace Kurenai::Passes
                 .DepthTarget = m_Engine.m_GBufferDepth.get(),
                 // 間接描画の引数(直前のModelCullパスが書いたもの)
                 .BufferReads = { m_Engine.m_ModelCullDrawArgsBuffer.get() },
-                .Execute = [this, gbufferViewport, &viewProj, modelCullIndirectActive,
-                            occlusionCullingActive](RHI::IRHICommandList* cmd)
+                .Execute = [this, gbufferViewport, &viewProj, modelCullIndirectActive, occlusionCullingActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(gbufferViewport);
                     // Reverse-Zのため遠平面側(NDC z=0.0)。G-Bufferパスの代わりにここでクリアする
@@ -605,8 +608,8 @@ namespace Kurenai::Passes
                                 if (pipelineState != currentPipelineState)
                                 {
                                     cmd->SetPipelineState(pipelineState);
-                                    cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
-                                    cmd->SetSamplerSet(m_Engine.m_MaterialSamplers.get());
+                                    cmd->SetConstantBuffer(0, frameConstantBuffer);
+                                    cmd->SetSamplerSet(materialSamplers);
                                     currentPipelineState = pipelineState;
                                 }
 
@@ -614,8 +617,8 @@ namespace Kurenai::Passes
                                     instance, lodModel, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, rejectMask, requireMask,
                                     m_Engine.m_MeshletLODFrame);
                                 cmd->UpdateBuffer(
-                                    m_Engine.m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                                cmd->SetConstantBuffer(1, m_Engine.m_ObjectConstantBuffer.get());
+                                    objectConstantBuffer, &objectConstants, sizeof(objectConstants));
+                                cmd->SetConstantBuffer(1, objectConstantBuffer);
                                 cmd->DispatchMesh(groupCount, 1, 1);
                                 ++m_Engine.m_DrawCallsDepthPrepass;
                             };
@@ -655,8 +658,8 @@ namespace Kurenai::Passes
                             if (wanted != currentPipelineState)
                             {
                                 cmd->SetPipelineState(wanted);
-                                cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
-                                cmd->SetSamplerSet(m_Engine.m_MaterialSamplers.get());
+                                cmd->SetConstantBuffer(0, frameConstantBuffer);
+                                cmd->SetSamplerSet(materialSamplers);
                                 currentPipelineState = wanted;
                             }
 
@@ -664,8 +667,8 @@ namespace Kurenai::Passes
                                 MakeObjectConstants(instance, lodModel, mesh, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame, lodDitherFade);
                             objectConstants.InstanceBase = unit.InstanceBase;
                             objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
-                            cmd->UpdateBuffer(m_Engine.m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                            cmd->SetConstantBuffer(1, m_Engine.m_ObjectConstantBuffer.get());
+                            cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
+                            cmd->SetConstantBuffer(1, objectConstantBuffer);
 
                             // カットアウト以外はピクセルシェーダーを持たないためテクスチャも要らない
                             if (cutout)
@@ -727,8 +730,7 @@ namespace Kurenai::Passes
             .DepthTarget = m_Engine.m_GBufferDepth.get(),
             // 間接描画の引数を読む(ModelCullパスが書いたもの)
             .BufferReads = { m_Engine.m_ModelCullDrawArgsBuffer.get() },
-            .Execute = [this, gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive,
-                        meshletCullStatsActive, modelCullIndirectActive](RHI::IRHICommandList* cmd)
+            .Execute = [this, gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive, meshletCullStatsActive, modelCullIndirectActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
             {
                 // カリング統計のカウンタを0へ戻す。増幅シェーダーは加算しかしないので、
                 // 戻さないとフレームをまたいで積み上がる。
@@ -756,8 +758,8 @@ namespace Kurenai::Passes
                 }
 
                 cmd->SetPipelineState(m_Engine.m_GBufferPipelineState.get());
-                cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
-                cmd->SetSamplerSet(m_Engine.m_MaterialSamplers.get());
+                cmd->SetConstantBuffer(0, frameConstantBuffer);
+                cmd->SetSamplerSet(materialSamplers);
 
                 // 増幅シェーダーのHi-Zオクルージョンカリング用(t8。GBufferMeshlet.hlsl)。
                 //
@@ -812,8 +814,8 @@ namespace Kurenai::Passes
                         return;
                     }
                     cmd->SetPipelineState(wanted);
-                    cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
-                    cmd->SetSamplerSet(m_Engine.m_MaterialSamplers.get());
+                    cmd->SetConstantBuffer(0, frameConstantBuffer);
+                    cmd->SetSamplerSet(materialSamplers);
                     currentPipelineState = wanted;
                 };
 
@@ -893,8 +895,8 @@ namespace Kurenai::Passes
                             instance, lodModel, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled,
                             Assets::kGpuMaterialFlagTransparent, 0, m_Engine.m_MeshletLODFrame,
                             /*countCullStats=*/true, lodDitherFade);
-                        cmd->UpdateBuffer(m_Engine.m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                        cmd->SetConstantBuffer(1, m_Engine.m_ObjectConstantBuffer.get());
+                        cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
+                        cmd->SetConstantBuffer(1, objectConstantBuffer);
 
                         // 起動するのは「モデル全体のメッシュレット数 ÷ 増幅シェーダーのグループサイズ」。
                         // 実際にラスタライズされるのはカリングとふるい分けを生き延びたぶんに絞られる
@@ -922,8 +924,8 @@ namespace Kurenai::Passes
                             MakeObjectConstants(instance, lodModel, mesh, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame, lodDitherFade);
                         objectConstants.InstanceBase = unit.InstanceBase;
                         objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
-                        cmd->UpdateBuffer(m_Engine.m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                        cmd->SetConstantBuffer(1, m_Engine.m_ObjectConstantBuffer.get());
+                        cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
+                        cmd->SetConstantBuffer(1, objectConstantBuffer);
 
                         cmd->SetTexture(0, mesh.BaseColorTexture);
                         cmd->SetTexture(1, mesh.NormalTexture);

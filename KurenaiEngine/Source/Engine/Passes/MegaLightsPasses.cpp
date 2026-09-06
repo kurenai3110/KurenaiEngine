@@ -29,6 +29,11 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        const uint32_t renderWidth = frame.RenderWidth;
+        const uint32_t renderHeight = frame.RenderHeight;
+        RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
+        RHI::IRHISamplerSet* const screenSpaceSamplers = frame.ScreenSpaceSamplers;
+
         // 【フレームの値をここで写し取る】以下はRender()から機械的に移した登録コードなので、
         // 参照している名前を変えずに済むよう同じ名前で受け直す。
         //
@@ -55,7 +60,7 @@ namespace Kurenai::Passes
                 .Reads = { m_Engine.m_GBufferDepth.get() },
                 .BufferReads = { m_Engine.m_LightBuffer.get() },
                 .BufferWrites = { m_Engine.m_LightTileBuffer.get() },
-                .Execute = [this, &gpuLights, viewMatrix, jitteredProj](RHI::IRHICommandList* cmd)
+                .Execute = [this, &gpuLights, viewMatrix, jitteredProj, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     Passes::LightCullingConstants cullingConstants{};
                     DirectX::XMStoreFloat4x4(
@@ -67,7 +72,7 @@ namespace Kurenai::Passes
                         static_cast<uint32_t>(gpuLights.size()),
                         KurenaiEngine3D::kLightTileCapacity,
                     };
-                    cullingConstants.RenderSize = { m_Engine.m_RenderWidth, m_Engine.m_RenderHeight, 0u, 0u };
+                    cullingConstants.RenderSize = { renderWidth, renderHeight, 0u, 0u };
 
                     // タイル錐台の側面を組み立てるのに射影行列の(0,0)/(1,1)成分が要る。
                     // 深度リニアライズ定数(z/w)は直接光パスへ渡しているものと同じ。
@@ -106,8 +111,7 @@ namespace Kurenai::Passes
                 .Reads = { m_Engine.m_GBufferDepth.get() },
                 .BufferReads = { m_Engine.m_LightBuffer.get() },
                 .BufferWrites = { m_Engine.m_MegaLightsTilePoolBuffer.get() },
-                .Execute = [this, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX,
-                            megaLightsEffectiveTilesY, megaLightsTileOffset](RHI::IRHICommandList* cmd)
+                .Execute = [this, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     Passes::MegaLightsTilePoolConstants poolConstants{};
                     DirectX::XMStoreFloat4x4(&poolConstants.View, DirectX::XMMatrixTranspose(viewMatrix));
@@ -120,7 +124,7 @@ namespace Kurenai::Passes
                         // 要素数はKから決まるので、食い違うと別タイルの領域を読み書きする
                         static_cast<uint32_t>(m_Engine.m_MegaLightsSettings.TilePoolCapacity),
                     };
-                    poolConstants.RenderSize = { m_Engine.m_RenderWidth, m_Engine.m_RenderHeight, 0u, 0u };
+                    poolConstants.RenderSize = { renderWidth, renderHeight, 0u, 0u };
 
                     // タイル錐台の組み立てと深度のリニアライズに使う。LightCullパスと同じ行列から
                     // 同じ成分を取る(判定を共有している以上、入力もずらしてはいけない)
@@ -199,14 +203,13 @@ namespace Kurenai::Passes
                 // 読むが、宣言しておくことで候補プールパスより後ろへ順序付けられる
                 // (参照実装のフレームでは辺が1本余分に張られるだけで無害)
                 .BufferReads = { m_Engine.m_LightBuffer.get(), tilePoolBufferForBinding, meshLightBufferForBinding },
-                .Execute = [this, &gpuLights, tilePoolBufferForBinding, meshLightBufferForBinding,
-                            meshLightTriangleCount](RHI::IRHICommandList* cmd)
+                .Execute = [this, &gpuLights, tilePoolBufferForBinding, meshLightBufferForBinding, meshLightTriangleCount, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     Passes::MegaLightsConstants megaLightsConstants{};
                     megaLightsConstants.Params0 =
                     {
-                        m_Engine.m_RenderWidth,
-                        m_Engine.m_RenderHeight,
+                        renderWidth,
+                        renderHeight,
                         static_cast<uint32_t>(std::max(0, m_Engine.m_MegaLightsSettings.ShadowRayCount)),
                         static_cast<uint32_t>(gpuLights.size()),
                     };
@@ -224,12 +227,12 @@ namespace Kurenai::Passes
                                       sizeof(megaLightsConstants));
 
                     cmd->SetComputePipelineState(m_Engine.m_MegaLightsReferencePipelineState.get());
-                    cmd->SetComputeConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_MegaLightsConstantBuffer.get());
 
                     // BRDF積分LUTをColorSampler(s1、Linear+Clamp)で引くためサンプラーを張る。
                     // 直前のパスのバインドが残っていることに依存しない
-                    cmd->SetComputeSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeSamplerSet(screenSpaceSamplers);
 
                     // レジスタ割り当てはMegaLightsReference.hlsl側の宣言と一致させること
                     cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
@@ -251,7 +254,7 @@ namespace Kurenai::Passes
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
                     cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_MegaLightsTexture.get());
-                    cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                    cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
         }
@@ -277,13 +280,13 @@ namespace Kurenai::Passes
             // Initial側のExecuteで1回だけ更新すればよい
             const auto buildStochasticConstants =
                 [this, jitteredProj, megaLightsQuadShared, megaLightsEffectiveTilesX,
-                 megaLightsTileOffset](uint32_t spatialIteration)
+                 megaLightsTileOffset, renderWidth, renderHeight](uint32_t spatialIteration)
             {
                 MegaLightsStochasticConstants stochasticConstants{};
                 stochasticConstants.Params0 =
                 {
-                    m_Engine.m_RenderWidth,
-                    m_Engine.m_RenderHeight,
+                    renderWidth,
+                    renderHeight,
                     static_cast<uint32_t>(std::max(1, m_Engine.m_MegaLightsSettings.SampleCount)),
                     // 影レイ本数の意味は参照実装と揃える(0なら影を撃たない=恒等テスト側)。
                     // 確率的サンプリングは選ばれた1灯にしか撃たないので本数ではなく有無
@@ -437,14 +440,14 @@ namespace Kurenai::Passes
                 },
                 .BufferReads = { m_Engine.m_LightBuffer.get(), tilePoolBufferForBinding },
                 .BufferWrites = { m_Engine.m_MegaLightsReservoirBuffer.get(), m_Engine.m_MegaLightsBlockedLightBuffer.get() },
-                .Execute = [this, tilePoolBufferForBinding, updateStochasticConstants](RHI::IRHICommandList* cmd)
+                .Execute = [this, tilePoolBufferForBinding, updateStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     updateStochasticConstants(cmd);
 
                     cmd->SetComputePipelineState(m_Engine.m_MegaLightsInitialPipelineState.get());
-                    cmd->SetComputeConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_MegaLightsStochasticConstantBuffer.get());
-                    cmd->SetComputeSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeSamplerSet(screenSpaceSamplers);
 
                     // レジスタ割り当てはMegaLightsInitialSample.hlsl側の宣言と一致させること。
                     // 初期可視レイ(選んだサンプルが遮蔽されていたら殺す)を撃つのでTLASが要る
@@ -459,7 +462,7 @@ namespace Kurenai::Passes
 
                     cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_MegaLightsReservoirBuffer.get());
                     cmd->SetComputeUnorderedAccessBuffer(1, m_Engine.m_MegaLightsBlockedLightBuffer.get());
-                    cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                    cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
 
@@ -483,13 +486,13 @@ namespace Kurenai::Passes
                                      m_Engine.m_MegaLightsHistoryGuide[historyReadIndex].get() },
                     .BufferWrites = { m_Engine.m_MegaLightsReservoirHistory[historyWriteIndex].get(),
                                       m_Engine.m_MegaLightsHistoryGuide[historyWriteIndex].get() },
-                    .Execute = [this, historyReadIndex, historyWriteIndex](RHI::IRHICommandList* cmd)
+                    .Execute = [this, historyReadIndex, historyWriteIndex, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
                         // 定数はInitial側で更新済み(中身はフレーム内で不変)
                         cmd->SetComputePipelineState(m_Engine.m_MegaLightsTemporalPipelineState.get());
-                        cmd->SetComputeConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                        cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
                         cmd->SetComputeConstantBuffer(1, m_Engine.m_MegaLightsStochasticConstantBuffer.get());
-                        cmd->SetComputeSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                        cmd->SetComputeSamplerSet(screenSpaceSamplers);
 
                         // レジスタ割り当てはMegaLightsTemporal.hlsl側の宣言と一致させること。
                         // 時間検証レイを撃つのでTLASが要る。
@@ -512,7 +515,7 @@ namespace Kurenai::Passes
                         cmd->SetComputeUnorderedAccessBuffer(
                             0, m_Engine.m_MegaLightsReservoirHistory[historyWriteIndex].get());
                         cmd->SetComputeUnorderedAccessBuffer(1, m_Engine.m_MegaLightsHistoryGuide[historyWriteIndex].get());
-                        cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                        cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                     },
                 });
             }
@@ -545,8 +548,7 @@ namespace Kurenai::Passes
                     .BufferReads = { m_Engine.m_LightBuffer.get(), spatialInput, m_Engine.m_MegaLightsTilePoolBuffer.get(),
                                      m_Engine.m_MegaLightsReservoirBuffer.get(), m_Engine.m_MegaLightsBlockedLightBuffer.get() },
                     .BufferWrites = { spatialOutput },
-                    .Execute = [this, spatialInput, spatialOutput, spatialConstants, spatialIteration,
-                                buildStochasticConstants](RHI::IRHICommandList* cmd)
+                    .Execute = [this, spatialInput, spatialOutput, spatialConstants, spatialIteration, buildStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
                         // 【この定数だけは自分で更新する】反復番号が反復ごとに違うため、
                         // Initial が更新する共有分は使えない。UpdateBuffer と
@@ -555,9 +557,9 @@ namespace Kurenai::Passes
                             buildStochasticConstants(spatialIteration);
                         cmd->UpdateBuffer(spatialConstants, &iterationConstants, sizeof(iterationConstants));
                         cmd->SetComputePipelineState(m_Engine.m_MegaLightsSpatialPipelineState.get());
-                        cmd->SetComputeConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                        cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
                         cmd->SetComputeConstantBuffer(1, spatialConstants);
-                        cmd->SetComputeSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                        cmd->SetComputeSamplerSet(screenSpaceSamplers);
 
                         // レジスタ割り当てはMegaLightsSpatial.hlsl側の宣言と一致させること。
                         // 不偏化の分母(Z)の判定にバイアス補正レイを撃つのでTLASが要る。
@@ -581,7 +583,7 @@ namespace Kurenai::Passes
                         cmd->SetComputeShaderResourceBuffer(10, m_Engine.m_MegaLightsBlockedLightBuffer.get());
 
                         cmd->SetComputeUnorderedAccessBuffer(0, spatialOutput);
-                        cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                        cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                     },
                 });
             }
@@ -607,14 +609,14 @@ namespace Kurenai::Passes
                     .Writes = { m_Engine.m_MegaLightsTexture.get() },
                     .BufferReads = { m_Engine.m_LightBuffer.get(), m_Engine.m_MegaLightsReservoirBuffer.get() },
                     .BufferWrites = { guideWriteBuffer },
-                    .Execute = [this, guideWriteBuffer](RHI::IRHICommandList* cmd)
+                    .Execute = [this, guideWriteBuffer, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
                         // 定数はInitial側で更新済み。ここでバインドし直すのは、DX12が
                         // SetPipelineStateのたびにルート引数を無効化するため
                         cmd->SetComputePipelineState(m_Engine.m_MegaLightsResolvePipelineState.get());
-                        cmd->SetComputeConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                        cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
                         cmd->SetComputeConstantBuffer(1, m_Engine.m_MegaLightsStochasticConstantBuffer.get());
-                        cmd->SetComputeSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                        cmd->SetComputeSamplerSet(screenSpaceSamplers);
 
                         // レジスタ割り当てはMegaLightsResolve.hlsl側の宣言と一致させること。
                         // **t0(TLAS)は宣言していない** ―― レイを撃たないパスなので張らない
@@ -628,7 +630,7 @@ namespace Kurenai::Passes
 
                         cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_MegaLightsTexture.get());
                         cmd->SetComputeUnorderedAccessBuffer(1, guideWriteBuffer);
-                        cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                        cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                     },
                 });
             }
@@ -643,14 +645,14 @@ namespace Kurenai::Passes
                 },
                 .Writes = { m_Engine.m_MegaLightsTexture.get() },
                 .BufferReads = { m_Engine.m_LightBuffer.get(), shadeReservoirBuffer },
-                .Execute = [this, shadeReservoirBuffer](RHI::IRHICommandList* cmd)
+                .Execute = [this, shadeReservoirBuffer, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     // 定数はInitial側で更新済み。ここでバインドし直すのは、DX12が
                     // SetPipelineStateのたびにルート引数を無効化するため
                     cmd->SetComputePipelineState(m_Engine.m_MegaLightsShadePipelineState.get());
-                    cmd->SetComputeConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_MegaLightsStochasticConstantBuffer.get());
-                    cmd->SetComputeSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeSamplerSet(screenSpaceSamplers);
 
                     // レジスタ割り当てはMegaLightsShade.hlsl側の宣言と一致させること
                     cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
@@ -664,7 +666,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeShaderResourceBuffer(7, shadeReservoirBuffer);
 
                     cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_MegaLightsTexture.get());
-                    cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                    cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
             }
@@ -705,11 +707,11 @@ namespace Kurenai::Passes
             const int atrousPasses = std::clamp(m_Engine.m_MegaLightsSettings.DenoiseAtrousPasses, 0, 5);
 
             const auto updateDenoiseConstants =
-                [this, denoiseGuideValid](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
+                [this, denoiseGuideValid, renderWidth, renderHeight](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
             {
                 Passes::MegaLightsDenoiseConstants denoiseConstants{};
                 denoiseConstants.Params0 = {
-                    m_Engine.m_RenderWidth, m_Engine.m_RenderHeight, m_Engine.m_MegaLightsDenoiseHistoryValid ? 1u : 0u, pass
+                    renderWidth, renderHeight, m_Engine.m_MegaLightsDenoiseHistoryValid ? 1u : 0u, pass
                 };
                 // 時間累積の上限は手法ごとに別の変数を持つ。手法3にはリザーバの履歴が
                 // 無く、デノイザだけが時間方向の記憶なので長くしてある(EngineDefaults.h)
@@ -735,9 +737,9 @@ namespace Kurenai::Passes
 
             // G-Bufferの束縛。**DX12はSetPipelineStateのたびにルート引数を無効化する**ので
             // パスごとに張り直す
-            const auto bindDenoiseCommon = [this, denoiseGuideBuffer](RHI::IRHICommandList* cmd)
+            const auto bindDenoiseCommon = [this, denoiseGuideBuffer, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
-                cmd->SetComputeConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
                 // 前フレームの幾何。【使わないパスでも必ず張る】DX12はPSO切替でルート引数が
                 // 無効化されるため、宣言したリソースが未バインドだと壊れる
                 if (denoiseGuideBuffer)
@@ -745,7 +747,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeShaderResourceBuffer(0, denoiseGuideBuffer);
                 }
                 cmd->SetComputeConstantBuffer(1, m_Engine.m_MegaLightsDenoiseConstantBuffer.get());
-                cmd->SetComputeSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                cmd->SetComputeSamplerSet(screenSpaceSamplers);
                 cmd->SetComputeTexture(1, m_Engine.m_GBufferNormal.get());
                 cmd->SetComputeTexture(2, m_Engine.m_GBufferDepth.get());
                 cmd->SetComputeTexture(3, m_Engine.m_GBufferAlbedo.get());
@@ -775,9 +777,7 @@ namespace Kurenai::Passes
                 // 前フレームの幾何は「前フレームが書いた側」なので今フレームに書き手はいない。
                 // 辺は張れないが、ping-pongで別バッファになっているので衝突しない
                 .BufferReads = denoiseGuideReads,
-                .Execute =
-                    [this, denoiseRead, denoiseWrite, updateDenoiseConstants,
-                     bindDenoiseCommon](RHI::IRHICommandList* cmd)
+                .Execute = [this, denoiseRead, denoiseWrite, updateDenoiseConstants, bindDenoiseCommon, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     updateDenoiseConstants(cmd, 0u, 1.0f);
                     cmd->SetComputePipelineState(m_Engine.m_MegaLightsDenoiseTemporalPSO.get());
@@ -791,7 +791,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeUnorderedAccessTexture(1, m_Engine.m_MegaLightsDenoiseMomentPing[0].get());
                     cmd->SetComputeUnorderedAccessTexture(2, m_Engine.m_MegaLightsDenoiseHistory[denoiseWrite].get());
                     cmd->SetComputeUnorderedAccessTexture(3, m_Engine.m_MegaLightsDenoiseMoments[denoiseWrite].get());
-                    cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                    cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
 
@@ -815,9 +815,7 @@ namespace Kurenai::Passes
                         m_Engine.m_MegaLightsDenoisePing[atrousDst].get(),
                         m_Engine.m_MegaLightsDenoiseMomentPing[atrousDst].get(),
                     },
-                    .Execute =
-                        [this, atrousSrc, atrousDst, atrousPass, atrousStep, updateDenoiseConstants,
-                         bindDenoiseCommon](RHI::IRHICommandList* cmd)
+                    .Execute = [this, atrousSrc, atrousDst, atrousPass, atrousStep, updateDenoiseConstants, bindDenoiseCommon, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                     {
                         updateDenoiseConstants(cmd, static_cast<uint32_t>(atrousPass + 1), atrousStep);
                         cmd->SetComputePipelineState(m_Engine.m_MegaLightsDenoiseAtrousPSO.get());
@@ -832,7 +830,7 @@ namespace Kurenai::Passes
                         cmd->SetComputeUnorderedAccessTexture(2, m_Engine.m_MegaLightsDenoisePing[atrousDst].get());
                         cmd->SetComputeUnorderedAccessTexture(
                             3, m_Engine.m_MegaLightsDenoiseMomentPing[atrousDst].get());
-                        cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                        cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                     },
                 });
             }
@@ -849,9 +847,7 @@ namespace Kurenai::Passes
                     m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferVelocity.get(),
                 },
                 .Writes = { m_Engine.m_MegaLightsDenoisedTexture.get() },
-                .Execute =
-                    [this, denoiseFinalSrc, updateDenoiseConstants,
-                     bindDenoiseCommon](RHI::IRHICommandList* cmd)
+                .Execute = [this, denoiseFinalSrc, updateDenoiseConstants, bindDenoiseCommon, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     updateDenoiseConstants(cmd, 0u, 1.0f);
                     cmd->SetComputePipelineState(m_Engine.m_MegaLightsDenoiseRemodulatePSO.get());
@@ -863,7 +859,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeUnorderedAccessTexture(1, m_Engine.m_MegaLightsDenoisedTexture.get());
                     cmd->SetComputeUnorderedAccessTexture(2, m_Engine.m_MegaLightsDenoisedTexture.get());
                     cmd->SetComputeUnorderedAccessTexture(3, m_Engine.m_MegaLightsDenoisedTexture.get());
-                    cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                    cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
         }
@@ -893,10 +889,10 @@ namespace Kurenai::Passes
                 // 「効いていない」と誤診する(実際に一度そう出た)
                 .Reads = { megaLightsAccumSourceTexture },
                 .BufferWrites = { m_Engine.m_MegaLightsAccumBuffer.get() },
-                .Execute = [this, accumReset, megaLightsAccumSourceTexture](RHI::IRHICommandList* cmd)
+                .Execute = [this, accumReset, megaLightsAccumSourceTexture, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     Passes::MegaLightsAccumConstants accumConstants{};
-                    accumConstants.Params0 = { m_Engine.m_RenderWidth, m_Engine.m_RenderHeight, accumReset, 0u };
+                    accumConstants.Params0 = { renderWidth, renderHeight, accumReset, 0u };
                     cmd->UpdateBuffer(m_Engine.m_MegaLightsAccumConstantBuffer.get(), &accumConstants, sizeof(accumConstants));
 
                     cmd->SetComputePipelineState(m_Engine.m_MegaLightsAccumPipelineState.get());
@@ -904,7 +900,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeTexture(0, megaLightsAccumSourceTexture);
                     // UAVはDispatch直後に解除されるため毎回バインドし直す
                     cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_MegaLightsAccumBuffer.get());
-                    cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                    cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
             ++m_Engine.m_MegaLightsAccumFrames;
@@ -918,7 +914,7 @@ namespace Kurenai::Passes
             m_Engine.m_MegaLightsAccumFrames >= static_cast<uint32_t>(m_Engine.m_MegaLightsSettings.AccumTargetFrames))
         {
             const uint32_t accumBytes =
-                static_cast<uint32_t>(sizeof(float) * 4) * m_Engine.m_RenderWidth * m_Engine.m_RenderHeight;
+                static_cast<uint32_t>(sizeof(float) * 4) * renderWidth * renderHeight;
 
             if (!m_Engine.m_MegaLightsDumpIssued)
             {
@@ -959,7 +955,7 @@ namespace Kurenai::Passes
             // GPUの実行はCPUより数フレーム遅れる。積んだ直後に読むと未完了の内容を掴む
             else if (m_Engine.m_TAAFrameIndex - m_Engine.m_MegaLightsDumpCopyFrame >= 5u)
             {
-                std::vector<float> host(static_cast<size_t>(m_Engine.m_RenderWidth) * m_Engine.m_RenderHeight * 4u);
+                std::vector<float> host(static_cast<size_t>(renderWidth) * renderHeight * 4u);
                 if (m_Engine.m_MegaLightsAccumReadback->ReadbackData(host.data(), accumBytes))
                 {
                     std::ofstream file(m_Engine.m_MegaLightsDumpPath, std::ios::binary | std::ios::trunc);
@@ -967,7 +963,7 @@ namespace Kurenai::Passes
                     {
                         // 形式: 'K','M','L','A' / 幅 / 高さ / 足したフレーム数 / 予約 / float4 × 画素数
                         const char magic[4] = { 'K', 'M', 'L', 'A' };
-                        const uint32_t header[4] = { m_Engine.m_RenderWidth, m_Engine.m_RenderHeight, m_Engine.m_MegaLightsAccumFrames, 0u };
+                        const uint32_t header[4] = { renderWidth, renderHeight, m_Engine.m_MegaLightsAccumFrames, 0u };
                         file.write(magic, sizeof(magic));
                         file.write(reinterpret_cast<const char*>(header), sizeof(header));
                         file.write(reinterpret_cast<const char*>(host.data()),
@@ -975,7 +971,7 @@ namespace Kurenai::Passes
                         Core::Logger::Info(
                             "KurenaiEngine3D",
                             "MegaLightsの蓄積平均を書き出しました: " + Core::WideToUtf8(m_Engine.m_MegaLightsDumpPath) +
-                                " (" + std::to_string(m_Engine.m_RenderWidth) + "x" + std::to_string(m_Engine.m_RenderHeight) +
+                                " (" + std::to_string(renderWidth) + "x" + std::to_string(renderHeight) +
                                 ", " + std::to_string(m_Engine.m_MegaLightsAccumFrames) + "フレームぶん)");
                     }
                     else

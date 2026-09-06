@@ -28,6 +28,12 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        const uint32_t renderWidth = frame.RenderWidth;
+        const uint32_t renderHeight = frame.RenderHeight;
+        RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
+        RHI::IRHISamplerSet* const materialSamplers = frame.MaterialSamplers;
+        RHI::IRHISamplerSet* const screenSpaceSamplers = frame.ScreenSpaceSamplers;
+
         // 【フレームの値をここで写し取る】以下はRender()から機械的に移した登録コードなので、
         // 参照している名前を変えずに済むよう同じ名前で受け直す。
         //
@@ -82,20 +88,19 @@ namespace Kurenai::Passes
                 m_Engine.m_BRDFLUTTexture.get(),
             },
             .RenderTargets = { m_Engine.m_DirectLightTexture.get() },
-            .Execute = [this, gbufferViewport, &gpuLights, &lightingConstants, rtShadowTextureForBinding,
-                        megaLightsTextureForBinding](RHI::IRHICommandList* cmd)
+            .Execute = [this, gbufferViewport, &gpuLights, &lightingConstants, rtShadowTextureForBinding, megaLightsTextureForBinding, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
 
                 cmd->SetPipelineState(m_Engine.m_DirectLightPipelineState.get());
-                cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                cmd->SetConstantBuffer(0, frameConstantBuffer);
 
                 // UpdateBufferはSetConstantBufferより前に呼ぶ必要がある。DX12の定数バッファは
                 // リングバッファで、GetGPUVirtualAddress()が現在のリングスロットのアドレスを返すため
                 cmd->UpdateBuffer(m_Engine.m_LightingConstantBuffer.get(), &lightingConstants, sizeof(lightingConstants));
                 cmd->SetConstantBuffer(1, m_Engine.m_LightingConstantBuffer.get());
 
-                cmd->SetSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                cmd->SetSamplerSet(screenSpaceSamplers);
                 cmd->SetTexture(0, m_Engine.m_GBufferAlbedo.get());
                 cmd->SetTexture(1, m_Engine.m_GBufferNormal.get());
                 cmd->SetTexture(2, m_Engine.m_GBufferMaterial.get());
@@ -139,11 +144,11 @@ namespace Kurenai::Passes
                     // (SSILと同じ理由でDirectLightパスより後に順序付けられる。RTAO.hlsl参照)
                     .Reads = { m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferDepth.get(), m_Engine.m_DirectLightTexture.get() },
                     .Writes = { aoRawTexture },
-                    .Execute = [this](RHI::IRHICommandList* cmd)
+                    .Execute = [this, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                     {
                         Passes::RTAOConstants rtAOConstants{};
                         rtAOConstants.Params0 = {
-                            static_cast<float>(m_Engine.m_RenderWidth), static_cast<float>(m_Engine.m_RenderHeight),
+                            static_cast<float>(renderWidth), static_cast<float>(renderHeight),
                             m_Engine.m_AmbientOcclusionSettings.RTAOMaxDistance, m_Engine.m_AmbientOcclusionSettings.RTAOPower
                         };
                         rtAOConstants.Params1 = {
@@ -157,8 +162,8 @@ namespace Kurenai::Passes
                         // (理由はRT反射パスの同じ呼び出しのコメント参照)。
                         // このパスは以前サンプラーセットを一度もバインドしておらず、
                         // 直前のパスが残したセットに依存していた
-                        cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
-                        cmd->SetComputeConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                        cmd->SetComputeSamplerSet(materialSamplers);
+                        cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
                         cmd->SetComputeConstantBuffer(1, m_Engine.m_RTAOConstantBuffer.get());
 
                         cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
@@ -182,7 +187,7 @@ namespace Kurenai::Passes
 
                         // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
                         cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RTAORawTexture.get());
-                        cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                        cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                     },
                 });
             }
@@ -194,11 +199,11 @@ namespace Kurenai::Passes
                         ? std::vector<RHI::IRHITexture*>{ m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferDepth.get(), m_Engine.m_DirectLightTexture.get() }
                         : std::vector<RHI::IRHITexture*>{ m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferDepth.get() },
                     .RenderTargets = { aoRawTexture },
-                    .Execute = [this, gbufferViewport, useSSIL](RHI::IRHICommandList* cmd)
+                    .Execute = [this, gbufferViewport, useSSIL, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
                         cmd->SetViewport(gbufferViewport);
-                        cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
-                        cmd->SetSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                        cmd->SetConstantBuffer(0, frameConstantBuffer);
+                        cmd->SetSamplerSet(screenSpaceSamplers);
 
                         if (useSSIL)
                         {
@@ -248,14 +253,14 @@ namespace Kurenai::Passes
                 .Name = "AOBlur",
                 .Reads = { aoRawTexture },
                 .RenderTargets = { aoBlurredTexture },
-                .Execute = [this, gbufferViewport, aoRawTexture](RHI::IRHICommandList* cmd)
+                .Execute = [this, gbufferViewport, aoRawTexture, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(gbufferViewport);
                     cmd->SetPipelineState(m_Engine.m_AOBlurPipelineState.get());
                     // ブラーはカーネルのタップが画面端で[0,1]を出るため、Wrapのサンプラーが
                     // 1つも入っていないこのセットを明示的にバインドする(直前のパスのバインドが
                     // そのまま残るのに依存してはいけない)
-                    cmd->SetSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, aoRawTexture);
                     cmd->Draw(3, 0);
                 },
@@ -301,12 +306,12 @@ namespace Kurenai::Passes
                 .RenderTargets = { m_Engine.m_SkyCloudTexture.get(), m_Engine.m_SkyCloudFogTexture.get() },
                 // 空パラメータ。SkyIntegrateパスより後に順序付けさせる
                 .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
-                .Execute = [this, skyCloudViewport](RHI::IRHICommandList* cmd)
+                .Execute = [this, skyCloudViewport, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(skyCloudViewport);
                     cmd->SetPipelineState(m_Engine.m_SkyCloudPipelineState.get());
-                    cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
-                    cmd->SetSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetConstantBuffer(0, frameConstantBuffer);
+                    cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, m_Engine.m_SkyViewLUT.get());
                     cmd->SetTexture(1, m_Engine.m_CloudShapeNoiseTexture.get());
                     cmd->SetTexture(2, m_Engine.m_CloudDetailNoiseTexture.get());
@@ -323,6 +328,11 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
+        RHI::IRHIBuffer* const objectConstantBuffer = frame.ObjectConstantBuffer;
+        RHI::IRHISamplerSet* const materialSamplers = frame.MaterialSamplers;
+        RHI::IRHISamplerSet* const screenSpaceSamplers = frame.ScreenSpaceSamplers;
+
         // 【フレームの値をここで写し取る】以下はRender()から機械的に移した登録コードなので、
         // 参照している名前を変えずに済むよう同じ名前で受け直す。
         //
@@ -365,7 +375,7 @@ namespace Kurenai::Passes
             // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
             // (実際のバインドはExecute内)
             .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
-            .Execute = [this, gbufferViewport, activeAOTexture, skyTexture](RHI::IRHICommandList* cmd)
+            .Execute = [this, gbufferViewport, activeAOTexture, skyTexture, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
                 // 深度テストに失敗した(=何も描かれていない)ピクセル用の背景色。discardされた箇所に前フレームのデータが
@@ -373,8 +383,8 @@ namespace Kurenai::Passes
                 cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
 
                 cmd->SetPipelineState(m_Engine.m_LightingPipelineState.get());
-                cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
-                cmd->SetSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                cmd->SetConstantBuffer(0, frameConstantBuffer);
+                cmd->SetSamplerSet(screenSpaceSamplers);
                 cmd->SetTexture(0, m_Engine.m_GBufferAlbedo.get());
                 cmd->SetTexture(1, m_Engine.m_DirectLightTexture.get());
                 cmd->SetTexture(2, m_Engine.m_GBufferMaterial.get());
@@ -440,7 +450,7 @@ namespace Kurenai::Passes
             },
             .RenderTargets = { m_Engine.m_SceneColor.get() },
             .DepthTarget = m_Engine.m_GBufferDepth.get(),
-            .Execute = [this, gbufferViewport, &gpuLights, &cameraPosition, &viewProj](RHI::IRHICommandList* cmd)
+            .Execute = [this, gbufferViewport, &gpuLights, &cameraPosition, &viewProj, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
             {
                 // 半透明メッシュをインスタンス単位でカメラからの距離降順(奥から手前)に並べる。
                 // instance.WorldはHLSL(mul(vec, World))に合わせて転置済みのため、ワールド座標の
@@ -489,8 +499,8 @@ namespace Kurenai::Passes
 
                 cmd->SetViewport(gbufferViewport);
                 cmd->SetPipelineState(m_Engine.m_TransparentPipelineState.get());
-                cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
-                cmd->SetSamplerSet(m_Engine.m_MaterialSamplers.get());
+                cmd->SetConstantBuffer(0, frameConstantBuffer);
+                cmd->SetSamplerSet(materialSamplers);
 
                 // ライトバッファの中身の更新はグラフ構築前に1回だけ済ませてある
                 // (タイルライトカリングパスがこのパスより先に読むため、パス内で更新できない)
@@ -533,8 +543,8 @@ namespace Kurenai::Passes
                         return;
                     }
                     cmd->SetPipelineState(wanted);
-                    cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
-                    cmd->SetSamplerSet(m_Engine.m_MaterialSamplers.get());
+                    cmd->SetConstantBuffer(0, frameConstantBuffer);
+                    cmd->SetSamplerSet(materialSamplers);
                     currentPipelineState = wanted;
                 };
 
@@ -546,8 +556,8 @@ namespace Kurenai::Passes
                         MakeObjectConstants(
                             *draw.Instance, *draw.Model, *draw.Mesh, m_Engine.m_EmissiveLightSettings.Intensity,
                             m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
-                    cmd->UpdateBuffer(m_Engine.m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                    cmd->SetConstantBuffer(1, m_Engine.m_ObjectConstantBuffer.get());
+                    cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
+                    cmd->SetConstantBuffer(1, objectConstantBuffer);
 
                     cmd->SetVertexBuffer(draw.Mesh->VertexBuffer.get());
                     cmd->SetIndexBuffer(draw.Mesh->IndexBuffer.get());

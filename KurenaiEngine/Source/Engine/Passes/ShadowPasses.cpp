@@ -25,6 +25,9 @@ namespace Kurenai::Passes
     void ShadowPasses::RegisterCascades(
         Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
     {
+        RHI::IRHIBuffer* const objectConstantBuffer = frame.ObjectConstantBuffer;
+        RHI::IRHISamplerSet* const materialSamplers = frame.MaterialSamplers;
+
         // 【フレームの値をここで写し取る】以下はRender()から機械的に移した登録コードなので、
         // 参照している名前を変えずに済むよう同じ名前で受け直す。
         //
@@ -41,7 +44,7 @@ namespace Kurenai::Passes
                 .Name = "Shadow" + std::to_string(cascade),
                 .DepthTarget = m_Engine.m_ShadowCascadeArray.get(),
                 .DepthTargetArraySlice = cascade,
-                .Execute = [this, shadowViewport, cascade, cascadeViewProj](RHI::IRHICommandList* cmd)
+                .Execute = [this, shadowViewport, cascade, cascadeViewProj, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(shadowViewport);
                     // 深度1.0(最遠)にクリアしておく。無効時はこの後の描画をスキップするため、
@@ -73,7 +76,7 @@ namespace Kurenai::Passes
                             cmd->SetConstantBuffer(0, m_Engine.m_ShadowCascadeConstantBuffer.get());
                             // カットアウトのピクセルシェーダーがベースカラーを引くためサンプラーが要る。
                             // 不透明用のPSOはピクセルシェーダーを持たないので無害
-                            cmd->SetSamplerSet(m_Engine.m_MaterialSamplers.get());
+                            cmd->SetSamplerSet(materialSamplers);
                             currentPipelineState = wanted;
                         };
                         // アルファカットアウトのマテリアルは切り抜きを反映して深度を書く。
@@ -143,8 +146,8 @@ namespace Kurenai::Passes
                                         instance, coarsestModel, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, rejectMask,
                                         requireMask, m_Engine.m_MeshletLODFrame);
                                     cmd->UpdateBuffer(
-                                        m_Engine.m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                                    cmd->SetConstantBuffer(1, m_Engine.m_ObjectConstantBuffer.get());
+                                        objectConstantBuffer, &objectConstants, sizeof(objectConstants));
+                                    cmd->SetConstantBuffer(1, objectConstantBuffer);
                                     cmd->DispatchMesh(groupCount, 1, 1);
                                     ++m_Engine.m_DrawCallsShadow;
                                 };
@@ -185,8 +188,8 @@ namespace Kurenai::Passes
                                     MakeObjectConstants(instance, coarsestModel, mesh, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
                                 objectConstants.InstanceBase = unit.InstanceBase;
                                 objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
-                                cmd->UpdateBuffer(m_Engine.m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                                cmd->SetConstantBuffer(1, m_Engine.m_ObjectConstantBuffer.get());
+                                cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
+                                cmd->SetConstantBuffer(1, objectConstantBuffer);
 
                                 if (cutout)
                                 {
@@ -216,6 +219,10 @@ namespace Kurenai::Passes
     void ShadowPasses::RegisterRaytraced(
         Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
     {
+        const uint32_t renderWidth = frame.RenderWidth;
+        const uint32_t renderHeight = frame.RenderHeight;
+        RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
+
         // 【フレームの値をここで写し取る】Render()から機械的に移した登録コードなので、
         // 参照している名前を変えずに済むよう同じ名前で受け直す
         const FrameConstants& constants = *frame.Constants;
@@ -228,20 +235,20 @@ namespace Kurenai::Passes
                 .Name = "RTShadow",
                 .Reads = { m_Engine.m_GBufferNormal.get(), m_Engine.m_GBufferDepth.get() },
                 .Writes = { m_Engine.m_RTShadowTexture.get() },
-                .Execute = [this](RHI::IRHICommandList* cmd)
+                .Execute = [this, renderWidth, renderHeight, frameConstantBuffer](RHI::IRHICommandList* cmd)
                 {
                     Passes::RTShadowConstants rtShadowConstants{};
                     rtShadowConstants.Params0 =
                     {
-                        static_cast<float>(m_Engine.m_RenderWidth),
-                        static_cast<float>(m_Engine.m_RenderHeight),
+                        static_cast<float>(renderWidth),
+                        static_cast<float>(renderHeight),
                         DirectX::XMConvertToRadians(m_Engine.m_ShadowSettings.RTSunAngularRadiusDegrees),
                         static_cast<float>(std::max(1, m_Engine.m_ShadowSettings.RTSampleCount)),
                     };
                     cmd->UpdateBuffer(m_Engine.m_RTShadowConstantBuffer.get(), &rtShadowConstants, sizeof(rtShadowConstants));
 
                     cmd->SetComputePipelineState(m_Engine.m_RTShadowPipelineState.get());
-                    cmd->SetComputeConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_RTShadowConstantBuffer.get());
 
                     // レジスタ割り当てはRTShadow.hlsl側の宣言と一致させること。
@@ -252,7 +259,7 @@ namespace Kurenai::Passes
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
                     cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RTShadowTexture.get());
-                    cmd->Dispatch((m_Engine.m_RenderWidth + 7) / 8, (m_Engine.m_RenderHeight + 7) / 8, 1);
+                    cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
         }

@@ -30,6 +30,9 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        RHI::IRHIBuffer* const objectConstantBuffer = frame.ObjectConstantBuffer;
+        RHI::IRHISamplerSet* const materialSamplers = frame.MaterialSamplers;
+
         // 【フレームの値をここで写し取る】以下はRender()から機械的に移した登録コードなので、
         // 参照している名前を変えずに済むよう同じ名前で受け直す。
         //
@@ -52,7 +55,7 @@ namespace Kurenai::Passes
         // プローブ1面ぶんのキャプチャ(フォワード描画 → スクラッチのキューブ面へコピー)。
         // フルベイクと時間分割の両方から呼ぶためラムダへ切り出してある
         const auto captureProbeFace =
-            [this, &constants, probeFaceProjection, skyTexture, bakedLightCount](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
+            [this, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
         {
             const Assets::ReflectionProbe& probe = m_Engine.m_ReflectionProbes[probeIndex];
             const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
@@ -99,7 +102,7 @@ namespace Kurenai::Passes
 
             cmd->SetPipelineState(m_Engine.m_ProbeCapturePipelineState.get());
             cmd->SetConstantBuffer(0, m_Engine.m_ProbeCaptureConstantBuffer.get());
-            cmd->SetSamplerSet(m_Engine.m_MaterialSamplers.get());
+            cmd->SetSamplerSet(materialSamplers);
 
             // メッシュによらず共通のバインドはループの外で1回だけ行う。テクスチャのバインドは
             // 上書きするまで維持される(IRHICommandList::SetTexture参照)。DX12もバインド状態の
@@ -146,8 +149,8 @@ namespace Kurenai::Passes
                     ObjectConstants objectConstants = MakeObjectConstants(instance, coarsestModel, mesh, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
                     objectConstants.InstanceBase = unit.InstanceBase;
                     objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
-                    cmd->UpdateBuffer(m_Engine.m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                    cmd->SetConstantBuffer(1, m_Engine.m_ObjectConstantBuffer.get());
+                    cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
+                    cmd->SetConstantBuffer(1, objectConstantBuffer);
 
                     // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかない
                     if (unit.IsBatch())
@@ -182,7 +185,7 @@ namespace Kurenai::Passes
             cmd->SetComputePipelineState(m_Engine.m_ProbeCubeCopyPipelineState.get());
             cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
             cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
-            cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+            cmd->SetComputeSamplerSet(materialSamplers);
             // ジオメトリが描かれなかったテクセルを埋める空。手続き空が有効なフレームでは
             // そちらを使わないと、プローブにだけ古いDDSの空が焼き込まれて本編と食い違う
             // (このフレームで使う空はRender冒頭のskyTextureに確定させてある)
@@ -223,11 +226,11 @@ namespace Kurenai::Passes
 
         // 6ミップ×6面ぶん全部を1回で焼く(フルベイク用。Realtimeの時間分割はconvolveProbePrefilterStepを
         // 直接、複数フレームに分けて呼ぶ。下のRealtimeブロック参照)
-        const auto convolveProbePrefilter = [this, convolveProbePrefilterStep](RHI::IRHICommandList* cmd, size_t probeIndex)
+        const auto convolveProbePrefilter = [this, convolveProbePrefilterStep, materialSamplers](RHI::IRHICommandList* cmd, size_t probeIndex)
         {
             cmd->SetComputePipelineState(m_Engine.m_PrefilterPipelineState.get());
             cmd->SetComputeTexture(0, m_Engine.m_ProbeRadianceCube.get());
-            cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+            cmd->SetComputeSamplerSet(materialSamplers);
             for (uint32_t mip = 0; mip < KurenaiEngine3D::kIBLPrefilterMipLevels; ++mip)
             {
                 for (uint32_t face = 0; face < KurenaiEngine3D::kCubeFaceCount; ++face)
@@ -332,12 +335,12 @@ namespace Kurenai::Passes
                     .Name = "ProbeRealtimeConvolvePrefilterStep",
                     .Reads = { m_Engine.m_ProbeRadianceCube.get() },
                     .Writes = { m_Engine.m_ProbePrefilteredArray.get() },
-                    .Execute = [this, convolveProbePrefilterStep, realtimeProbe, startStep, stepsThisFrame](
+                .Execute = [this, convolveProbePrefilterStep, realtimeProbe, startStep, stepsThisFrame, materialSamplers](
                         RHI::IRHICommandList* cmd)
                     {
                         cmd->SetComputePipelineState(m_Engine.m_PrefilterPipelineState.get());
                         cmd->SetComputeTexture(0, m_Engine.m_ProbeRadianceCube.get());
-                        cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+                        cmd->SetComputeSamplerSet(materialSamplers);
                         for (uint32_t s = 0; s < stepsThisFrame; ++s)
                         {
                             const uint32_t step = startStep + s;

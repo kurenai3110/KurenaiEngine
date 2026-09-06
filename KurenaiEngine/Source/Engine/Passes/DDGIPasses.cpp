@@ -31,6 +31,10 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
+        RHI::IRHIBuffer* const objectConstantBuffer = frame.ObjectConstantBuffer;
+        RHI::IRHISamplerSet* const materialSamplers = frame.MaterialSamplers;
+
         // 【フレームの値をここで写し取る】以下はRender()から機械的に移した登録コードなので、
         // 参照している名前を変えずに済むよう同じ名前で受け直す。
         //
@@ -55,7 +59,7 @@ namespace Kurenai::Passes
         // RWTexture2DArray<float>なので、キューブ配列だけでなく単体のキューブ(=6要素の2D配列)の
         // 面へもそのまま書ける
         const auto captureDDGIProbeFace =
-            [this, &constants, probeFaceProjection, skyTexture, bakedLightCount](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
 
@@ -82,7 +86,7 @@ namespace Kurenai::Passes
             // PSOは反射プローブと共通(同じシェーダー・同じレンダーターゲットフォーマット)
             cmd->SetPipelineState(m_Engine.m_ProbeCapturePipelineState.get());
             cmd->SetConstantBuffer(0, m_Engine.m_ProbeCaptureConstantBuffer.get());
-            cmd->SetSamplerSet(m_Engine.m_MaterialSamplers.get());
+            cmd->SetSamplerSet(materialSamplers);
 
             cmd->SetTexture(4, m_Engine.m_ShadowCascadeArray.get());
             cmd->SetShaderResourceBuffer(8, m_Engine.m_LightBuffer.get());
@@ -165,8 +169,8 @@ namespace Kurenai::Passes
                         ++ddgiLODMismatchMeshes;
                     }
                     const ObjectConstants objectConstants = MakeObjectConstants(instance, coarsestModel, mesh, ddgiEmissiveIntensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
-                    cmd->UpdateBuffer(m_Engine.m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                    cmd->SetConstantBuffer(1, m_Engine.m_ObjectConstantBuffer.get());
+                    cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
+                    cmd->SetConstantBuffer(1, objectConstantBuffer);
 
                     cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                     cmd->SetIndexBuffer(mesh.IndexBuffer.get());
@@ -209,7 +213,7 @@ namespace Kurenai::Passes
             cmd->SetComputePipelineState(m_Engine.m_ProbeCubeCopyPipelineState.get());
             cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
             cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
-            cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+            cmd->SetComputeSamplerSet(materialSamplers);
             cmd->SetComputeTexture(0, skyTexture);
             cmd->SetComputeTexture(1, m_Engine.m_DDGICaptureColor.get());
             cmd->SetComputeTexture(2, m_Engine.m_DDGICaptureDepth.get());
@@ -227,7 +231,7 @@ namespace Kurenai::Passes
         // RWTexture2DArrayとして張る」メソッドをDX11/DX12の両方へ足す必要がある。
         // ドローとメッシュ走査が消えるのが本題なので、そこは測ってから決める
         const auto traceDDGIProbeFace =
-            [this, skyTexture, bakedLightCount](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, skyTexture, bakedLightCount, materialSamplers, frameConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
 
@@ -260,11 +264,11 @@ namespace Kurenai::Passes
 
             cmd->SetComputePipelineState(m_Engine.m_DDGIProbeTracePipelineState.get());
             // ヒット面のマテリアルテクスチャをbindlessで引くためs0にWrapが要る(RTAOと同じ理由)
-            cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+            cmd->SetComputeSamplerSet(materialSamplers);
             cmd->UpdateBuffer(m_Engine.m_DDGITraceConstantBuffer.get(), &traceConstants, sizeof(traceConstants));
             // b0はこのフレームのFrameConstantsをそのまま使う。ラスタ経路と違い、
             // プローブ位置は専用の定数バッファ(b1)で渡すのでViewProjを差し替える必要が無い
-            cmd->SetComputeConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
+            cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
             cmd->SetComputeConstantBuffer(1, m_Engine.m_DDGITraceConstantBuffer.get());
 
             cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
@@ -297,7 +301,7 @@ namespace Kurenai::Passes
 
         // 組み上がったキューブ2本から、オクタヘドラルアトラスの該当セルを焼き直す。
         // 境界の複製は本体の書き込みが全て終わってからでないと正しい値を読めないので別ディスパッチ
-        const auto updateDDGIProbe = [this, effectiveExposure](RHI::IRHICommandList* cmd, uint32_t probeIndex, bool overwrite)
+        const auto updateDDGIProbe = [this, effectiveExposure, materialSamplers](RHI::IRHICommandList* cmd, uint32_t probeIndex, bool overwrite)
         {
             DDGIUpdateConstants updateConstants{};
             updateConstants.Params0 = {
@@ -326,7 +330,7 @@ namespace Kurenai::Passes
                 ? KurenaiEngine3D::kDDGIIrradianceTexels : KurenaiEngine3D::kDDGIDistanceTexels;
             cmd->SetComputePipelineState(m_Engine.m_DDGIProbeUpdatePipelineState.get());
             cmd->SetComputeConstantBuffer(0, m_Engine.m_DDGIUpdateConstantBuffer.get());
-            cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+            cmd->SetComputeSamplerSet(materialSamplers);
             cmd->SetComputeTexture(0, m_Engine.m_DDGICaptureRadianceCube.get());
             cmd->SetComputeTexture(1, m_Engine.m_DDGICaptureDistanceCube.get());
             cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_DDGIIrradianceAtlas.get());
@@ -535,9 +539,7 @@ namespace Kurenai::Passes
                         m_Engine.m_DDGICaptureRadianceCube.get(), m_Engine.m_DDGICaptureDistanceCube.get(),
                         m_Engine.m_DDGIIrradianceAtlas.get(), m_Engine.m_DDGIDistanceAtlas.get(),
                     },
-                    .Execute =
-                        [captureDDGIProbeFace, traceDDGIProbeFace, updateDDGIProbe, probeIndex, overwrite,
-                         useRaytracedTrace](RHI::IRHICommandList* cmd)
+                    .Execute = [captureDDGIProbeFace, traceDDGIProbeFace, updateDDGIProbe, probeIndex, overwrite, useRaytracedTrace](RHI::IRHICommandList* cmd)
                     {
                         // レイの取得だけを差し替える。埋めるスクラッチキューブも、
                         // そのあとの更新CSも同じものを使う(A/Bの差分をレイ取得に限定するため)
@@ -603,6 +605,9 @@ namespace Kurenai::Passes
     void DDGIPasses::RegisterResolve(
         Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
     {
+        RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
+        RHI::IRHISamplerSet* const screenSpaceSamplers = frame.ScreenSpaceSamplers;
+
         // 【フレームの値をここで写し取る】Render()から機械的に移した登録コードなので、
         // 参照している名前を変えずに済むよう同じ名前で受け直す
         const FrameConstants& constants = *frame.Constants;
@@ -629,12 +634,12 @@ namespace Kurenai::Passes
                 // 2枚目は合成側のGatherRed用の低解像度深度(41.24節)。
                 // 並びはDDGIResolve.hlslのPSOutputおよびPSOのRenderTargetFormatsと一致させること
                 .RenderTargets = { m_Engine.m_DDGIResolveTexture.get(), m_Engine.m_DDGIResolveDepthTexture.get() },
-                .Execute = [this, ddgiResolveViewport](RHI::IRHICommandList* cmd)
+                .Execute = [this, ddgiResolveViewport, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(ddgiResolveViewport);
                     cmd->SetPipelineState(m_Engine.m_DDGIResolvePipelineState.get());
-                    cmd->SetConstantBuffer(0, m_Engine.m_FrameConstantBuffer.get());
-                    cmd->SetSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetConstantBuffer(0, frameConstantBuffer);
+                    cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, m_Engine.m_DDGIIrradianceAtlas.get());
                     cmd->SetTexture(1, m_Engine.m_DDGIDistanceAtlas.get());
                     cmd->SetTexture(2, m_Engine.m_GBufferDepth.get());

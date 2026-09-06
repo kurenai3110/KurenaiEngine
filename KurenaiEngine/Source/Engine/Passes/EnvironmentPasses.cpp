@@ -41,6 +41,9 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        RHI::IRHISamplerSet* const materialSamplers = frame.MaterialSamplers;
+        RHI::IRHISamplerSet* const screenSpaceSamplers = frame.ScreenSpaceSamplers;
+
         // 【フレームの値をここで写し取る】以下はRender()から機械的に移した登録コードなので、
         // 参照している名前を変えずに済むよう同じ名前で受け直す。
         //
@@ -92,7 +95,7 @@ namespace Kurenai::Passes
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AtmosphereLUTBake",
                 .Writes = { m_Engine.m_TransmittanceLUT.get(), m_Engine.m_MultiScatteringLUT.get() },
-                .Execute = [this, updateAtmosphereConstants](RHI::IRHICommandList* cmd)
+                .Execute = [this, updateAtmosphereConstants, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_Engine.m_TransmittancePipelineState.get());
                     updateAtmosphereConstants(cmd);
@@ -104,7 +107,7 @@ namespace Kurenai::Passes
                     cmd->SetComputePipelineState(m_Engine.m_MultiScatteringPipelineState.get());
                     updateAtmosphereConstants(cmd);
                     cmd->SetComputeTexture(0, m_Engine.m_TransmittanceLUT.get());
-                    cmd->SetComputeSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeSamplerSet(screenSpaceSamplers);
                     cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_MultiScatteringLUT.get(), 0);
                     const uint32_t groups = (KurenaiEngine3D::kMultiScatteringLUTSize + 7) / 8;
                     cmd->Dispatch(groups, groups, 1);
@@ -137,13 +140,13 @@ namespace Kurenai::Passes
                 .Name = "SkyViewBake",
                 .Reads = { m_Engine.m_TransmittanceLUT.get(), m_Engine.m_MultiScatteringLUT.get() },
                 .Writes = { m_Engine.m_SkyViewLUT.get() },
-                .Execute = [this, updateAtmosphereConstants](RHI::IRHICommandList* cmd)
+                .Execute = [this, updateAtmosphereConstants, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_Engine.m_SkyViewPipelineState.get());
                     updateAtmosphereConstants(cmd);
                     cmd->SetComputeTexture(0, m_Engine.m_TransmittanceLUT.get());
                     cmd->SetComputeTexture(1, m_Engine.m_MultiScatteringLUT.get());
-                    cmd->SetComputeSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeSamplerSet(screenSpaceSamplers);
                     cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_SkyViewLUT.get(), 0);
                     cmd->Dispatch((KurenaiEngine3D::kSkyViewLUTWidth + 7) / 8, (KurenaiEngine3D::kSkyViewLUTHeight + 7) / 8, 1);
                 },
@@ -216,7 +219,7 @@ namespace Kurenai::Passes
                 // 雲の3枚(P18)も同じ仕組みでCloudNoiseBakeより後へ並ぶ
                 .Reads = integrateReads,
                 .BufferWrites = { m_Engine.m_SkyParametersBuffer.get() },
-                .Execute = [this, integrateConstants, cloudNoiseReady](RHI::IRHICommandList* cmd)
+                .Execute = [this, integrateConstants, cloudNoiseReady, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->UpdateBuffer(m_Engine.m_SkyIntegrateConstantBuffer.get(), &integrateConstants, sizeof(integrateConstants));
 
@@ -235,7 +238,7 @@ namespace Kurenai::Passes
                     }
                     // s3 VolumeSamplerがLinear+Wrapで入っている(Samplers.hlsliの役割表参照)。
                     // 雲の3Dノイズとウェザーマップはこれで引く
-                    cmd->SetComputeSamplerSet(m_Engine.m_ScreenSpaceSamplers.get());
+                    cmd->SetComputeSamplerSet(screenSpaceSamplers);
                     cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_SkyParametersBuffer.get());
                     // 1グループ×256スレッド固定(SkyIntegrate.hlsl参照)
                     cmd->Dispatch(1, 1, 1);
@@ -258,14 +261,14 @@ namespace Kurenai::Passes
                 .Reads = { m_Engine.m_SkyViewLUT.get() },
                 .Writes = { m_Engine.m_ProceduralSkyTexture.get() },
                 .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
-                .Execute = [this, &sunLighting](RHI::IRHICommandList* cmd)
+                .Execute = [this, &sunLighting, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_Engine.m_SkyGeneratePipelineState.get());
                     cmd->SetComputeShaderResourceBuffer(0, m_Engine.m_SkyParametersBuffer.get());
                     // SkyView LUT(t1)とサンプラー(s1 ColorSampler)。**サンプラーのバインドを
                     // 外してはいけない** ―― LUTを線形補間で引くため、このパスにもサンプラーが要る
                     cmd->SetComputeTexture(1, m_Engine.m_SkyViewLUT.get());
-                    cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+                    cmd->SetComputeSamplerSet(materialSamplers);
                     for (uint32_t face = 0; face < KurenaiEngine3D::kCubeFaceCount; ++face)
                     {
                         SkyBakeConstants skyConstants{};
@@ -368,11 +371,11 @@ namespace Kurenai::Passes
                 .Name = "IBLPrefilter",
                 .Reads = { skyTexture },
                 .Writes = { m_Engine.m_PrefilteredEnvTexture.get() },
-                .Execute = [this, skyTexture](RHI::IRHICommandList* cmd)
+                .Execute = [this, skyTexture, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_Engine.m_PrefilterPipelineState.get());
                     cmd->SetComputeTexture(0, skyTexture);
-                    cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+                    cmd->SetComputeSamplerSet(materialSamplers);
                     for (uint32_t mip = 0; mip < KurenaiEngine3D::kIBLPrefilterMipLevels; ++mip)
                     {
                         const uint32_t mipSize = std::max(1u, KurenaiEngine3D::kIBLPrefilterBaseSize >> mip);
@@ -410,7 +413,7 @@ namespace Kurenai::Passes
                 .Name = "IBLIrradianceBake",
                 .Reads = { skyTexture },
                 .Writes = { m_Engine.m_IrradianceTexture.get() },
-                .Execute = [this, skyTexture](RHI::IRHICommandList* cmd)
+                .Execute = [this, skyTexture, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     // 拡散イラディアンス(本物のTextureCube、32x32x6面)。HLSLはリソースを動的に
                     // スライス選択できないため、面ごとに1回ずつディスパッチする。
@@ -430,7 +433,7 @@ namespace Kurenai::Passes
                         cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
                         cmd->SetComputePipelineState(m_Engine.m_ProjectSHPipelineState.get());
                         cmd->SetComputeTexture(0, skyTexture);
-                        cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+                        cmd->SetComputeSamplerSet(materialSamplers);
                         cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_SHPartialSumsBuffer.get());
                         const uint32_t groupsPerSide = (KurenaiEngine3D::kSHProjectionSize + 7) / 8;
                         cmd->Dispatch(groupsPerSide, groupsPerSide, KurenaiEngine3D::kCubeFaceCount);
@@ -462,7 +465,7 @@ namespace Kurenai::Passes
                     {
                         cmd->SetComputePipelineState(m_Engine.m_IrradiancePipelineState.get());
                         cmd->SetComputeTexture(0, skyTexture);
-                        cmd->SetComputeSamplerSet(m_Engine.m_MaterialSamplers.get());
+                        cmd->SetComputeSamplerSet(materialSamplers);
                         for (uint32_t face = 0; face < KurenaiEngine3D::kCubeFaceCount; ++face)
                         {
                             IBLFaceConstants faceConstants{};
