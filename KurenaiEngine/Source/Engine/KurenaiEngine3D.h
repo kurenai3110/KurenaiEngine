@@ -1371,14 +1371,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_RTReflectionTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_RTReflectionConstantBuffer;
 
-        // RTシャドウパス: TLASへ太陽の見かけの円盤に向けて影レイを撃ち、可視率(0〜1)を
-        // 単チャンネルのテクスチャへ書くコンピュートパス。DirectLighting.hlslがt6で読み、
-        // CSMのComputeCascadedShadowFactorの戻り値と同じ位置で使う(26章)。
-        // シェーダーとパイプラインステートはm_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る
-        std::unique_ptr<RHI::IRHIShader> m_RTShadowComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_RTShadowPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_RTShadowConstantBuffer;
-
         MegaLightsSettings m_MegaLightsSettings;
         // シェーダーとパイプラインステートはm_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsReferenceComputeShader;
@@ -1844,27 +1836,6 @@ namespace Kurenai
         // カスケードシャドウマップ(CSM)。近いカスケードほどテクセル密度が高く、遠いカスケードほど
         // 広い範囲を粗くカバーする
         static constexpr uint32_t kShadowMapSize = 2048;
-        std::unique_ptr<RHI::IRHIShader> m_ShadowVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_ShadowPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowPipelineStateMirrored;
-        // メッシュシェーダー版のシャドウ(Shaders/3D/ShadowMeshlet.hlsl)。
-        // 非対応環境ではすべてnullptrのままで、描画側は従来のメッシュ単位経路を使う
-        std::unique_ptr<RHI::IRHIShader> m_ShadowAmplificationShader;
-        std::unique_ptr<RHI::IRHIShader> m_ShadowMeshShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletPipelineStateMirrored;
-        // アルファカットアウト(glTFのalphaMode=MASK)の影。ピクセルシェーダーは
-        // 頂点シェーダー経路とメッシュシェーダー経路で共有する。
-        // **DX11でも効く**(bindlessもメッシュシェーダーも要らない)
-        std::unique_ptr<RHI::IRHIShader> m_ShadowCutoutVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_ShadowCutoutPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowCutoutPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowCutoutPipelineStateMirrored;
-        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletCutoutPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletCutoutPipelineStateMirrored;
-        // シャドウパスの各カスケード描画で使う専用の定数バッファ(カスケードごとに値を更新して使い回す)
-        std::unique_ptr<RHI::IRHIBuffer> m_ShadowCascadeConstantBuffer;
 
         ShadowSettings m_ShadowSettings;
 
@@ -3115,7 +3086,6 @@ namespace Kurenai
         // 数えるのはCPUが発行したDrawIndexed/DispatchMeshの回数で、
         // 増幅シェーダーがカリングした後に実際にラスタライズされた塊の数ではない
         uint32_t m_DrawCallsGBuffer = 0;
-        uint32_t m_DrawCallsShadow = 0;
         uint32_t m_DrawCallsDepthPrepass = 0;
         // 直前に描き終えたフレームの値はm_RenderStats.DrawCalls*LastFrameへ出す。
         // **UIパネルはこちらを読むこと** ―― 上のカウンタはフレーム先頭で0に戻るため、

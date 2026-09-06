@@ -10,6 +10,8 @@
 #include "Core/Logger.h"
 #include "Core/RenderGraph.h"
 #include "Core/StringUtil.h"
+// シャドウのドローコール数を m_ShadowPasses->GetDrawCalls() で読むため、前方宣言では足りない
+#include "../Passes/ShadowPasses.h"
 #include "RenderDumpService.h"
 
 // 中間レンダーターゲットのダンプ(-dumptex)と、性能記録のログ出力。
@@ -810,7 +812,7 @@ namespace Kurenai
         m_FrameStatsMeshCullTestedSum += m_MeshCullTested;
         m_FrameStatsMeshCullCulledSum += m_MeshCullCulled;
         m_FrameStatsDrawCallsGBufferSum += m_DrawCallsGBuffer;
-        m_FrameStatsDrawCallsShadowSum += m_DrawCallsShadow;
+        m_FrameStatsDrawCallsShadowSum += m_ShadowPasses->GetDrawCalls();
         m_FrameStatsDrawCallsDepthPrepassSum += m_DrawCallsDepthPrepass;
         m_FrameStatsInstancedBatchSum += m_InstancedBatchCount;
         m_FrameStatsInstancedInstanceSum += m_InstancedInstanceCount;
