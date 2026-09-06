@@ -1,5 +1,8 @@
 #pragma once
 
+#include <string>
+
+#include "Core/Logger.h"
 #include "KurenaiEngine3D.h"
 
 // ジオメトリを描く各パスが共有する「列挙 → カリング → 段の選択 → メッシュのループ」。
@@ -79,6 +82,36 @@ namespace Kurenai
     void KurenaiEngine3D::ForEachGeometryDraw(
         const GeometryDrawLoopDesc& desc, ModelFn&& onModel, MeshFn&& onMesh)
     {
+        // 【入れ子の列挙を禁じる】m_DrawUnitScratchは1本しかなく、内側の列挙が
+        // 外側の列挙対象を丸ごと書き換えてしまう。段階5から人手のコメントで守ってきた
+        // 義務だが、ForEachGeometryDrawがpublicになって呼べる場所が広がったので検査にする。
+        //
+        // 【打ち切らずに記録だけ残す】ここでreturnすると、入れ子を書いた瞬間に
+        // 「描かれないメッシュ」が出る。従来どおり最後まで回して絵は変えない。
+        // 毎フレーム何千回も通るので記録は絞る。**ここはテンプレートなのでstaticは
+        // インスタンス化ごとに別物**で、記録は呼び出し箇所ごとに1回になる
+        // (非テンプレートのIsMeshVisibleWithStatsはプログラム全体で1回。そこは違う)
+        if (m_DrawUnitScratchInUse)
+        {
+            static bool loggedNestedDrawLoop = false;
+            if (!loggedNestedDrawLoop)
+            {
+                loggedNestedDrawLoop = true;
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "ForEachGeometryDrawを入れ子で呼んでいます。m_DrawUnitScratchは1本しか無く、"
+                    "内側の列挙が外側の列挙対象を書き換えます");
+            }
+        }
+        // onMeshが偽を返す打ち切りでも必ず戻すためスコープガードにする
+        struct ScratchGuard
+        {
+            bool& InUse;
+            bool Previous;
+            ~ScratchGuard() { InUse = Previous; }
+        } scratchGuard{ m_DrawUnitScratchInUse, m_DrawUnitScratchInUse };
+        m_DrawUnitScratchInUse = true;
+
         const bool coarsest = desc.LODMode == GeometryLODMode::Coarsest;
 
         // 列挙元をどちらでも InstanceDrawUnit へ揃える。

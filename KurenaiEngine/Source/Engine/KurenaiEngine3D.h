@@ -998,6 +998,9 @@ namespace Kurenai
         // 上の出力先。パスは順に実行されるので1本を使い回してよい(確保のやり直しを避ける)。
         // **パスのラムダより長生きする必要がある**ため、ローカル変数ではなくここに置く
         mutable std::vector<InstanceDrawUnit> m_DrawUnitScratch;
+        // 上が1本しかないことを守るための旗。入れ子で列挙すると内側が外側の列挙対象を
+        // 書き換えてしまう。検査の中身はRendering/GeometryDrawLoop.hにある
+        mutable bool m_DrawUnitScratchInUse = false;
         // 統計。**フラスタムカリングとは別建てにする** ―― 「バッチが0のまま」は
         // 「まとめられる相手がいない」のか「一度も実行されていない」のかを区別できないため、
         // まとめた数と減らせたドロー数の両方を出す
