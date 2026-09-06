@@ -39,6 +39,9 @@
     <ClInclude Include="Source\Engine\Diagnostics\RenderStats.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Engine\Diagnostics\ScheduledRecreation.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
     <ClInclude Include="Source\Engine\Settings\AmbientOcclusionSettings.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>

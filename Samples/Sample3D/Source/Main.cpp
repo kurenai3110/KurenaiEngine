@@ -4,6 +4,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <exception>
@@ -496,6 +497,132 @@ namespace
         return dumps;
     }
 
+    // -recreate <フレーム> <指示> を全部拾う。ベースライン採取だけでは通らない解像度・精度・
+    // シーン切り替え時のGPUリソース作り直し経路を、無人の採取スクリプトから検証するために使う。
+    std::vector<Kurenai::ScheduledRecreation> ParseScheduledRecreations()
+    {
+        std::vector<Kurenai::ScheduledRecreation> recreations;
+
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            Kurenai::Core::Logger::Error("Main", "-recreateのコマンドライン取得に失敗しました");
+            return recreations;
+        }
+
+        const auto logInvalid = [](const wchar_t* frame, const wchar_t* instruction)
+        {
+            Kurenai::Core::Logger::Error(
+                "Main", "-recreateの指定が不正なため無視します: frame=" + Kurenai::Core::WideToUtf8(frame) +
+                    ", instruction=" + Kurenai::Core::WideToUtf8(instruction));
+        };
+        const auto parseDimension = [](const std::wstring& text, uint32_t& value)
+        {
+            if (text.empty() || text[0] == L'-')
+            {
+                return false;
+            }
+            errno = 0;
+            wchar_t* end = nullptr;
+            const unsigned long parsed = wcstoul(text.c_str(), &end, 10);
+            if (errno == ERANGE || end == text.c_str() || (end != nullptr && *end != L'\0') || parsed == 0 ||
+                parsed > (std::numeric_limits<uint32_t>::max)())
+            {
+                return false;
+            }
+            value = static_cast<uint32_t>(parsed);
+            return true;
+        };
+
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-recreate") != 0)
+            {
+                continue;
+            }
+            if (i + 2 >= argc)
+            {
+                Kurenai::Core::Logger::Error("Main", "-recreate は「-recreate <フレーム> <指示>」の形で指定します。無視します");
+                break;
+            }
+
+            errno = 0;
+            wchar_t* frameEnd = nullptr;
+            const long frame = wcstol(argv[i + 1], &frameEnd, 10);
+            if (errno == ERANGE || frameEnd == argv[i + 1] || (frameEnd != nullptr && *frameEnd != L'\0') || frame < 0)
+            {
+                logInvalid(argv[i + 1], argv[i + 2]);
+                i += 2;
+                continue;
+            }
+
+            Kurenai::ScheduledRecreation request;
+            request.Frame = static_cast<uint32_t>(frame);
+            const std::wstring instruction = argv[i + 2];
+            const auto parseResolution = [&](const wchar_t* prefix)
+            {
+                const size_t prefixLength = wcslen(prefix);
+                if (instruction.size() <= prefixLength || _wcsnicmp(instruction.c_str(), prefix, prefixLength) != 0)
+                {
+                    return false;
+                }
+                const std::wstring size = instruction.substr(prefixLength);
+                const size_t x = size.find(L'x');
+                if (x == std::wstring::npos || size.find(L'x', x + 1) != std::wstring::npos ||
+                    !parseDimension(size.substr(0, x), request.Width) || !parseDimension(size.substr(x + 1), request.Height))
+                {
+                    return false;
+                }
+                return true;
+            };
+
+            bool valid = true;
+            if (_wcsnicmp(instruction.c_str(), L"renderres=", 10) == 0)
+            {
+                request.Kind = Kurenai::ScheduledRecreationKind::RenderResolution;
+                valid = parseResolution(L"renderres=");
+            }
+            else if (_wcsnicmp(instruction.c_str(), L"upscale=", 8) == 0)
+            {
+                request.Kind = Kurenai::ScheduledRecreationKind::UpscaleOutput;
+                valid = parseResolution(L"upscale=");
+            }
+            else if (_wcsicmp(instruction.c_str(), L"precision=hdr") == 0)
+            {
+                request.Kind = Kurenai::ScheduledRecreationKind::BufferPrecision;
+                request.Precision = Kurenai::BufferPrecision::HDR;
+            }
+            else if (_wcsicmp(instruction.c_str(), L"precision=legacy8bit") == 0)
+            {
+                request.Kind = Kurenai::ScheduledRecreationKind::BufferPrecision;
+                request.Precision = Kurenai::BufferPrecision::Legacy8bit;
+            }
+            else if (_wcsnicmp(instruction.c_str(), L"scene=", 6) == 0 && instruction.size() > 6)
+            {
+                request.Kind = Kurenai::ScheduledRecreationKind::SceneLoad;
+                request.SceneName = instruction.substr(6);
+            }
+            else
+            {
+                valid = false;
+            }
+
+            if (!valid)
+            {
+                logInvalid(argv[i + 1], argv[i + 2]);
+            }
+            else
+            {
+                recreations.push_back(std::move(request));
+            }
+            i += 2;
+        }
+
+        LocalFree(argv);
+        return recreations;
+    }
+
     // -sceneを指定したのに解決できなかったときに投げる。
     //
     // 【既定のシーンへ落とさない】以前は警告を1行出して0番(一覧の先頭)で起動していたが、
@@ -788,6 +915,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -dumpframe <N> / -exitafterdump。中間レンダーターゲットを線形の生値で書き出す。
         // 「コンパイルは通るが絵が違う」を、8bitのスクリーンショットではなく数値で切り分けるための経路
         const std::vector<TextureDumpArg> textureDumps = ParseTextureDumps();
+        // -recreate <フレーム> <renderres=<幅>x<高さ>|upscale=<幅>x<高さ>|precision=hdr|precision=legacy8bit|scene=<名前>>
+        // (繰り返し可)。GPUリソースの作り直し経路を指定フレームで無人検証する。
+        const std::vector<Kurenai::ScheduledRecreation> scheduledRecreations = ParseScheduledRecreations();
         const int textureDumpFrame = ParseIntOption(L"-dumpframe", -1);
         const bool exitAfterDump = HasFlagOption(L"-exitafterdump");
         // -taa の読み取りは下の `taa` で行う(ダンプの比較でも同じ指定を使う)
@@ -1015,6 +1145,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.AddTextureDump(
                     dump.Name.c_str(), dump.Path.c_str(), dump.MipLevel, dump.ArraySlice, dump.Frames, dump.Stride);
+            }
+            for (const Kurenai::ScheduledRecreation& recreation : scheduledRecreations)
+            {
+                engine.AddScheduledRecreation(recreation);
             }
             if (!textureDumps.empty() || (!passManifestPath.empty() && passManifestFrames == 1))
             {

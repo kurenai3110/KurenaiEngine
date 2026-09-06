@@ -28,6 +28,7 @@
 #include "Core/CPUProfiler.h"
 #include "Diagnostics/RenderCapabilities.h"
 #include "Diagnostics/RenderStats.h"
+#include "Diagnostics/ScheduledRecreation.h"
 #include "Settings/AmbientOcclusionSettings.h"
 #include "Settings/CloudSettings.h"
 #include "Settings/DDGISettings.h"
@@ -351,6 +352,12 @@ namespace Kurenai
 
         // 書き出しが全部終わったらウィンドウを閉じる。無人での検証用
         void SetExitAfterDump(bool enabled);
+
+        // 【検証専用】指定フレームでGPUリソースの作り直し経路を踏ませる予約を積む。
+        // 複数回呼べば1回の起動で複数の経路を順に踏む(GUIの起動は共有資源なので、
+        // 1回の起動で必要な経路が全部通る形にすること)。
+        // 種別と各フィールドの意味は Diagnostics/ScheduledRecreation.h を見ること
+        void AddScheduledRecreation(const ScheduledRecreation& request);
 
         // TAAの有無を起動時に上書きするのは SetTAAEnabled(上で宣言済み)。
         // ダンプの比較では、まずこれを切って再現性の下限をゼロにする ――
@@ -1548,6 +1555,16 @@ namespace Kurenai
         // (a-trousは段の数だけ同名で登録される。**合計が知りたいので足すのが正しい**)
         std::map<std::string, double> m_PerfDumpTotals;
 
+        // --- 作り直し経路の予約(検証専用。AddScheduledRecreation) ---
+        // 発火済みのものはFiredを立てて二度と撃たない。フレームが飛んでも取りこぼさないよう、
+        // 「>= Frameの最初のフレーム」で撃つ。
+        struct ScheduledRecreationSlot
+        {
+            ScheduledRecreation Request;
+            bool Fired = false;
+        };
+        std::vector<ScheduledRecreationSlot> m_ScheduledRecreations;
+
         // --- 中間レンダーターゲットの生値ダンプ(検証専用。AddTextureDump) ---
         // 名前 -> テクスチャ の対応表。CreateRenderTargetsでテクスチャを増やしたら
         // BuildDumpableTextureTableにも足すこと(表の実体はそちらのコメントを参照)
@@ -1650,6 +1667,7 @@ namespace Kurenai
         static constexpr size_t kTextureDumpRingMaxBytes = 512ull * 1024 * 1024;
 
         // ダンプの発行(コピーを積む)と、読み戻し・ファイル書き出し。Render()から呼ぶ
+        void ApplyScheduledRecreations();
         void IssueTextureDumps(Core::RenderGraph& graph);
         void ResolveTextureDumps();
         // 1件ぶんをファイルへ書く。書けたらtrue

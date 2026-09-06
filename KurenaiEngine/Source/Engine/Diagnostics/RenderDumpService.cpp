@@ -190,6 +190,140 @@ namespace Kurenai
             std::string("書き出し後の自動終了: ") + (enabled ? "有効" : "無効"));
     }
 
+    void KurenaiEngine3D::AddScheduledRecreation(const ScheduledRecreation& request)
+    {
+        const char* kindName = nullptr;
+        switch (request.Kind)
+        {
+        case ScheduledRecreationKind::RenderResolution:
+            kindName = "RenderResolution";
+            if (request.Width == 0 || request.Height == 0)
+            {
+                Core::Logger::Error("KurenaiEngine3D", "AddScheduledRecreation: RenderResolutionの解像度が不正です");
+                return;
+            }
+            break;
+        case ScheduledRecreationKind::UpscaleOutput:
+            kindName = "UpscaleOutput";
+            if (request.Width == 0 || request.Height == 0)
+            {
+                Core::Logger::Error("KurenaiEngine3D", "AddScheduledRecreation: UpscaleOutputの解像度が不正です");
+                return;
+            }
+            break;
+        case ScheduledRecreationKind::BufferPrecision:
+            kindName = "BufferPrecision";
+            break;
+        case ScheduledRecreationKind::SceneLoad:
+            kindName = "SceneLoad";
+            if (request.SceneName.empty())
+            {
+                Core::Logger::Error("KurenaiEngine3D", "AddScheduledRecreation: SceneLoadのシーン名が空です");
+                return;
+            }
+            break;
+        default:
+            Core::Logger::Error("KurenaiEngine3D", "AddScheduledRecreation: 未知の作り直し種別です");
+            return;
+        }
+
+        m_ScheduledRecreations.push_back({ request });
+        std::string message = "作り直し予約を登録しました: frame=" + std::to_string(request.Frame) + ", kind=" + kindName;
+        if (request.Kind == ScheduledRecreationKind::RenderResolution || request.Kind == ScheduledRecreationKind::UpscaleOutput)
+        {
+            message += ", size=" + std::to_string(request.Width) + "x" + std::to_string(request.Height);
+        }
+        else if (request.Kind == ScheduledRecreationKind::BufferPrecision)
+        {
+            message += std::string(", precision=") +
+                (request.Precision == BufferPrecision::Legacy8bit ? "Legacy8bit" : "HDR");
+        }
+        else
+        {
+            message += ", scene=" + Core::WideToUtf8(request.SceneName);
+        }
+        Core::Logger::Info("KurenaiEngine3D", message);
+    }
+
+    void KurenaiEngine3D::ApplyScheduledRecreations()
+    {
+        for (ScheduledRecreationSlot& slot : m_ScheduledRecreations)
+        {
+            if (slot.Fired || m_TAAFrameIndex < slot.Request.Frame)
+            {
+                continue;
+            }
+
+            slot.Fired = true;
+            const ScheduledRecreation& request = slot.Request;
+            switch (request.Kind)
+            {
+            case ScheduledRecreationKind::RenderResolution:
+                RequestUpscaleSettings(false, m_PostProcessSettings.UpscaleQuality, request.Width, request.Height);
+                Core::Logger::Info(
+                    "KurenaiEngine3D", "作り直し予約を発火しました: frame=" + std::to_string(m_TAAFrameIndex) +
+                        ", RenderResolution=" + std::to_string(request.Width) + "x" + std::to_string(request.Height));
+                break;
+            case ScheduledRecreationKind::UpscaleOutput:
+                RequestUpscaleSettings(true, m_PostProcessSettings.UpscaleQuality, request.Width, request.Height);
+                Core::Logger::Info(
+                    "KurenaiEngine3D", "作り直し予約を発火しました: frame=" + std::to_string(m_TAAFrameIndex) +
+                        ", UpscaleOutput=" + std::to_string(request.Width) + "x" + std::to_string(request.Height));
+                break;
+            case ScheduledRecreationKind::BufferPrecision:
+                m_SystemSettings.Precision = request.Precision;
+                m_BufferPrecisionDirty = true;
+                Core::Logger::Info(
+                    "KurenaiEngine3D", "作り直し予約を発火しました: frame=" + std::to_string(m_TAAFrameIndex) +
+                        ", BufferPrecision=" +
+                        (request.Precision == BufferPrecision::Legacy8bit ? std::string("Legacy8bit") : std::string("HDR")));
+                break;
+            case ScheduledRecreationKind::SceneLoad:
+            {
+                size_t sceneIndex = m_SceneFilePaths.size();
+                std::string candidates;
+                for (size_t i = 0; i < m_SceneFilePaths.size(); ++i)
+                {
+                    const std::wstring& path = m_SceneFilePaths[i];
+                    const size_t slash = path.find_last_of(L"\\/");
+                    const size_t nameBegin = slash == std::wstring::npos ? 0 : slash + 1;
+                    const size_t dot = path.find_last_of(L'.');
+                    const std::wstring name = dot != std::wstring::npos && dot >= nameBegin
+                        ? path.substr(nameBegin, dot - nameBegin)
+                        : path.substr(nameBegin);
+                    if (!candidates.empty())
+                    {
+                        candidates += ", ";
+                    }
+                    candidates += Core::WideToUtf8(name);
+                    if (_wcsicmp(name.c_str(), request.SceneName.c_str()) == 0)
+                    {
+                        sceneIndex = i;
+                    }
+                }
+
+                if (sceneIndex == m_SceneFilePaths.size())
+                {
+                    Core::Logger::Error(
+                        "KurenaiEngine3D", "作り直し予約のSceneLoadでシーンが見つかりません: " +
+                            Core::WideToUtf8(request.SceneName) + " (候補: " +
+                            (candidates.empty() ? std::string("なし") : candidates) + ")");
+                    break;
+                }
+
+                RequestSceneLoad(sceneIndex);
+                Core::Logger::Info(
+                    "KurenaiEngine3D", "作り直し予約を発火しました: frame=" + std::to_string(m_TAAFrameIndex) +
+                        ", SceneLoad=" + Core::WideToUtf8(request.SceneName));
+                break;
+            }
+            default:
+                Core::Logger::Error("KurenaiEngine3D", "作り直し予約の発火で未知の種別を検出しました");
+                break;
+            }
+        }
+    }
+
     void KurenaiEngine3D::IssueTextureDumps(Core::RenderGraph& graph)
     {
         if (m_TextureDumps.empty())

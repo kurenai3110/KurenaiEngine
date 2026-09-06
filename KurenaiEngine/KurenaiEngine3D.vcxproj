@@ -82,6 +82,7 @@
     <ClInclude Include="Source\Engine\Diagnostics\RenderCapabilities.h" />
     <ClInclude Include="Source\Engine\Diagnostics\RenderDumpService.h" />
     <ClInclude Include="Source\Engine\Diagnostics\RenderStats.h" />
+    <ClInclude Include="Source\Engine\Diagnostics\ScheduledRecreation.h" />
     <ClInclude Include="Source\Engine\ShaderInterop\CascadeConstants.h" />
     <ClInclude Include="Source\Engine\ShaderInterop\FrameConstants.h" />
     <ClInclude Include="Source\Engine\ShaderInterop\MegaLightsStochasticConstants.h" />
