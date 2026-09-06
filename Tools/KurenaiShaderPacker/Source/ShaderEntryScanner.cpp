@@ -57,8 +57,23 @@ namespace Kurenai::ShaderPacker
             return true;
         }
 
+        // baseDirectory は**一番外側の .hlsl があるフォルダ**。入れ子のインクルードは
+        // まずここから解決する。
+        //
+        // 【含めた側のフォルダ基準ではない】fxc の D3D_COMPILE_STANDARD_FILE_INCLUDE も
+        // dxc の -I も、入れ子のインクルードを一番外側の .hlsl のフォルダ基準で解決する。
+        // ここを含めた側のフォルダ基準にしていたため、
+        // ShaderInterop/Common.hlsli の #include "ShaderInterop/FrameConstants.hlsli" が
+        // ShaderInterop/ShaderInterop/... になって展開されず、**そのヘッダの中にある
+        // エントリポイントを取りこぼす**状態だった(FrameConstants.hlsli にエントリが
+        // 無かったため実害は出ていなかった)。
+        //
+        // 【含めた側のフォルダも試す】同じフォルダの相対指定で書かれた既存の
+        // インクルードを壊さないための保険。コンパイラが受け付ける書き方より
+        // 広く受けることになるが、走査で取りこぼすよりは安全側
         void ExpandRecursive(
             const std::filesystem::path& path,
+            const std::filesystem::path& baseDirectory,
             std::set<std::filesystem::path>& visited,
             std::string& out,
             std::string& outError)
@@ -95,7 +110,14 @@ namespace Kurenai::ShaderPacker
                 out.append("\n");
                 copied = matchBegin + matchLength;
 
-                ExpandRecursive(path.parent_path() / (*it)[1].str(), visited, out, outError);
+                const std::string includeName = (*it)[1].str();
+                std::filesystem::path resolved = baseDirectory / includeName;
+                std::error_code existsEc;
+                if (!std::filesystem::exists(resolved, existsEc))
+                {
+                    resolved = path.parent_path() / includeName;
+                }
+                ExpandRecursive(resolved, baseDirectory, visited, out, outError);
             }
             out.append(text, copied, text.size() - copied);
             out.append("\n");
@@ -106,7 +128,8 @@ namespace Kurenai::ShaderPacker
     {
         std::set<std::filesystem::path> visited;
         std::string expanded;
-        ExpandRecursive(std::filesystem::path(filePath), visited, expanded, outError);
+        const std::filesystem::path root(filePath);
+        ExpandRecursive(root, root.parent_path(), visited, expanded, outError);
         return expanded;
     }
 
