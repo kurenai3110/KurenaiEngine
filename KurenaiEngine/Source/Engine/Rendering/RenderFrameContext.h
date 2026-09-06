@@ -139,6 +139,21 @@ namespace Kurenai::Rendering
         // 大気遠近パスを今フレーム走らせるか
         bool FogPassRuns = false;
 
+        // このフレームにどの経路が走るかの判定。**エンジンの Should* を Render() が
+        // 1回だけ呼んだ結果**で、bool をここで作り直してはいけない。作り直すと
+        // 「MegaLights は走るか」の定義が2つに割れ、静かに食い違う。
+        // 判定に使う値(設定・レイトレシーンの有無・PSOやテクスチャの生成可否)は
+        // どれも登録が始まる前に確定している
+        bool MegaLightsRuns = false;
+        bool LightCullingRuns = false;
+        bool RaytracedShadowRuns = false;
+        bool RaytracedAORuns = false;
+        bool RaytracedReflectionRuns = false;
+        bool RaytracedDDGITraceRuns = false;
+        bool SuppressEmissiveForGI = false;
+        // MegaLightsが1画素あたり何標本取るか(手法3以外は必ず1)
+        int32_t MegaLightsSamplesPerPixel = 1;
+
         // ジオメトリの経路で、このフレームに何が有効かを配る一式
         bool DepthPrepassRuns = false;
         bool HiZFromDepthPrepass = false;

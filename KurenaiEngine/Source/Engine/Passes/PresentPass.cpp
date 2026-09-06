@@ -52,6 +52,11 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
+        // ここで作り直さない。ラムダへ値で渡すためローカルで受ける
+        const bool megaLightsRuns = frame.MegaLightsRuns;
+        const bool raytracedShadowRuns = frame.RaytracedShadowRuns;
+
         const uint32_t renderWidth = frame.RenderWidth;
         const uint32_t renderHeight = frame.RenderHeight;
         RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
@@ -126,7 +131,7 @@ namespace Kurenai::Passes
             // (SWラスタ・PlanarReflection・RTShadowのデバッグ表示と同じ方針)。
             // ModeはDebugView::DirectLightと同じ4 ―― 並べて差分を取るのが目的なので、
             // 表示側の処理まで一致させる
-            if (m_Engine.ShouldRunMegaLights())
+            if (megaLightsRuns)
             {
                 presentSourceTexture = m_Engine.m_MegaLightsTexture.get();
                 presentMode = 4;
@@ -161,7 +166,7 @@ namespace Kurenai::Passes
             // 可視率(0〜1のスカラー)をそのままグレースケール表示する。RTシャドウを実行していない
             // フレーム(非対応環境・手法がRaytraced以外)はテクスチャの中身が意味を持たないため、
             // 最終結果のまま何も切り替えない
-            if (m_Engine.ShouldRunRaytracedShadow())
+            if (raytracedShadowRuns)
             {
                 presentSourceTexture = m_Engine.m_RenderTargets.RTShadowTexture.get();
                 presentMode = 5;
@@ -242,7 +247,7 @@ namespace Kurenai::Passes
             // 候補プールも構造化バッファなのでt3から読む(Present.hlsl Mode 21)。t0の扱いは
             // Mode 11と同じ。パスが走っていないフレームは中身が前フレーム/未定義の残骸なので、
             // 最終結果のまま何も切り替えない(他のMegaLights系の表示と同じ方針)
-            if (m_Engine.ShouldRunMegaLights() && m_Engine.m_MegaLightsTilePoolBuffer)
+            if (megaLightsRuns && m_Engine.m_MegaLightsTilePoolBuffer)
             {
                 presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
                 presentMode = 21;

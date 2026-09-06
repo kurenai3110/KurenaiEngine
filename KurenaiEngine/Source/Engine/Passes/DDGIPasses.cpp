@@ -32,6 +32,11 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
+        // ここで作り直さない。ラムダへ値で渡すためローカルで受ける
+        const bool raytracedDDGITraceRuns = frame.RaytracedDDGITraceRuns;
+        const bool suppressEmissiveForGI = frame.SuppressEmissiveForGI;
+
         // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
         // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
         const AmbientOcclusionSettings ambientOcclusionSettings = frame.Settings.AmbientOcclusion;
@@ -66,7 +71,7 @@ namespace Kurenai::Passes
         // RWTexture2DArray<float>なので、キューブ配列だけでなく単体のキューブ(=6要素の2D配列)の
         // 面へもそのまま書ける
         const auto captureDDGIProbeFace =
-            [this, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, suppressEmissiveForGI, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
 
@@ -118,7 +123,7 @@ namespace Kurenai::Passes
             // **反射プローブでは抑止しない** ―― 同じProbeCapture.hlslを共有しているが、
             // 鏡面が光源を直接見ているのは二重計上ではなく、消すと看板が鏡に映らなくなる。
             // だから材質のフラグではなくCPUのパスごとに決めている
-            const bool suppressEmissiveForDDGI = m_Engine.ShouldSuppressEmissiveForGI();
+            const bool suppressEmissiveForDDGI = suppressEmissiveForGI;
             uint32_t ddgiDrawnMeshes = 0;
             uint32_t ddgiEmissiveMeshes = 0;
             uint32_t ddgiSuppressedMeshes = 0;
@@ -238,7 +243,7 @@ namespace Kurenai::Passes
         // RWTexture2DArrayとして張る」メソッドをDX11/DX12の両方へ足す必要がある。
         // ドローとメッシュ走査が消えるのが本題なので、そこは測ってから決める
         const auto traceDDGIProbeFace =
-            [this, ddgiSettings, emissiveLightSettings, skyTexture, bakedLightCount, materialSamplers, frameConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, suppressEmissiveForGI, ddgiSettings, emissiveLightSettings, skyTexture, bakedLightCount, materialSamplers, frameConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
 
@@ -252,7 +257,7 @@ namespace Kurenai::Passes
                 static_cast<float>(kDDGICaptureSize),
                 emissiveLightSettings.Intensity,
                 ddgiSettings.SunShadowRayEnabled ? 1.0f : 0.0f,
-                m_Engine.ShouldSuppressEmissiveForGI() ? 0.0f : 1.0f
+                suppressEmissiveForGI ? 0.0f : 1.0f
             };
             // 舐めるライトの数。ラスタ経路(ProbeCaptureのcaptureConstants)と同じ値にすること。
             // ここだけ揃っていないと、DX11(ラスタ)とDX12(レイトレ)でDDGIの結果が黙って食い違う
@@ -372,7 +377,7 @@ namespace Kurenai::Passes
         if (frame.Settings.DDGI.Enabled && m_Engine.m_HasGIVolume && m_Engine.m_DDGIProbeCount > 0 && !m_Engine.m_DDGIUpdateSuspended)
         {
             // レイの取得をどちらで行うか。パスの登録とキャプチャの実行で同じ判定を使う
-            const bool useRaytracedTrace = m_Engine.ShouldRunRaytracedDDGITrace();
+            const bool useRaytracedTrace = raytracedDDGITraceRuns;
 
             // 【どちらの経路が実際に走ったかをログに残す】切り替えたつもりで切り替わっていない、
             // という取り違えをA/B比較の前に潰すため。切り替わったときだけ出す

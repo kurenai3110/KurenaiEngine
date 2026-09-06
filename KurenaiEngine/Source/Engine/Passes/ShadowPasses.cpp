@@ -377,6 +377,10 @@ namespace Kurenai::Passes
     void ShadowPasses::RegisterRaytraced(
         Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
     {
+        // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
+        // ここで作り直さない。ラムダへ値で渡すためローカルで受ける
+        const bool raytracedShadowRuns = frame.RaytracedShadowRuns;
+
         // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
         // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
         const ShadowSettings shadowSettings = frame.Settings.Shadow;
@@ -391,7 +395,7 @@ namespace Kurenai::Passes
 
         // --- RTシャドウパス: TLASへ太陽の見かけの円盤方向へ影レイを撃ち、可視率(0〜1)を
         //     単チャンネルのテクスチャへ書く。直後の直接光パスがt6でこれを読む ---
-        if (m_Engine.ShouldRunRaytracedShadow())
+        if (raytracedShadowRuns)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "RTShadow",

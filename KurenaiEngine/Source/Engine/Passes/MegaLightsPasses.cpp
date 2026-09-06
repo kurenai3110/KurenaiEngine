@@ -30,6 +30,12 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
+        // ここで作り直さない。ラムダへ値で渡すためローカルで受ける
+        const int32_t megaLightsSamplesPerPixel = frame.MegaLightsSamplesPerPixel;
+        const bool lightCullingRuns = frame.LightCullingRuns;
+        const bool megaLightsRuns = frame.MegaLightsRuns;
+
         // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
         // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
         const EmissiveLightSettings emissiveLightSettings = frame.Settings.EmissiveLight;
@@ -59,7 +65,7 @@ namespace Kurenai::Passes
         //     **積むかどうかはShouldRunLightCullingが決める。** グリッドの読み手は直接光パスと
         //     Presentのデバッグ表示しか無く、MegaLightsが走るフレームは前者が止まっているため、
         //     通常表示では丸ごと無駄になる ---
-        if (m_Engine.ShouldRunLightCulling())
+        if (lightCullingRuns)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "LightCull",
@@ -110,7 +116,7 @@ namespace Kurenai::Passes
         //     確率でK灯を重みつきで抽出する。到達判定はタイルライトカリングと共有している
         //     (TileLightCulling.hlsli)ので、両者の「届いた灯数」は一致するはず。
         //     現段階では参照実装がこれを読まない(全灯を回す)ため、出力の消費者はまだいない ---
-        if (m_Engine.ShouldRunMegaLights() && m_Engine.m_MegaLightsTilePoolBuffer && m_Engine.m_MegaLightsTilePoolPipelineState)
+        if (megaLightsRuns && m_Engine.m_MegaLightsTilePoolBuffer && m_Engine.m_MegaLightsTilePoolPipelineState)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLightsPool",
@@ -192,7 +198,7 @@ namespace Kurenai::Passes
         RHI::IRHIBuffer* const meshLightBufferForBinding =
             meshLightsActive ? m_Engine.m_MeshLightScene.GetTriangleBuffer() : m_Engine.m_LightBuffer.get();
 
-        if (m_Engine.ShouldRunMegaLights() && frame.Settings.MegaLights.Mode == MegaLightsMode::Reference)
+        if (megaLightsRuns && frame.Settings.MegaLights.Mode == MegaLightsMode::Reference)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLights",
@@ -278,14 +284,14 @@ namespace Kurenai::Passes
         // Initial を共有していることが陽性対照の土台になる ―― 共有を切った手法3は、
         // 手法2から再利用を外した構成と画素単位で一致するはず
         const bool megaLightsQuadShared =
-            m_Engine.ShouldRunMegaLights() && frame.Settings.MegaLights.Mode == MegaLightsMode::QuadShared;
-        if (m_Engine.ShouldRunMegaLights() &&
+            megaLightsRuns && frame.Settings.MegaLights.Mode == MegaLightsMode::QuadShared;
+        if (megaLightsRuns &&
             (frame.Settings.MegaLights.Mode == MegaLightsMode::Stochastic || megaLightsQuadShared))
         {
             // 2パスで同じ定数バッファを共有する。中身はグラフ構築のこの時点で確定しているので、
             // Initial側のExecuteで1回だけ更新すればよい
             const auto buildStochasticConstants =
-                [this, megaLightsSettings, jitteredProj, megaLightsQuadShared, megaLightsEffectiveTilesX,
+                [this, megaLightsSamplesPerPixel, megaLightsSettings, jitteredProj, megaLightsQuadShared, megaLightsEffectiveTilesX,
                  megaLightsTileOffset, renderWidth, renderHeight](uint32_t spatialIteration)
             {
                 MegaLightsStochasticConstants stochasticConstants{};
@@ -364,7 +370,7 @@ namespace Kurenai::Passes
                 // ずれると Initial が確保外へ書くか、Resolve が別画素の標本を読む
                 // (どちらも例外にならず、絵が「それらしく」出るので気付けない)
                 stochasticConstants.Params5 = {
-                    static_cast<uint32_t>(m_Engine.MegaLightsSamplesPerPixel()), 0u, 0u, 0u
+                    static_cast<uint32_t>(megaLightsSamplesPerPixel), 0u, 0u, 0u
                 };
                 // 候補プールを書いたときと同じ格子オフセット。末尾へ足して、途中までしか
                 // 宣言しない Shade / Temporal / Resolve の既存レイアウトを変えない
@@ -683,7 +689,7 @@ namespace Kurenai::Passes
         // 【TAAより前に落とす】ノイズを残したまま渡すとTAAが履歴を毎フレーム棄却し、
         // ノイズもAAも両方失う(MegaLightsDenoise.hlsl 冒頭)
         // 手法2と手法3は同じデノイザを共有する(入力は「確率的に作られた1枚の絵」で同じもの)
-        const bool megaLightsDenoiseRuns = m_Engine.ShouldRunMegaLights() &&
+        const bool megaLightsDenoiseRuns = megaLightsRuns &&
                                            (frame.Settings.MegaLights.Mode == MegaLightsMode::Stochastic ||
                                             frame.Settings.MegaLights.Mode == MegaLightsMode::QuadShared) &&
                                            frame.Settings.MegaLights.DenoiseEnabled && m_Engine.m_MegaLightsDenoiseTemporalPSO &&
@@ -880,7 +886,7 @@ namespace Kurenai::Passes
         //     「偏りが無くてもノイズがあるだけで平均が低く出る」。線形で足す場所がここに要る ---
         // 整定を待ってから足し始める(内部解像度の切り替えとストリーミングが片付くまで)
         ++m_Engine.m_MegaLightsAccumWarmupFrames;
-        const bool megaLightsAccumRuns = m_Engine.ShouldRunMegaLights() && frame.Settings.MegaLights.AccumTargetFrames > 0 &&
+        const bool megaLightsAccumRuns = megaLightsRuns && frame.Settings.MegaLights.AccumTargetFrames > 0 &&
                                          m_Engine.m_MegaLightsAccumPipelineState && m_Engine.m_MegaLightsAccumBuffer &&
                                          m_Engine.m_MegaLightsAccumWarmupFrames > kMegaLightsAccumWarmup &&
                                          m_Engine.m_MegaLightsAccumFrames < static_cast<uint32_t>(frame.Settings.MegaLights.AccumTargetFrames);

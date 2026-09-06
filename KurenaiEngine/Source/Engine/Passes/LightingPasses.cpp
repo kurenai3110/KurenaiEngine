@@ -28,6 +28,10 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
+        // ここで作り直さない。ラムダへ値で渡すためローカルで受ける
+        const bool raytracedAORuns = frame.RaytracedAORuns;
+
         // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
         // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
         const AmbientOcclusionSettings ambientOcclusionSettings = frame.Settings.AmbientOcclusion;
@@ -136,9 +140,9 @@ namespace Kurenai::Passes
         {
             RHI::IRHITexture* const aoRawTexture = m_Engine.GetActiveAORawTexture();
             RHI::IRHITexture* const aoBlurredTexture = m_Engine.GetActiveAOTexture();
-            const bool useSSIL = !m_Engine.ShouldRunRaytracedAO() && frame.Settings.AmbientOcclusion.Technique == AOTechnique::SSILVisibilityBitmask;
+            const bool useSSIL = !raytracedAORuns && frame.Settings.AmbientOcclusion.Technique == AOTechnique::SSILVisibilityBitmask;
 
-            if (m_Engine.ShouldRunRaytracedAO())
+            if (raytracedAORuns)
             {
                 // RTAOパス。SSAO/SSILと違いコンピュートでUAVへ書くため、レンダーターゲットではなく
                 // Writesで宣言する。レジスタ割り当てはRTAO.hlsl側の宣言と一致させること

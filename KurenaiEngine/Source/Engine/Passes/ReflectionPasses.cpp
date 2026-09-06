@@ -27,6 +27,10 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
+        // ここで作り直さない。ラムダへ値で渡すためローカルで受ける
+        const bool raytracedReflectionRuns = frame.RaytracedReflectionRuns;
+
         // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
         // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
         const AmbientOcclusionSettings ambientOcclusionSettings = frame.Settings.AmbientOcclusion;
@@ -332,7 +336,7 @@ namespace Kurenai::Passes
                 },
             });
         }
-        else if (m_Engine.ShouldRunRaytracedReflection())
+        else if (raytracedReflectionRuns)
         {
             // RT反射パス。読むものはSSRとほぼ同じ(同じ鏡面IBLを差し替えるため)で、
             // これに加えてTLASとシーンジオメトリの統合バッファを読む。

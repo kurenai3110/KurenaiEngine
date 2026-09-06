@@ -6334,6 +6334,16 @@ namespace Kurenai
         frameContext.Settings.Shadow = m_ShadowSettings;
         frameContext.Settings.Sky = m_SkySettings;
         frameContext.Settings.Water = m_WaterSettings;
+        // どの経路が走るかを、ここで1回だけ判定して配る。**述語の実装は増やさない**
+        // (Should* が唯一の定義。パス群はその結果だけを見る)
+        frameContext.MegaLightsRuns = ShouldRunMegaLights();
+        frameContext.LightCullingRuns = ShouldRunLightCulling();
+        frameContext.RaytracedShadowRuns = ShouldRunRaytracedShadow();
+        frameContext.RaytracedAORuns = ShouldRunRaytracedAO();
+        frameContext.RaytracedReflectionRuns = ShouldRunRaytracedReflection();
+        frameContext.RaytracedDDGITraceRuns = ShouldRunRaytracedDDGITrace();
+        frameContext.SuppressEmissiveForGI = ShouldSuppressEmissiveForGI();
+        frameContext.MegaLightsSamplesPerPixel = MegaLightsSamplesPerPixel();
         frameContext.RenderWidth = m_RenderWidth;
         frameContext.RenderHeight = m_RenderHeight;
         frameContext.FrameConstantBuffer = m_FrameConstantBuffer.get();
