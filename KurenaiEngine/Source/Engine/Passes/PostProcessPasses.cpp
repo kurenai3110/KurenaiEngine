@@ -79,7 +79,7 @@ namespace Kurenai::Passes
         //  ・TAAより前: ここに置くとRenderGraphがtaaInputColorのRead-after-Write依存で
         //    自動的にTAAの前へ順序付ける。機体がTAA・自動露出・ブルーム・トーンマップを
         //    一貫して通るため、シーンの他の発光物とまったく同じ扱いになる。
-        //    TAAの後(=m_Engine.m_TAAHistoryへ直接加算)にしてはいけない ―― 履歴を汚し、
+        //    TAAの後(=m_TAAHistoryへ直接加算)にしてはいけない ―― 履歴を汚し、
         //    次フレーム以降に尾を引く
         //
         // 書き込み先をtaaInputColorにしているのは、反射やフォグの有無でHDRシーン色の実体が
@@ -279,7 +279,7 @@ namespace Kurenai::Passes
         }
 
         // --- ブルームパス: SceneColorから半解像度のピラミッドを作り、段階的にダウンサンプル→
-        //     3x3テントでアップサンプルしながら加算する。最終段(m_Engine.m_BloomUpTextures[0])をTonemapが読む ---
+        //     3x3テントでアップサンプルしながら加算する。最終段(m_BloomUpTextures[0])をTonemapが読む ---
         if (m_Engine.m_PostProcessSettings.BloomEnabled && !m_Engine.m_BloomDownTextures.empty())
         {
             std::vector<RHI::IRHITexture*> bloomWrites;

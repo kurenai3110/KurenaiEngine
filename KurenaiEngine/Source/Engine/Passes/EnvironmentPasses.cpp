@@ -65,7 +65,7 @@ namespace Kurenai::Passes
         //     登録順に1回だけ舐める前方走査で、あるパスのReadsは**自分より前に登録された
         //     書き手**しか見つけられない(RenderGraph::ResolveExecutionOrderのlastWriter)。
         //     つまりグラフはパスを後ろへ遅らせることはできても前へ動かすことはできない。
-        //     この2つをSkyIntegrateより後ろに置くと、SkyIntegrateが.Reads = { m_Engine.m_SkyViewLUT }を
+        //     この2つをSkyIntegrateより後ろに置くと、SkyIntegrateが.Reads = { m_SkyViewLUT }を
         //     宣言していても辺が張られず、**未初期化のLUTを積分してしまう**。
         //     太陽が静止したシーンではSkyIntegrateは起動直後の1回しか走らないため、
         //     壊れた天頂輝度がそのまま最後まで残る(実測: 積分値が5.29ではなく1.58になり、
@@ -247,8 +247,8 @@ namespace Kurenai::Passes
         // --- 手続き空の生成パス: Perez分布をGPUで評価してキューブマップを焼く。
         //     太陽が動くと空の輝度分布の形も変わるため、オフラインDDSと違い焼き直しが要る
         //     (詳細はSkyGenerate.hlsl冒頭)。焼き直しの要否・雲の平均透過率のキャッシュ・
-        //     m_Engine.m_SkyBakeDirty等のフラグ更新はすべて上のbakeSkyThisFrameブロックで済ませてあるため、
-        //     ここではそのキャッシュ(m_Engine.m_ActiveCloudTransmittance)と、直前のSkyIntegrateパスが
+        //     m_SkyBakeDirty等のフラグ更新はすべて上のbakeSkyThisFrameブロックで済ませてあるため、
+        //     ここではそのキャッシュ(m_ActiveCloudTransmittance)と、直前のSkyIntegrateパスが
         //     書いたm_SkyParametersBufferを使ってパスを登録するだけでよい ---
         if (bakeSkyThisFrame)
         {
@@ -290,7 +290,7 @@ namespace Kurenai::Passes
         // --- BRDF積分LUTのベイクパス: (NdotV, ラフネス)の2Dテーブルで、スカイボックスにも
         //     太陽の位置にも一切依存しないため起動後に一度だけ焼く。
         //     プリフィルタ済み鏡面(下記)が空の変化へ追従して焼き直されるようになっても、
-        //     こちらが巻き込まれないよう別パス・別フラグに分離してある(m_Engine.m_BRDFLUTBaked参照) ---
+        //     こちらが巻き込まれないよう別パス・別フラグに分離してある(m_BRDFLUTBaked参照) ---
         if (!m_Engine.m_BRDFLUTBaked)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
@@ -415,10 +415,10 @@ namespace Kurenai::Passes
                     // 拡散イラディアンス(本物のTextureCube、32x32x6面)。HLSLはリソースを動的に
                     // スライス選択できないため、面ごとに1回ずつディスパッチする。
                     //
-                    // m_Engine.m_IBLSettings.UseSHIrradianceでCSIrradiance(総当たり積分、約9,750万
+                    // m_IBLSettings.UseSHIrradianceでCSIrradiance(総当たり積分、約9,750万
                     // サンプル)とSH L2経路(CSProjectSH→CSProjectSHFinal→CSEvaluateSH、
                     // 射影は24,576テクセルを1回ずつ読むだけ)を切り替えられる。
-                    // 出力(m_Engine.m_IrradianceTexture)の形・規約はどちらの経路でも完全に同一
+                    // 出力(m_IrradianceTexture)の形・規約はどちらの経路でも完全に同一
                     if (m_Engine.m_IBLSettings.UseSHIrradiance)
                     {
                         IBLFaceConstants shConstants{};

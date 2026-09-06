@@ -297,7 +297,7 @@ namespace Kurenai::Passes
             break;
         case DebugView::PlanarReflection:
             // 平面反射パスの出力。パスが今フレーム実行されていない(無効化・水面なし)場合、
-            // m_Engine.m_PlanarReflectionColorの中身は前フレーム/未定義の残骸なので最終結果のまま何も
+            // m_PlanarReflectionColorの中身は前フレーム/未定義の残骸なので最終結果のまま何も
             // 切り替えない(RTShadowデバッグ表示と同じ方針)
             if (frame.PlanarReflectionPassRuns)
             {
@@ -387,7 +387,7 @@ namespace Kurenai::Passes
         const uint32_t presentTileCapacity =
             presentUsesTilePool ? static_cast<uint32_t>(m_Engine.m_MegaLightsSettings.TilePoolCapacity) : KurenaiEngine3D::kLightTileCapacity;
         // Mode 21だけは候補プールを書いた有効タイル幅を使う。Mode 11は従来のライトグリッドなので
-        // m_Engine.m_LightTileCountXのままにし、デバッグ表示が実データと別の添字を読まないようにする
+        // m_LightTileCountXのままにし、デバッグ表示が実データと別の添字を読まないようにする
         const uint32_t presentTileCountX =
             presentUsesTilePool ? frame.MegaLightsEffectiveTilesX : m_Engine.m_LightTileCountX;
 
