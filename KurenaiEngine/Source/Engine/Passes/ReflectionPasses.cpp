@@ -27,6 +27,14 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
+        // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
+        const AmbientOcclusionSettings ambientOcclusionSettings = frame.Settings.AmbientOcclusion;
+        const EmissiveLightSettings emissiveLightSettings = frame.Settings.EmissiveLight;
+        const GeometrySettings geometrySettings = frame.Settings.Geometry;
+        const ReflectionSettings reflectionSettings = frame.Settings.Reflection;
+        const WaterSettings waterSettings = frame.Settings.Water;
+
         const uint32_t renderWidth = frame.RenderWidth;
         const uint32_t renderHeight = frame.RenderHeight;
         RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
@@ -75,7 +83,7 @@ namespace Kurenai::Passes
                 // m_DroneBufferはこのパス末尾でドローンショーの機体を描き足すために読む
                 // (実際のバインドはExecute内)
                 .BufferReads = { m_Engine.m_LightBuffer.get(), m_Engine.m_SkyParametersBuffer.get(), m_Engine.m_DroneBuffer.get() },
-                .Execute = [this, &constants, planarReflectionViewport, reflectedViewProj, reflectMatrix, waterPlaneY, viewMatrix, jitteredProj, effectiveExposure, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, ambientOcclusionSettings, emissiveLightSettings, &constants, planarReflectionViewport, reflectedViewProj, reflectMatrix, waterPlaneY, viewMatrix, jitteredProj, effectiveExposure, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     // captureProbeFaceとまったく同じ作法(constants.ViewProj/CameraPosition/
                     // PrevViewProj/TAAParams/PlanarReflectionPlaneだけをこのパス用に差し替える)。
@@ -171,7 +179,7 @@ namespace Kurenai::Passes
                             bindPipelineState(!instance.IsMirrored);
 
                             ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, currentModel, mesh, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
+                                MakeObjectConstants(instance, currentModel, mesh, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
                             objectConstants.InstanceBase = unit.InstanceBase;
                             objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                             cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
@@ -264,7 +272,7 @@ namespace Kurenai::Passes
                 // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
                 // (実際のバインドはExecute内)
                 .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
-                .Execute = [this, gbufferViewport, activeAOTexture, usingProceduralSky, planarReflectionPassRuns, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, reflectionSettings, waterSettings, gbufferViewport, activeAOTexture, usingProceduralSky, planarReflectionPassRuns, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     // 水面の解析空フォールバック。手続き空が無効(.ksceneがDDSスカイボックスを
                     // 明示するシーン)なときは、m_WaterSettings.AnalyticSkyReflectionの値に関わらず必ず0にする
@@ -272,7 +280,7 @@ namespace Kurenai::Passes
                     // 解析評価してはいけない(usingProceduralSkyはRender()前半で既に確定済み。
                     // DeferredLighting.hlsl向けのconstants.SkyParams.y代入と同じ判断)
                     const float waterAnalyticSkyFlag =
-                        (m_Engine.m_WaterSettings.AnalyticSkyReflection && usingProceduralSky) ? 1.0f : 0.0f;
+                        (waterSettings.AnalyticSkyReflection && usingProceduralSky) ? 1.0f : 0.0f;
                     // 平面反射。このフレームでPlanarReflectionパスを実際に実行したときだけ
                     // 有効にする(登録されなかったフレームにm_PlanarReflectionColorの中身は
                     // 前フレーム/未定義の残骸なので、フラグをそのままSSR.hlsl側へ渡してはいけない)
@@ -280,8 +288,8 @@ namespace Kurenai::Passes
 
                     SSRConstants ssrConstants{};
                     ssrConstants.Params0 =
-                        { m_Engine.m_ReflectionSettings.SSRMaxDistance, m_Engine.m_ReflectionSettings.SSRThickness, m_Engine.m_ReflectionSettings.SSRRoughnessCutoff, waterAnalyticSkyFlag };
-                    ssrConstants.Params1 = { planarReflectionFlag, m_Engine.m_ReflectionSettings.PlanarDistortion, 0.0f, 0.0f };
+                        { reflectionSettings.SSRMaxDistance, reflectionSettings.SSRThickness, reflectionSettings.SSRRoughnessCutoff, waterAnalyticSkyFlag };
+                    ssrConstants.Params1 = { planarReflectionFlag, reflectionSettings.PlanarDistortion, 0.0f, 0.0f };
                     cmd->UpdateBuffer(m_Engine.m_SSRConstantBuffer.get(), &ssrConstants, sizeof(ssrConstants));
 
                     cmd->SetViewport(gbufferViewport);
@@ -337,19 +345,19 @@ namespace Kurenai::Passes
                     m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_RenderTargets.GBufferBentNormal.get(),
                 },
                 .Writes = { m_Engine.m_RTReflectionTexture.get() },
-                .Execute = [this, activeAOTexture, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, geometrySettings, reflectionSettings, activeAOTexture, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     RTReflectionConstants rtConstants{};
                     rtConstants.Params0 = {
                         static_cast<float>(renderWidth), static_cast<float>(renderHeight),
-                        m_Engine.m_ReflectionSettings.RTReflectionMaxDistance, m_Engine.m_ReflectionSettings.RTReflectionRoughnessCutoff
+                        reflectionSettings.RTReflectionMaxDistance, reflectionSettings.RTReflectionRoughnessCutoff
                     };
                     // yはメッシュレットのデバッグ表示。ラスタ側と同じトグルで駆動するので、
                     // 有効にすると「直接見えている面」と「反射に映る面」の両方が
                     // メッシュレット色になり、同じ塊が同じ色かを見比べられる
                     rtConstants.Params1 = {
-                        m_Engine.m_ReflectionSettings.RTReflectionShadowRayEnabled ? 1.0f : 0.0f,
-                        m_Engine.m_GeometrySettings.MeshletDebugViewEnabled ? 1.0f : 0.0f,
+                        reflectionSettings.RTReflectionShadowRayEnabled ? 1.0f : 0.0f,
+                        geometrySettings.MeshletDebugViewEnabled ? 1.0f : 0.0f,
                         0.0f,
                         0.0f,
                     };

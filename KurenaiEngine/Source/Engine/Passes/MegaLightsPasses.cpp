@@ -30,6 +30,11 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
+        // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
+        const EmissiveLightSettings emissiveLightSettings = frame.Settings.EmissiveLight;
+        const MegaLightsSettings megaLightsSettings = frame.Settings.MegaLights;
+
         const uint32_t renderWidth = frame.RenderWidth;
         const uint32_t renderHeight = frame.RenderHeight;
         RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
@@ -112,7 +117,7 @@ namespace Kurenai::Passes
                 .Reads = { m_Engine.m_RenderTargets.GBufferDepth.get() },
                 .BufferReads = { m_Engine.m_LightBuffer.get() },
                 .BufferWrites = { m_Engine.m_MegaLightsTilePoolBuffer.get() },
-                .Execute = [this, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
+                .Execute = [this, megaLightsSettings, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     Passes::MegaLightsTilePoolConstants poolConstants{};
                     DirectX::XMStoreFloat4x4(&poolConstants.View, DirectX::XMMatrixTranspose(viewMatrix));
@@ -123,7 +128,7 @@ namespace Kurenai::Passes
                         static_cast<uint32_t>(gpuLights.size()),
                         // 【書き手と読み手で必ず同じKを使うこと】プールの1タイルぶんの
                         // 要素数はKから決まるので、食い違うと別タイルの領域を読み書きする
-                        static_cast<uint32_t>(m_Engine.m_MegaLightsSettings.TilePoolCapacity),
+                        static_cast<uint32_t>(megaLightsSettings.TilePoolCapacity),
                     };
                     poolConstants.RenderSize = { renderWidth, renderHeight, 0u, 0u };
 
@@ -204,14 +209,14 @@ namespace Kurenai::Passes
                 // 読むが、宣言しておくことで候補プールパスより後ろへ順序付けられる
                 // (参照実装のフレームでは辺が1本余分に張られるだけで無害)
                 .BufferReads = { m_Engine.m_LightBuffer.get(), tilePoolBufferForBinding, meshLightBufferForBinding },
-                .Execute = [this, &gpuLights, tilePoolBufferForBinding, meshLightBufferForBinding, meshLightTriangleCount, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, emissiveLightSettings, megaLightsSettings, &gpuLights, tilePoolBufferForBinding, meshLightBufferForBinding, meshLightTriangleCount, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     Passes::MegaLightsConstants megaLightsConstants{};
                     megaLightsConstants.Params0 =
                     {
                         renderWidth,
                         renderHeight,
-                        static_cast<uint32_t>(std::max(0, m_Engine.m_MegaLightsSettings.ShadowRayCount)),
+                        static_cast<uint32_t>(std::max(0, megaLightsSettings.ShadowRayCount)),
                         static_cast<uint32_t>(gpuLights.size()),
                     };
                     // 球光源のサンプル列を毎フレーム回す種。確率的サンプリング側と同じ
@@ -222,7 +227,7 @@ namespace Kurenai::Passes
                     // y は影響半径の伸縮。半径は倍率1で焼いてあり、段階1の Range は
                     // peak ∝ intensity から解かれるので R ∝ sqrt(intensity) で伸ばす
                     megaLightsConstants.Params2 = {
-                        m_Engine.m_EmissiveLightSettings.Intensity, std::sqrt(std::max(m_Engine.m_EmissiveLightSettings.Intensity, 0.0f)),
+                        emissiveLightSettings.Intensity, std::sqrt(std::max(emissiveLightSettings.Intensity, 0.0f)),
                         0.0f, 0.0f };
                     cmd->UpdateBuffer(m_Engine.m_MegaLightsConstantBuffer.get(), &megaLightsConstants,
                                       sizeof(megaLightsConstants));
@@ -280,7 +285,7 @@ namespace Kurenai::Passes
             // 2パスで同じ定数バッファを共有する。中身はグラフ構築のこの時点で確定しているので、
             // Initial側のExecuteで1回だけ更新すればよい
             const auto buildStochasticConstants =
-                [this, jitteredProj, megaLightsQuadShared, megaLightsEffectiveTilesX,
+                [this, megaLightsSettings, jitteredProj, megaLightsQuadShared, megaLightsEffectiveTilesX,
                  megaLightsTileOffset, renderWidth, renderHeight](uint32_t spatialIteration)
             {
                 MegaLightsStochasticConstants stochasticConstants{};
@@ -288,30 +293,30 @@ namespace Kurenai::Passes
                 {
                     renderWidth,
                     renderHeight,
-                    static_cast<uint32_t>(std::max(1, m_Engine.m_MegaLightsSettings.SampleCount)),
+                    static_cast<uint32_t>(std::max(1, megaLightsSettings.SampleCount)),
                     // 影レイ本数の意味は参照実装と揃える(0なら影を撃たない=恒等テスト側)。
                     // 確率的サンプリングは選ばれた1灯にしか撃たないので本数ではなく有無
-                    (m_Engine.m_MegaLightsSettings.ShadowRayCount > 0) ? 1u : 0u,
+                    (megaLightsSettings.ShadowRayCount > 0) ? 1u : 0u,
                 };
                 stochasticConstants.Params1 =
                 {
                     megaLightsEffectiveTilesX,
                     kLightTileSize,
                     // 候補プールを書いたときと同じKでなければならない(上のTileParams.wと同値)
-                    static_cast<uint32_t>(m_Engine.m_MegaLightsSettings.TilePoolCapacity),
+                    static_cast<uint32_t>(megaLightsSettings.TilePoolCapacity),
                     m_Engine.m_TAAFrameIndex,
                 };
                 stochasticConstants.Params2 =
                 {
-                    static_cast<uint32_t>(std::max(0, m_Engine.m_MegaLightsSettings.SpatialNeighborCount)),
-                    static_cast<uint32_t>(std::max(1, m_Engine.m_MegaLightsSettings.SpatialRadius)),
-                    m_Engine.m_MegaLightsSettings.SpatialMIS ? 1u : 0u,
+                    static_cast<uint32_t>(std::max(0, megaLightsSettings.SpatialNeighborCount)),
+                    static_cast<uint32_t>(std::max(1, megaLightsSettings.SpatialRadius)),
+                    megaLightsSettings.SpatialMIS ? 1u : 0u,
                     // 初期可視レイでリザーバを殺すか(Initialが読む)。殺すと影の縁に
                     // 暗い側の系統誤差が残るため、切り替えて測れるようにしてある。
                     // 【手法3では必ず撃つ】クアッド共有は「Initialが撃った1本」だけを
                     // 可視性の情報源にしている。切ると全標本が可視フラグ付きで出てきて
                     // 影が1つも出ない(絵が明るいだけで例外もログも出ない)
-                    (megaLightsQuadShared || m_Engine.m_MegaLightsSettings.InitialVisibility) ? 1u : 0u,
+                    (megaLightsQuadShared || megaLightsSettings.InitialVisibility) ? 1u : 0u,
                 };
                 // 候補プールが錐台を組み立てたのと**同じ行列**から取る。ずれると
                 // 「その灯が隣のタイルへ届くか」の判定が候補プールと食い違い、定義域がずれる
@@ -334,7 +339,7 @@ namespace Kurenai::Passes
                         projection._11, projection._22,
                         // z は未使用(かつて露出補正を入れていた枠。上のコメント参照)
                         0.0f,
-                        static_cast<float>(std::max(1, m_Engine.m_MegaLightsSettings.TemporalMClamp)),
+                        static_cast<float>(std::max(1, megaLightsSettings.TemporalMClamp)),
                     };
                 }
                 // 履歴が使えるか。解像度が変わった直後は添字の意味が変わっており、
@@ -347,13 +352,13 @@ namespace Kurenai::Passes
                 // 遮蔽の確定した灯のキャッシュを信用してよいかの判定にだけ使う。
                 // **陽性対照では切る**(履歴に依存すると手法2との画素単位の一致が崩れる)
                 const bool historyUsable = megaLightsQuadShared
-                                               ? (m_Engine.m_MegaLightsHistoryValid && m_Engine.m_MegaLightsSettings.BlockedCacheEnabled)
+                                               ? (m_Engine.m_MegaLightsHistoryValid && megaLightsSettings.BlockedCacheEnabled)
                                                : m_Engine.m_MegaLightsHistoryValid;
                 stochasticConstants.Params4 = {
                     historyUsable ? 1u : 0u,
                     spatialIteration,
-                    (megaLightsQuadShared && m_Engine.m_MegaLightsSettings.QuadShareEnabled) ? 1u : 0u,
-                    (megaLightsQuadShared && m_Engine.m_MegaLightsSettings.QuadStratify) ? 1u : 0u,
+                    (megaLightsQuadShared && megaLightsSettings.QuadShareEnabled) ? 1u : 0u,
+                    (megaLightsQuadShared && megaLightsSettings.QuadStratify) ? 1u : 0u,
                 };
                 // 1画素あたりの標本数。**リザーババッファの確保と必ず同じ値にすること** ――
                 // ずれると Initial が確保外へ書くか、Resolve が別画素の標本を読む
@@ -708,7 +713,7 @@ namespace Kurenai::Passes
             const int atrousPasses = std::clamp(frame.Settings.MegaLights.DenoiseAtrousPasses, 0, 5);
 
             const auto updateDenoiseConstants =
-                [this, denoiseGuideValid, renderWidth, renderHeight](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
+                [this, megaLightsSettings, denoiseGuideValid, renderWidth, renderHeight](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
             {
                 Passes::MegaLightsDenoiseConstants denoiseConstants{};
                 denoiseConstants.Params0 = {
@@ -716,21 +721,21 @@ namespace Kurenai::Passes
                 };
                 // 時間累積の上限は手法ごとに別の変数を持つ。手法3にはリザーバの履歴が
                 // 無く、デノイザだけが時間方向の記憶なので長くしてある(EngineDefaults.h)
-                const int32_t denoiseMaxFrames = (m_Engine.m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared)
-                                                     ? m_Engine.m_MegaLightsSettings.QuadDenoiseMaxFrames
-                                                     : m_Engine.m_MegaLightsSettings.DenoiseMaxFrames;
+                const int32_t denoiseMaxFrames = (megaLightsSettings.Mode == MegaLightsMode::QuadShared)
+                                                     ? megaLightsSettings.QuadDenoiseMaxFrames
+                                                     : megaLightsSettings.DenoiseMaxFrames;
                 denoiseConstants.Params1 = {
                     stepWidth,
                     static_cast<float>(std::max(1, denoiseMaxFrames)),
                     // 輝度のエッジ停止の強さ(σ_l)。根拠は EngineDefaults.h の宣言に書いてある
-                    m_Engine.m_MegaLightsSettings.DenoiseSigmaLuminance,
+                    megaLightsSettings.DenoiseSigmaLuminance,
                     // 法線のエッジ停止の指数(同128)
                     128.0f,
                 };
                 // 深度のエッジ停止(View空間Zに対する相対差なので無次元)と、
                 // ファイアフライの近傍クランプの強さ(近傍平均 + k・標準偏差で頭打ちにする)
                 denoiseConstants.Params2 = {
-                    0.02f, m_Engine.m_MegaLightsSettings.DenoiseFireflyClamp, denoiseGuideValid ? 1.0f : 0.0f, 0.0f
+                    0.02f, megaLightsSettings.DenoiseFireflyClamp, denoiseGuideValid ? 1.0f : 0.0f, 0.0f
                 };
                 cmd->UpdateBuffer(
                     m_Engine.m_MegaLightsDenoiseConstantBuffer.get(), &denoiseConstants, sizeof(denoiseConstants));

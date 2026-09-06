@@ -29,6 +29,12 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
+        // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
+        const AmbientOcclusionSettings ambientOcclusionSettings = frame.Settings.AmbientOcclusion;
+        const EmissiveLightSettings emissiveLightSettings = frame.Settings.EmissiveLight;
+        const GeometrySettings geometrySettings = frame.Settings.Geometry;
+
         const uint32_t renderWidth = frame.RenderWidth;
         const uint32_t renderHeight = frame.RenderHeight;
         RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
@@ -310,7 +316,7 @@ namespace Kurenai::Passes
                 // 辺は張られない(RenderGraphのReadsは登録順で解決する)
                 .Reads = { m_Engine.m_RenderTargets.HiZTexture.get() },
                 .BufferWrites = { m_Engine.m_ModelCullCounterBuffer.get(), m_Engine.m_ModelCullDrawArgsBuffer.get() },
-                .Execute = [this, beginIndex, count, initializeBuffers, useCurrentFrameHiZ, occlusionEnabled, regionStride, statsBeginIndex, cameraMoveDistance, modelCullIndirectActive, &viewProj, &modelCullDraws, renderWidth, renderHeight, objectConstantBuffer](RHI::IRHICommandList* cmd)
+                .Execute = [this, ambientOcclusionSettings, emissiveLightSettings, beginIndex, count, initializeBuffers, useCurrentFrameHiZ, occlusionEnabled, regionStride, statsBeginIndex, cameraMoveDistance, modelCullIndirectActive, &viewProj, &modelCullDraws, renderWidth, renderHeight, objectConstantBuffer](RHI::IRHICommandList* cmd)
                 {
                     if (initializeBuffers)
                     {
@@ -342,7 +348,7 @@ namespace Kurenai::Passes
                             if (modelCullIndirectActive)
                             {
                                 const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                    *draw.Instance, *draw.Model, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled,
+                                    *draw.Instance, *draw.Model, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled,
                                     draw.RejectMask, draw.RequireMask, m_Engine.m_MeshletLODFrame,
                                     draw.CountCullStats, draw.DitherFade, draw.OcclusionMode);
                                 cmd->UpdateBuffer(
@@ -487,7 +493,7 @@ namespace Kurenai::Passes
                 .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
                 // 間接描画の引数(直前のModelCullパスが書いたもの)
                 .BufferReads = { m_Engine.m_ModelCullDrawArgsBuffer.get() },
-                .Execute = [this, gbufferViewport, &viewProj, modelCullIndirectActive, occlusionCullingActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &viewProj, modelCullIndirectActive, occlusionCullingActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(gbufferViewport);
                     // Reverse-Zのため遠平面側(NDC z=0.0)。G-Bufferパスの代わりにここでクリアする
@@ -615,7 +621,7 @@ namespace Kurenai::Passes
                                 }
 
                                 const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                    instance, lodModel, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, rejectMask, requireMask,
+                                    instance, lodModel, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled, rejectMask, requireMask,
                                     m_Engine.m_MeshletLODFrame);
                                 cmd->UpdateBuffer(
                                     objectConstantBuffer, &objectConstants, sizeof(objectConstants));
@@ -665,7 +671,7 @@ namespace Kurenai::Passes
                             }
 
                             ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, lodModel, mesh, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame, lodDitherFade);
+                                MakeObjectConstants(instance, lodModel, mesh, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame, lodDitherFade);
                             objectConstants.InstanceBase = unit.InstanceBase;
                             objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                             cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
@@ -731,7 +737,7 @@ namespace Kurenai::Passes
             .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
             // 間接描画の引数を読む(ModelCullパスが書いたもの)
             .BufferReads = { m_Engine.m_ModelCullDrawArgsBuffer.get() },
-            .Execute = [this, gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive, meshletCullStatsActive, modelCullIndirectActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, ambientOcclusionSettings, emissiveLightSettings, geometrySettings, gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive, meshletCullStatsActive, modelCullIndirectActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
             {
                 // カリング統計のカウンタを0へ戻す。増幅シェーダーは加算しかしないので、
                 // 戻さないとフレームをまたいで積み上がる。
@@ -797,7 +803,7 @@ namespace Kurenai::Passes
                     {
                         // デバッグ表示が有効ならメッシュレットごとの色分けPSOを使う。
                         // 用意できていない場合(作成失敗)は通常のメッシュレットPSOへ落とす
-                        const bool debugView = m_Engine.m_GeometrySettings.MeshletDebugViewEnabled && m_Engine.m_GBufferMeshletDebugPipelineState;
+                        const bool debugView = geometrySettings.MeshletDebugViewEnabled && m_Engine.m_GBufferMeshletDebugPipelineState;
                         wanted = debugView
                             ? (mirrored ? m_Engine.m_GBufferMeshletDebugPipelineStateMirrored.get()
                                         : m_Engine.m_GBufferMeshletDebugPipelineState.get())
@@ -838,7 +844,7 @@ namespace Kurenai::Passes
                 // 選ぶPSOはbindPipelineState(mirrored, false, true)と同じもの
                 if (modelCullIndirectActive)
                 {
-                    const bool meshletDebug = m_Engine.m_GeometrySettings.MeshletDebugViewEnabled && m_Engine.m_GBufferMeshletDebugPipelineState;
+                    const bool meshletDebug = geometrySettings.MeshletDebugViewEnabled && m_Engine.m_GBufferMeshletDebugPipelineState;
                     if (m_Engine.IssueModelCullIndirect(
                             cmd, kModelCullRegionGBuffer,
                             meshletDebug ? m_Engine.m_GBufferMeshletDebugPipelineState.get()
@@ -893,7 +899,7 @@ namespace Kurenai::Passes
                         bindPipelineState(instance.IsMirrored, false, true);
 
                         const ObjectConstants objectConstants = MakeModelObjectConstants(
-                            instance, lodModel, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled,
+                            instance, lodModel, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled,
                             Assets::kGpuMaterialFlagTransparent, 0, m_Engine.m_MeshletLODFrame,
                             /*countCullStats=*/true, lodDitherFade);
                         cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
@@ -922,7 +928,7 @@ namespace Kurenai::Passes
                         bindPipelineState(instance.IsMirrored, instance.IsWater, false);
 
                         ObjectConstants objectConstants =
-                            MakeObjectConstants(instance, lodModel, mesh, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame, lodDitherFade);
+                            MakeObjectConstants(instance, lodModel, mesh, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame, lodDitherFade);
                         objectConstants.InstanceBase = unit.InstanceBase;
                         objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                         cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));

@@ -15,6 +15,11 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
+        // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
+        const DebugViewSettings debugViewSettings = frame.Settings.DebugView;
+        const PostProcessSettings postProcessSettings = frame.Settings.PostProcess;
+
         const uint32_t renderWidth = frame.RenderWidth;
         const uint32_t renderHeight = frame.RenderHeight;
         RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
@@ -146,7 +151,7 @@ namespace Kurenai::Passes
                 // 実際にバインドするテクスチャはReadsにも宣言しておくというRenderGraphの規約に従う
                 .Reads = { taaInputColor, historyTexture, m_Engine.m_RenderTargets.GBufferVelocity.get(), m_Engine.m_RenderTargets.GBufferDepth.get() },
                 .RenderTargets = { m_Engine.m_RenderTargets.TAAHistory[historyWriteIndex].get() },
-                .Execute = [this, gbufferViewport, taaInputColor, historyTexture, invViewProj, jitterUv, effectiveExposure, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, postProcessSettings, gbufferViewport, taaInputColor, historyTexture, invViewProj, jitterUv, effectiveExposure, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     TAAConstants taaConstants{};
                     DirectX::XMStoreFloat4x4(&taaConstants.InvViewProj, DirectX::XMMatrixTranspose(invViewProj));
@@ -171,13 +176,13 @@ namespace Kurenai::Passes
                         (historyValid && previousExposure > 0.0f) ? (effectiveExposure / previousExposure) : 1.0f;
 
                     taaConstants.Params0 = {
-                        m_Engine.m_PostProcessSettings.TAABlendWeight,
-                        m_Engine.m_PostProcessSettings.TAAClipGamma,
+                        postProcessSettings.TAABlendWeight,
+                        postProcessSettings.TAAClipGamma,
                         historyValid ? 1.0f : 0.0f,
                         exposureRescale,
                     };
                     taaConstants.Params1 = {
-                        static_cast<float>(m_Engine.m_PostProcessSettings.TAAClip), m_Engine.m_PostProcessSettings.TAAAntiFlicker, 0.0f, 0.0f
+                        static_cast<float>(postProcessSettings.TAAClip), postProcessSettings.TAAAntiFlicker, 0.0f, 0.0f
                     };
                     cmd->UpdateBuffer(m_Engine.m_TAAConstantBuffer.get(), &taaConstants, sizeof(taaConstants));
 
@@ -219,28 +224,28 @@ namespace Kurenai::Passes
                 .Name = "AutoExposure",
                 .Reads = { hdrSceneColor, m_Engine.m_RenderTargets.GBufferDepth.get() },
                 .Writes = { m_Engine.m_ExposureTexture.get() },
-                .Execute = [this, hdrSceneColor, keyReferenceEV100, usingProceduralSky, resetAdaptation, renderWidth, renderHeight](
+                .Execute = [this, postProcessSettings, hdrSceneColor, keyReferenceEV100, usingProceduralSky, resetAdaptation, renderWidth, renderHeight](
                     RHI::IRHICommandList* cmd)
                 {
                     AutoExposureConstants autoExposureConstants{};
                     autoExposureConstants.InputSize = { renderWidth, renderHeight };
                     // Min>Maxのような不正な範囲だとヒストグラムのビン割りが破綻するため順序を保証する
-                    autoExposureConstants.MinEV100 = std::min(m_Engine.m_PostProcessSettings.AutoExposureMinEV100, m_Engine.m_PostProcessSettings.AutoExposureMaxEV100);
-                    autoExposureConstants.MaxEV100 = std::max(m_Engine.m_PostProcessSettings.AutoExposureMinEV100, m_Engine.m_PostProcessSettings.AutoExposureMaxEV100);
+                    autoExposureConstants.MinEV100 = std::min(postProcessSettings.AutoExposureMinEV100, postProcessSettings.AutoExposureMaxEV100);
+                    autoExposureConstants.MaxEV100 = std::max(postProcessSettings.AutoExposureMinEV100, postProcessSettings.AutoExposureMaxEV100);
                     autoExposureConstants.PreExposureEV100 = m_Engine.m_EffectiveExposureEV100;
                     // 一時停止やシーン読み込み直後の巨大なdtで順応が飛ばないよう上限を設ける
                     autoExposureConstants.DeltaTime = std::clamp(m_Engine.m_RenderDeltaTime, 0.0f, 0.1f);
-                    autoExposureConstants.AdaptationSpeedUp = m_Engine.m_PostProcessSettings.AutoExposureSpeedUp;
-                    autoExposureConstants.AdaptationSpeedDown = m_Engine.m_PostProcessSettings.AutoExposureSpeedDown;
-                    autoExposureConstants.LowPercentile = std::min(m_Engine.m_PostProcessSettings.AutoExposureLowPercentile, m_Engine.m_PostProcessSettings.AutoExposureHighPercentile);
-                    autoExposureConstants.HighPercentile = std::max(m_Engine.m_PostProcessSettings.AutoExposureLowPercentile, m_Engine.m_PostProcessSettings.AutoExposureHighPercentile);
-                    autoExposureConstants.ExposureCompensation = m_Engine.m_PostProcessSettings.AutoExposureCompensation;
-                    autoExposureConstants.NightRolloffEV = m_Engine.m_PostProcessSettings.AutoExposureNightRolloffEV;
+                    autoExposureConstants.AdaptationSpeedUp = postProcessSettings.AutoExposureSpeedUp;
+                    autoExposureConstants.AdaptationSpeedDown = postProcessSettings.AutoExposureSpeedDown;
+                    autoExposureConstants.LowPercentile = std::min(postProcessSettings.AutoExposureLowPercentile, postProcessSettings.AutoExposureHighPercentile);
+                    autoExposureConstants.HighPercentile = std::max(postProcessSettings.AutoExposureLowPercentile, postProcessSettings.AutoExposureHighPercentile);
+                    autoExposureConstants.ExposureCompensation = postProcessSettings.AutoExposureCompensation;
+                    autoExposureConstants.NightRolloffEV = postProcessSettings.AutoExposureNightRolloffEV;
                     // 折れ点は必ずDark < Brightにする(逆転すると補正が不連続になる)
                     autoExposureConstants.NightRolloffDarkEV100 =
-                        std::min(m_Engine.m_PostProcessSettings.AutoExposureNightRolloffDarkEV100, m_Engine.m_PostProcessSettings.AutoExposureNightRolloffBrightEV100);
+                        std::min(postProcessSettings.AutoExposureNightRolloffDarkEV100, postProcessSettings.AutoExposureNightRolloffBrightEV100);
                     autoExposureConstants.NightRolloffBrightEV100 =
-                        std::max(m_Engine.m_PostProcessSettings.AutoExposureNightRolloffDarkEV100, m_Engine.m_PostProcessSettings.AutoExposureNightRolloffBrightEV100);
+                        std::max(postProcessSettings.AutoExposureNightRolloffDarkEV100, postProcessSettings.AutoExposureNightRolloffBrightEV100);
                     // 構図に依存しないシーンの基準EV。測光値の上限の足がかりになる。
                     //
                     // **手続き空を使っていないシーンではクランプを無効にする**。
@@ -252,7 +257,7 @@ namespace Kurenai::Passes
                     // 飽和させてしまうとエネルギー保存の検証が成立しなくなる)
                     autoExposureConstants.KeyReferenceEV100 = keyReferenceEV100;
                     autoExposureConstants.KeyCeilingEV =
-                        usingProceduralSky ? m_Engine.m_PostProcessSettings.AutoExposureKeyCeilingEV : 1.0e4f;
+                        usingProceduralSky ? postProcessSettings.AutoExposureKeyCeilingEV : 1.0e4f;
                     autoExposureConstants.ResetAdaptation = resetAdaptation ? 1.0f : 0.0f;
                     cmd->UpdateBuffer(m_Engine.m_AutoExposureConstantBuffer.get(), &autoExposureConstants, sizeof(autoExposureConstants));
 
@@ -301,17 +306,17 @@ namespace Kurenai::Passes
                 .Name = "Bloom",
                 .Reads = { hdrSceneColor, m_Engine.m_ExposureTexture.get() },
                 .Writes = std::move(bloomWrites),
-                .Execute = [this, hdrSceneColor, manualExposureScale, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, postProcessSettings, hdrSceneColor, manualExposureScale, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     const uint32_t levelCount = static_cast<uint32_t>(m_Engine.m_BloomDownTextures.size());
 
                     BloomConstants bloomConstants{};
-                    bloomConstants.Threshold = m_Engine.m_PostProcessSettings.BloomThreshold;
-                    bloomConstants.SoftKnee = m_Engine.m_PostProcessSettings.BloomSoftKnee;
+                    bloomConstants.Threshold = postProcessSettings.BloomThreshold;
+                    bloomConstants.SoftKnee = postProcessSettings.BloomSoftKnee;
                     // しきい値を「表示上の白」基準の直感的な値のままにするため、
                     // ピラミッドの入力段で露出を反映する(Bloom.hlsl ExposureScale()参照)。
                     // Tonemapと同じ倍率でなければ、ブルームだけ露出がずれて合成比が狂う
-                    bloomConstants.UseAutoExposure = m_Engine.m_PostProcessSettings.AutoExposureEnabled ? 1.0f : 0.0f;
+                    bloomConstants.UseAutoExposure = postProcessSettings.AutoExposureEnabled ? 1.0f : 0.0f;
                     bloomConstants.PreExposureEV100 = m_Engine.m_EffectiveExposureEV100;
                     bloomConstants.ExposureScale = manualExposureScale;
 
@@ -378,26 +383,26 @@ namespace Kurenai::Passes
 
         // このフレームで超解像パスを走らせるか。デバッグ表示中は内部解像度の中間バッファを
         // そのまま等倍で見たいので走らせない(拡大するとバッファの実際の解像度が分からなくなる)
-        const bool upscaleActive = m_Engine.IsUpscaleActive() && m_Engine.m_DebugViewSettings.View == DebugView::Final;
+        const bool upscaleActive = m_Engine.IsUpscaleActive() && debugViewSettings.View == DebugView::Final;
         bb.UpscaleActive = upscaleActive;
 
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Tonemap",
             .Reads = { hdrSceneColor, m_Engine.m_ExposureTexture.get(), bloomResultTexture },
             .RenderTargets = { m_Engine.m_RenderTargets.TonemapTexture.get() },
-            .Execute = [this, gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale, keyReferenceEV100, upscaleActive, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, postProcessSettings, gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale, keyReferenceEV100, upscaleActive, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 TonemapConstants tonemapConstants{};
-                tonemapConstants.Curve = static_cast<int32_t>(m_Engine.m_PostProcessSettings.Curve);
+                tonemapConstants.Curve = static_cast<int32_t>(postProcessSettings.Curve);
                 // 手動露出時: プリ露出は時刻連動で変動するので、設定EV100との差分を割り戻して
                 // 「設定EV100で固定した絵」へ戻す(manualExposureScaleの算出箇所のコメント参照)
                 tonemapConstants.ExposureScale = manualExposureScale;
-                tonemapConstants.DitherStrength = m_Engine.m_PostProcessSettings.DitherEnabled ? 1.0f : 0.0f;
-                tonemapConstants.UseAutoExposure = m_Engine.m_PostProcessSettings.AutoExposureEnabled ? 1.0f : 0.0f;
+                tonemapConstants.DitherStrength = postProcessSettings.DitherEnabled ? 1.0f : 0.0f;
+                tonemapConstants.UseAutoExposure = postProcessSettings.AutoExposureEnabled ? 1.0f : 0.0f;
                 tonemapConstants.PreExposureEV100 = m_Engine.m_EffectiveExposureEV100;
                 tonemapConstants.BloomStrength =
-                    (m_Engine.m_PostProcessSettings.BloomEnabled && !m_Engine.m_BloomUpTextures.empty()) ? m_Engine.m_PostProcessSettings.BloomStrength : 0.0f;
-                tonemapConstants.MesopicStrength = m_Engine.m_PostProcessSettings.MesopicStrength;
+                    (postProcessSettings.BloomEnabled && !m_Engine.m_BloomUpTextures.empty()) ? postProcessSettings.BloomStrength : 0.0f;
+                tonemapConstants.MesopicStrength = postProcessSettings.MesopicStrength;
                 // 目の順応は画面の構図ではなくシーンの明るさで決まるので、
                 // 自動露出の測光値ではなくキー照度から求めた基準EVを使う
                 tonemapConstants.MesopicAdaptationEV100 = keyReferenceEV100;
@@ -408,10 +413,10 @@ namespace Kurenai::Passes
                 // その後EASUで拡大すると、戻した高域もオーバーシュートの縁も一緒に引き伸ばされて
                 // 太い縁取りになる。超解像時のシャープ化は出力解像度で効くRCASへ一本化し、
                 // ここは素直なトーンマップ出力をEASUへ渡すことに徹する
-                tonemapConstants.Sharpness = (m_Engine.m_PostProcessSettings.TAAEnabled && !upscaleActive) ? m_Engine.m_PostProcessSettings.TAASharpness : 0.0f;
+                tonemapConstants.Sharpness = (postProcessSettings.TAAEnabled && !upscaleActive) ? postProcessSettings.TAASharpness : 0.0f;
                 tonemapConstants.InvRenderWidth = 1.0f / static_cast<float>(renderWidth);
                 tonemapConstants.InvRenderHeight = 1.0f / static_cast<float>(renderHeight);
-                tonemapConstants.BlackPoint = m_Engine.m_PostProcessSettings.TonemapBlackPoint;
+                tonemapConstants.BlackPoint = postProcessSettings.TonemapBlackPoint;
                 cmd->UpdateBuffer(m_Engine.m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
 
                 cmd->SetViewport(gbufferViewport);

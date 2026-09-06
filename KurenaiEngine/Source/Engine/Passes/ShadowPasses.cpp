@@ -177,6 +177,12 @@ namespace Kurenai::Passes
     void ShadowPasses::RegisterCascades(
         Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
     {
+        // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
+        // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
+        const AmbientOcclusionSettings ambientOcclusionSettings = frame.Settings.AmbientOcclusion;
+        const EmissiveLightSettings emissiveLightSettings = frame.Settings.EmissiveLight;
+        const ShadowSettings shadowSettings = frame.Settings.Shadow;
+
         RHI::IRHIBuffer* const objectConstantBuffer = frame.ObjectConstantBuffer;
         RHI::IRHISamplerSet* const materialSamplers = frame.MaterialSamplers;
 
@@ -196,7 +202,7 @@ namespace Kurenai::Passes
                 .Name = "Shadow" + std::to_string(cascade),
                 .DepthTarget = m_Engine.m_RenderTargets.ShadowCascadeArray.get(),
                 .DepthTargetArraySlice = cascade,
-                .Execute = [this, shadowViewport, cascade, cascadeViewProj, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, ambientOcclusionSettings, emissiveLightSettings, shadowSettings, shadowViewport, cascade, cascadeViewProj, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(shadowViewport);
                     // 深度1.0(最遠)にクリアしておく。無効時はこの後の描画をスキップするため、
@@ -206,7 +212,7 @@ namespace Kurenai::Passes
                     // RTシャドウ選択時もここは描く。半透明(Transparent.hlsl)と反射プローブの
                     // キャプチャ(ProbeCapture.hlsl)はカメラ視点の可視率テクスチャを使えず、
                     // カスケードシャドウマップを必要とするため(26章)
-                    if (m_Engine.m_ShadowSettings.Mode != ShadowMode::Off)
+                    if (shadowSettings.Mode != ShadowMode::Off)
                     {
                         CascadeConstants cascadeConstants{};
                         DirectX::XMStoreFloat4x4(&cascadeConstants.ViewProj, DirectX::XMMatrixTranspose(cascadeViewProj[cascade]));
@@ -295,7 +301,7 @@ namespace Kurenai::Passes
                                     bindShadowPipelineState(pipelineState);
 
                                     const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                        instance, coarsestModel, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, rejectMask,
+                                        instance, coarsestModel, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled, rejectMask,
                                         requireMask, m_Engine.m_MeshletLODFrame);
                                     cmd->UpdateBuffer(
                                         objectConstantBuffer, &objectConstants, sizeof(objectConstants));
@@ -337,7 +343,7 @@ namespace Kurenai::Passes
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
                                 ObjectConstants objectConstants =
-                                    MakeObjectConstants(instance, coarsestModel, mesh, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
+                                    MakeObjectConstants(instance, coarsestModel, mesh, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
                                 objectConstants.InstanceBase = unit.InstanceBase;
                                 objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                                 cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
@@ -371,6 +377,10 @@ namespace Kurenai::Passes
     void ShadowPasses::RegisterRaytraced(
         Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
     {
+        // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
+        // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
+        const ShadowSettings shadowSettings = frame.Settings.Shadow;
+
         const uint32_t renderWidth = frame.RenderWidth;
         const uint32_t renderHeight = frame.RenderHeight;
         RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
@@ -387,15 +397,15 @@ namespace Kurenai::Passes
                 .Name = "RTShadow",
                 .Reads = { m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get() },
                 .Writes = { m_Engine.m_RenderTargets.RTShadowTexture.get() },
-                .Execute = [this, renderWidth, renderHeight, frameConstantBuffer](RHI::IRHICommandList* cmd)
+                .Execute = [this, shadowSettings, renderWidth, renderHeight, frameConstantBuffer](RHI::IRHICommandList* cmd)
                 {
                     Passes::RTShadowConstants rtShadowConstants{};
                     rtShadowConstants.Params0 =
                     {
                         static_cast<float>(renderWidth),
                         static_cast<float>(renderHeight),
-                        DirectX::XMConvertToRadians(m_Engine.m_ShadowSettings.RTSunAngularRadiusDegrees),
-                        static_cast<float>(std::max(1, m_Engine.m_ShadowSettings.RTSampleCount)),
+                        DirectX::XMConvertToRadians(shadowSettings.RTSunAngularRadiusDegrees),
+                        static_cast<float>(std::max(1, shadowSettings.RTSampleCount)),
                     };
                     cmd->UpdateBuffer(m_RTShadowConstantBuffer.get(), &rtShadowConstants, sizeof(rtShadowConstants));
 

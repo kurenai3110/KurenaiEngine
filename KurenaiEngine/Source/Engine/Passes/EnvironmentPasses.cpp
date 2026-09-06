@@ -43,6 +43,10 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
+        // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
+        const IBLSettings iblSettings = frame.Settings.IBL;
+
         RHI::IRHISamplerSet* const materialSamplers = frame.MaterialSamplers;
         RHI::IRHISamplerSet* const screenSpaceSamplers = frame.ScreenSpaceSamplers;
 
@@ -415,7 +419,7 @@ namespace Kurenai::Passes
                 .Name = "IBLIrradianceBake",
                 .Reads = { skyTexture },
                 .Writes = { m_Engine.m_IrradianceTexture.get() },
-                .Execute = [this, skyTexture, materialSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, iblSettings, skyTexture, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     // 拡散イラディアンス(本物のTextureCube、32x32x6面)。HLSLはリソースを動的に
                     // スライス選択できないため、面ごとに1回ずつディスパッチする。
@@ -424,11 +428,11 @@ namespace Kurenai::Passes
                     // サンプル)とSH L2経路(CSProjectSH→CSProjectSHFinal→CSEvaluateSH、
                     // 射影は24,576テクセルを1回ずつ読むだけ)を切り替えられる。
                     // 出力(m_IrradianceTexture)の形・規約はどちらの経路でも完全に同一
-                    if (m_Engine.m_IBLSettings.UseSHIrradiance)
+                    if (iblSettings.UseSHIrradiance)
                     {
                         IBLFaceConstants shConstants{};
                         shConstants.SHProjectionSize = static_cast<float>(kSHProjectionSize);
-                        shConstants.SHWindowLambda = m_Engine.m_IBLSettings.SHWindowLambda;
+                        shConstants.SHWindowLambda = iblSettings.SHWindowLambda;
 
                         // --- 1. 射影: ソースキューブ全体を1回だけ読んで9個の係数(RGB)へ集約する ---
                         cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &shConstants, sizeof(shConstants));
@@ -456,7 +460,7 @@ namespace Kurenai::Passes
                         {
                             IBLFaceConstants faceConstants{};
                             faceConstants.Face = face;
-                            faceConstants.SHWindowLambda = m_Engine.m_IBLSettings.SHWindowLambda;
+                            faceConstants.SHWindowLambda = iblSettings.SHWindowLambda;
                             cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
                             cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
                             cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_IrradianceTexture.get(), face, 0);

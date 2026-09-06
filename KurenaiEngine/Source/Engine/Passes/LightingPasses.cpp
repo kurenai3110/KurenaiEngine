@@ -28,6 +28,10 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
+        // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
+        const AmbientOcclusionSettings ambientOcclusionSettings = frame.Settings.AmbientOcclusion;
+
         const uint32_t renderWidth = frame.RenderWidth;
         const uint32_t renderHeight = frame.RenderHeight;
         RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
@@ -144,16 +148,16 @@ namespace Kurenai::Passes
                     // (SSILと同じ理由でDirectLightパスより後に順序付けられる。RTAO.hlsl参照)
                     .Reads = { m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_RenderTargets.DirectLightTexture.get() },
                     .Writes = { aoRawTexture },
-                    .Execute = [this, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                    .Execute = [this, ambientOcclusionSettings, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                     {
                         Passes::RTAOConstants rtAOConstants{};
                         rtAOConstants.Params0 = {
                             static_cast<float>(renderWidth), static_cast<float>(renderHeight),
-                            m_Engine.m_AmbientOcclusionSettings.RTAOMaxDistance, m_Engine.m_AmbientOcclusionSettings.RTAOPower
+                            ambientOcclusionSettings.RTAOMaxDistance, ambientOcclusionSettings.RTAOPower
                         };
                         rtAOConstants.Params1 = {
-                            static_cast<float>(std::max(1, m_Engine.m_AmbientOcclusionSettings.RTAOSampleCount)), m_Engine.m_AmbientOcclusionSettings.RTAOIntensity,
-                            m_Engine.m_AmbientOcclusionSettings.RTAOBounceShadowRayEnabled ? 1.0f : 0.0f, 0.0f
+                            static_cast<float>(std::max(1, ambientOcclusionSettings.RTAOSampleCount)), ambientOcclusionSettings.RTAOIntensity,
+                            ambientOcclusionSettings.RTAOBounceShadowRayEnabled ? 1.0f : 0.0f, 0.0f
                         };
                         cmd->UpdateBuffer(m_Engine.m_RTAOConstantBuffer.get(), &rtAOConstants, sizeof(rtAOConstants));
 
@@ -199,7 +203,7 @@ namespace Kurenai::Passes
                         ? std::vector<RHI::IRHITexture*>{ m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_RenderTargets.DirectLightTexture.get() }
                         : std::vector<RHI::IRHITexture*>{ m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get() },
                     .RenderTargets = { aoRawTexture },
-                    .Execute = [this, gbufferViewport, useSSIL, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                    .Execute = [this, ambientOcclusionSettings, gbufferViewport, useSSIL, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
                         cmd->SetViewport(gbufferViewport);
                         cmd->SetConstantBuffer(0, frameConstantBuffer);
@@ -208,8 +212,8 @@ namespace Kurenai::Passes
                         if (useSSIL)
                         {
                             Passes::SSILConstants ssilConstants{};
-                            ssilConstants.Params0 = { m_Engine.m_AmbientOcclusionSettings.SSILRadius, m_Engine.m_AmbientOcclusionSettings.SSILThickness, m_Engine.m_AmbientOcclusionSettings.SSILIntensity, m_Engine.m_AmbientOcclusionSettings.SSILPower };
-                            ssilConstants.Params1 = { m_Engine.m_AmbientOcclusionSettings.SSILSliceCount, m_Engine.m_AmbientOcclusionSettings.SSILStepCount, 0u, 0u };
+                            ssilConstants.Params0 = { ambientOcclusionSettings.SSILRadius, ambientOcclusionSettings.SSILThickness, ambientOcclusionSettings.SSILIntensity, ambientOcclusionSettings.SSILPower };
+                            ssilConstants.Params1 = { ambientOcclusionSettings.SSILSliceCount, ambientOcclusionSettings.SSILStepCount, 0u, 0u };
                             cmd->UpdateBuffer(m_Engine.m_SSILConstantBuffer.get(), &ssilConstants, sizeof(ssilConstants));
 
                             cmd->SetPipelineState(m_Engine.m_SSILPipelineState.get());
@@ -225,7 +229,7 @@ namespace Kurenai::Passes
                             // 先頭N本を流用してはいけない理由はm_AmbientOcclusionSettings.SSAOKernelSizeのコメント参照。
                             // 生成は16回のRNGだけなので毎フレーム比較しても問題にならない
                             const uint32_t kernelSize =
-                                std::clamp(m_Engine.m_AmbientOcclusionSettings.SSAOKernelSize, 1u, Passes::kSSAOKernelSizeMax);
+                                std::clamp(ambientOcclusionSettings.SSAOKernelSize, 1u, Passes::kSSAOKernelSizeMax);
                             if (m_Engine.m_SSAOKernel.size() != kernelSize)
                             {
                                 m_Engine.m_SSAOKernel = Passes::GenerateSSAOKernel(kernelSize);
@@ -235,7 +239,7 @@ namespace Kurenai::Passes
                             Passes::SSAOConstants ssaoConstants{};
                             std::copy(m_Engine.m_SSAOKernel.begin(), m_Engine.m_SSAOKernel.end(), ssaoConstants.Samples);
                             ssaoConstants.Params = {
-                                m_Engine.m_AmbientOcclusionSettings.SSAORadius, m_Engine.m_AmbientOcclusionSettings.SSAORadius * 0.05f, m_Engine.m_AmbientOcclusionSettings.SSAOPower, static_cast<float>(kernelSize) };
+                                ambientOcclusionSettings.SSAORadius, ambientOcclusionSettings.SSAORadius * 0.05f, ambientOcclusionSettings.SSAOPower, static_cast<float>(kernelSize) };
                             cmd->UpdateBuffer(m_Engine.m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
 
                             cmd->SetPipelineState(m_Engine.m_SSAOPipelineState.get());
@@ -328,6 +332,11 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
+        // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
+        const AmbientOcclusionSettings ambientOcclusionSettings = frame.Settings.AmbientOcclusion;
+        const EmissiveLightSettings emissiveLightSettings = frame.Settings.EmissiveLight;
+
         RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
         RHI::IRHIBuffer* const objectConstantBuffer = frame.ObjectConstantBuffer;
         RHI::IRHISamplerSet* const materialSamplers = frame.MaterialSamplers;
@@ -450,7 +459,7 @@ namespace Kurenai::Passes
             },
             .RenderTargets = { m_Engine.m_RenderTargets.SceneColor.get() },
             .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
-            .Execute = [this, gbufferViewport, &gpuLights, &cameraPosition, &viewProj, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &gpuLights, &cameraPosition, &viewProj, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
             {
                 // 半透明メッシュをインスタンス単位でカメラからの距離降順(奥から手前)に並べる。
                 // instance.WorldはHLSL(mul(vec, World))に合わせて転置済みのため、ワールド座標の
@@ -554,8 +563,8 @@ namespace Kurenai::Passes
 
                     const ObjectConstants objectConstants =
                         MakeObjectConstants(
-                            *draw.Instance, *draw.Model, *draw.Mesh, m_Engine.m_EmissiveLightSettings.Intensity,
-                            m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
+                            *draw.Instance, *draw.Model, *draw.Mesh, emissiveLightSettings.Intensity,
+                            ambientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
                     cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, objectConstantBuffer);
 

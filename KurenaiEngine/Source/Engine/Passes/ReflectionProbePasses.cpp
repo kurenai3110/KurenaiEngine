@@ -32,6 +32,11 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
+        // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
+        const AmbientOcclusionSettings ambientOcclusionSettings = frame.Settings.AmbientOcclusion;
+        const EmissiveLightSettings emissiveLightSettings = frame.Settings.EmissiveLight;
+
         RHI::IRHIBuffer* const objectConstantBuffer = frame.ObjectConstantBuffer;
         RHI::IRHISamplerSet* const materialSamplers = frame.MaterialSamplers;
 
@@ -57,7 +62,7 @@ namespace Kurenai::Passes
         // プローブ1面ぶんのキャプチャ(フォワード描画 → スクラッチのキューブ面へコピー)。
         // フルベイクと時間分割の両方から呼ぶためラムダへ切り出してある
         const auto captureProbeFace =
-            [this, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
+            [this, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
         {
             const Assets::ReflectionProbe& probe = m_Engine.m_ReflectionProbes[probeIndex];
             const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
@@ -148,7 +153,7 @@ namespace Kurenai::Passes
                 {
                     const Assets::ModelInstance& instance = *unit.Instance;
 
-                    ObjectConstants objectConstants = MakeObjectConstants(instance, coarsestModel, mesh, m_Engine.m_EmissiveLightSettings.Intensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
+                    ObjectConstants objectConstants = MakeObjectConstants(instance, coarsestModel, mesh, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
                     objectConstants.InstanceBase = unit.InstanceBase;
                     objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                     cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));

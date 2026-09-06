@@ -32,6 +32,12 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
+        // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
+        const AmbientOcclusionSettings ambientOcclusionSettings = frame.Settings.AmbientOcclusion;
+        const DDGISettings ddgiSettings = frame.Settings.DDGI;
+        const EmissiveLightSettings emissiveLightSettings = frame.Settings.EmissiveLight;
+
         RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
         RHI::IRHIBuffer* const objectConstantBuffer = frame.ObjectConstantBuffer;
         RHI::IRHISamplerSet* const materialSamplers = frame.MaterialSamplers;
@@ -60,7 +66,7 @@ namespace Kurenai::Passes
         // RWTexture2DArray<float>なので、キューブ配列だけでなく単体のキューブ(=6要素の2D配列)の
         // 面へもそのまま書ける
         const auto captureDDGIProbeFace =
-            [this, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
 
@@ -155,7 +161,7 @@ namespace Kurenai::Passes
                     // RaytracingScene.cpp が !mesh.EmissiveClusters.empty() だけで印を付ける。
                     // 条件が1つでも違うと、環境によって二重計上の有無が変わる
                     const bool meshIsProxySource = suppressEmissiveForDDGI && !mesh.EmissiveClusters.empty();
-                    const float ddgiEmissiveIntensity = meshIsProxySource ? 0.0f : m_Engine.m_EmissiveLightSettings.Intensity;
+                    const float ddgiEmissiveIntensity = meshIsProxySource ? 0.0f : emissiveLightSettings.Intensity;
                     ++ddgiDrawnMeshes;
                     const float emissiveMax =
                         std::max({ mesh.EmissiveFactor[0], mesh.EmissiveFactor[1], mesh.EmissiveFactor[2] });
@@ -169,7 +175,7 @@ namespace Kurenai::Passes
                     {
                         ++ddgiLODMismatchMeshes;
                     }
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, coarsestModel, mesh, ddgiEmissiveIntensity, m_Engine.m_AmbientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, coarsestModel, mesh, ddgiEmissiveIntensity, ambientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
                     cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, objectConstantBuffer);
 
@@ -194,7 +200,7 @@ namespace Kurenai::Passes
                         " / 描いたメッシュ " + std::to_string(ddgiDrawnMeshes) + "個(うち自発光 " +
                         std::to_string(ddgiEmissiveMeshes) + "個) / 0にしたメッシュ " +
                         std::to_string(ddgiSuppressedMeshes) + "個 / 自発光の強度 " +
-                        std::to_string(m_Engine.m_EmissiveLightSettings.Intensity));
+                        std::to_string(emissiveLightSettings.Intensity));
                 if (ddgiLODMismatchMeshes > 0)
                 {
                     Core::Logger::Warning(
@@ -232,7 +238,7 @@ namespace Kurenai::Passes
         // RWTexture2DArrayとして張る」メソッドをDX11/DX12の両方へ足す必要がある。
         // ドローとメッシュ走査が消えるのが本題なので、そこは測ってから決める
         const auto traceDDGIProbeFace =
-            [this, skyTexture, bakedLightCount, materialSamplers, frameConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, ddgiSettings, emissiveLightSettings, skyTexture, bakedLightCount, materialSamplers, frameConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
 
@@ -244,8 +250,8 @@ namespace Kurenai::Passes
             // ラスタ経路(ObjectConstantsの倍率を0にする)と**同じ判定**から決めること
             traceConstants.Params1 = {
                 static_cast<float>(kDDGICaptureSize),
-                m_Engine.m_EmissiveLightSettings.Intensity,
-                m_Engine.m_DDGISettings.SunShadowRayEnabled ? 1.0f : 0.0f,
+                emissiveLightSettings.Intensity,
+                ddgiSettings.SunShadowRayEnabled ? 1.0f : 0.0f,
                 m_Engine.ShouldSuppressEmissiveForGI() ? 0.0f : 1.0f
             };
             // 舐めるライトの数。ラスタ経路(ProbeCaptureのcaptureConstants)と同じ値にすること。
