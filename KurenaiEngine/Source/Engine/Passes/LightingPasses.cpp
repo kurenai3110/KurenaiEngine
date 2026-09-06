@@ -39,7 +39,7 @@ namespace Kurenai::Passes
         const std::vector<GPULight>& gpuLights = *frame.Lights;
         const RHI::Viewport gbufferViewport = frame.GBufferViewport;
         const bool usingProceduralSky = frame.UsingProceduralSky;
-        const bool megaLightsDenoiseRuns = frame.MegaLightsDenoiseRuns;
+        const bool megaLightsDenoiseRuns = bb.MegaLightsDenoiseRuns;
         RHI::IRHITexture* const skyTexture = bb.SkyTexture;
 
         // 直接光パスがt6へバインドする可視率テクスチャ。DirectLighting.hlslは

@@ -105,6 +105,8 @@
     <ClInclude Include="Source\Engine\Passes\EnvironmentConstants.h" />
     <ClInclude Include="Source\Engine\Passes\EnvironmentPasses.h" />
     <ClInclude Include="Source\Engine\Rendering\SunLighting.h" />
+    <ClInclude Include="Source\Engine\Passes\MegaLightsConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\MegaLightsPasses.h" />
     <ClInclude Include="Source\Engine\Passes\PostProcessConstants.h" />
     <ClInclude Include="Source\Engine\Passes\LightingConstants.h" />
     <ClInclude Include="Source\Engine\Passes\LightingPasses.h" />
@@ -151,6 +153,7 @@
     <ClCompile Include="Source\Engine\Rendering\GeometryDrawLoop.cpp" />
     <ClCompile Include="Source\Engine\Passes\DDGIPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\EnvironmentPasses.cpp" />
+    <ClCompile Include="Source\Engine\Passes\MegaLightsPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\PostProcessPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\LightingPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\ReflectionPasses.cpp" />

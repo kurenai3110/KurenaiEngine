@@ -46,5 +46,9 @@ namespace Kurenai::Rendering
         // 超解像(EASU/RCAS)を今フレーム走らせたか。
         // デバッグ表示中は内部解像度のまま等倍で見たいので走らせない
         bool UpscaleActive = false;
+
+        // MegaLightsのデノイズを今フレーム走らせたか。
+        // 後段の直接光パスが「生出力とデノイズ後のどちらを t7 へ張るか」をこれで決める
+        bool MegaLightsDenoiseRuns = false;
     };
 }

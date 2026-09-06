@@ -85,6 +85,7 @@ namespace Kurenai::Passes
     class DDGIPasses;
     class EnvironmentPasses;
     class LightingPasses;
+    class MegaLightsPasses;
     class PostProcessPasses;
     class ReflectionPasses;
     class ReflectionProbePasses;
@@ -140,6 +141,7 @@ namespace Kurenai
         friend class Passes::DDGIPasses;
         friend class Passes::EnvironmentPasses;
         friend class Passes::LightingPasses;
+        friend class Passes::MegaLightsPasses;
         friend class Passes::PostProcessPasses;
         friend class Passes::ReflectionPasses;
         friend class Passes::ReflectionProbePasses;
@@ -780,6 +782,7 @@ namespace Kurenai
         std::unique_ptr<Passes::DDGIPasses> m_DDGIPasses;
         std::unique_ptr<Passes::EnvironmentPasses> m_EnvironmentPasses;
         std::unique_ptr<Passes::LightingPasses> m_LightingPasses;
+        std::unique_ptr<Passes::MegaLightsPasses> m_MegaLightsPasses;
         std::unique_ptr<Passes::PostProcessPasses> m_PostProcessPasses;
         std::unique_ptr<Passes::ReflectionPasses> m_ReflectionPasses;
         std::unique_ptr<Passes::ReflectionProbePasses> m_ReflectionProbePasses;

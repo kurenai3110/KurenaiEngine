@@ -61,6 +61,7 @@ namespace Kurenai::Rendering
         // MegaLights のタイルジッタを含めた実効タイル数(X)。
         // 候補プールのデバッグ表示が、プールの添字を組み立てるのに使う
         uint32_t MegaLightsEffectiveTilesX = 0;
+        uint32_t MegaLightsEffectiveTilesY = 0;
 
         // MegaLights のタイルジッタで格子をずらした量[画素]。
         // **書き手と読み手が同じ格子を読むこと** ―― デバッグ表示が別の格子を読むと
@@ -92,9 +93,6 @@ namespace Kurenai::Rendering
         // GPUへ送るライト配列と、直接光の定数。**どちらもRender()のローカルを指す**
         const std::vector<GPULight>* Lights = nullptr;
         const Passes::LightingConstants* Lighting = nullptr;
-
-        // MegaLightsのデノイズを今フレーム走らせるか(合成パスが読む先が変わる)
-        bool MegaLightsDenoiseRuns = false;
 
         // このフレームのTAAジッタ量[UV]
         DirectX::XMFLOAT2 JitterUv{ 0.0f, 0.0f };
