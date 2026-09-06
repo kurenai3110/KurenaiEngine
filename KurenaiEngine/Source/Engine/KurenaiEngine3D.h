@@ -78,6 +78,13 @@ namespace Kurenai::Rendering
     struct FrustumPlanes;
 }
 
+namespace Kurenai::Passes
+{
+    // Render()から切り出したパス群(段階6)。実体はPasses/*.hにあり、
+    // そちらはこのヘッダをインクルードするため、ここでは前方宣言で止める
+    class PresentPass;
+}
+
 namespace Kurenai
 {
     // メッシュレットLODの段を選ぶために、フレーム内の全パスへ配る値(Stage 6)。
@@ -121,6 +128,10 @@ namespace Kurenai
     class KURENAI_3D_API KurenaiEngine3D : public KurenaiEngineBase
     {
     public:
+        // 切り出したパス群は、まだエンジンのprivate(PSO・定数バッファ・統計カウンタ)を
+        // m_Engine越しに触る。所有権を群へ移し終えたらこのfriendは外す(段階6)
+        friend class Passes::PresentPass;
+
         // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
         //   実行時に「システム」パネルからも変更できる)。
         // initialSceneIndex: 起動時に読み込むシーンの番号(Assets/Scenes/*.ksceneをファイル名の
@@ -743,6 +754,16 @@ namespace Kurenai
         // m_ImGuiBackendより後に宣言してメンバ破棄順(宣言の逆順)で先に破棄させる。
         // UI::UIManagerは不完全型のままにするため、デストラクタは.cpp側で定義する
         std::unique_ptr<UI::UIManager> m_UIManager;
+
+        // Render()から切り出したパス群(段階6)。
+        //
+        // 【エンジンへの参照を持たせている】段階6は「登録順を1つも変えない」ことだけを
+        // 決め手に進めており、その担保はパスマニフェストの完全一致である。状態の引っ越しと
+        // 登録位置の移動を同時にやると、食い違ったときにどちらが原因か分けられない。
+        // まず登録コードだけを機械的に移し、リソースの所有権は後から群へ移す。
+        // それまでの間、群はここのprivateをm_Engine越しに触る(下のfriend宣言)。
+        // 不完全型のままにするため、デストラクタは.cpp側で定義する
+        std::unique_ptr<Passes::PresentPass> m_PresentPass;
 
         // SetExtraImGuiCallbackで登録された追加のImGui描画(Tools/KurenaiShowEditor)。
         // Renderスレッドだけが読み書きする

@@ -21,7 +21,10 @@
 #include "Core/RenderGraph.h"
 #include "Core/StringUtil.h"
 #include "Diagnostics/RenderDumpService.h"
+#include "Passes/PresentPass.h"
 #include "Rendering/GeometryDrawLoop.h"
+#include "Rendering/RenderBlackboard.h"
+#include "Rendering/RenderFrameContext.h"
 #include "ShaderInterop/CascadeConstants.h"
 #include "ShaderInterop/FrameConstants.h"
 #include "ShaderInterop/GroupSizes.h"
@@ -870,43 +873,6 @@ namespace Kurenai
             constants.MeshletOcclusionMode = occlusionMode;
             return constants;
         }
-
-        // Present.hlsl側のModeと一致させる必要がある
-        struct alignas(16) PresentConstants
-        {
-            int32_t Mode;
-            float MipLevel; // Mode==6(Hi-Z)でSampleLevelに渡すミップレベル
-            // Mode==10(シャドウマップ配列)ではカスケード番号、
-            // Mode==12(反射プローブのキューブマップ配列)では表示するプローブ番号として使う
-            float ArraySlice;
-            // デバッグ表示の輝度倍率(m_DebugViewSettings.Gain)。色として表示するMode 0/3/4にだけ効く
-            float Gain;
-            // Mode==11(タイルライトカリングのヒートマップ)専用。
-            // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=ヒートマップの上限ライト数
-            DirectX::XMFLOAT4 TileParams;
-            // xy=レンダー解像度。zw=Mode 21の候補プール格子オフセット。
-            // デバッグ表示も書き手と同じ格子を読まないとA/Bの比較結果が嘘になる
-            DirectX::XMFLOAT4 TileRenderSize;
-            // Mode==22(MegaLightsの蓄積平均)専用。x=これまでに足したフレーム数, yzw=未使用。
-            // **末尾に足すこと** ―― cbufferは宣言順レイアウトなので、途中へ挿すと
-            // Present.hlsl側の以降のフィールドがすべてずれる
-            DirectX::XMFLOAT4 AccumParams;
-        };
-        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
-        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
-        // HLSL側を直さないかぎり黙って別の値を読むことになる。
-        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
-        //
-        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
-        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
-        static_assert(offsetof(PresentConstants, Mode) == 0, "Mode のレイアウトが変わっている");
-        static_assert(offsetof(PresentConstants, MipLevel) == 4, "MipLevel のレイアウトが変わっている");
-        static_assert(offsetof(PresentConstants, ArraySlice) == 8, "ArraySlice のレイアウトが変わっている");
-        static_assert(offsetof(PresentConstants, Gain) == 12, "Gain のレイアウトが変わっている");
-        static_assert(offsetof(PresentConstants, TileParams) == 16, "TileParams のレイアウトが変わっている");
-        static_assert(offsetof(PresentConstants, TileRenderSize) == 32, "TileRenderSize のレイアウトが変わっている");
-        static_assert(offsetof(PresentConstants, AccumParams) == 48, "AccumParams のレイアウトが変わっている");
-        static_assert(sizeof(PresentConstants) == 64, "PresentConstants の総サイズが変わっている");
 
         // Tonemap.hlsl側のcbuffer TonemapConstantsと一致させる必要がある
         struct alignas(16) TonemapConstants
@@ -1962,36 +1928,6 @@ namespace Kurenai
             }
             return kernel;
         }
-
-        // レンダー解像度(renderWidth x renderHeight)のアスペクト比を保ったまま、
-        // windowWidth x windowHeight の中央に収まるビューポート(レターボックス/ピラーボックス)を求める
-        RHI::Viewport ComputeLetterboxViewport(uint32_t windowWidth, uint32_t windowHeight, uint32_t renderWidth, uint32_t renderHeight)
-        {
-            const float windowAspect = static_cast<float>(windowWidth) / static_cast<float>(windowHeight);
-            const float renderAspect = static_cast<float>(renderWidth) / static_cast<float>(renderHeight);
-
-            float viewportWidth;
-            float viewportHeight;
-            if (windowAspect > renderAspect)
-            {
-                // ウィンドウの方が横長 -> 高さいっぱいに合わせ、左右に余白(ピラーボックス)
-                viewportHeight = static_cast<float>(windowHeight);
-                viewportWidth = viewportHeight * renderAspect;
-            }
-            else
-            {
-                // ウィンドウの方が縦長 -> 幅いっぱいに合わせ、上下に余白(レターボックス)
-                viewportWidth = static_cast<float>(windowWidth);
-                viewportHeight = viewportWidth / renderAspect;
-            }
-
-            RHI::Viewport viewport;
-            viewport.TopLeftX = (static_cast<float>(windowWidth) - viewportWidth) * 0.5f;
-            viewport.TopLeftY = (static_cast<float>(windowHeight) - viewportHeight) * 0.5f;
-            viewport.Width = viewportWidth;
-            viewport.Height = viewportHeight;
-            return viewport;
-        }
     }
 
     KurenaiEngine3D::KurenaiEngine3D(
@@ -2021,6 +1957,10 @@ namespace Kurenai
         // UIパネル群はImGuiコンテキストの生成後に作る(パネルの構築自体はImGuiを呼ばないが、
         // 以降の段階でスタイル・フォント設定をここへ足す前提で順序を固定しておく)
         m_UIManager = std::make_unique<UI::UIManager>(*this);
+
+        // Render()から切り出したパス群(段階6)。CreateSceneResources()より前に作ってよい
+        // ―― 群はまだリソースを持たず、登録時にエンジン側を参照するだけである
+        m_PresentPass = std::make_unique<Passes::PresentPass>(*this);
 
         // アスペクト比はm_RenderAspectを唯一の出所にする(解像度は実行時に変わるため)。
         // ここではまだUpdateスレッドが動いていないのでm_Cameraへ直接書いてよい
@@ -3672,7 +3612,7 @@ namespace Kurenai
 
         RHI::BufferDesc presentConstantBufferDesc;
         presentConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        presentConstantBufferDesc.SizeInBytes = sizeof(PresentConstants);
+        presentConstantBufferDesc.SizeInBytes = sizeof(Passes::PresentConstants);
         m_PresentConstantBuffer = m_Device->CreateBuffer(presentConstantBufferDesc);
 
         // レンダーターゲットを先に作る。CreateRenderTargetsはHDRフォーマットの作成に失敗した場合に
@@ -7851,6 +7791,18 @@ namespace Kurenai
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
         // トランジェントリソースの確保は行わず、既存の永続確保済みテクスチャ(G-Buffer・SceneColor等)を
         // そのまま読み書きする(詳細はRenderGraph.h参照)
+        // --- パス群へ配るフレームのスナップショットと、登録中に確定していく出力(段階6) ---
+        // 【graph.Execute() が終わるまで生かすこと】パスの Execute ラムダはこの2つより
+        // 長生きするので、ここより内側のスコープへ置くと参照が浮く
+        Rendering::RenderFrameContext frameContext{};
+        frameContext.EffectiveExposure = effectiveExposure;
+        frameContext.PlanarReflectionPassRuns = planarReflectionPassRuns;
+        frameContext.MegaLightsEffectiveTilesX = megaLightsEffectiveTilesX;
+        frameContext.MegaLightsTileOffset = megaLightsTileOffset;
+
+        Rendering::RenderBlackboard blackboard{};
+        blackboard.SkyTexture = skyTexture;
+
         Core::RenderGraph graph(commandList, m_GPUProfiler.get(), &m_CPUProfiler);
 
         // --- 大気散乱のLUTのベイクパス ---
@@ -10347,6 +10299,7 @@ namespace Kurenai
         // 座標変換の間違いで、シルエットの±1画素ならフィルルールの差(想定内)
         const bool softwareRasterPassRuns = m_GeometrySettings.SoftwareRasterEnabled && m_RenderCapabilities.SoftwareRasterAvailable &&
                                             m_SoftwareRasterVisibilityBuffer && !m_Scene.Instances.empty();
+        blackboard.SoftwareRasterPassRuns = softwareRasterPassRuns;
         if (softwareRasterPassRuns)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
@@ -11618,6 +11571,8 @@ namespace Kurenai
         // 上のパスが書いた先と必ず一致させるため、どちらも同じアクセサから取る
         RHI::IRHITexture* const activeAOTexture = GetActiveAOTexture();
         RHI::IRHITexture* const activeAORawTexture = GetActiveAORawTexture();
+        blackboard.ActiveAOTexture = activeAOTexture;
+        blackboard.ActiveAORawTexture = activeAORawTexture;
 
         // --- 雲パス: 積雲と巻雲だけを1/2解像度で評価し、透過率と事前乗算済みの散乱光を書く ---
         //
@@ -12452,6 +12407,9 @@ namespace Kurenai
         // この行はTAAパスのAddPassより後に置くこと。ラムダは値キャプチャなので、先に差し替えると
         // TAAが自分の出力を入力として読む形になる(RenderGraphが循環を検出して例外を投げる)
         RHI::IRHITexture* hdrSceneColor = m_PostProcessSettings.TAAEnabled ? m_TAAHistory[m_TAAHistoryIndex].get() : taaInputColor;
+        // 【TAAパスの登録より後で確定させること】上のコメントの理由がそのまま効くため、
+        // ブラックボードへ載せるのもこの位置にする
+        blackboard.HdrSceneColor = hdrSceneColor;
 
         // --- 自動露出パス: SceneColorの輝度ヒストグラムから目標EV100を求め、時間方向に順応させる。
         //     結果はm_ExposureTextureへ書かれ、後段のTonemapパスが読む(AutoExposure.hlsl参照) ---
@@ -12626,6 +12584,7 @@ namespace Kurenai
         // このフレームで超解像パスを走らせるか。デバッグ表示中は内部解像度の中間バッファを
         // そのまま等倍で見たいので走らせない(拡大するとバッファの実際の解像度が分からなくなる)
         const bool upscaleActive = IsUpscaleActive() && m_DebugViewSettings.View == DebugView::Final;
+        blackboard.UpscaleActive = upscaleActive;
 
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Tonemap",
@@ -12732,486 +12691,10 @@ namespace Kurenai
             });
         }
 
-        // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
-        // デバッグ表示(Render Targets UI)で選択されたバッファに応じて表示ソースを切り替える。
-        // 深度バッファ(GBuffer深度・シャドウマップ)はPresent.hlsl側でグレースケール化するためMode=1を渡す
-        RHI::IRHITexture* presentSourceTexture = m_TonemapTexture.get();
-        // Mode 9(IBL Irradiance/Prefilterのキューブマップ表示)専用。他のModeでは使われないが、
-        // t1には常に何らかの有効なTextureCubeをバインドしておく必要があるため既定値を持たせる
-        RHI::IRHITexture* presentDebugCubeTexture = skyTexture;
-        // Mode 10(シャドウマップのカスケード表示)専用。t1と同じ理由で、t2にも常に有効な
-        // Texture2DArrayをバインドしておく必要があるためシャドウマップ配列自身を既定値にする
-        RHI::IRHITexture* presentDebugArrayTexture = m_ShadowCascadeArray.get();
-        // Mode 12(反射プローブのキューブマップ配列)専用。TextureCube(t1)ともTexture2DArray(t2)とも
-        // 型が違うためさらに別スロット(t4)が要る。こちらも常に有効なテクスチャをバインドしておく
-        // (反射プローブは鏡面専任なので、既定値はプリフィルタ済み鏡面の配列にしてある)
-        RHI::IRHITexture* presentDebugCubeArrayTexture = m_ProbePrefilteredArray.get();
-        // Mode 18(雲の3Dノイズ)専用。Texture3Dはここまでのどの型とも別なのでさらに
-        // 別スロット(t5)が要る。他と同じく常に有効なテクスチャをバインドしておく
-        RHI::IRHITexture* presentDebugVolumeTexture = m_CloudShapeNoiseTexture.get();
-        int32_t presentMode = 0;
-        uint32_t presentSourceWidth = m_RenderWidth;
-        uint32_t presentSourceHeight = m_RenderHeight;
-        switch (m_DebugViewSettings.View)
-        {
-        case DebugView::Final:
-            // Tonemapパスが既にSSR有効/無効を考慮したHDRソースをLDR変換済みのため、そのまま使う。
-            // 超解像が有効なときは、その先のRCASまで通した出力解像度の結果へ差し替える。
-            // レターボックスの基準になるpresentSourceWidth/Heightも出力解像度にすること
-            // (ここを内部解像度のままにすると、拡大済みの絵をさらに拡大してしまう)
-            if (upscaleActive)
-            {
-                presentSourceTexture = m_UpscaleSharpTexture.get();
-                presentSourceWidth = m_UpscaleTargetWidth;
-                presentSourceHeight = m_UpscaleTargetHeight;
-            }
-            else
-            {
-                presentSourceTexture = m_TonemapTexture.get();
-            }
-            break;
-        case DebugView::Albedo:
-            presentSourceTexture = m_GBufferAlbedo.get();
-            break;
-        case DebugView::Normal:
-            presentSourceTexture = m_GBufferNormal.get();
-            presentMode = 7; // オクタヘドラルエンコードをデコードして[0,1]へ再マップして表示
-            break;
-        case DebugView::Material:
-            presentSourceTexture = m_GBufferMaterial.get();
-            break;
-        case DebugView::Emissive:
-            presentSourceTexture = m_GBufferEmissive.get();
-            break;
-        case DebugView::Depth:
-            presentSourceTexture = m_GBufferDepth.get();
-            presentMode = 2;
-            break;
-        case DebugView::DepthRaw:
-            presentSourceTexture = m_GBufferDepth.get();
-            presentMode = 5; // 生の深度値(0〜1)を加工せずそのまま表示(reverse-z等の生値確認用)
-            break;
-        case DebugView::DirectLight:
-            presentSourceTexture = m_DirectLightTexture.get();
-            presentMode = 4; // HDRのためトーンマッピング(Reinhard)+ガンマ補正して表示
-            break;
-        case DebugView::MegaLights:
-            // MegaLightsが求めたポイント/スポットの直接光。パスが今フレーム実行されていない場合、
-            // バッファの中身は前フレーム/未定義の残骸なので最終結果のまま何も切り替えない
-            // (SWラスタ・PlanarReflection・RTShadowのデバッグ表示と同じ方針)。
-            // ModeはDebugView::DirectLightと同じ4 ―― 並べて差分を取るのが目的なので、
-            // 表示側の処理まで一致させる
-            if (ShouldRunMegaLights())
-            {
-                presentSourceTexture = m_MegaLightsTexture.get();
-                presentMode = 4;
-            }
-            break;
-        case DebugView::AOIndirectLight:
-            presentSourceTexture = activeAOTexture;
-            presentMode = 0; // rgb(間接拡散光)をそのまま表示。SSAOはrgbが常に0のため常に黒になる
-            break;
-        case DebugView::AOIndirectLightRaw:
-            presentSourceTexture = activeAORawTexture;
-            presentMode = 0; // ブラー前の生値(タイル状ノイズが乗った状態)
-            break;
-        case DebugView::AOOcclusion:
-            presentSourceTexture = activeAOTexture;
-            presentMode = 3; // a(遮蔽率)をグレースケール表示
-            break;
-        case DebugView::AOOcclusionRaw:
-            presentSourceTexture = activeAORawTexture;
-            presentMode = 3; // ブラー前の生値(タイル状ノイズが乗った状態)
-            break;
-        case DebugView::ShadowMap:
-            // Texture2DArrayはSourceTexture(t0、Texture2D)へバインドできないため、専用の
-            // DebugArrayTexture(t2)を表示スライス指定付きでサンプルする(IBLキューブマップの
-            // Mode 9と同じ方式。Present.hlsl参照)
-            presentDebugArrayTexture = m_ShadowCascadeArray.get();
-            presentMode = 10;
-            presentSourceWidth = kShadowMapSize;
-            presentSourceHeight = kShadowMapSize;
-            break;
-        case DebugView::RTShadow:
-            // 可視率(0〜1のスカラー)をそのままグレースケール表示する。RTシャドウを実行していない
-            // フレーム(非対応環境・手法がRaytraced以外)はテクスチャの中身が意味を持たないため、
-            // 最終結果のまま何も切り替えない
-            if (ShouldRunRaytracedShadow())
-            {
-                presentSourceTexture = m_RTShadowTexture.get();
-                presentMode = 5;
-            }
-            break;
-        case DebugView::SSR:
-            // 反射がOffのときは反射パスをスキップしているため、Tonemapパスの入力もSceneColorになり
-            // 結果的にFinalと同一表示になる(SSR / RT反射のどちらでも同じ扱い)
-            presentSourceTexture = m_TonemapTexture.get();
-            break;
-        case DebugView::HiZ:
-            presentSourceTexture = m_HiZTexture.get();
-            presentMode = 6; // 指定ミップをSampleLevelで読みグレースケール表示
-            presentSourceWidth = std::max(1u, m_RenderWidth >> m_DebugViewSettings.HiZDebugMipLevel);
-            presentSourceHeight = std::max(1u, m_RenderHeight >> m_DebugViewSettings.HiZDebugMipLevel);
-            break;
-        case DebugView::IBLIrradiance:
-            // 本物のTextureCubeのため、SourceTexture(t0、Texture2D)ではなくDebugCubeTexture(t1)を
-            // 現在のカメラ視線方向でサンプルする(Present.hlsl Mode 9、presentDebugCubeTexture参照)
-            presentDebugCubeTexture = m_IrradianceTexture.get();
-            presentMode = 9;
-            presentSourceWidth = m_RenderWidth;
-            presentSourceHeight = m_RenderHeight;
-            break;
-        case DebugView::IBLPrefilter:
-            presentDebugCubeTexture = m_PrefilteredEnvTexture.get();
-            presentMode = 9;
-            presentSourceWidth = m_RenderWidth;
-            presentSourceHeight = m_RenderHeight;
-            break;
-        case DebugView::ProbePrefilter:
-            presentDebugCubeArrayTexture = m_ProbePrefilteredArray.get();
-            presentMode = 12;
-            break;
-        case DebugView::ProbeInfluence:
-            // 塗り分けはDeferredLighting.hlsl側(FrameConstants.ProbeParams.y)で行うため、
-            // Presentは通常どおり最終結果を表示するだけでよい
-            presentSourceTexture = m_TonemapTexture.get();
-            break;
-        case DebugView::ProbeDistance:
-            // 距離キューブ(19.12節)。格納値はワールド距離なので専用のMode 13でGain倍して
-            // グレースケール表示する(Mode 12でそのまま出すと数メートルで白飛びする)
-            presentDebugCubeArrayTexture = m_ProbeDistanceArray.get();
-            presentMode = 13;
-            break;
-        case DebugView::IBLBRDFLUT:
-            presentSourceTexture = m_BRDFLUTTexture.get();
-            presentMode = 0; // (A, B, Eavg)の生値をそのままRGBとして表示(値域はおおむね[0,1])
-            presentSourceWidth = kIBLBRDFLUTSize;
-            presentSourceHeight = kIBLBRDFLUTSize;
-            break;
-        case DebugView::Bloom:
-            // ピラミッド最上段(半解像度、HDR)。Mode 4でトーンマッピングしてから表示する
-            if (!m_BloomUpTextures.empty())
-            {
-                presentSourceTexture = m_BloomUpTextures[0].get();
-                presentMode = 4;
-                presentSourceWidth = m_BloomLevelSizes[0].x;
-                presentSourceHeight = m_BloomLevelSizes[0].y;
-            }
-            break;
-        case DebugView::LightTiles:
-            // ライトグリッドは構造化バッファなのでSourceTexture(t0)では受け取れず、専用のt3から読む
-            // (Present.hlsl Mode 11)。t0には何かをバインドしておく必要があるため、
-            // 解像度だけ合わせてm_TonemapTextureをそのまま渡す(Mode 11では読まれない)
-            presentSourceTexture = m_TonemapTexture.get();
-            presentMode = 11;
-            break;
-        case DebugView::MegaLightsAverage:
-            // 蓄積した平均。1フレームも足していないうちは中身が未定義なので切り替えない
-            if (m_MegaLightsAccumFrames > 0u && m_MegaLightsAccumBuffer)
-            {
-                presentSourceTexture = m_TonemapTexture.get();
-                presentMode = 22;
-            }
-            break;
-        case DebugView::MegaLightsTilePool:
-            // 候補プールも構造化バッファなのでt3から読む(Present.hlsl Mode 21)。t0の扱いは
-            // Mode 11と同じ。パスが走っていないフレームは中身が前フレーム/未定義の残骸なので、
-            // 最終結果のまま何も切り替えない(他のMegaLights系の表示と同じ方針)
-            if (ShouldRunMegaLights() && m_MegaLightsTilePoolBuffer)
-            {
-                presentSourceTexture = m_TonemapTexture.get();
-                presentMode = 21;
-            }
-            break;
-        case DebugView::BentNormal:
-            // bent normal(34章)。正規化しないベクトルなので、法線表示(Mode 7)のような
-            // オクタヘドラルのデコードは通さず専用のModeで扱う。
-            // 【15ではなく19】15はDDGIのイラディアンスアトラスが使っている。Present.hlslの
-            // PSMainではそちらの分岐が先にreturnするため、15を割り当てるとbent normalの
-            // 表示へ到達できない(Present.hlsl冒頭のMode一覧を参照)
-            presentSourceTexture = m_GBufferBentNormal.get();
-            presentMode = 19;
-            break;
-        case DebugView::MotionVector:
-            // 速度バッファ。格納値はUV単位(1画素ぶんの移動で1/解像度、1920幅なら約0.0005)と
-            // 極端に小さく、そのまま色として出しても真っ黒にしか見えない。専用のMode 14で
-            // ピクセル単位へ換算してから中間灰色を原点に色付けする
-            presentSourceTexture = m_GBufferVelocity.get();
-            presentMode = 14;
-            break;
-        case DebugView::SceneColorRaw:
-            // トーンマップもガンマも通さないリニア値をそのまま出す。スペキュラのエネルギー補正の
-            // 各方式を数値で突き合わせるための測定用(14.9.9節)。
-            // バックバッファが8bit UNormのため1.0を超える値はクリップする ―― 測定時は
-            // EV100を上げてピークが1.0未満に収まるようにしてから読むこと。
-            // TAAが有効な場合、hdrSceneColorはTAAの蓄積結果(23章)を指す。静止して収束させれば
-            // ジッターの平均が取れたぶん単フレームより安定した値が読めるが、カメラを動かした
-            // 直後の数フレームは履歴が混ざっているため、値を読むのは静止させてから
-            presentSourceTexture = hdrSceneColor;
-            presentMode = 0;
-            break;
-        case DebugView::DDGIIrradiance:
-        case DebugView::DDGIDistance:
-        case DebugView::DDGIProbeBackface:
-        {
-            // アトラスはただのTexture2Dなのでt0でそのまま受け取れる(22章)。
-            // 反射プローブのキューブと違い専用スロットは要らない。
-            // アトラスは横長(列=Cx*Cy、行=Cz)なので、レターボックスがその比率に合うよう
-            // 実寸を渡す。渡さないと画面いっぱいへ引き伸ばされ、セルが正方形に見えなくなる
-            // 裏面率はイラディアンスアトラスのαなので、資源も寸法もイラディアンスと同じ
-            const bool isIrradiance =
-                (m_DebugViewSettings.View == DebugView::DDGIIrradiance || m_DebugViewSettings.View == DebugView::DDGIProbeBackface);
-            const uint32_t cell = isIrradiance ? kDDGIIrradianceCell : kDDGIDistanceCell;
-            const uint32_t columns = m_GIVolume.ProbeCounts[0] * m_GIVolume.ProbeCounts[1];
-            const uint32_t rows = m_GIVolume.ProbeCounts[2];
-
-            presentSourceTexture = isIrradiance ? m_DDGIIrradianceAtlas.get() : m_DDGIDistanceAtlas.get();
-            // Present.hlslのMode 14はモーションベクター(TAA、23章)が既に使っているため、
-            // DDGIのイラディアンス/距離モーメントはMode 15/16にずらしてある
-            presentMode = (m_DebugViewSettings.View == DebugView::DDGIProbeBackface) ? 20 : (isIrradiance ? 15 : 16);
-            presentSourceWidth = m_HasGIVolume ? columns * cell : cell;
-            presentSourceHeight = m_HasGIVolume ? rows * cell : cell;
-            break;
-        }
-        case DebugView::WaterMask:
-            // G-BufferのMaterial.a(水面のマテリアルID)をそのままグレースケール表示する。
-            // 0/1の二値なのでMode 3(Gain倍する遮蔽率表示)ではなく専用のMode 17を使う
-            presentSourceTexture = m_GBufferMaterial.get();
-            presentMode = 17;
-            break;
-        case DebugView::PlanarReflection:
-            // 平面反射パスの出力。パスが今フレーム実行されていない(無効化・水面なし)場合、
-            // m_PlanarReflectionColorの中身は前フレーム/未定義の残骸なので最終結果のまま何も
-            // 切り替えない(RTShadowデバッグ表示と同じ方針)
-            if (planarReflectionPassRuns)
-            {
-                // HDRのためMode 4でReinhardトーンマッピング+ガンマ補正して表示する
-                // (DirectLight/Bloomと同じ扱い)。専用のMode追加は不要でPresent.hlslは無変更のまま使える
-                presentSourceTexture = m_PlanarReflectionColor.get();
-                presentMode = 4;
-                presentSourceWidth = m_PlanarReflectionWidth;
-                presentSourceHeight = m_PlanarReflectionHeight;
-            }
-            break;
-        case DebugView::AtmosphereLUT:
-            // 大気散乱のLUT。HDRなのでMode 4(Reinhard+ガンマ)で表示する。
-            // Transmittanceは0〜1なのでそのままでも読めるが、MultiScatteringは値が小さいので
-            // 表示輝度の倍率と併用する
-            if (m_SkySettings.AtmosphereLUTDebugIndex == 1)
-            {
-                presentSourceTexture = m_MultiScatteringLUT.get();
-                presentSourceWidth = kMultiScatteringLUTSize;
-                presentSourceHeight = kMultiScatteringLUTSize;
-            }
-            else if (m_SkySettings.AtmosphereLUTDebugIndex == 2)
-            {
-                presentSourceTexture = m_SkyViewLUT.get();
-                presentSourceWidth = kSkyViewLUTWidth;
-                presentSourceHeight = kSkyViewLUTHeight;
-            }
-            else
-            {
-                presentSourceTexture = m_TransmittanceLUT.get();
-                presentSourceWidth = kTransmittanceLUTWidth;
-                presentSourceHeight = kTransmittanceLUTHeight;
-            }
-            presentMode = 4;
-            break;
-        case DebugView::SoftwareRaster:
-        case DebugView::SoftwareRasterDepth:
-        case DebugView::SoftwareRasterNormal:
-            // 自前ソフトウェアラスタライザ(46章)の出力。パスが今フレーム実行されていない場合、
-            // バッファの中身は前フレーム/未定義の残骸なので最終結果のまま何も切り替えない
-            // (PlanarReflection・RTShadowのデバッグ表示と同じ方針)。
-            //
-            // 【Modeはハードウェア側と同じものを使う】深度はDebugView::DepthRawと同じMode 5、
-            // 法線はDebugView::Normalと同じMode 7。並べて差分を取るのが目的なので、
-            // 表示側の処理まで完全に一致させる。Present.hlslは無変更のまま使える
-            if (softwareRasterPassRuns)
-            {
-                if (m_DebugViewSettings.View == DebugView::SoftwareRasterDepth)
-                {
-                    presentSourceTexture = m_SoftwareRasterDepth.get();
-                    presentMode = 5;
-                }
-                else if (m_DebugViewSettings.View == DebugView::SoftwareRasterNormal)
-                {
-                    presentSourceTexture = m_SoftwareRasterNormal.get();
-                    presentMode = 7;
-                }
-                else
-                {
-                    // フラット陰影はHDRのためMode 4(Reinhard+ガンマ)
-                    presentSourceTexture = m_SoftwareRasterColor.get();
-                    presentMode = 4;
-                }
-            }
-            break;
-        case DebugView::CloudNoiseSlice:
-        {
-            // 雲の3Dノイズ。形状(128^3)とディテール(32^3)を切り替えて任意のスライスを見る。
-            // 正方形のテクスチャなので表示も正方形にする(レターボックスの計算に渡す)
-            const bool showDetail = m_CloudSettings.NoiseDebugShowDetail;
-            presentDebugVolumeTexture =
-                showDetail ? m_CloudDetailNoiseTexture.get() : m_CloudShapeNoiseTexture.get();
-            presentMode = 18;
-            const uint32_t size = showDetail ? kCloudDetailNoiseSize : kCloudShapeNoiseSize;
-            presentSourceWidth = size;
-            presentSourceHeight = size;
-            break;
-        }
-        }
-
-        // Mode 11(ライトグリッド)とMode 21(MegaLightsの候補プール)はどちらもt3の構造化バッファを
-        // 読むが、1タイルぶんの要素数が違う。バッファと容量は必ず対で切り替えること
-        // (片方だけ切り替えると、正しいバッファを別のストライドで読んで無関係な値をヒートマップにする)
-        const bool presentUsesTilePool = (presentMode == 21) && m_MegaLightsTilePoolBuffer != nullptr;
-        RHI::IRHIBuffer* const presentTileBuffer =
-            presentUsesTilePool ? m_MegaLightsTilePoolBuffer.get() : m_LightTileBuffer.get();
-        const uint32_t presentTileCapacity =
-            presentUsesTilePool ? static_cast<uint32_t>(m_MegaLightsSettings.TilePoolCapacity) : kLightTileCapacity;
-        // Mode 21だけは候補プールを書いた有効タイル幅を使う。Mode 11は従来のライトグリッドなので
-        // m_LightTileCountXのままにし、デバッグ表示が実データと別の添字を読まないようにする
-        const uint32_t presentTileCountX =
-            presentUsesTilePool ? megaLightsEffectiveTilesX : m_LightTileCountX;
-
-        PresentConstants presentConstants{};
-        presentConstants.Mode = presentMode;
-        presentConstants.TileParams =
-        {
-            static_cast<float>(presentTileCountX),
-            static_cast<float>(kLightTileSize),
-            static_cast<float>(presentTileCapacity),
-            // ヒートマップで赤に振り切る基準のライト数。容量そのものを基準にすると
-            // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
-            static_cast<float>(std::max(1, m_DebugViewSettings.LightTileHeatmapMax)),
-        };
-        presentConstants.TileRenderSize =
-        {
-            static_cast<float>(m_RenderWidth),
-            static_cast<float>(m_RenderHeight),
-            presentUsesTilePool ? static_cast<float>(megaLightsTileOffset.x) : 0.0f,
-            presentUsesTilePool ? static_cast<float>(megaLightsTileOffset.y) : 0.0f,
-        };
-        // Mode 22(蓄積平均)が割る数。0で割らないよう下限1
-        presentConstants.AccumParams =
-        {
-            static_cast<float>(std::max(1u, m_MegaLightsAccumFrames)),
-            0.0f,
-            0.0f,
-            0.0f,
-        };
-        if (m_DebugViewSettings.View == DebugView::IBLPrefilter)
-        {
-            presentConstants.MipLevel = static_cast<float>(m_IBLSettings.PrefilterDebugMipLevel);
-        }
-        else if (m_DebugViewSettings.View == DebugView::IBLIrradiance)
-        {
-            presentConstants.MipLevel = 0.0f; // イラディアンスマップは常に1ミップのみ
-        }
-        else if (m_DebugViewSettings.View == DebugView::ProbePrefilter)
-        {
-            presentConstants.MipLevel = static_cast<float>(m_ReflectionProbeSettings.PrefilterDebugMipLevel);
-        }
-        else
-        {
-            presentConstants.MipLevel = static_cast<float>(m_DebugViewSettings.HiZDebugMipLevel);
-        }
-        // ArraySliceはMode 10ではカスケード番号、Mode 12ではプローブ番号として使う。
-        // プローブが1つも無い場合でも配列の範囲外を引かないようクランプする
-        if (m_DebugViewSettings.View == DebugView::ProbePrefilter || m_DebugViewSettings.View == DebugView::ProbeDistance)
-        {
-            presentConstants.ArraySlice = static_cast<float>(
-                std::clamp(m_ReflectionProbeSettings.DebugIndex, 0, std::max(0, static_cast<int32_t>(m_ReflectionProbes.size()) - 1)));
-        }
-        else if (m_DebugViewSettings.View == DebugView::CloudNoiseSlice)
-        {
-            // Mode 18ではW座標(0〜1)として使う。3Dテクスチャなので配列番号ではなく連続値
-            presentConstants.ArraySlice = std::clamp(m_CloudSettings.NoiseDebugSlice, 0.0f, 1.0f);
-        }
-        else
-        {
-            presentConstants.ArraySlice =
-                static_cast<float>(std::clamp(m_ShadowSettings.DebugCascade, 0, static_cast<int32_t>(kCascadeCount) - 1));
-        }
-        // Finalの見た目は倍率の影響を受けてはならないため、デバッグ表示のときだけ倍率を掛ける
-        // (Gainはゼロ初期化のままだと0倍=真っ黒になるので、必ず明示的に設定すること)
-        if (m_DebugViewSettings.View == DebugView::ProbeDistance || m_DebugViewSettings.View == DebugView::DDGIDistance)
-        {
-            // 距離は色ではなくワールド距離なので、Debug View Gain(1倍以上)ではなく
-            // 「白になる距離」の逆数を渡す。Present.hlsl Mode 13/15の式は他と同じ「値×Gain」のまま。
-            // DDGI側は距離がMaxRayDistanceでクランプされているので、そこを白にすると
-            // 「クランプに当たっている方向」が一目で分かる
-            const float whiteAt = (m_DebugViewSettings.View == DebugView::DDGIDistance)
-                ? m_GIVolume.MaxRayDistance
-                : m_ReflectionProbeSettings.DistanceDebugRange;
-            presentConstants.Gain = 1.0f / std::max(whiteAt, 0.01f);
-        }
-        else if (m_DebugViewSettings.View == DebugView::DDGIIrradiance)
-        {
-            // アトラスは露出非依存の物理量で持っている(FrameConstants::DDGIParams4 参照)ため、
-            // そのまま出すと昼は数万倍の値になって白飛びする。表示だけ実効プリ露出を掛けて
-            // 他のバッファと同じ表示レンジへ揃える。こうしておくと
-            // 「IBL - イラディアンス」の表示と直接見比べられる(22.9.1節の検証がこれに依存している)
-            presentConstants.Gain = m_DebugViewSettings.Gain * effectiveExposure;
-        }
-        else
-        {
-            presentConstants.Gain = (m_DebugViewSettings.View == DebugView::Final) ? 1.0f : m_DebugViewSettings.Gain;
-        }
-        commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
-
-        // レターボックス/ピラーボックスの余白もクリア色のまま残るよう、絞ったビューポートで描画する
-        const RHI::Viewport letterboxViewport = ComputeLetterboxViewport(
-            m_Window->GetWidth(), m_Window->GetHeight(), presentSourceWidth, presentSourceHeight);
-
-        // グラフィックスデバッガ向けの名前を焼く。**フレームの記録とは独立**なので
-        // レンダーグラフへは積まず、ここで直接呼ぶ(ID3D12Object::SetNameはコマンドではない)。
-        // 立っているのは起動直後とレンダーターゲットを作り直した直後だけ
-        if (m_DebugNamesDirty)
-        {
-            ApplyDebugNames();
-            m_DebugNamesDirty = false;
-        }
-
-        // 【Presentより前に積む】書き出す対象は中間バッファなので、Presentの後ろに置く理由が無い。
-        // Readsで書き手より後に順序付くので、この位置に積めば「そのフレームの最終的な中身」が取れる
-        IssueTextureDumps(graph);
-
-        graph.AddPass(Core::RenderGraphPassDesc{
-            .Name = "Present",
-            .Reads = { presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture,
-                       presentDebugCubeArrayTexture, presentDebugVolumeTexture },
-            // DebugView::LightTilesでライトグリッドを、DebugView::MegaLightsTilePoolで候補プールを
-            // 読むため、それぞれの書き手より後に順序付ける(表示していないフレームでも
-            // 同じポインタになるだけで無害)
-            .BufferReads = { m_LightTileBuffer.get(), presentTileBuffer, m_MegaLightsAccumBuffer.get() },
-            .SwapChainTarget = m_SwapChain.get(),
-            .Execute = [this, &letterboxViewport, presentSourceTexture, presentDebugCubeTexture,
-                        presentDebugArrayTexture, presentDebugCubeArrayTexture,
-                        presentDebugVolumeTexture, presentTileBuffer](RHI::IRHICommandList* cmd)
-            {
-                cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
-                cmd->ClearDepth(1.0f);
-                cmd->SetViewport(letterboxViewport);
-
-                cmd->SetPipelineState(m_PresentPipelineState.get());
-                cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-                cmd->SetConstantBuffer(1, m_PresentConstantBuffer.get());
-                cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
-                cmd->SetTexture(0, presentSourceTexture);
-                cmd->SetTexture(1, presentDebugCubeTexture);
-                cmd->SetTexture(2, presentDebugArrayTexture);
-                // Mode 11(ライトグリッド)/ Mode 21(候補プール)以外でも、シェーダが宣言している
-                // リソースは必ずバインドする(SetPipelineStateが毎回ルート引数を無効化するため)
-                cmd->SetShaderResourceBuffer(3, presentTileBuffer);
-                // Mode 22(蓄積平均)専用。読まれないModeでも必ずバインドする(上と同じ理由)
-                cmd->SetShaderResourceBuffer(6, m_MegaLightsAccumBuffer.get());
-                cmd->SetTexture(4, presentDebugCubeArrayTexture);
-                cmd->SetTexture(5, presentDebugVolumeTexture);
-                cmd->Draw(3, 0);
-            },
-        });
+        // --- Present パス群(段階6で Passes/PresentPass へ移設) ---
+        // 【この位置で登録すること】RenderGraph は依存が同点のとき最小登録番号を選ぶため、
+        // 登録順そのものが実行順の一部になっている。移設で順番が動くと実行順が変わる
+        m_PresentPass->Register(graph, commandList, frameContext, blackboard);
 
         // 1枚だけなら既存のテクスチャダンプと同じフレームを使う。複数枚では焼き込みを捕まえるため最初から出す。
         const uint32_t manifestTargetFrame =
