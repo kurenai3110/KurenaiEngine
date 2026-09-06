@@ -100,6 +100,8 @@
     <ClInclude Include="Source\Engine\Rendering\GeometryDrawLoop.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderBlackboard.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderFrameContext.h" />
+    <ClInclude Include="Source\Engine\Passes\DDGIConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\DDGIPasses.h" />
     <ClInclude Include="Source\Engine\Passes\EnvironmentConstants.h" />
     <ClInclude Include="Source\Engine\Passes\EnvironmentPasses.h" />
     <ClInclude Include="Source\Engine\Rendering\SunLighting.h" />
@@ -142,6 +144,7 @@
     <ClCompile Include="Source\Engine\Scene\ModelResidencySystem.cpp" />
     <ClCompile Include="Source\Engine\Scene\SceneLoadService.cpp" />
     <ClCompile Include="Source\Engine\Rendering\GeometryDrawLoop.cpp" />
+    <ClCompile Include="Source\Engine\Passes\DDGIPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\EnvironmentPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\PostProcessPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\ReflectionProbePasses.cpp" />
