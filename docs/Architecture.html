@@ -895,6 +895,52 @@ TRS(平行移動・回転・スケール)から<code>Assets::ModelInstance::Worl
 シーンでは発行されるコマンド列がこの機能を持たない場合と完全に同一</b>になる。半透明パスは奥から手前への
 描画順が正しさの前提で並べ替えられないため、この「必要になった時点で切り替える」方式が必須になる。
 </p>
+<h3>10.3 ジオメトリを描く9箇所が共有する列挙ループ</h3>
+<p>
+ジオメトリを列挙するループは全部で9箇所ある —— シャドウ(カスケード)・反射プローブ・
+DDGI(ラスタ)・深度プリパス・G-Buffer・半透明フォワード・平面反射・
+ソフトウェアラスタライザ・モデル単位GPUカリングの候補集め。
+どれも<b>「インスタンスの列挙 → 錐台カリング → 段(モデルLOD)の選択 →
+メッシュのふるい分け → メッシュ単位のカリング」までは同じ</b>で、違うのは
+PSOの選び方・定数バッファ・張るテクスチャ・ドローの発行だけである。
+</p>
+<p>
+前半を<code>KurenaiEngine3D::ForEachGeometryDraw</code>
+(<code>Source/Engine/Rendering/GeometryDrawLoop.h</code>)に置き、後半を
+コールバックとして呼び出し側に残す。<b>深度プリパスとG-Bufferが同じ組を描くことは、
+同じ引数で同じ関数を呼ぶことで保証される</b>。両者が食い違うと
+「深度は書かれているのに色が書かれない」穴が開くが、これは絵を見ても気づけないため、
+手で揃える方式は採らない。
+</p>
+<p>
+パスごとの違いは<code>GeometryDrawLoopDesc</code>の引数として表に出す。
+<b>次の3つは共通化で潰してはならない差である。</b>
+</p>
+<table>
+<tr><th>引数</th><th>意味</th></tr>
+<tr><td><code>LODMode</code></td><td>
+<code>Coarsest</code>(シャドウ・プローブ・DDGI。テクスチャを読まないので詳細な段に意味が無い) /
+<code>Current</code>(半透明・平面反射・ソフトウェアラスタライザ。<b>クロスディザ非対応</b>なので
+フェード中でも1段に決め打つ) /
+<code>Fade</code>(深度プリパス・G-Buffer。フェード中は2段を重ねる)
+</td></tr>
+<tr><td><code>MeshFilter</code></td><td>
+<code>Opaque</code> / <code>Transparent</code> /
+<code>All</code>(<b>シャドウ専用</b>。BLENDのメッシュも実体のまま影を落とす従来の挙動を保つ)
+</td></tr>
+<tr><td><code>Frustum</code></td><td>
+<code>nullptr</code> なら<b>カリングを一切行わず統計にも入れない</b>。
+DDGIのラスタ経路がこれで、プローブの位置ごとに結果が変わり定数バッファの予算計算と
+食い違うため意図的にカリングを入れていない
+</td></tr>
+</table>
+<p>
+メッシュごとに呼ぶコールバックは1フレームに数千回通るため、
+<code>ForEachGeometryDraw</code>は間接呼び出しを避けてヘッダー上のテンプレートにしてある。
+視錐台の抽出(<code>ExtractFrustumPlanes</code>)・AABB判定(<code>IsAABBVisible</code>)・
+メッシュ単位の判定(<code>IsMeshVisibleWithStats</code>)は非テンプレートで
+<code>GeometryDrawLoop.cpp</code>にある。
+</p>
 <p>
 事前パックにした効果、モデル行列をb1へ同居させているDX12側の事情、
 <code>.kscene</code>をGit管理する理由、ミラーリングで何が起きるか、CULL_NONEを採らない理由は
