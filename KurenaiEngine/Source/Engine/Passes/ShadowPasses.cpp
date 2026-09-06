@@ -5,6 +5,7 @@
 
 #include "Core/RenderGraph.h"
 #include "ShadowPasses.h"
+#include "../Rendering/ShadowConstants.h"
 #include "../Rendering/GeometryDrawLoop.h"
 #include "../Rendering/ObjectConstants.h"
 #include "../Rendering/RenderFrameContext.h"
@@ -189,7 +190,7 @@ namespace Kurenai::Passes
 
         // --- シャドウパス: ライト視点から深度のみを描画する(常に固定のシャドウマップ解像度)。
         //     カスケードごとに1回ずつ、同じメッシュ群を異なるライト正射影で描き直す ---
-        for (uint32_t cascade = 0; cascade < KurenaiEngine3D::kCascadeCount; ++cascade)
+        for (uint32_t cascade = 0; cascade < Rendering::kCascadeCount; ++cascade)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "Shadow" + std::to_string(cascade),

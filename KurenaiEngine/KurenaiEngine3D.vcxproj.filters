@@ -30,6 +30,12 @@
     <ClInclude Include="Source\Engine\Rendering\RenderTargets.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\ShadowConstants.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Passes\ReflectionProbeConstants.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
     <ClInclude Include="Source\Engine\EngineDefaults.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>

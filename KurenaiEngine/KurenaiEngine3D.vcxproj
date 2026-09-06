@@ -100,9 +100,11 @@
     <ClInclude Include="Source\Engine\Settings\QualitySettings.h" />
     <ClInclude Include="Source\Engine\Rendering\GeometryDrawLoop.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderTargets.h" />
+    <ClInclude Include="Source\Engine\Rendering\ShadowConstants.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderBlackboard.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderFrameContext.h" />
     <ClInclude Include="Source\Engine\Passes\DDGIConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\ReflectionProbeConstants.h" />
     <ClInclude Include="Source\Engine\Passes\DDGIPasses.h" />
     <ClInclude Include="Source\Engine\Passes\EnvironmentConstants.h" />
     <ClInclude Include="Source\Engine\Passes\EnvironmentPasses.h" />

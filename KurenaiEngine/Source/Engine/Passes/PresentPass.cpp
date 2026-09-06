@@ -4,6 +4,10 @@
 
 #include "Core/RenderGraph.h"
 #include "PresentPass.h"
+#include "DDGIConstants.h"
+#include "EnvironmentConstants.h"
+#include "MegaLightsConstants.h"
+#include "../Rendering/ShadowConstants.h"
 #include "../Rendering/RenderBlackboard.h"
 #include "../Rendering/RenderFrameContext.h"
 
@@ -150,8 +154,8 @@ namespace Kurenai::Passes
             // Mode 9と同じ方式。Present.hlsl参照)
             presentDebugArrayTexture = m_Engine.m_RenderTargets.ShadowCascadeArray.get();
             presentMode = 10;
-            presentSourceWidth = KurenaiEngine3D::kShadowMapSize;
-            presentSourceHeight = KurenaiEngine3D::kShadowMapSize;
+            presentSourceWidth = Rendering::kShadowMapSize;
+            presentSourceHeight = Rendering::kShadowMapSize;
             break;
         case DebugView::RTShadow:
             // 可視率(0〜1のスカラー)をそのままグレースケール表示する。RTシャドウを実行していない
@@ -206,8 +210,8 @@ namespace Kurenai::Passes
         case DebugView::IBLBRDFLUT:
             presentSourceTexture = m_Engine.m_BRDFLUTTexture.get();
             presentMode = 0; // (A, B, Eavg)の生値をそのままRGBとして表示(値域はおおむね[0,1])
-            presentSourceWidth = KurenaiEngine3D::kIBLBRDFLUTSize;
-            presentSourceHeight = KurenaiEngine3D::kIBLBRDFLUTSize;
+            presentSourceWidth = kIBLBRDFLUTSize;
+            presentSourceHeight = kIBLBRDFLUTSize;
             break;
         case DebugView::Bloom:
             // ピラミッド最上段(半解像度、HDR)。Mode 4でトーンマッピングしてから表示する
@@ -282,7 +286,7 @@ namespace Kurenai::Passes
             // 裏面率はイラディアンスアトラスのαなので、資源も寸法もイラディアンスと同じ
             const bool isIrradiance =
                 (m_Engine.m_DebugViewSettings.View == DebugView::DDGIIrradiance || m_Engine.m_DebugViewSettings.View == DebugView::DDGIProbeBackface);
-            const uint32_t cell = isIrradiance ? KurenaiEngine3D::kDDGIIrradianceCell : KurenaiEngine3D::kDDGIDistanceCell;
+            const uint32_t cell = isIrradiance ? kDDGIIrradianceCell : kDDGIDistanceCell;
             const uint32_t columns = m_Engine.m_GIVolume.ProbeCounts[0] * m_Engine.m_GIVolume.ProbeCounts[1];
             const uint32_t rows = m_Engine.m_GIVolume.ProbeCounts[2];
 
@@ -321,20 +325,20 @@ namespace Kurenai::Passes
             if (m_Engine.m_SkySettings.AtmosphereLUTDebugIndex == 1)
             {
                 presentSourceTexture = m_Engine.m_MultiScatteringLUT.get();
-                presentSourceWidth = KurenaiEngine3D::kMultiScatteringLUTSize;
-                presentSourceHeight = KurenaiEngine3D::kMultiScatteringLUTSize;
+                presentSourceWidth = kMultiScatteringLUTSize;
+                presentSourceHeight = kMultiScatteringLUTSize;
             }
             else if (m_Engine.m_SkySettings.AtmosphereLUTDebugIndex == 2)
             {
                 presentSourceTexture = m_Engine.m_SkyViewLUT.get();
-                presentSourceWidth = KurenaiEngine3D::kSkyViewLUTWidth;
-                presentSourceHeight = KurenaiEngine3D::kSkyViewLUTHeight;
+                presentSourceWidth = kSkyViewLUTWidth;
+                presentSourceHeight = kSkyViewLUTHeight;
             }
             else
             {
                 presentSourceTexture = m_Engine.m_TransmittanceLUT.get();
-                presentSourceWidth = KurenaiEngine3D::kTransmittanceLUTWidth;
-                presentSourceHeight = KurenaiEngine3D::kTransmittanceLUTHeight;
+                presentSourceWidth = kTransmittanceLUTWidth;
+                presentSourceHeight = kTransmittanceLUTHeight;
             }
             presentMode = 4;
             break;
@@ -376,7 +380,7 @@ namespace Kurenai::Passes
             presentDebugVolumeTexture =
                 showDetail ? m_Engine.m_CloudDetailNoiseTexture.get() : m_Engine.m_CloudShapeNoiseTexture.get();
             presentMode = 18;
-            const uint32_t size = showDetail ? KurenaiEngine3D::kCloudDetailNoiseSize : KurenaiEngine3D::kCloudShapeNoiseSize;
+            const uint32_t size = showDetail ? kCloudDetailNoiseSize : kCloudShapeNoiseSize;
             presentSourceWidth = size;
             presentSourceHeight = size;
             break;
@@ -390,7 +394,7 @@ namespace Kurenai::Passes
         RHI::IRHIBuffer* const presentTileBuffer =
             presentUsesTilePool ? m_Engine.m_MegaLightsTilePoolBuffer.get() : m_Engine.m_LightTileBuffer.get();
         const uint32_t presentTileCapacity =
-            presentUsesTilePool ? static_cast<uint32_t>(m_Engine.m_MegaLightsSettings.TilePoolCapacity) : KurenaiEngine3D::kLightTileCapacity;
+            presentUsesTilePool ? static_cast<uint32_t>(m_Engine.m_MegaLightsSettings.TilePoolCapacity) : kLightTileCapacity;
         // Mode 21だけは候補プールを書いた有効タイル幅を使う。Mode 11は従来のライトグリッドなので
         // m_LightTileCountXのままにし、デバッグ表示が実データと別の添字を読まないようにする
         const uint32_t presentTileCountX =
@@ -401,7 +405,7 @@ namespace Kurenai::Passes
         presentConstants.TileParams =
         {
             static_cast<float>(presentTileCountX),
-            static_cast<float>(KurenaiEngine3D::kLightTileSize),
+            static_cast<float>(kLightTileSize),
             static_cast<float>(presentTileCapacity),
             // ヒートマップで赤に振り切る基準のライト数。容量そのものを基準にすると
             // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
@@ -453,7 +457,7 @@ namespace Kurenai::Passes
         else
         {
             presentConstants.ArraySlice =
-                static_cast<float>(std::clamp(m_Engine.m_ShadowSettings.DebugCascade, 0, static_cast<int32_t>(KurenaiEngine3D::kCascadeCount) - 1));
+                static_cast<float>(std::clamp(m_Engine.m_ShadowSettings.DebugCascade, 0, static_cast<int32_t>(Rendering::kCascadeCount) - 1));
         }
         // Finalの見た目は倍率の影響を受けてはならないため、デバッグ表示のときだけ倍率を掛ける
         // (Gainはゼロ初期化のままだと0倍=真っ黒になるので、必ず明示的に設定すること)

@@ -12,13 +12,40 @@
 // 【なぜ独立したヘッダーなのか】パスの登録側(Passes/GeometryPasses.cpp)と、
 // 定数バッファを作る側(KurenaiEngine3D.cpp)の**両方**が sizeof で使う。
 //
-// 【ModelCullRegion と kModelCullArgsBaseOffset はここに無い】あの2つは
-// KurenaiEngine3D.h のクラス定数としても宣言されており、メンバ関数からはそちらが引かれる。
-// こちらへ移すと参照先が静かに入れ替わるため、触っていない(重複自体は段階6以前からのもの)。
+// 【KurenaiEngine3D.cpp にも同じ名前の写しが残っている】区画番号と
+// kModelCullArgsBaseOffset は、あちらの無名名前空間にも同じ値で宣言されている
+// (段階6以前からの重複)。値が同じなのでどちらを引いても結果は変わらないが、
+// **片方だけ直すと静かに食い違う**。消すのは別の関心事なので手を付けていない。
 //
 // 【static_assert が守るのはC++側だけ】**通すために期待値を書き換えないこと。**
 namespace Kurenai::Passes
 {
+        // 増幅シェーダーが数え上げる先。uint×3 = [判定, 視錐台+コーンで間引き, オクルージョンで間引き]
+        inline constexpr uint32_t kMeshletCullStatsCount = 3;
+
+        enum : uint32_t
+        {
+            kModelCullRegionGBuffer = 0,
+            kModelCullRegionGBufferMirrored,
+            kModelCullRegionPrepassOpaque,
+            kModelCullRegionPrepassOpaqueMirrored,
+            kModelCullRegionPrepassCutout,
+            kModelCullRegionPrepassCutoutMirrored,
+            kModelCullRegionCount,
+        };
+        // 引数バッファの先頭に置く「区画ごとの発行数」の領域。ExecuteIndirectの
+        // 件数バッファとしてそのまま渡す(1区画あたりuint1つ)。
+        //
+        // 【256バイトに切り上げる】後ろに続く引数配列の先頭を、定数バッファのGPUアドレスが
+        // 8バイト境界に載る位置から始めるため
+        inline constexpr uint32_t kModelCullArgsBaseOffset = 256;
+        // [判定, 視錐台で間引き, オクルージョンで間引き, 生き残り] + 区画ごとの発行数。
+        //
+        // 【前の4つはモデル数】数えるのはG-Bufferぶんの候補だけで、そこは1モデル1件になる
+        // (m_ModelCullPrepassCandidateCount のコメント参照)。深度プリパスぶんも数えると
+        // 1モデルを2回数えてしまい、CPU側の判定と単位が合わなくなる
+        inline constexpr uint32_t kModelCullCounterCount = 4 + kModelCullRegionCount;
+
         // HiZ.hlsl側のcbuffer HiZConstantsと一致させる必要がある
         struct alignas(16) HiZConstants
         {

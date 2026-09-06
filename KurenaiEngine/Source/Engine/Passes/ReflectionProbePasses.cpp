@@ -6,6 +6,8 @@
 #include "Core/Logger.h"
 #include "Core/RenderGraph.h"
 #include "ReflectionProbePasses.h"
+#include "EnvironmentConstants.h"
+#include "ReflectionProbeConstants.h"
 #include "../Rendering/CubeFaceMath.h"
 #include "../Rendering/GeometryDrawLoop.h"
 #include "../Rendering/ObjectConstants.h"
@@ -61,8 +63,8 @@ namespace Kurenai::Passes
             const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
 
             RHI::Viewport probeViewport;
-            probeViewport.Width = static_cast<float>(KurenaiEngine3D::kProbeCaptureSize);
-            probeViewport.Height = static_cast<float>(KurenaiEngine3D::kProbeCaptureSize);
+            probeViewport.Width = static_cast<float>(kProbeCaptureSize);
+            probeViewport.Height = static_cast<float>(kProbeCaptureSize);
             // 2枚目は距離(19.12節)。ProbeCapture.hlslのPSOutputと並びを一致させること
             RHI::IRHITexture* const captureTargets[] = { m_Engine.m_ProbeCaptureColor.get(), m_Engine.m_ProbeCaptureDistance.get() };
 
@@ -197,7 +199,7 @@ namespace Kurenai::Passes
             // 距離は畳み込まないため、スクラッチのキューブを経由せずプローブのスライスへ直接書く
             cmd->SetComputeUnorderedAccessTextureCubeFace(
                 1, m_Engine.m_ProbeDistanceArray.get(), face, 0, static_cast<uint32_t>(probeIndex));
-            cmd->Dispatch((KurenaiEngine3D::kProbeCaptureSize + 7) / 8, (KurenaiEngine3D::kProbeCaptureSize + 7) / 8, 1);
+            cmd->Dispatch((kProbeCaptureSize + 7) / 8, (kProbeCaptureSize + 7) / 8, 1);
         };
 
         // 組み上がったスクラッチのキューブマップを、IBLとまったく同じ手順で畳み込んで
@@ -212,8 +214,8 @@ namespace Kurenai::Passes
             [this](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t mip, uint32_t face)
         {
             const uint32_t cubeIndex = static_cast<uint32_t>(probeIndex);
-            const uint32_t mipSize = std::max(1u, KurenaiEngine3D::kIBLPrefilterBaseSize >> mip);
-            const float roughness = static_cast<float>(mip) / static_cast<float>(KurenaiEngine3D::kIBLPrefilterMipLevels - 1);
+            const uint32_t mipSize = std::max(1u, kIBLPrefilterBaseSize >> mip);
+            const float roughness = static_cast<float>(mip) / static_cast<float>(kIBLPrefilterMipLevels - 1);
 
             Passes::IBLFaceConstants faceConstants{};
             faceConstants.Face = face;
@@ -231,9 +233,9 @@ namespace Kurenai::Passes
             cmd->SetComputePipelineState(m_Engine.m_PrefilterPipelineState.get());
             cmd->SetComputeTexture(0, m_Engine.m_ProbeRadianceCube.get());
             cmd->SetComputeSamplerSet(materialSamplers);
-            for (uint32_t mip = 0; mip < KurenaiEngine3D::kIBLPrefilterMipLevels; ++mip)
+            for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
             {
-                for (uint32_t face = 0; face < KurenaiEngine3D::kCubeFaceCount; ++face)
+                for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                 {
                     convolveProbePrefilterStep(cmd, probeIndex, mip, face);
                 }
@@ -272,7 +274,7 @@ namespace Kurenai::Passes
                     },
                     .Execute = [captureProbeFace, probeIndex](RHI::IRHICommandList* cmd)
                     {
-                        for (uint32_t face = 0; face < KurenaiEngine3D::kCubeFaceCount; ++face)
+                        for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                         {
                             captureProbeFace(cmd, probeIndex, face);
                         }
@@ -300,7 +302,7 @@ namespace Kurenai::Passes
             // 全プローブが今焼けたので、時間分割は先頭から仕切り直す
             m_Engine.m_ProbeRealtimeProbeIndex = 0;
             m_Engine.m_ProbeRealtimeFace = 0;
-            m_Engine.m_ProbeRealtimePrefilterStep = KurenaiEngine3D::kProbePrefilterStepCount;
+            m_Engine.m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
         }
         else if (m_Engine.m_ReflectionProbeSettings.UpdateMode == ProbeUpdateMode::Realtime && probeCount > 0 && m_Engine.m_ProbeBaked)
         {
@@ -320,16 +322,16 @@ namespace Kurenai::Passes
             {
                 m_Engine.m_ProbeRealtimeProbeIndex = 0;
                 m_Engine.m_ProbeRealtimeFace = 0;
-                m_Engine.m_ProbeRealtimePrefilterStep = KurenaiEngine3D::kProbePrefilterStepCount;
+                m_Engine.m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
             }
 
-            if (m_Engine.m_ProbeRealtimePrefilterStep < KurenaiEngine3D::kProbePrefilterStepCount)
+            if (m_Engine.m_ProbeRealtimePrefilterStep < kProbePrefilterStepCount)
             {
                 // --- プリフィルタフェーズ ---
                 const size_t realtimeProbe = m_Engine.m_ProbeRealtimeProbeIndex;
                 const uint32_t startStep = m_Engine.m_ProbeRealtimePrefilterStep;
                 const uint32_t stepsThisFrame =
-                    std::min(KurenaiEngine3D::kProbeRealtimePrefilterStepsPerFrame, KurenaiEngine3D::kProbePrefilterStepCount - startStep);
+                    std::min(kProbeRealtimePrefilterStepsPerFrame, kProbePrefilterStepCount - startStep);
 
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "ProbeRealtimeConvolvePrefilterStep",
@@ -359,18 +361,18 @@ namespace Kurenai::Passes
                             // つまりミップ0の6面ぶんに対して約1/4.5になる。
                             // なお1フレームの下限は「ミップ0の1面」であり、これ以上細かくするには
                             // 1つの面をさらに矩形へ分割する必要がある(そこまではやっていない)
-                            const uint32_t face = step / KurenaiEngine3D::kIBLPrefilterMipLevels;
-                            const uint32_t mip = step % KurenaiEngine3D::kIBLPrefilterMipLevels;
+                            const uint32_t face = step / kIBLPrefilterMipLevels;
+                            const uint32_t mip = step % kIBLPrefilterMipLevels;
                             convolveProbePrefilterStep(cmd, realtimeProbe, mip, face);
                         }
                     },
                 });
 
                 m_Engine.m_ProbeRealtimePrefilterStep = startStep + stepsThisFrame;
-                if (m_Engine.m_ProbeRealtimePrefilterStep >= KurenaiEngine3D::kProbePrefilterStepCount)
+                if (m_Engine.m_ProbeRealtimePrefilterStep >= kProbePrefilterStepCount)
                 {
                     // このプローブの畳み込みが完了。次のプローブのキャプチャへ進む
-                    m_Engine.m_ProbeRealtimePrefilterStep = KurenaiEngine3D::kProbePrefilterStepCount;
+                    m_Engine.m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
                     m_Engine.m_ProbeRealtimeProbeIndex = static_cast<uint32_t>((realtimeProbe + 1) % probeCount);
                     m_Engine.m_ProbeRealtimeFace = 0;
                 }
@@ -395,7 +397,7 @@ namespace Kurenai::Passes
                 });
 
                 m_Engine.m_ProbeRealtimeFace = realtimeFace + 1;
-                if (m_Engine.m_ProbeRealtimeFace >= KurenaiEngine3D::kCubeFaceCount)
+                if (m_Engine.m_ProbeRealtimeFace >= kCubeFaceCount)
                 {
                     // 6面揃った。次フレームからこのプローブのプリフィルタフェーズへ入る
                     // (プローブ番号はプリフィルタが完了するまで進めない。上のプリフィルタフェーズ参照)

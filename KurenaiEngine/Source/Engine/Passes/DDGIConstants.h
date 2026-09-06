@@ -15,6 +15,32 @@
 // **通すために期待値を書き換えないこと。**
 namespace Kurenai::Passes
 {
+        // オクタヘドラル1プローブぶんの1辺のテクセル数(境界を含まない)。
+        // 拡散イラディアンスは低周波なのでこの程度で足りる。距離は遮蔽の輪郭を担うので広く取る
+        inline constexpr uint32_t kDDGIIrradianceTexels = 6;
+        inline constexpr uint32_t kDDGIDistanceTexels = 14;
+        // 各辺に足す境界の幅。オクタヘドラルは正方形の縁が球面上で折り返して繋がるため、
+        // その繋がる先のテクセルを外周へ複製しておかないと、バイリニア補間が縁で破綻する
+        // (隣のプローブのテクセルを拾ってしまうことの防止も兼ねる)
+        inline constexpr uint32_t kDDGIProbeBorder = 1;
+        // アトラス上の1プローブぶんのセルの1辺(境界込み)
+        inline constexpr uint32_t kDDGIIrradianceCell = kDDGIIrradianceTexels + kDDGIProbeBorder * 2;
+        inline constexpr uint32_t kDDGIDistanceCell = kDDGIDistanceTexels + kDDGIProbeBorder * 2;
+        // プローブ数の上限。反射プローブと違いアトラスはシーン読み込み時に確保し直すので
+        // 技術的な固定容量ではないが、.ksceneの書き間違いで数GBのアトラスを作らないための歯止め
+        // シーン全体で確保してよいプローブ数の上限。**容量の限界ではなく、`.kscene`の
+        // 打ち間違いでギガバイト単位を確保しないための番人**である。
+        // クリップマップLODでプローブ総数が「格子の積 × LOD段数」になったので引き上げた
+        // (8192でもイラディアンス8MB + 距離16MB程度で、実際の律速は更新スループット側)
+        inline constexpr uint32_t kDDGIMaxProbes = 8192;
+        // キャプチャ解像度(1面あたり)。6面ぶんで 16×16×6 = 1536方向がレイの代わりになる。
+        // 反射プローブのkProbeCaptureSize(128)と違い小さくてよいのは、DDGIが必要とするのが
+        // 「低周波の拡散イラディアンス」であって鏡面の映り込みではないため
+        inline constexpr uint32_t kDDGICaptureSize = 16;
+        // これを超えて実効プリ露出が動いたら追従させる(段)。1段=明るさ2倍ぶん
+        inline constexpr float kDDGIExposureRewarmEV = 0.5f;
+        inline constexpr uint32_t kDDGIBounceCycles = 4;
+
         // DDGIのプローブ更新CS(DDGIProbeUpdate.hlsl)専用の定数バッファ。
         // 焼く側にしか要らない値(どのプローブを焼いているか・ヒステリシス・距離のクランプ上限)を持つ
         struct alignas(16) DDGIUpdateConstants

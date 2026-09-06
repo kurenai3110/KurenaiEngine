@@ -6,6 +6,7 @@
 #include "Core/Logger.h"
 #include "Core/RenderGraph.h"
 #include "GeometryPasses.h"
+#include "GeometryConstants.h"
 #include "../Rendering/GeometryDrawLoop.h"
 #include "../Rendering/ObjectConstants.h"
 #include "../Rendering/RenderBlackboard.h"
@@ -114,25 +115,25 @@ namespace Kurenai::Passes
             : (occlusionPrevFrameEnabled ? 1u : 0u);
 
         // 区画(=PSO)の対応表。nullptrの区画は候補に載せない(そのぶんは従来のCPUループが描く)
-        RHI::IRHIPipelineState* modelCullRegionPipelines[KurenaiEngine3D::kModelCullRegionCount]{};
+        RHI::IRHIPipelineState* modelCullRegionPipelines[kModelCullRegionCount]{};
         if (modelCullGpuActive)
         {
             const bool meshletDebug = m_Engine.m_GeometrySettings.MeshletDebugViewEnabled && m_Engine.m_GBufferMeshletDebugPipelineState;
-            modelCullRegionPipelines[KurenaiEngine3D::kModelCullRegionGBuffer] = meshletDebug
+            modelCullRegionPipelines[kModelCullRegionGBuffer] = meshletDebug
                 ? m_Engine.m_GBufferMeshletDebugPipelineState.get()
                 : m_Engine.m_GBufferMeshletPipelineState.get();
-            modelCullRegionPipelines[KurenaiEngine3D::kModelCullRegionGBufferMirrored] = meshletDebug
+            modelCullRegionPipelines[kModelCullRegionGBufferMirrored] = meshletDebug
                 ? m_Engine.m_GBufferMeshletDebugPipelineStateMirrored.get()
                 : m_Engine.m_GBufferMeshletPipelineStateMirrored.get();
             if (depthPrepassRuns)
             {
-                modelCullRegionPipelines[KurenaiEngine3D::kModelCullRegionPrepassOpaque] =
+                modelCullRegionPipelines[kModelCullRegionPrepassOpaque] =
                     m_Engine.m_DepthPrepassMeshletPipelineState.get();
-                modelCullRegionPipelines[KurenaiEngine3D::kModelCullRegionPrepassOpaqueMirrored] =
+                modelCullRegionPipelines[kModelCullRegionPrepassOpaqueMirrored] =
                     m_Engine.m_DepthPrepassMeshletPipelineStateMirrored.get();
-                modelCullRegionPipelines[KurenaiEngine3D::kModelCullRegionPrepassCutout] =
+                modelCullRegionPipelines[kModelCullRegionPrepassCutout] =
                     m_Engine.m_DepthPrepassMeshletCutoutPipelineState.get();
-                modelCullRegionPipelines[KurenaiEngine3D::kModelCullRegionPrepassCutoutMirrored] =
+                modelCullRegionPipelines[kModelCullRegionPrepassCutoutMirrored] =
                     m_Engine.m_DepthPrepassMeshletCutoutPipelineStateMirrored.get();
             }
         }
@@ -228,7 +229,7 @@ namespace Kurenai::Passes
                     // G-Bufferに書かず専用のフォワードパスへ回るため
                     addCandidate(
                         modelCullGBufferDraws,
-                        mirrored ? KurenaiEngine3D::kModelCullRegionGBufferMirrored : KurenaiEngine3D::kModelCullRegionGBuffer,
+                        mirrored ? kModelCullRegionGBufferMirrored : kModelCullRegionGBuffer,
                         Assets::kGpuMaterialFlagTransparent, 0u, lodDitherFade, /*countCullStats=*/true,
                         gbufferOcclusionMode);
 
@@ -242,7 +243,7 @@ namespace Kurenai::Passes
                     }
                     addCandidate(
                         modelCullDraws,
-                        mirrored ? KurenaiEngine3D::kModelCullRegionPrepassOpaqueMirrored : KurenaiEngine3D::kModelCullRegionPrepassOpaque,
+                        mirrored ? kModelCullRegionPrepassOpaqueMirrored : kModelCullRegionPrepassOpaque,
                         Assets::kGpuMaterialFlagTransparent | Assets::kGpuMaterialFlagCutout, 0u, 1.0f, false,
                         prepassOcclusionMode);
                     // カットアウトぶん(clipを通す)。持たないモデルではこの回は発行しない
@@ -250,7 +251,7 @@ namespace Kurenai::Passes
                     {
                         addCandidate(
                             modelCullDraws,
-                            mirrored ? KurenaiEngine3D::kModelCullRegionPrepassCutoutMirrored : KurenaiEngine3D::kModelCullRegionPrepassCutout,
+                            mirrored ? kModelCullRegionPrepassCutoutMirrored : kModelCullRegionPrepassCutout,
                             Assets::kGpuMaterialFlagTransparent, Assets::kGpuMaterialFlagCutout, 1.0f, false,
                             prepassOcclusionMode);
                     }
@@ -391,10 +392,10 @@ namespace Kurenai::Passes
                             m_Engine.m_TAAPrevViewProjValid ? m_Engine.m_TAAPrevViewProj : DirectX::XMFLOAT4X4{};
                     }
                     cullConstants.CullParams = {
-                        count, m_Engine.m_HiZMipLevels, occlusionEnabled ? 1u : 0u, KurenaiEngine3D::kModelCullArgsBaseOffset
+                        count, m_Engine.m_HiZMipLevels, occlusionEnabled ? 1u : 0u, kModelCullArgsBaseOffset
                     };
                     cullConstants.CullRegionParams = {
-                        regionStride, KurenaiEngine3D::kModelCullRegionCount, beginIndex, statsBeginIndex
+                        regionStride, kModelCullRegionCount, beginIndex, statsBeginIndex
                     };
                     cullConstants.CullHiZScreenParams = {
                         static_cast<float>(renderWidth), static_cast<float>(renderHeight), 0.0f, 0.0f
@@ -514,25 +515,25 @@ namespace Kurenai::Passes
                     if (modelCullIndirectActive)
                     {
                         if (m_Engine.IssueModelCullIndirect(
-                                cmd, KurenaiEngine3D::kModelCullRegionPrepassOpaque, m_Engine.m_DepthPrepassMeshletPipelineState.get(),
+                                cmd, kModelCullRegionPrepassOpaque, m_Engine.m_DepthPrepassMeshletPipelineState.get(),
                                 currentPipelineState))
                         {
                             ++m_Engine.m_DrawCallsDepthPrepass;
                         }
                         if (m_Engine.IssueModelCullIndirect(
-                                cmd, KurenaiEngine3D::kModelCullRegionPrepassOpaqueMirrored,
+                                cmd, kModelCullRegionPrepassOpaqueMirrored,
                                 m_Engine.m_DepthPrepassMeshletPipelineStateMirrored.get(), currentPipelineState))
                         {
                             ++m_Engine.m_DrawCallsDepthPrepass;
                         }
                         if (m_Engine.IssueModelCullIndirect(
-                                cmd, KurenaiEngine3D::kModelCullRegionPrepassCutout,
+                                cmd, kModelCullRegionPrepassCutout,
                                 m_Engine.m_DepthPrepassMeshletCutoutPipelineState.get(), currentPipelineState))
                         {
                             ++m_Engine.m_DrawCallsDepthPrepass;
                         }
                         if (m_Engine.IssueModelCullIndirect(
-                                cmd, KurenaiEngine3D::kModelCullRegionPrepassCutoutMirrored,
+                                cmd, kModelCullRegionPrepassCutoutMirrored,
                                 m_Engine.m_DepthPrepassMeshletCutoutPipelineStateMirrored.get(), currentPipelineState))
                         {
                             ++m_Engine.m_DrawCallsDepthPrepass;
@@ -839,7 +840,7 @@ namespace Kurenai::Passes
                 {
                     const bool meshletDebug = m_Engine.m_GeometrySettings.MeshletDebugViewEnabled && m_Engine.m_GBufferMeshletDebugPipelineState;
                     if (m_Engine.IssueModelCullIndirect(
-                            cmd, KurenaiEngine3D::kModelCullRegionGBuffer,
+                            cmd, kModelCullRegionGBuffer,
                             meshletDebug ? m_Engine.m_GBufferMeshletDebugPipelineState.get()
                                          : m_Engine.m_GBufferMeshletPipelineState.get(),
                             currentPipelineState))
@@ -847,7 +848,7 @@ namespace Kurenai::Passes
                         ++m_Engine.m_DrawCallsGBuffer;
                     }
                     if (m_Engine.IssueModelCullIndirect(
-                            cmd, KurenaiEngine3D::kModelCullRegionGBufferMirrored,
+                            cmd, kModelCullRegionGBufferMirrored,
                             meshletDebug ? m_Engine.m_GBufferMeshletDebugPipelineStateMirrored.get()
                                          : m_Engine.m_GBufferMeshletPipelineStateMirrored.get(),
                             currentPipelineState))
@@ -965,7 +966,7 @@ namespace Kurenai::Passes
                     cmd->CopyBufferToReadback(
                         m_Engine.m_MeshletCullStatsReadback[m_Engine.m_MeshletCullStatsRingIndex].get(),
                         m_Engine.m_MeshletCullStatsBuffer.get(),
-                        static_cast<uint32_t>(sizeof(uint32_t)) * KurenaiEngine3D::kMeshletCullStatsCount);
+                        static_cast<uint32_t>(sizeof(uint32_t)) * kMeshletCullStatsCount);
                 }
             },
         });
@@ -990,7 +991,7 @@ namespace Kurenai::Passes
                 {
                     cmd->CopyBufferToReadback(
                         m_Engine.m_ModelCullReadback[m_Engine.m_ModelCullRingIndex].get(), m_Engine.m_ModelCullCounterBuffer.get(),
-                        static_cast<uint32_t>(sizeof(uint32_t)) * KurenaiEngine3D::kModelCullCounterCount);
+                        static_cast<uint32_t>(sizeof(uint32_t)) * kModelCullCounterCount);
                 },
             });
         }

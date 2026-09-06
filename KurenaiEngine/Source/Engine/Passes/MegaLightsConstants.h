@@ -16,6 +16,23 @@
 // 【static_assert が守るのはC++側だけ】**通すために期待値を書き換えないこと。**
 namespace Kurenai::Passes
 {
+        // タイルライトカリングのタイルサイズ(1辺のピクセル数)。
+        // LightCulling.hlsl の kTileSize および numthreads と必ず一致させること
+        inline constexpr uint32_t kLightTileSize = 16;
+        // 1タイルが保持できるライト数の上限。LightCulling.hlsl の kMaxLightsPerTile および
+        // DirectLighting.hlsl の同名の定数と必ず一致させること(バッファのストライドがこの値で決まる)。
+        // HLSL側はgroupshared配列のサイズに使うためコンパイル時定数である必要があり、
+        // C++からの受け渡しでは代用できないので、3箇所で同じ値を書く形になっている。
+        // .cppの無名名前空間ではなくここに置いてあるのは、DebugViewPanelがヒートマップの
+        // 上限としてこの値を使うため
+        inline constexpr uint32_t kLightTileCapacity = 64;
+        // 空間再利用の反復ごとの定数(中身は共有分と同じで、反復番号だけが違う)。
+        // 【1本を使い回してはいけない】UpdateBuffer は同じフレームで2回書くと
+        // 後の値が両方のパスに見えるため、反復の数だけバッファを分ける
+        inline constexpr uint32_t kMegaLightsMaxSpatialIterations = 2u;
+        // 何フレーム待ってから足し始めるか。小さなシーンの読み込みとリサイズが片付く目安
+        inline constexpr uint32_t kMegaLightsAccumWarmup = 180;
+
         // MegaLightsTilePool.hlsl側のcbuffer MegaLightsTilePoolConstantsと並びを一致させること。
         // 先頭4つはLightCullingConstantsと同じ並びだが、TileParams.wの意味が違う
         // (あちらは1タイルの容量、こちらは抽出する候補数K)ので構造体は分けてある

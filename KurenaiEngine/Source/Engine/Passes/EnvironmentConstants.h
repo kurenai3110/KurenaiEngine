@@ -16,6 +16,55 @@
 // **通すために期待値を書き換えないこと。**
 namespace Kurenai::Passes
 {
+        inline constexpr uint32_t kIBLIrradianceSize = 32;
+        inline constexpr uint32_t kIBLPrefilterBaseSize = 128;
+        // プリフィルタ済み鏡面マップのミップ数(128,64,32,16,8,4の6段)。ラフネス[0,1]を
+        // [0, kIBLPrefilterMipLevels-1]のミップ番号へ線形マッピングする(DeferredLighting.hlsl参照)
+        inline constexpr uint32_t kIBLPrefilterMipLevels = 6;
+        inline constexpr uint32_t kIBLBRDFLUTSize = 128;
+        // ボリュメトリック雲の3Dノイズの1辺のテクセル数。
+        // Shapeは128^3のRGBA8で8MB、Detailは32^3のRGBA8で128KB。合わせて約8.1MB。
+        // Shapeを128にしているのは、雲1つが画面上で数百画素に広がるため塊の形にはこの程度の
+        // 解像度が要る一方、これ以上上げるとメモリが4倍(256^3で64MB)に跳ねるため。
+        // Detailは縁を削るだけで低周波成分を持たないので32で足りる
+        // 大気散乱のLUT(Hillaire 2020)。解像度は論文の推奨値。
+        // Transmittanceは高度×視線天頂角、MultiScatteringは高度×太陽天頂角で、
+        // どちらも大気パラメータだけで決まるためカメラにも時刻にも依存しない。
+        // SkyViewは空そのもの(太陽の子午線からの方位×天頂角)で、太陽が動くと変わる。
+        // **kSkyViewLUTWidth/Heightはシェーダ側(AtmosphereCommon.hlsliの
+        // kSkyViewLUTWidthF/kSkyViewLUTHeightF)と一致させること** — UVの半テクセル補正に
+        // 解像度が要るため、焼く側・引く側の両方が同じ値を知っている必要がある
+        inline constexpr uint32_t kTransmittanceLUTWidth = 256;
+        inline constexpr uint32_t kTransmittanceLUTHeight = 64;
+        inline constexpr uint32_t kMultiScatteringLUTSize = 32;
+        inline constexpr uint32_t kSkyViewLUTWidth = 192;
+        inline constexpr uint32_t kSkyViewLUTHeight = 108;
+        inline constexpr uint32_t kCloudShapeNoiseSize = 128;
+        inline constexpr uint32_t kCloudDetailNoiseSize = 32;
+        // ウェザーマップ(H3)。ノイズ空間の1周期(256セル=358km)を1枚で覆うので、
+        // 4096なら88m/テクセル。**CloudNoiseGenerate.hlsl の kWeatherNoiseSize と同じ値であること**
+        // (片方だけ変えるとテクセル中心がずれ、バイリニアが半テクセル分ぼける)。
+        // R8G8B8A8で4096^2 = 67MB。解像度の実測はSky.hlsliのウェザーマップの節
+        inline constexpr uint32_t kCloudWeatherNoiseSize = 4096;
+        // 手続き空(SkyGenerate.hlsl): Perez分布をGPUで評価してキューブマップを生成する。
+        // オフラインで焼いたDDS(Sky.dds)と違い、太陽が動くと空の輝度分布の「形」も追従する
+        // (circumsolarの明るい領域が太陽と一緒に動く)。詳細はSkyGenerate.hlsl冒頭。
+        //
+        // .ksceneで[Scene]Skyboxを明示しているシーン(White Furnace TestのUniformWhite.dds)は
+        // 従来どおりDDSを使う必要があるため、手続き空は別テクスチャに持ち、
+        // ActiveSkyTexture()がフレームごとにどちらを使うか決める
+        inline constexpr uint32_t kProceduralSkySize = 256;
+        // 太陽がこの角度以上動いたらSkyView LUTを焼き直す。LUTは天頂方向180度を108テクセルで
+        // 持つので1テクセルあたり約1.67度あり、その1/30以下しかずらさない値にしてある。
+        inline constexpr float kSkyViewRebakeAngleDegrees = 0.05f;
+        // CSProjectSHの射影に使う離散化解像度(1面の1辺のテクセル数)。
+        // 【SourceSkyboxの実解像度とは無関係】スカイボックスはDDS(シーンごとに任意の解像度)や
+        // 手続き空(256)など実行時に変わりうる一方、IRHITextureには解像度を問い合わせる手段が
+        // 無いため、射影側は独立した固定解像度を持つ(IBLConvolve.hlslのSHProjectionSizeコメント参照)。
+        // 64×64×6=24,576テクセルはCSIrradianceの約9,750万サンプルに対し十分密で、
+        // 9個の係数を求めるだけの積分には(理論上は32でも足りる範囲)余裕を持たせた値
+        inline constexpr uint32_t kSHProjectionSize = 64;
+
         // IBLConvolve.hlsl(CSIrradiance/CSPrefilter)へ、処理対象の面(キューブマップは面ごとに
         // 個別ディスパッチが必要)とCSPrefilterのみが使うラフネス値を渡す専用の定数バッファ
         struct alignas(16) IBLFaceConstants

@@ -9,6 +9,7 @@
 #include "Core/RenderGraph.h"
 #include "Core/StringUtil.h"
 #include "MegaLightsPasses.h"
+#include "MegaLightsConstants.h"
 #include "../Rendering/GPULight.h"
 #include "../Rendering/RenderBlackboard.h"
 #include "../Rendering/RenderFrameContext.h"
@@ -70,7 +71,7 @@ namespace Kurenai::Passes
                         m_Engine.m_LightTileCountX,
                         m_Engine.m_LightTileCountY,
                         static_cast<uint32_t>(gpuLights.size()),
-                        KurenaiEngine3D::kLightTileCapacity,
+                        kLightTileCapacity,
                     };
                     cullingConstants.RenderSize = { renderWidth, renderHeight, 0u, 0u };
 
@@ -295,7 +296,7 @@ namespace Kurenai::Passes
                 stochasticConstants.Params1 =
                 {
                     megaLightsEffectiveTilesX,
-                    KurenaiEngine3D::kLightTileSize,
+                    kLightTileSize,
                     // 候補プールを書いたときと同じKでなければならない(上のTileParams.wと同値)
                     static_cast<uint32_t>(m_Engine.m_MegaLightsSettings.TilePoolCapacity),
                     m_Engine.m_TAAFrameIndex,
@@ -402,14 +403,14 @@ namespace Kurenai::Passes
             uint32_t spatialIterations =
                 spatialRuns ? static_cast<uint32_t>(std::clamp(
                                   m_Engine.m_MegaLightsSettings.SpatialIterations, 1,
-                                  static_cast<int32_t>(KurenaiEngine3D::kMegaLightsMaxSpatialIterations)))
+                                  static_cast<int32_t>(kMegaLightsMaxSpatialIterations)))
                             : 0u;
             if (!temporalRuns && spatialIterations > 1u)
             {
                 spatialIterations = 1u;
             }
             // 最後の反復が書いた側をシェードが読む
-            RHI::IRHIBuffer* const spatialPingPong[KurenaiEngine3D::kMegaLightsMaxSpatialIterations] = {
+            RHI::IRHIBuffer* const spatialPingPong[kMegaLightsMaxSpatialIterations] = {
                 m_Engine.m_MegaLightsReservoirSpatialBuffer.get(), m_Engine.m_MegaLightsReservoirSpatialBuffer2.get()
             };
 
@@ -428,7 +429,7 @@ namespace Kurenai::Passes
             RHI::IRHIBuffer* const reuseInputBuffer =
                 temporalRuns ? temporalOutputBuffer : m_Engine.m_MegaLightsReservoirBuffer.get();
             RHI::IRHIBuffer* const shadeReservoirBuffer =
-                spatialRuns ? spatialPingPong[(spatialIterations - 1u) % KurenaiEngine3D::kMegaLightsMaxSpatialIterations]
+                spatialRuns ? spatialPingPong[(spatialIterations - 1u) % kMegaLightsMaxSpatialIterations]
                             : reuseInputBuffer;
 
             graph.AddPass(Core::RenderGraphPassDesc{
@@ -531,11 +532,11 @@ namespace Kurenai::Passes
                 RHI::IRHIBuffer* const spatialInput =
                     (spatialIteration == 0u)
                         ? reuseInputBuffer
-                        : spatialPingPong[(spatialIteration - 1u) % KurenaiEngine3D::kMegaLightsMaxSpatialIterations];
+                        : spatialPingPong[(spatialIteration - 1u) % kMegaLightsMaxSpatialIterations];
                 RHI::IRHIBuffer* const spatialOutput =
-                    spatialPingPong[spatialIteration % KurenaiEngine3D::kMegaLightsMaxSpatialIterations];
+                    spatialPingPong[spatialIteration % kMegaLightsMaxSpatialIterations];
                 RHI::IRHIBuffer* const spatialConstants =
-                    m_Engine.m_MegaLightsSpatialConstantBuffer[spatialIteration % KurenaiEngine3D::kMegaLightsMaxSpatialIterations].get();
+                    m_Engine.m_MegaLightsSpatialConstantBuffer[spatialIteration % kMegaLightsMaxSpatialIterations].get();
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "MegaLightsSpatial",
                     .Reads =
@@ -876,7 +877,7 @@ namespace Kurenai::Passes
         ++m_Engine.m_MegaLightsAccumWarmupFrames;
         const bool megaLightsAccumRuns = m_Engine.ShouldRunMegaLights() && m_Engine.m_MegaLightsSettings.AccumTargetFrames > 0 &&
                                          m_Engine.m_MegaLightsAccumPipelineState && m_Engine.m_MegaLightsAccumBuffer &&
-                                         m_Engine.m_MegaLightsAccumWarmupFrames > KurenaiEngine3D::kMegaLightsAccumWarmup &&
+                                         m_Engine.m_MegaLightsAccumWarmupFrames > kMegaLightsAccumWarmup &&
                                          m_Engine.m_MegaLightsAccumFrames < static_cast<uint32_t>(m_Engine.m_MegaLightsSettings.AccumTargetFrames);
         if (megaLightsAccumRuns)
         {

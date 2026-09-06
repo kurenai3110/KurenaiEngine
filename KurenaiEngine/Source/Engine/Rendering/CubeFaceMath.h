@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #include <DirectXMath.h>
 
 // キューブマップの面ごとのビュー行列と射影行列(段階6)。
@@ -9,6 +11,10 @@
 // KurenaiEngine3D.cpp の無名名前空間に置いたままでは、どちらのパス群からも見えない。
 namespace Kurenai
 {
+        // キューブマップの面数(D3D標準順: +X,-X,+Y,-Y,+Z,-Z)。IBLの2つのキューブマップは
+        // いずれもこの順で面ごとにディスパッチする(IBLConvolve.hlsl CubeFaceDirectionと一致させる)
+        inline constexpr uint32_t kCubeFaceCount = 6;
+
         // キューブマップの1面を撮るためのビュー行列(左手系)。前方向・上方向の組は
         // IBLConvolve.hlslのCubeFaceDirectionが定める面→方向の対応と一致していなければならない
         // (ずれると焼いた面が回転・反転する)。D3Dのキューブマップ標準順(+X,-X,+Y,-Y,+Z,-Z)
