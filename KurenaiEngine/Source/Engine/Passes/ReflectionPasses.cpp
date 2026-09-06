@@ -64,7 +64,7 @@ namespace Kurenai::Passes
                 // ProbeCapture/captureProbeFaceと同じ理由でシャドウ・IBL・DDGIを挙げ、
                 // これらを書くパスより後ろへ順序付ける(実際のバインドはExecute内)
                 .Reads = {
-                    m_Engine.m_ShadowCascadeArray.get(), m_Engine.m_IrradianceTexture.get(), m_Engine.m_PrefilteredEnvTexture.get(),
+                    m_Engine.m_RenderTargets.ShadowCascadeArray.get(), m_Engine.m_IrradianceTexture.get(), m_Engine.m_PrefilteredEnvTexture.get(),
                     m_Engine.m_BRDFLUTTexture.get(), m_Engine.m_DDGIIrradianceAtlas.get(), m_Engine.m_DDGIDistanceAtlas.get(),
                     m_Engine.m_SkyViewLUT.get(),
                 },
@@ -113,7 +113,7 @@ namespace Kurenai::Passes
                     cmd->SetSamplerSet(materialSamplers);
 
                     // captureProbeFaceと同じ順・同じレジスタでバインドする(PlanarReflection.hlsl参照)
-                    cmd->SetTexture(4, m_Engine.m_ShadowCascadeArray.get());
+                    cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
                     cmd->SetShaderResourceBuffer(8, m_Engine.m_LightBuffer.get());
                     cmd->SetTexture(9, m_Engine.m_IrradianceTexture.get());
                     cmd->SetTexture(10, m_Engine.m_PrefilteredEnvTexture.get());

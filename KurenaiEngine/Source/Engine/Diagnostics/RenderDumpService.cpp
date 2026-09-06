@@ -52,7 +52,7 @@ namespace Kurenai
             { "SSILTexture", m_RenderTargets.SSILTexture.get() },
             { "RTAORawTexture", m_RTAORawTexture.get() },
             { "RTAOTexture", m_RTAOTexture.get() },
-            { "RTShadowTexture", m_RTShadowTexture.get() },
+            { "RTShadowTexture", m_RenderTargets.RTShadowTexture.get() },
             { "SceneColor", m_RenderTargets.SceneColor.get() },
             // 反射
             { "SSRTexture", m_RenderTargets.SSRTexture.get() },
@@ -63,7 +63,7 @@ namespace Kurenai
             { "MegaLightsTexture", m_MegaLightsTexture.get() },
             { "MegaLightsDenoisedTexture", m_MegaLightsDenoisedTexture.get() },
             // 影・Hi-Z
-            { "ShadowCascadeArray", m_ShadowCascadeArray.get() },
+            { "ShadowCascadeArray", m_RenderTargets.ShadowCascadeArray.get() },
             { "HiZTexture", m_RenderTargets.HiZTexture.get() },
             // 空と大気
             { "SkyCloudTexture", m_SkyCloudTexture.get() },

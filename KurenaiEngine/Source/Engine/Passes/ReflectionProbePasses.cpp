@@ -108,7 +108,7 @@ namespace Kurenai::Passes
             // 上書きするまで維持される(IRHICommandList::SetTexture参照)。DX12もバインド状態の
             // シャドウコピーを持ち寿命がDX11と揃っているため、ここで先にバインドしたものが
             // ループ内の各Drawへ引き継がれる
-            cmd->SetTexture(4, m_Engine.m_ShadowCascadeArray.get());
+            cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
             cmd->SetShaderResourceBuffer(8, m_Engine.m_LightBuffer.get());
             cmd->SetTexture(9, m_Engine.m_IrradianceTexture.get());
             cmd->SetTexture(10, m_Engine.m_PrefilteredEnvTexture.get());

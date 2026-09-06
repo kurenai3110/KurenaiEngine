@@ -28,6 +28,17 @@ namespace Kurenai::Rendering
         std::unique_ptr<RHI::IRHITexture> GBufferVelocity;
         // bent normal(ワールド空間の正規化しない可視方向の平均)。.rgb = bRaw、.a = 有効フラグ
         std::unique_ptr<RHI::IRHITexture> GBufferBentNormal;
+        // RTシャドウの可視率(0〜1のスカラー)。RWTexture2D<float>として書くため単チャンネルの
+        // R32_Floatにする(型付きUAVの読み書きが保証されているのはR32系のみ。AutoExposure.hlsl参照)
+        std::unique_ptr<RHI::IRHITexture> RTShadowTexture;
+
+        // 全カスケードの深度を1つのTexture2DArray(スライス番号=カスケード番号)として保持する。
+        // 書き込みはスライスごとの個別DSV(RenderGraphPassDesc::DepthTargetArraySlice)で行い、
+        // 読み取りは配列全体を指す1本のSRV(t4)を1回バインドするだけでよい。シェーダ側は
+        // ShadowMapArray.Sample(DataSampler, float3(uv, cascadeIndex))で動的にカスケードを選べる
+        // (ShadowSampling.hlsli参照)。ウィンドウ/レンダー解像度に依存しないため一度だけ作成し、
+        // 解像度変更時に作り直す他のメンバとは生成契機が異なる。
+        std::unique_ptr<RHI::IRHITexture> ShadowCascadeArray;
 
         // 直接光(シャドウ適用済みのPBR直接光をHDRで持つ)。DeferredLightingパスと
         // SSIL_VisibilityBitmask.hlslの両方が読むため、G-Bufferと同じレンダー解像度で保つ
@@ -59,7 +70,9 @@ namespace Kurenai::Rendering
         void CreateGBufferBentNormal(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         void CreateLightingChain(RHI::IRHIDevice& device, uint32_t width, uint32_t height, RHI::Format aoFormat);
         void CreateTonemap(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+        void CreateRTShadow(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         void CreateTAAHistory(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         void CreateHiZ(RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t mipLevels);
+        void CreateShadowCascadeArray(RHI::IRHIDevice& device, uint32_t size, uint32_t cascadeCount);
     };
 }

@@ -88,7 +88,7 @@ namespace Kurenai::Passes
             cmd->SetConstantBuffer(0, m_Engine.m_ProbeCaptureConstantBuffer.get());
             cmd->SetSamplerSet(materialSamplers);
 
-            cmd->SetTexture(4, m_Engine.m_ShadowCascadeArray.get());
+            cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
             cmd->SetShaderResourceBuffer(8, m_Engine.m_LightBuffer.get());
             cmd->SetTexture(9, m_Engine.m_IrradianceTexture.get());
             cmd->SetTexture(10, m_Engine.m_PrefilteredEnvTexture.get());

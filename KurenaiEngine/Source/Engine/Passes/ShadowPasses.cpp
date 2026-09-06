@@ -42,7 +42,7 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "Shadow" + std::to_string(cascade),
-                .DepthTarget = m_Engine.m_ShadowCascadeArray.get(),
+                .DepthTarget = m_Engine.m_RenderTargets.ShadowCascadeArray.get(),
                 .DepthTargetArraySlice = cascade,
                 .Execute = [this, shadowViewport, cascade, cascadeViewProj, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
@@ -234,7 +234,7 @@ namespace Kurenai::Passes
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "RTShadow",
                 .Reads = { m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get() },
-                .Writes = { m_Engine.m_RTShadowTexture.get() },
+                .Writes = { m_Engine.m_RenderTargets.RTShadowTexture.get() },
                 .Execute = [this, renderWidth, renderHeight, frameConstantBuffer](RHI::IRHICommandList* cmd)
                 {
                     Passes::RTShadowConstants rtShadowConstants{};
@@ -258,7 +258,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RTShadowTexture.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RenderTargets.RTShadowTexture.get());
                     cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });

@@ -62,7 +62,7 @@ namespace Kurenai::Passes
         RHI::IRHITexture* presentDebugCubeTexture = bb.SkyTexture;
         // Mode 10(シャドウマップのカスケード表示)専用。t1と同じ理由で、t2にも常に有効な
         // Texture2DArrayをバインドしておく必要があるためシャドウマップ配列自身を既定値にする
-        RHI::IRHITexture* presentDebugArrayTexture = m_Engine.m_ShadowCascadeArray.get();
+        RHI::IRHITexture* presentDebugArrayTexture = m_Engine.m_RenderTargets.ShadowCascadeArray.get();
         // Mode 12(反射プローブのキューブマップ配列)専用。TextureCube(t1)ともTexture2DArray(t2)とも
         // 型が違うためさらに別スロット(t4)が要る。こちらも常に有効なテクスチャをバインドしておく
         // (反射プローブは鏡面専任なので、既定値はプリフィルタ済み鏡面の配列にしてある)
@@ -148,7 +148,7 @@ namespace Kurenai::Passes
             // Texture2DArrayはSourceTexture(t0、Texture2D)へバインドできないため、専用の
             // DebugArrayTexture(t2)を表示スライス指定付きでサンプルする(IBLキューブマップの
             // Mode 9と同じ方式。Present.hlsl参照)
-            presentDebugArrayTexture = m_Engine.m_ShadowCascadeArray.get();
+            presentDebugArrayTexture = m_Engine.m_RenderTargets.ShadowCascadeArray.get();
             presentMode = 10;
             presentSourceWidth = KurenaiEngine3D::kShadowMapSize;
             presentSourceHeight = KurenaiEngine3D::kShadowMapSize;
@@ -159,7 +159,7 @@ namespace Kurenai::Passes
             // 最終結果のまま何も切り替えない
             if (m_Engine.ShouldRunRaytracedShadow())
             {
-                presentSourceTexture = m_Engine.m_RTShadowTexture.get();
+                presentSourceTexture = m_Engine.m_RenderTargets.RTShadowTexture.get();
                 presentMode = 5;
             }
             break;

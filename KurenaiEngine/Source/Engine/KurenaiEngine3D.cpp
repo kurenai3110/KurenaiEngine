@@ -1809,9 +1809,7 @@ namespace Kurenai
             }
         }
 
-        // シャドウマップはG-Bufferと異なりウィンドウ/レンダー解像度に依存しないため固定サイズで一度だけ作成する。
-        // 全カスケードを1つのTexture2DArrayにまとめ、スライスごとのDSVで1カスケードずつ描き込む
-        m_ShadowCascadeArray = m_Device->CreateDepthTextureArray(kShadowMapSize, kShadowMapSize, kCascadeCount);
+        m_RenderTargets.CreateShadowCascadeArray(*m_Device, kShadowMapSize, kCascadeCount);
 
         // 既定のスカイボックス。.ksceneの[Scene]Skyboxで差し替えられる(LoadScene参照)ため、
         // 現在読み込んでいるパスを覚えておき、同じパスなら読み直さない
@@ -2382,7 +2380,7 @@ namespace Kurenai
     bool KurenaiEngine3D::ShouldRunRaytracedShadow() const
     {
         return m_ShadowSettings.Mode == ShadowMode::Raytraced && m_RaytracingScene.IsValid() &&
-               m_RTShadowPipelineState != nullptr && m_RTShadowTexture != nullptr;
+               m_RTShadowPipelineState != nullptr && m_RenderTargets.RTShadowTexture != nullptr;
     }
 
     bool KurenaiEngine3D::ShouldRunMegaLights() const
@@ -3639,9 +3637,7 @@ namespace Kurenai
             if (m_RenderCapabilities.RaytracingAvailable)
             {
                 m_RTReflectionTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R16G16B16A16_Float);
-                // RTシャドウの可視率(0〜1のスカラー)。RWTexture2D<float>として書くため単チャンネルの
-                // R32_Floatにする(型付きUAVの読み書きが保証されているのはR32系のみ。AutoExposure.hlsl参照)
-                m_RTShadowTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R32_Float);
+                m_RenderTargets.CreateRTShadow(*m_Device, width, height);
                 // RTAOの生バッファはコンピュートがUAVで書くためUAVテクスチャ、ブラー後は
                 // 従来どおりピクセルシェーダーが書くレンダーターゲット。
                 // フォーマットはSSAO/SSILと同じaoFormat(バッファ精度の設定に追従する)
@@ -6548,7 +6544,7 @@ namespace Kurenai
 
         // プローブのキャプチャが読むテクスチャ一式。反射プローブとDDGIが同じ組を読む
         const std::vector<RHI::IRHITexture*> probeCaptureReads = {
-            m_ShadowCascadeArray.get(),
+            m_RenderTargets.ShadowCascadeArray.get(),
             skyTexture, m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
         };
         frameContext.ProbeCaptureReads = &probeCaptureReads;

@@ -54,7 +54,7 @@ namespace Kurenai::Passes
         // 必要がある(nullptrはSetTextureが受け付けない)。非対応環境では読まれないダミーとして
         // 深度テクスチャを張る(Presentのデバッグ用t1/t2/t4に既定値を持たせているのと同じ理由)
         RHI::IRHITexture* const rtShadowTextureForBinding =
-            m_Engine.m_RTShadowTexture ? m_Engine.m_RTShadowTexture.get() : m_Engine.m_RenderTargets.GBufferDepth.get();
+            m_Engine.m_RenderTargets.RTShadowTexture ? m_Engine.m_RenderTargets.RTShadowTexture.get() : m_Engine.m_RenderTargets.GBufferDepth.get();
 
         // 直接光パスがt7へバインドするMegaLightsの寄与。上と同じ理由で、読まれないフレームでも
         // 何かを張る必要がある(非対応環境ではそもそもテクスチャを確保していない)
@@ -75,7 +75,7 @@ namespace Kurenai::Passes
             .Reads =
             {
                 m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
-                m_Engine.m_ShadowCascadeArray.get(),
+                m_Engine.m_RenderTargets.ShadowCascadeArray.get(),
                 // RTシャドウの可視率。RTシャドウパスを実行しないフレームではm_RenderTargets.GBufferDepthと
                 // 同じポインタになるが、RenderGraphは同じ書き手への多重エッジを弾くため無害
                 rtShadowTextureForBinding,
@@ -105,7 +105,7 @@ namespace Kurenai::Passes
                 cmd->SetTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
                 cmd->SetTexture(2, m_Engine.m_RenderTargets.GBufferMaterial.get());
                 cmd->SetTexture(3, m_Engine.m_RenderTargets.GBufferDepth.get());
-                cmd->SetTexture(4, m_Engine.m_ShadowCascadeArray.get());
+                cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
                 // RTシャドウの可視率。LightCount.zがRaytracedのときだけ読まれる
                 cmd->SetTexture(6, rtShadowTextureForBinding);
                 // MegaLightsが求めたポイント/スポットの直接光。LightCount.wが1のときだけ読まれる
@@ -508,7 +508,7 @@ namespace Kurenai::Passes
                 // メッシュによらずパス全体で共通のテクスチャはここで一度だけバインドする。
                 // テクスチャのバインドは上書きするまで維持されるため(IRHICommandList::SetTexture参照)、
                 // メッシュごとのループ内で張り直す必要はない
-                cmd->SetTexture(4, m_Engine.m_ShadowCascadeArray.get());
+                cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
                 cmd->SetShaderResourceBuffer(8, m_Engine.m_LightBuffer.get());
                 // IBL(14章)。このパスにはSSRが適用されないため、半透明サーフェスの環境の
                 // 映り込みはこの環境ソースだけが担う

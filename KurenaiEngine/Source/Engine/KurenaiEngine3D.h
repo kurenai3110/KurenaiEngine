@@ -1377,7 +1377,6 @@ namespace Kurenai
         // シェーダーとパイプラインステートはm_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る
         std::unique_ptr<RHI::IRHIShader> m_RTShadowComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_RTShadowPipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_RTShadowTexture;
         std::unique_ptr<RHI::IRHIBuffer> m_RTShadowConstantBuffer;
 
         MegaLightsSettings m_MegaLightsSettings;
@@ -1864,12 +1863,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowCutoutPipelineStateMirrored;
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletCutoutPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_ShadowMeshletCutoutPipelineStateMirrored;
-        // 全カスケードの深度を1つのTexture2DArray(スライス番号=カスケード番号)として保持する。
-        // 書き込みはスライスごとの個別DSV(RenderGraphPassDesc::DepthTargetArraySlice)で行い、
-        // 読み取りは配列全体を指す1本のSRV(t4)を1回バインドするだけでよい。シェーダ側は
-        // ShadowMapArray.Sample(DataSampler, float3(uv, cascadeIndex))で動的にカスケードを選べる
-        // (ShadowSampling.hlsli参照)
-        std::unique_ptr<RHI::IRHITexture> m_ShadowCascadeArray;
         // シャドウパスの各カスケード描画で使う専用の定数バッファ(カスケードごとに値を更新して使い回す)
         std::unique_ptr<RHI::IRHIBuffer> m_ShadowCascadeConstantBuffer;
 

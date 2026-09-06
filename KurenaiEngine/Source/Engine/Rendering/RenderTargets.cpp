@@ -49,6 +49,11 @@ namespace Kurenai::Rendering
         TonemapTexture = device.CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
     }
 
+    void RenderTargets::CreateRTShadow(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        RTShadowTexture = device.CreateUAVTexture(width, height, RHI::Format::R32_Float);
+    }
+
     void RenderTargets::CreateTAAHistory(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
     {
         // 読みながら同じテクスチャへ書けないため、毎フレーム役割を入れ替える履歴バッファ2枚。
@@ -61,5 +66,10 @@ namespace Kurenai::Rendering
     void RenderTargets::CreateHiZ(RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t mipLevels)
     {
         HiZTexture = device.CreateHiZTexture(width, height, mipLevels);
+    }
+
+    void RenderTargets::CreateShadowCascadeArray(RHI::IRHIDevice& device, uint32_t size, uint32_t cascadeCount)
+    {
+        ShadowCascadeArray = device.CreateDepthTextureArray(size, size, cascadeCount);
     }
 }
