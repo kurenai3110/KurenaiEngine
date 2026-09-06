@@ -17,7 +17,7 @@
 #define KURENAI_SHADOW_SAMPLING_HLSLI
 
 // 全カスケードの深度を1枚にまとめたテクスチャ配列。スライス番号がカスケード番号に対応する
-// (エンジン側はKurenaiEngine3D::m_ShadowCascadeArray。CreateDepthTextureArrayで生成)。
+// (エンジン側はRenderTargets::ShadowCascadeArray。CreateDepthTextureArrayで生成)。
 // カスケードごとにTexture2Dを1枚ずつ宣言せずテクスチャ配列に統合してあるため、t4の1本で済む
 Texture2DArray ShadowMapArray : register(t4);
 
