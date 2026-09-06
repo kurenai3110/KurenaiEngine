@@ -133,7 +133,7 @@ namespace Kurenai::Passes
             });
         }
 
-        if (m_Engine.m_PostProcessSettings.TAAEnabled)
+        if (frame.Settings.PostProcess.TAAEnabled)
         {
             // 今フレームの書き込み先と、前フレームの結果(履歴)。Render()の末尾で役割が入れ替わる
             const uint32_t historyWriteIndex = m_Engine.m_TAAHistoryIndex;
@@ -201,14 +201,14 @@ namespace Kurenai::Passes
         //     常に実行する ---
         // この行はTAAパスのAddPassより後に置くこと。ラムダは値キャプチャなので、先に差し替えると
         // TAAが自分の出力を入力として読む形になる(RenderGraphが循環を検出して例外を投げる)
-        RHI::IRHITexture* hdrSceneColor = m_Engine.m_PostProcessSettings.TAAEnabled ? m_Engine.m_RenderTargets.TAAHistory[m_Engine.m_TAAHistoryIndex].get() : taaInputColor;
+        RHI::IRHITexture* hdrSceneColor = frame.Settings.PostProcess.TAAEnabled ? m_Engine.m_RenderTargets.TAAHistory[m_Engine.m_TAAHistoryIndex].get() : taaInputColor;
         // 【TAAパスの登録より後で確定させること】上のコメントの理由がそのまま効くため、
         // ブラックボードへ載せるのもこの位置にする
         bb.HdrSceneColor = hdrSceneColor;
 
         // --- 自動露出パス: SceneColorの輝度ヒストグラムから目標EV100を求め、時間方向に順応させる。
         //     結果はm_ExposureTextureへ書かれ、後段のTonemapパスが読む(AutoExposure.hlsl参照) ---
-        if (m_Engine.m_PostProcessSettings.AutoExposureEnabled)
+        if (frame.Settings.PostProcess.AutoExposureEnabled)
         {
             // シーン切り替え直後の1回だけ順応を飛ばす。パスを積んだ時点で消費しておくことで、
             // Executeが呼ばれる保証(グラフの枝刈り)に依存せず必ず1回で消える
@@ -284,7 +284,7 @@ namespace Kurenai::Passes
 
         // --- ブルームパス: SceneColorから半解像度のピラミッドを作り、段階的にダウンサンプル→
         //     3x3テントでアップサンプルしながら加算する。最終段(m_BloomUpTextures[0])をTonemapが読む ---
-        if (m_Engine.m_PostProcessSettings.BloomEnabled && !m_Engine.m_BloomDownTextures.empty())
+        if (frame.Settings.PostProcess.BloomEnabled && !m_Engine.m_BloomDownTextures.empty())
         {
             std::vector<RHI::IRHITexture*> bloomWrites;
             bloomWrites.reserve(m_Engine.m_BloomDownTextures.size() + m_Engine.m_BloomUpTextures.size());
@@ -444,7 +444,7 @@ namespace Kurenai::Passes
             ComputeEasuConstants(
                 upscaleConstants, renderWidth, renderHeight, upscaleOutputWidth, upscaleOutputHeight);
             upscaleConstants.OutputSize = { upscaleOutputWidth, upscaleOutputHeight };
-            upscaleConstants.RcasSharpnessScale = m_Engine.ComputeRcasSharpnessScale(m_Engine.m_PostProcessSettings.UpscaleSharpness);
+            upscaleConstants.RcasSharpnessScale = m_Engine.ComputeRcasSharpnessScale(frame.Settings.PostProcess.UpscaleSharpness);
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "UpscaleEASU",

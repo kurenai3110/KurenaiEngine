@@ -78,7 +78,7 @@ namespace Kurenai::Passes
         //
         //     【定数バッファは3つのエントリポイント共通】濁りはMieの密度としてTransmittanceにも
         //     MultiScatteringにも効くため、AtmosphereConstantsを3者で共有している
-        const float atmosphereMieDensityScale = ComputeAtmosphereMieDensityScale(m_Engine.m_SkySettings.Turbidity);
+        const float atmosphereMieDensityScale = ComputeAtmosphereMieDensityScale(frame.Settings.Sky.Turbidity);
         const auto updateAtmosphereConstants = [this, &sunLighting, atmosphereMieDensityScale]
             (RHI::IRHICommandList* cmd)
         {
@@ -91,7 +91,7 @@ namespace Kurenai::Passes
             cmd->SetComputeConstantBuffer(0, m_Engine.m_AtmosphereConstantBuffer.get());
         };
 
-        if (m_Engine.m_AtmosphereLUTBakedTurbidity != m_Engine.m_SkySettings.Turbidity &&
+        if (m_Engine.m_AtmosphereLUTBakedTurbidity != frame.Settings.Sky.Turbidity &&
             m_Engine.m_TransmittancePipelineState && m_Engine.m_MultiScatteringPipelineState)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
@@ -115,7 +115,7 @@ namespace Kurenai::Passes
                     cmd->Dispatch(groups, groups, 1);
                 },
             });
-            m_Engine.m_AtmosphereLUTBakedTurbidity = m_Engine.m_SkySettings.Turbidity;
+            m_Engine.m_AtmosphereLUTBakedTurbidity = frame.Settings.Sky.Turbidity;
         }
 
         // SkyView LUTを焼き直すかどうか。CSSkyViewの入力は太陽の向きと濁りだけで、
@@ -124,7 +124,7 @@ namespace Kurenai::Passes
         // 濁りは上のAtmosphereLUTBakeとまったく同じ条件で判定するため、濁りが動いたフレームでは
         // Transmittance/MultiScatteringとSkyViewが同じフレームで焼き直され、実行順序は
         // Reads/Writesの依存からレンダーグラフが決める
-        bool bakeSkyViewThisFrame = m_Engine.m_SkyViewBakedTurbidity != m_Engine.m_SkySettings.Turbidity;
+        bool bakeSkyViewThisFrame = m_Engine.m_SkyViewBakedTurbidity != frame.Settings.Sky.Turbidity;
         if (!bakeSkyViewThisFrame)
         {
             const DirectX::XMVECTOR current = DirectX::XMLoadFloat3(&sunLighting.SunPosition);
@@ -137,7 +137,7 @@ namespace Kurenai::Passes
         if (m_Engine.m_SkyViewPipelineState && bakeSkyViewThisFrame)
         {
             m_Engine.m_SkyViewBakedSunPosition = sunLighting.SunPosition;
-            m_Engine.m_SkyViewBakedTurbidity = m_Engine.m_SkySettings.Turbidity;
+            m_Engine.m_SkyViewBakedTurbidity = frame.Settings.Sky.Turbidity;
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyViewBake",
                 .Reads = { m_Engine.m_TransmittanceLUT.get(), m_Engine.m_MultiScatteringLUT.get() },
@@ -172,7 +172,7 @@ namespace Kurenai::Passes
                 sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
             };
             integrateConstants.IntegrateParams = {
-                sunLighting.SkyIlluminanceLux, effectiveExposure, m_Engine.m_SkySettings.Turbidity, m_Engine.m_SkySettings.Saturation
+                sunLighting.SkyIlluminanceLux, effectiveExposure, frame.Settings.Sky.Turbidity, frame.Settings.Sky.Saturation
             };
             integrateConstants.CloudParams0 = constants.CloudParams0;
             integrateConstants.CloudParams1 = constants.CloudParams1;
@@ -408,7 +408,7 @@ namespace Kurenai::Passes
         // ときだけ焼く。RenderGraphがReads/Writesから順序付けるため、トグルを入れたその同じ
         // フレームでLightingパスより先に実行される
         const bool needIrradianceBake =
-            m_Engine.m_IBLSettings.UseDedicatedIrradiance || m_Engine.m_DebugViewSettings.View == DebugView::IBLIrradiance;
+            frame.Settings.IBL.UseDedicatedIrradiance || frame.Settings.DebugView.View == DebugView::IBLIrradiance;
         if (needIrradianceBake && !m_Engine.m_IBLIrradianceBaked)
         {
             graph.AddPass(Core::RenderGraphPassDesc{

@@ -239,7 +239,7 @@ namespace Kurenai::Passes
         // --- 反射パス: Lightingパスが適用した鏡面IBLを、実際に追跡した反射で差し替える(20章)。
         //     ScreenSpaceならSSR(レイマーチ)、RaytracedならRT反射(RayQuery)。
         //     Offならスキップし、後段のTonemapが直接RenderTargets::SceneColorを読む ---
-        if (m_Engine.m_ReflectionSettings.Mode == ReflectionMode::ScreenSpace)
+        if (frame.Settings.Reflection.Mode == ReflectionMode::ScreenSpace)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SSR",

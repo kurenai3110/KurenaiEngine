@@ -7,6 +7,7 @@
 #include <DirectXMath.h>
 
 #include "RHI/IRHICommandList.h"
+#include "RenderSettingsSnapshot.h"
 
 // フレームの先頭で確定し、グラフ登録の間ずっと変わらない値をまとめたスナップショット(段階6)。
 //
@@ -158,5 +159,9 @@ namespace Kurenai::Rendering
         // 手続き空を今フレーム焼き直すか / 空の照度を積分し直すか
         bool BakeSkyThisFrame = false;
         bool SkyIntegrateThisFrame = false;
+
+        // パス群が読む設定の写し。**エンジンの設定そのものではない**ので、
+        // ここを書き換えてもUIには戻らない(戻す経路はエンジンのセッターだけ)
+        RenderSettingsSnapshot Settings;
     };
 }

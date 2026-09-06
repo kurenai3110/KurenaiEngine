@@ -363,7 +363,7 @@ namespace Kurenai::Passes
             }
         }
 
-        if (m_Engine.m_DDGISettings.Enabled && m_Engine.m_HasGIVolume && m_Engine.m_DDGIProbeCount > 0 && !m_Engine.m_DDGIUpdateSuspended)
+        if (frame.Settings.DDGI.Enabled && m_Engine.m_HasGIVolume && m_Engine.m_DDGIProbeCount > 0 && !m_Engine.m_DDGIUpdateSuspended)
         {
             // レイの取得をどちらで行うか。パスの登録とキャプチャの実行で同じ判定を使う
             const bool useRaytracedTrace = m_Engine.ShouldRunRaytracedDDGITrace();
@@ -378,12 +378,12 @@ namespace Kurenai::Passes
                     "KurenaiEngine3D",
                     useRaytracedTrace
                         ? std::string("DDGIのレイ取得: レイトレーシング(DXR)。太陽の影レイ: ") +
-                              (m_Engine.m_DDGISettings.SunShadowRayEnabled ? "有効" : "無効")
+                              (frame.Settings.DDGI.SunShadowRayEnabled ? "有効" : "無効")
                         : std::string("DDGIのレイ取得: ラスタライズ"));
             }
 
             uint32_t perFrame = std::min<uint32_t>(
-                static_cast<uint32_t>(std::max(m_Engine.m_DDGISettings.ProbesPerFrame, 1)), m_Engine.m_DDGIProbeCount);
+                static_cast<uint32_t>(std::max(frame.Settings.DDGI.ProbesPerFrame, 1)), m_Engine.m_DDGIProbeCount);
             if (!useRaytracedTrace)
             {
                 // 1フレームの描画回数・定数書き込み回数の上限はラスタ経路だけの制約。
@@ -415,7 +415,7 @@ namespace Kurenai::Passes
             // 【止めるモードでは停止するまでの全巡回を上書きで焼く】理由はKurenaiEngine3D.hの
             // kDDGIBounceCyclesのコメント参照。露出追従のm_DDGIOverwriteRemainingとは
             // 独立に効かせたいので、残数を消費せず条件だけ合流させる
-            const bool overwriteWholeCycle = !warmingUp && m_Engine.m_DDGISettings.UpdateMode != DDGIUpdateMode::Always;
+            const bool overwriteWholeCycle = !warmingUp && frame.Settings.DDGI.UpdateMode != DDGIUpdateMode::Always;
 
             // --- 格子のスクロールで未確定になったスロットを拾う ---
             //
@@ -568,12 +568,12 @@ namespace Kurenai::Passes
             // 一巡ぶん焼き終えるたびに数え、モードごとの巡回数に達したら止める。
             // 【上書きが残っている間は止めない】まだ焼き切っていないため。
             // 一巡目(warmingUp)はこの後の分岐で別に扱うのでここでは数えない
-            if (cycleCompleted && !warmingUp && m_Engine.m_DDGISettings.UpdateMode != DDGIUpdateMode::Always)
+            if (cycleCompleted && !warmingUp && frame.Settings.DDGI.UpdateMode != DDGIUpdateMode::Always)
             {
                 ++m_Engine.m_DDGIStableCycles;
                 if (m_Engine.m_DDGIOverwriteRemaining == 0)
                 {
-                    const uint32_t requiredCycles = (m_Engine.m_DDGISettings.UpdateMode == DDGIUpdateMode::OverwriteThenStop)
+                    const uint32_t requiredCycles = (frame.Settings.DDGI.UpdateMode == DDGIUpdateMode::OverwriteThenStop)
                         ? 1u
                         : kDDGIBounceCycles;
                     if (m_Engine.m_DDGIStableCycles >= requiredCycles)
@@ -617,7 +617,7 @@ namespace Kurenai::Passes
         // 拡散イラディアンスとinsideWeightを1/2解像度で求め、Lightingパスが深度を見て
         // アップサンプルする。雲と違い厳密ではない近似のため既定は無効(DDGIResolve.hlsl冒頭参照)
         const bool ddgiResolvePassRuns =
-            m_Engine.m_DDGISettings.HalfResolution && m_Engine.m_DDGIResolveTexture && m_Engine.m_DDGISettings.Enabled && m_Engine.m_HasGIVolume && m_Engine.m_DDGIBaked;
+            frame.Settings.DDGI.HalfResolution && m_Engine.m_DDGIResolveTexture && frame.Settings.DDGI.Enabled && m_Engine.m_HasGIVolume && m_Engine.m_DDGIBaked;
         if (ddgiResolvePassRuns)
         {
             RHI::Viewport ddgiResolveViewport;

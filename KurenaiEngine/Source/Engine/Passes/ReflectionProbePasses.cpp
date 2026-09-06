@@ -250,7 +250,7 @@ namespace Kurenai::Passes
 
         // OnDemandは、焼き上がりに影響する状態(時刻・太陽・ライト)が変わったフレームだけ焼き直す。
         // 一度も焼けていない間はシーン読み込み時の要求が既に立っているのでここでは何もしない
-        if (m_Engine.m_ReflectionProbeSettings.UpdateMode == ProbeUpdateMode::OnDemand && probeCount > 0 && m_Engine.m_ProbeBaked &&
+        if (frame.Settings.ReflectionProbe.UpdateMode == ProbeUpdateMode::OnDemand && probeCount > 0 && m_Engine.m_ProbeBaked &&
             m_Engine.ComputeProbeBakeSignature() != m_Engine.m_ProbeBakeSignature)
         {
             m_Engine.m_ProbeBakeRequested = true;
@@ -304,7 +304,7 @@ namespace Kurenai::Passes
             m_Engine.m_ProbeRealtimeFace = 0;
             m_Engine.m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
         }
-        else if (m_Engine.m_ReflectionProbeSettings.UpdateMode == ProbeUpdateMode::Realtime && probeCount > 0 && m_Engine.m_ProbeBaked)
+        else if (frame.Settings.ReflectionProbe.UpdateMode == ProbeUpdateMode::Realtime && probeCount > 0 && m_Engine.m_ProbeBaked)
         {
             // --- 時間分割: キャプチャフェーズ(1フレーム1面、6フレーム)→ プリフィルタフェーズ
             //     (1フレームkProbeRealtimePrefilterStepsPerFrame個の(mip,face)、6フレーム)を

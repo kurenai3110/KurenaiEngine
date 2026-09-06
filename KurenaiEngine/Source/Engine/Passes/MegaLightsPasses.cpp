@@ -187,7 +187,7 @@ namespace Kurenai::Passes
         RHI::IRHIBuffer* const meshLightBufferForBinding =
             meshLightsActive ? m_Engine.m_MeshLightScene.GetTriangleBuffer() : m_Engine.m_LightBuffer.get();
 
-        if (m_Engine.ShouldRunMegaLights() && m_Engine.m_MegaLightsSettings.Mode == MegaLightsMode::Reference)
+        if (m_Engine.ShouldRunMegaLights() && frame.Settings.MegaLights.Mode == MegaLightsMode::Reference)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLights",
@@ -273,9 +273,9 @@ namespace Kurenai::Passes
         // Initial を共有していることが陽性対照の土台になる ―― 共有を切った手法3は、
         // 手法2から再利用を外した構成と画素単位で一致するはず
         const bool megaLightsQuadShared =
-            m_Engine.ShouldRunMegaLights() && m_Engine.m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared;
+            m_Engine.ShouldRunMegaLights() && frame.Settings.MegaLights.Mode == MegaLightsMode::QuadShared;
         if (m_Engine.ShouldRunMegaLights() &&
-            (m_Engine.m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic || megaLightsQuadShared))
+            (frame.Settings.MegaLights.Mode == MegaLightsMode::Stochastic || megaLightsQuadShared))
         {
             // 2パスで同じ定数バッファを共有する。中身はグラフ構築のこの時点で確定しているので、
             // Initial側のExecuteで1回だけ更新すればよい
@@ -385,13 +385,13 @@ namespace Kurenai::Passes
             // 【手法3は再利用の段をどちらも通さない】リザーバを持ち回らないのが手法3の要点で、
             // 追加のレイ(可視レイ・時間検証レイ・不偏化の分母のための補正レイ)が
             // ここから生まれている。1画素1レイという予算はこれを外して初めて成り立つ
-            const bool temporalRuns = !megaLightsQuadShared && m_Engine.m_MegaLightsSettings.TemporalEnabled &&
+            const bool temporalRuns = !megaLightsQuadShared && frame.Settings.MegaLights.TemporalEnabled &&
                                       m_Engine.m_MegaLightsTemporalPipelineState &&
                                       m_Engine.m_MegaLightsReservoirHistory[0] && m_Engine.m_MegaLightsHistoryGuide[0];
-            const bool spatialRuns = !megaLightsQuadShared && m_Engine.m_MegaLightsSettings.SpatialEnabled &&
+            const bool spatialRuns = !megaLightsQuadShared && frame.Settings.MegaLights.SpatialEnabled &&
                                      m_Engine.m_MegaLightsSpatialPipelineState &&
                                      m_Engine.m_MegaLightsReservoirSpatialBuffer &&
-                                     m_Engine.m_MegaLightsReservoirSpatialBuffer2 && m_Engine.m_MegaLightsSettings.SpatialNeighborCount > 0;
+                                     m_Engine.m_MegaLightsReservoirSpatialBuffer2 && frame.Settings.MegaLights.SpatialNeighborCount > 0;
             // 反復回数。ping-pongのバッファと定数バッファの本数で上限が決まる。
             // 【時間再利用を切っているときは1回に落とす】不偏化の分母(Z)の可視性込みの
             // 判定は「生きているリザーバはこのフレーム・この画素で可視」という不変条件に
@@ -402,7 +402,7 @@ namespace Kurenai::Passes
             //(同じ測定で +0.0% / 誤差の中央値は 0.0379 → 0.0305 と改善)
             uint32_t spatialIterations =
                 spatialRuns ? static_cast<uint32_t>(std::clamp(
-                                  m_Engine.m_MegaLightsSettings.SpatialIterations, 1,
+                                  frame.Settings.MegaLights.SpatialIterations, 1,
                                   static_cast<int32_t>(kMegaLightsMaxSpatialIterations)))
                             : 0u;
             if (!temporalRuns && spatialIterations > 1u)
@@ -679,9 +679,9 @@ namespace Kurenai::Passes
         // ノイズもAAも両方失う(MegaLightsDenoise.hlsl 冒頭)
         // 手法2と手法3は同じデノイザを共有する(入力は「確率的に作られた1枚の絵」で同じもの)
         const bool megaLightsDenoiseRuns = m_Engine.ShouldRunMegaLights() &&
-                                           (m_Engine.m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic ||
-                                            m_Engine.m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared) &&
-                                           m_Engine.m_MegaLightsSettings.DenoiseEnabled && m_Engine.m_MegaLightsDenoiseTemporalPSO &&
+                                           (frame.Settings.MegaLights.Mode == MegaLightsMode::Stochastic ||
+                                            frame.Settings.MegaLights.Mode == MegaLightsMode::QuadShared) &&
+                                           frame.Settings.MegaLights.DenoiseEnabled && m_Engine.m_MegaLightsDenoiseTemporalPSO &&
                                            m_Engine.m_MegaLightsDenoisedTexture != nullptr;
         bb.MegaLightsDenoiseRuns = megaLightsDenoiseRuns;
         if (megaLightsDenoiseRuns)
@@ -692,9 +692,9 @@ namespace Kurenai::Passes
             // 書いているのは、手法2では時間再利用、手法3では Resolve。
             // どちらも走っていなければ更新されないので使えない
             const bool denoiseGuideWritten =
-                (m_Engine.m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared)
+                (frame.Settings.MegaLights.Mode == MegaLightsMode::QuadShared)
                     ? (m_Engine.m_MegaLightsResolvePipelineState != nullptr)
-                    : (m_Engine.m_MegaLightsSettings.TemporalEnabled && m_Engine.m_MegaLightsTemporalPipelineState != nullptr);
+                    : (frame.Settings.MegaLights.TemporalEnabled && m_Engine.m_MegaLightsTemporalPipelineState != nullptr);
             const bool denoiseGuideValid =
                 denoiseGuideWritten && m_Engine.m_MegaLightsHistoryGuide[0] && m_Engine.m_MegaLightsHistoryValid;
             // 【読むのは前フレームが書いた側】今フレームの時間再利用はもう片方へ書いている
@@ -705,7 +705,7 @@ namespace Kurenai::Passes
             const std::vector<RHI::IRHIBuffer*> denoiseGuideReads =
                 denoiseGuideBuffer ? std::vector<RHI::IRHIBuffer*>{ denoiseGuideBuffer }
                                    : std::vector<RHI::IRHIBuffer*>{};
-            const int atrousPasses = std::clamp(m_Engine.m_MegaLightsSettings.DenoiseAtrousPasses, 0, 5);
+            const int atrousPasses = std::clamp(frame.Settings.MegaLights.DenoiseAtrousPasses, 0, 5);
 
             const auto updateDenoiseConstants =
                 [this, denoiseGuideValid, renderWidth, renderHeight](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
@@ -875,10 +875,10 @@ namespace Kurenai::Passes
         //     「偏りが無くてもノイズがあるだけで平均が低く出る」。線形で足す場所がここに要る ---
         // 整定を待ってから足し始める(内部解像度の切り替えとストリーミングが片付くまで)
         ++m_Engine.m_MegaLightsAccumWarmupFrames;
-        const bool megaLightsAccumRuns = m_Engine.ShouldRunMegaLights() && m_Engine.m_MegaLightsSettings.AccumTargetFrames > 0 &&
+        const bool megaLightsAccumRuns = m_Engine.ShouldRunMegaLights() && frame.Settings.MegaLights.AccumTargetFrames > 0 &&
                                          m_Engine.m_MegaLightsAccumPipelineState && m_Engine.m_MegaLightsAccumBuffer &&
                                          m_Engine.m_MegaLightsAccumWarmupFrames > kMegaLightsAccumWarmup &&
-                                         m_Engine.m_MegaLightsAccumFrames < static_cast<uint32_t>(m_Engine.m_MegaLightsSettings.AccumTargetFrames);
+                                         m_Engine.m_MegaLightsAccumFrames < static_cast<uint32_t>(frame.Settings.MegaLights.AccumTargetFrames);
         if (megaLightsAccumRuns)
         {
             // 最初の1枚は「足す」ではなく「代入する」。RHIにバッファのクリアが無いため
@@ -911,8 +911,8 @@ namespace Kurenai::Passes
         // 画面キャプチャは8bit・トーンマップ後で、丸めだけでRMSEに0.29階調の下限が生まれる。
         // 「平均が真値へ 1/√N で寄るか」はその下限に隠れて読めないので、線形のまま取り出す
         if (!m_Engine.m_MegaLightsDumpPath.empty() && !m_Engine.m_MegaLightsDumpDone && m_Engine.m_MegaLightsAccumBuffer &&
-            m_Engine.m_MegaLightsSettings.AccumTargetFrames > 0 &&
-            m_Engine.m_MegaLightsAccumFrames >= static_cast<uint32_t>(m_Engine.m_MegaLightsSettings.AccumTargetFrames))
+            frame.Settings.MegaLights.AccumTargetFrames > 0 &&
+            m_Engine.m_MegaLightsAccumFrames >= static_cast<uint32_t>(frame.Settings.MegaLights.AccumTargetFrames))
         {
             const uint32_t accumBytes =
                 static_cast<uint32_t>(sizeof(float) * 4) * renderWidth * renderHeight;

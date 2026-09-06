@@ -6318,6 +6318,22 @@ namespace Kurenai
         // 【graph.Execute() が終わるまで生かすこと】パスの Execute ラムダはこの2つより
         // 長生きするので、ここより内側のスコープへ置くと参照が浮く
         Rendering::RenderFrameContext frameContext{};
+        // パス群が読む設定を、この1箇所でまとめて写す。**UIパネルの描画
+        // (m_UIManager->Draw)はこの行より前で終わっている**ので、写しても値は変わらない
+        frameContext.Settings.AmbientOcclusion = m_AmbientOcclusionSettings;
+        frameContext.Settings.Cloud = m_CloudSettings;
+        frameContext.Settings.DDGI = m_DDGISettings;
+        frameContext.Settings.DebugView = m_DebugViewSettings;
+        frameContext.Settings.EmissiveLight = m_EmissiveLightSettings;
+        frameContext.Settings.Geometry = m_GeometrySettings;
+        frameContext.Settings.IBL = m_IBLSettings;
+        frameContext.Settings.MegaLights = m_MegaLightsSettings;
+        frameContext.Settings.PostProcess = m_PostProcessSettings;
+        frameContext.Settings.ReflectionProbe = m_ReflectionProbeSettings;
+        frameContext.Settings.Reflection = m_ReflectionSettings;
+        frameContext.Settings.Shadow = m_ShadowSettings;
+        frameContext.Settings.Sky = m_SkySettings;
+        frameContext.Settings.Water = m_WaterSettings;
         frameContext.RenderWidth = m_RenderWidth;
         frameContext.RenderHeight = m_RenderHeight;
         frameContext.FrameConstantBuffer = m_FrameConstantBuffer.get();

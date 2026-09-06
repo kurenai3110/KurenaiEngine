@@ -77,7 +77,7 @@ namespace Kurenai::Passes
         int32_t presentMode = 0;
         uint32_t presentSourceWidth = renderWidth;
         uint32_t presentSourceHeight = renderHeight;
-        switch (m_Engine.m_DebugViewSettings.View)
+        switch (frame.Settings.DebugView.View)
         {
         case DebugView::Final:
             // Tonemapパスが既にSSR有効/無効を考慮したHDRソースをLDR変換済みのため、そのまま使う。
@@ -175,8 +175,8 @@ namespace Kurenai::Passes
         case DebugView::HiZ:
             presentSourceTexture = m_Engine.m_RenderTargets.HiZTexture.get();
             presentMode = 6; // 指定ミップをSampleLevelで読みグレースケール表示
-            presentSourceWidth = std::max(1u, renderWidth >> m_Engine.m_DebugViewSettings.HiZDebugMipLevel);
-            presentSourceHeight = std::max(1u, renderHeight >> m_Engine.m_DebugViewSettings.HiZDebugMipLevel);
+            presentSourceWidth = std::max(1u, renderWidth >> frame.Settings.DebugView.HiZDebugMipLevel);
+            presentSourceHeight = std::max(1u, renderHeight >> frame.Settings.DebugView.HiZDebugMipLevel);
             break;
         case DebugView::IBLIrradiance:
             // 本物のTextureCubeのため、SourceTexture(t0、Texture2D)ではなくDebugCubeTexture(t1)を
@@ -285,7 +285,7 @@ namespace Kurenai::Passes
             // 実寸を渡す。渡さないと画面いっぱいへ引き伸ばされ、セルが正方形に見えなくなる
             // 裏面率はイラディアンスアトラスのαなので、資源も寸法もイラディアンスと同じ
             const bool isIrradiance =
-                (m_Engine.m_DebugViewSettings.View == DebugView::DDGIIrradiance || m_Engine.m_DebugViewSettings.View == DebugView::DDGIProbeBackface);
+                (frame.Settings.DebugView.View == DebugView::DDGIIrradiance || frame.Settings.DebugView.View == DebugView::DDGIProbeBackface);
             const uint32_t cell = isIrradiance ? kDDGIIrradianceCell : kDDGIDistanceCell;
             const uint32_t columns = m_Engine.m_GIVolume.ProbeCounts[0] * m_Engine.m_GIVolume.ProbeCounts[1];
             const uint32_t rows = m_Engine.m_GIVolume.ProbeCounts[2];
@@ -293,7 +293,7 @@ namespace Kurenai::Passes
             presentSourceTexture = isIrradiance ? m_Engine.m_DDGIIrradianceAtlas.get() : m_Engine.m_DDGIDistanceAtlas.get();
             // Present.hlslのMode 14はモーションベクター(TAA、23章)が既に使っているため、
             // DDGIのイラディアンス/距離モーメントはMode 15/16にずらしてある
-            presentMode = (m_Engine.m_DebugViewSettings.View == DebugView::DDGIProbeBackface) ? 20 : (isIrradiance ? 15 : 16);
+            presentMode = (frame.Settings.DebugView.View == DebugView::DDGIProbeBackface) ? 20 : (isIrradiance ? 15 : 16);
             presentSourceWidth = m_Engine.m_HasGIVolume ? columns * cell : cell;
             presentSourceHeight = m_Engine.m_HasGIVolume ? rows * cell : cell;
             break;
@@ -322,13 +322,13 @@ namespace Kurenai::Passes
             // 大気散乱のLUT。HDRなのでMode 4(Reinhard+ガンマ)で表示する。
             // Transmittanceは0〜1なのでそのままでも読めるが、MultiScatteringは値が小さいので
             // 表示輝度の倍率と併用する
-            if (m_Engine.m_SkySettings.AtmosphereLUTDebugIndex == 1)
+            if (frame.Settings.Sky.AtmosphereLUTDebugIndex == 1)
             {
                 presentSourceTexture = m_Engine.m_MultiScatteringLUT.get();
                 presentSourceWidth = kMultiScatteringLUTSize;
                 presentSourceHeight = kMultiScatteringLUTSize;
             }
-            else if (m_Engine.m_SkySettings.AtmosphereLUTDebugIndex == 2)
+            else if (frame.Settings.Sky.AtmosphereLUTDebugIndex == 2)
             {
                 presentSourceTexture = m_Engine.m_SkyViewLUT.get();
                 presentSourceWidth = kSkyViewLUTWidth;
@@ -354,12 +354,12 @@ namespace Kurenai::Passes
             // 表示側の処理まで完全に一致させる。Present.hlslは無変更のまま使える
             if (bb.SoftwareRasterPassRuns)
             {
-                if (m_Engine.m_DebugViewSettings.View == DebugView::SoftwareRasterDepth)
+                if (frame.Settings.DebugView.View == DebugView::SoftwareRasterDepth)
                 {
                     presentSourceTexture = m_Engine.m_SoftwareRasterDepth.get();
                     presentMode = 5;
                 }
-                else if (m_Engine.m_DebugViewSettings.View == DebugView::SoftwareRasterNormal)
+                else if (frame.Settings.DebugView.View == DebugView::SoftwareRasterNormal)
                 {
                     presentSourceTexture = m_Engine.m_SoftwareRasterNormal.get();
                     presentMode = 7;
@@ -376,7 +376,7 @@ namespace Kurenai::Passes
         {
             // 雲の3Dノイズ。形状(128^3)とディテール(32^3)を切り替えて任意のスライスを見る。
             // 正方形のテクスチャなので表示も正方形にする(レターボックスの計算に渡す)
-            const bool showDetail = m_Engine.m_CloudSettings.NoiseDebugShowDetail;
+            const bool showDetail = frame.Settings.Cloud.NoiseDebugShowDetail;
             presentDebugVolumeTexture =
                 showDetail ? m_Engine.m_CloudDetailNoiseTexture.get() : m_Engine.m_CloudShapeNoiseTexture.get();
             presentMode = 18;
@@ -394,7 +394,7 @@ namespace Kurenai::Passes
         RHI::IRHIBuffer* const presentTileBuffer =
             presentUsesTilePool ? m_Engine.m_MegaLightsTilePoolBuffer.get() : m_Engine.m_LightTileBuffer.get();
         const uint32_t presentTileCapacity =
-            presentUsesTilePool ? static_cast<uint32_t>(m_Engine.m_MegaLightsSettings.TilePoolCapacity) : kLightTileCapacity;
+            presentUsesTilePool ? static_cast<uint32_t>(frame.Settings.MegaLights.TilePoolCapacity) : kLightTileCapacity;
         // Mode 21だけは候補プールを書いた有効タイル幅を使う。Mode 11は従来のライトグリッドなので
         // m_LightTileCountXのままにし、デバッグ表示が実データと別の添字を読まないようにする
         const uint32_t presentTileCountX =
@@ -409,7 +409,7 @@ namespace Kurenai::Passes
             static_cast<float>(presentTileCapacity),
             // ヒートマップで赤に振り切る基準のライト数。容量そのものを基準にすると
             // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある
-            static_cast<float>(std::max(1, m_Engine.m_DebugViewSettings.LightTileHeatmapMax)),
+            static_cast<float>(std::max(1, frame.Settings.DebugView.LightTileHeatmapMax)),
         };
         presentConstants.TileRenderSize =
         {
@@ -426,63 +426,63 @@ namespace Kurenai::Passes
             0.0f,
             0.0f,
         };
-        if (m_Engine.m_DebugViewSettings.View == DebugView::IBLPrefilter)
+        if (frame.Settings.DebugView.View == DebugView::IBLPrefilter)
         {
-            presentConstants.MipLevel = static_cast<float>(m_Engine.m_IBLSettings.PrefilterDebugMipLevel);
+            presentConstants.MipLevel = static_cast<float>(frame.Settings.IBL.PrefilterDebugMipLevel);
         }
-        else if (m_Engine.m_DebugViewSettings.View == DebugView::IBLIrradiance)
+        else if (frame.Settings.DebugView.View == DebugView::IBLIrradiance)
         {
             presentConstants.MipLevel = 0.0f; // イラディアンスマップは常に1ミップのみ
         }
-        else if (m_Engine.m_DebugViewSettings.View == DebugView::ProbePrefilter)
+        else if (frame.Settings.DebugView.View == DebugView::ProbePrefilter)
         {
-            presentConstants.MipLevel = static_cast<float>(m_Engine.m_ReflectionProbeSettings.PrefilterDebugMipLevel);
+            presentConstants.MipLevel = static_cast<float>(frame.Settings.ReflectionProbe.PrefilterDebugMipLevel);
         }
         else
         {
-            presentConstants.MipLevel = static_cast<float>(m_Engine.m_DebugViewSettings.HiZDebugMipLevel);
+            presentConstants.MipLevel = static_cast<float>(frame.Settings.DebugView.HiZDebugMipLevel);
         }
         // ArraySliceはMode 10ではカスケード番号、Mode 12ではプローブ番号として使う。
         // プローブが1つも無い場合でも配列の範囲外を引かないようクランプする
-        if (m_Engine.m_DebugViewSettings.View == DebugView::ProbePrefilter || m_Engine.m_DebugViewSettings.View == DebugView::ProbeDistance)
+        if (frame.Settings.DebugView.View == DebugView::ProbePrefilter || frame.Settings.DebugView.View == DebugView::ProbeDistance)
         {
             presentConstants.ArraySlice = static_cast<float>(
-                std::clamp(m_Engine.m_ReflectionProbeSettings.DebugIndex, 0, std::max(0, static_cast<int32_t>(m_Engine.m_ReflectionProbes.size()) - 1)));
+                std::clamp(frame.Settings.ReflectionProbe.DebugIndex, 0, std::max(0, static_cast<int32_t>(m_Engine.m_ReflectionProbes.size()) - 1)));
         }
-        else if (m_Engine.m_DebugViewSettings.View == DebugView::CloudNoiseSlice)
+        else if (frame.Settings.DebugView.View == DebugView::CloudNoiseSlice)
         {
             // Mode 18ではW座標(0〜1)として使う。3Dテクスチャなので配列番号ではなく連続値
-            presentConstants.ArraySlice = std::clamp(m_Engine.m_CloudSettings.NoiseDebugSlice, 0.0f, 1.0f);
+            presentConstants.ArraySlice = std::clamp(frame.Settings.Cloud.NoiseDebugSlice, 0.0f, 1.0f);
         }
         else
         {
             presentConstants.ArraySlice =
-                static_cast<float>(std::clamp(m_Engine.m_ShadowSettings.DebugCascade, 0, static_cast<int32_t>(Rendering::kCascadeCount) - 1));
+                static_cast<float>(std::clamp(frame.Settings.Shadow.DebugCascade, 0, static_cast<int32_t>(Rendering::kCascadeCount) - 1));
         }
         // Finalの見た目は倍率の影響を受けてはならないため、デバッグ表示のときだけ倍率を掛ける
         // (Gainはゼロ初期化のままだと0倍=真っ黒になるので、必ず明示的に設定すること)
-        if (m_Engine.m_DebugViewSettings.View == DebugView::ProbeDistance || m_Engine.m_DebugViewSettings.View == DebugView::DDGIDistance)
+        if (frame.Settings.DebugView.View == DebugView::ProbeDistance || frame.Settings.DebugView.View == DebugView::DDGIDistance)
         {
             // 距離は色ではなくワールド距離なので、Debug View Gain(1倍以上)ではなく
             // 「白になる距離」の逆数を渡す。Present.hlsl Mode 13/15の式は他と同じ「値×Gain」のまま。
             // DDGI側は距離がMaxRayDistanceでクランプされているので、そこを白にすると
             // 「クランプに当たっている方向」が一目で分かる
-            const float whiteAt = (m_Engine.m_DebugViewSettings.View == DebugView::DDGIDistance)
+            const float whiteAt = (frame.Settings.DebugView.View == DebugView::DDGIDistance)
                 ? m_Engine.m_GIVolume.MaxRayDistance
-                : m_Engine.m_ReflectionProbeSettings.DistanceDebugRange;
+                : frame.Settings.ReflectionProbe.DistanceDebugRange;
             presentConstants.Gain = 1.0f / std::max(whiteAt, 0.01f);
         }
-        else if (m_Engine.m_DebugViewSettings.View == DebugView::DDGIIrradiance)
+        else if (frame.Settings.DebugView.View == DebugView::DDGIIrradiance)
         {
             // アトラスは露出非依存の物理量で持っている(FrameConstants::DDGIParams4 参照)ため、
             // そのまま出すと昼は数万倍の値になって白飛びする。表示だけ実効プリ露出を掛けて
             // 他のバッファと同じ表示レンジへ揃える。こうしておくと
             // 「IBL - イラディアンス」の表示と直接見比べられる(22.9.1節の検証がこれに依存している)
-            presentConstants.Gain = m_Engine.m_DebugViewSettings.Gain * frame.EffectiveExposure;
+            presentConstants.Gain = frame.Settings.DebugView.Gain * frame.EffectiveExposure;
         }
         else
         {
-            presentConstants.Gain = (m_Engine.m_DebugViewSettings.View == DebugView::Final) ? 1.0f : m_Engine.m_DebugViewSettings.Gain;
+            presentConstants.Gain = (frame.Settings.DebugView.View == DebugView::Final) ? 1.0f : frame.Settings.DebugView.Gain;
         }
         commandList->UpdateBuffer(m_Engine.m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 

@@ -128,11 +128,11 @@ namespace Kurenai::Passes
 
         // --- AO/GIパス: 選択中の手法(SSAO / SSIL / RTAO)で遮蔽率(・間接拡散光)を計算し、
         //     ブラーで均す(常に指定した内部解像度)。出力フォーマットはどれもrgb=間接拡散光, a=遮蔽率で共通 ---
-        if (m_Engine.m_AmbientOcclusionSettings.Enabled)
+        if (frame.Settings.AmbientOcclusion.Enabled)
         {
             RHI::IRHITexture* const aoRawTexture = m_Engine.GetActiveAORawTexture();
             RHI::IRHITexture* const aoBlurredTexture = m_Engine.GetActiveAOTexture();
-            const bool useSSIL = !m_Engine.ShouldRunRaytracedAO() && m_Engine.m_AmbientOcclusionSettings.Technique == AOTechnique::SSILVisibilityBitmask;
+            const bool useSSIL = !m_Engine.ShouldRunRaytracedAO() && frame.Settings.AmbientOcclusion.Technique == AOTechnique::SSILVisibilityBitmask;
 
             if (m_Engine.ShouldRunRaytracedAO())
             {
@@ -285,7 +285,7 @@ namespace Kurenai::Passes
         //
         // 【手続き空が無効なら登録しない】.ksceneでDDSスカイボックスを使う場合、Lightingパスは
         // キューブマップをサンプルする経路(SkyParams.y <= 0.5)へ入り、この結果を一切読まない
-        const bool skyCloudPassRuns = m_Engine.m_SkyCloudTexture && (m_Engine.m_SkySettings.AnalyticBackground && usingProceduralSky);
+        const bool skyCloudPassRuns = m_Engine.m_SkyCloudTexture && (frame.Settings.Sky.AnalyticBackground && usingProceduralSky);
         if (skyCloudPassRuns)
         {
             RHI::Viewport skyCloudViewport;

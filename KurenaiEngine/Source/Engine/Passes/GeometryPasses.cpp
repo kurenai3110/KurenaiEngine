@@ -88,7 +88,7 @@ namespace Kurenai::Passes
         //
         // 【Hi-Zは前フレームのもの】Hi-Zパスの登録はG-Bufferより後なので、ここが読むのは
         // 前フレームに書かれた内容になる。カメラ移動ぶんAABBを膨らませて視差を吸収する
-        const bool modelCullGpuActive = m_Engine.m_GeometrySettings.ModelCullGpuEnabled && meshletPathActive
+        const bool modelCullGpuActive = frame.Settings.Geometry.ModelCullGpuEnabled && meshletPathActive
             && m_Engine.m_ModelCullPipelineState && m_Engine.m_ModelCullCounterBuffer && !m_Engine.m_Scene.Instances.empty();
 
         // hiZFromDepthPrepass = Hi-Zを**深度プリパスの深度から**作るか(宣言は上流にある)。
@@ -118,7 +118,7 @@ namespace Kurenai::Passes
         RHI::IRHIPipelineState* modelCullRegionPipelines[kModelCullRegionCount]{};
         if (modelCullGpuActive)
         {
-            const bool meshletDebug = m_Engine.m_GeometrySettings.MeshletDebugViewEnabled && m_Engine.m_GBufferMeshletDebugPipelineState;
+            const bool meshletDebug = frame.Settings.Geometry.MeshletDebugViewEnabled && m_Engine.m_GBufferMeshletDebugPipelineState;
             modelCullRegionPipelines[kModelCullRegionGBuffer] = meshletDebug
                 ? m_Engine.m_GBufferMeshletDebugPipelineState.get()
                 : m_Engine.m_GBufferMeshletPipelineState.get();
@@ -277,7 +277,7 @@ namespace Kurenai::Passes
         // 実際に描画発行まで任せるか。
         // 【DX11とメッシュシェーダー非対応環境では常にfalse】従来のCPUループへ縮退する
         const bool modelCullIndirectActive =
-            modelCullReady && m_Engine.m_GeometrySettings.ModelCullIndirectEnabled && m_Engine.m_Device->SupportsIndirectDispatchMesh();
+            modelCullReady && frame.Settings.Geometry.ModelCullIndirectEnabled && m_Engine.m_Device->SupportsIndirectDispatchMesh();
         m_Engine.m_ModelCullIndirectActiveLastFrame = modelCullIndirectActive;
         m_Engine.m_HiZFromDepthPrepassLastFrame = hiZFromDepthPrepass;
         m_Engine.m_ModelCullDispatchCounts[0] = hiZFromDepthPrepass
@@ -1006,7 +1006,7 @@ namespace Kurenai::Passes
         // 【なぜハードウェアと比べられるのか】GBufferパスとまったく同じjitteredProjを渡すため、
         // 深度は丸め誤差とフィルルールの差を除いて一致するはず。差が面全体に出たら
         // 座標変換の間違いで、シルエットの±1画素ならフィルルールの差(想定内)
-        const bool softwareRasterPassRuns = m_Engine.m_GeometrySettings.SoftwareRasterEnabled && m_Engine.m_RenderCapabilities.SoftwareRasterAvailable &&
+        const bool softwareRasterPassRuns = frame.Settings.Geometry.SoftwareRasterEnabled && m_Engine.m_RenderCapabilities.SoftwareRasterAvailable &&
                                             m_Engine.m_SoftwareRasterVisibilityBuffer && !m_Engine.m_Scene.Instances.empty();
         bb.SoftwareRasterPassRuns = softwareRasterPassRuns;
         if (softwareRasterPassRuns)
@@ -1052,7 +1052,7 @@ namespace Kurenai::Passes
         // ここへは来ない。プリパスが走らないフレームだけ、従来どおりG-Bufferの後で作る ――
         // その場合に読めるのは次フレームで、増幅シェーダーは前フレームのビュー射影行列で
         // 投影し、球を保守的に膨らませて視差を吸収する(GBufferMeshlet.hlslのIsMeshletOccluded)
-        const bool hiZPassRuns = (m_Engine.m_DebugViewSettings.View == DebugView::HiZ) || occlusionCullingActive;
+        const bool hiZPassRuns = (frame.Settings.DebugView.View == DebugView::HiZ) || occlusionCullingActive;
         if (!hiZPassRuns)
         {
             // このフレームで作らないなら、次フレームのHi-Zは「何フレームか前の、別のカメラ位置で
