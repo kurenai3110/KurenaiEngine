@@ -50,5 +50,9 @@ namespace Kurenai::Rendering
         // MegaLightsのデノイズを今フレーム走らせたか。
         // 後段の直接光パスが「生出力とデノイズ後のどちらを t7 へ張るか」をこれで決める
         bool MegaLightsDenoiseRuns = false;
+
+        // モデル単位GPUカリングの候補が今フレーム揃っていたか。
+        // graph.Execute() の後で走るカウンタの読み戻しが読む
+        bool ModelCullReady = false;
     };
 }

@@ -124,6 +124,17 @@ namespace Kurenai::Rendering
         // 大気遠近パスを今フレーム走らせるか
         bool FogPassRuns = false;
 
+        // ジオメトリの経路で、このフレームに何が有効かを配る一式
+        bool DepthPrepassRuns = false;
+        bool HiZFromDepthPrepass = false;
+        bool OcclusionCullEnabledThisFrame = false;
+        bool OcclusionCullingActive = false;
+        bool MeshletPathActive = false;
+        bool MeshletCullStatsActive = false;
+
+        // 前フレームからカメラが動いた距離[m]。Hi-Zオクルージョンの判定が使う
+        float CameraMoveDistance = 0.0f;
+
         // 太陽・月・空の状態と、GPUへ送った FrameConstants。
         // **どちらもRender()のローカルを指す。** graph.Execute()が終わるまで生きているので
         // 登録中に読んでよいが、Executeラムダへ渡すときは必要な値だけを値で写すこと
