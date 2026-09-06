@@ -20,6 +20,10 @@ namespace Kurenai::RHI
     public:
         explicit DX12CommandList(DX12Device* device);
 
+        // GPUリソースが破棄されるときに呼ばれ、シャドウに残ったディスクリプタハンドルを
+        // すべてnullディスクリプタへ戻す。
+        void InvalidateShadowedDescriptors();
+
         void SetRenderTarget(IRHISwapChain* swapChain) override;
         void SetRenderTargets(
             IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture, uint32_t depthArraySlice = 0) override;

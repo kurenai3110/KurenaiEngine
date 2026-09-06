@@ -184,6 +184,9 @@ namespace Kurenai::RHI
         // bindless区画への登録があれば返却する(DX12Buffer::~DX12Bufferと同じ扱い)
         if (m_Device)
         {
+            // どのスレッドから破棄されてもよいよう、ここではatomicな印を立てるだけにする。
+            m_Device->OnGPUResourceDestroyed();
+
             if (DX12BindlessTable* table = m_Device->GetBindlessTable())
             {
                 table->Unregister(m_BindlessIndex);

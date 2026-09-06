@@ -158,6 +158,9 @@ namespace Kurenai::RHI
         // 渡された場合に何もしないため、登録の有無で分岐する必要はない
         if (m_Device)
         {
+            // どのスレッドから破棄されてもよいよう、ここではatomicな印を立てるだけにする。
+            m_Device->OnGPUResourceDestroyed();
+
             if (DX12BindlessTable* table = m_Device->GetBindlessTable())
             {
                 table->Unregister(m_BindlessIndex);

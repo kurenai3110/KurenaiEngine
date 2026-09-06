@@ -39,6 +39,23 @@ namespace Kurenai::RHI
         device->GetCommandList()->QueryInterface(IID_PPV_ARGS(&m_CommandList6));
     }
 
+    void DX12CommandList::InvalidateShadowedDescriptors()
+    {
+        const D3D12_CPU_DESCRIPTOR_HANDLE nullSrv = m_Device->GetNullSrvCpuHandle();
+        const D3D12_CPU_DESCRIPTOR_HANDLE nullUav = m_Device->GetNullUavCpuHandle();
+
+        // テクスチャはmip・キューブ面ごとに複数のUAVを持ち、バッファにもSRV/UAVがあるため、
+        // リソースごとのハンドル一致判定では取りこぼしうる。破棄は解像度変更やシーン切り替え時に
+        // 限られて極めて低頻度なので、全スロットを無条件に消すほうが安全である。次のDraw/Dispatchで
+        // 必要な分だけ張り直すため、性能上の損失もない。
+        std::fill(std::begin(m_PendingSrvHandles), std::end(m_PendingSrvHandles), nullSrv);
+        std::fill(std::begin(m_PendingComputeSrvHandles), std::end(m_PendingComputeSrvHandles), nullSrv);
+        std::fill(std::begin(m_PendingComputeUavHandles), std::end(m_PendingComputeUavHandles), nullUav);
+        std::fill(std::begin(m_LastDrawSrvHandles), std::end(m_LastDrawSrvHandles), nullSrv);
+        std::fill(std::begin(m_BoundComputeUavResources), std::end(m_BoundComputeUavResources), nullptr);
+        m_HasLastDraw = false;
+    }
+
     void DX12CommandList::UnbindSrvSlotsBoundTo(IRHITexture* texture)
     {
         auto* dx12Texture = static_cast<DX12Texture*>(texture);

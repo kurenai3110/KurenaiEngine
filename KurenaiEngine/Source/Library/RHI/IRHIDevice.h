@@ -211,6 +211,10 @@ namespace Kurenai::RHI
         virtual std::unique_ptr<IRHISamplerSet> CreateSamplerSet(const SamplerDesc* descs, uint32_t count) = 0;
         virtual IRHICommandList* GetImmediateCommandList() = 0;
 
+        // 破棄されたGPUリソースのディスクリプタが、コマンドリストのバインド状態に残っていれば消す。
+        // フレームの先頭、GPUコマンドを1つも積んでいない時点で、Renderスレッドから呼ぶこと。
+        virtual void ApplyPendingResourceInvalidation() = 0;
+
         // ImGui連携。ImGuiはバックエンド(DX11/DX12)ごとに専用の実装が必要なため、
         // このRHI抽象化層でも他のAPIと同様にバックエンド実装側(DX11Deviceなど)に委譲する
         virtual std::unique_ptr<IRHIImGuiBackend> CreateImGuiBackend(void* windowHandle) = 0;

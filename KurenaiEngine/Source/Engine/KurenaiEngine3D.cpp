@@ -5280,6 +5280,10 @@ namespace Kurenai
             }
         }
 
+        // このフレームのGPUコマンドをまだ1つも積んでおらず、UpdateSceneStreamingとバッファ精度・
+        // 解像度の作り直しの両方より後なので、そこで生じた破棄をすべて拾える。どのパスもまだ
+        // バインドしていないため、上書きまで維持する前提のバインドをフレーム途中で失わせない。
+        m_Device->ApplyPendingResourceInvalidation();
         auto* commandList = m_Device->GetImmediateCommandList();
         m_GPUProfiler->BeginFrame();
         m_CPUProfiler.BeginFrame();

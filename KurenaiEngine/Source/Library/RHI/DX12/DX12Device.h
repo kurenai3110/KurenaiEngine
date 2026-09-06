@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <d3d12.h>
 #include <d3d12sdklayers.h> // ID3D12InfoQueue(デバッグレイヤーのメッセージ引き取り用)
@@ -74,6 +75,7 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHITexture> CreateReadbackTexture(IRHITexture* source, uint32_t mipLevel = 0) override;
         std::unique_ptr<IRHISamplerSet> CreateSamplerSet(const SamplerDesc* descs, uint32_t count) override;
         IRHICommandList* GetImmediateCommandList() override;
+        void ApplyPendingResourceInvalidation() override;
 
         std::unique_ptr<IRHIImGuiBackend> CreateImGuiBackend(void* windowHandle) override;
         std::unique_ptr<IRHIGPUProfiler> CreateGPUProfiler() override;
@@ -112,6 +114,11 @@ namespace Kurenai::RHI
         // 「未バインドのスロットは0を返す」というDX11と同じ挙動を構造的に保証する
         D3D12_CPU_DESCRIPTOR_HANDLE GetNullSrvCpuHandle() const { return m_RenderSrvCpuHeap->GetCpuHandle(m_NullSrvIndex); }
         D3D12_CPU_DESCRIPTOR_HANDLE GetNullUavCpuHandle() const { return m_RenderSrvCpuHeap->GetCpuHandle(m_NullUavIndex); }
+
+        // GPUリソースの破棄を、コマンドリストのシャドウへ伝える(DX12CommandList参照)
+        void OnGPUResourceDestroyed();
+        // 保留中の破棄通知をRenderスレッドでシャドウへ反映する。
+        void ApplyPendingShadowedDescriptorInvalidation();
 
         // フレームごとに1ずつ増える通し番号。DX12Bufferがリングへの書き込み回数を
         // 「同一フレーム内で何回目か」として数えるために参照する(ResetCommandList()で進む)
@@ -421,6 +428,7 @@ namespace Kurenai::RHI
         uint64_t m_FrameStamp = 0;
 
         std::unique_ptr<DX12CommandList> m_ImmediateCommandList;
+        std::atomic<bool> m_ShadowedDescriptorsDirty{ false };
 
         uint32_t m_NextSrvTableIndex = 0;
         // 1フレームあたりの払い出しブロック数の検証用(実際のリング位置には影響しない)。

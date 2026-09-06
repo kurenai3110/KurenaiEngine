@@ -1228,6 +1228,12 @@ namespace Kurenai::RHI
         return m_ImmediateCommandList.get();
     }
 
+    void DX11Device::ApplyPendingResourceInvalidation()
+    {
+        // DX11はSRVを参照カウント付きのCOMポインタで直接バインドし、CPUディスクリプタハンドルの
+        // シャドウを持たないため、破棄済みリソースのハンドルが残る問題自体が起こらない。
+    }
+
     void DX11Device::WaitForGPUIdle()
     {
         D3D11_QUERY_DESC queryDesc{};

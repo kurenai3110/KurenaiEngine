@@ -59,6 +59,7 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHITexture> CreateReadbackTexture(IRHITexture* source, uint32_t mipLevel = 0) override;
         std::unique_ptr<IRHISamplerSet> CreateSamplerSet(const SamplerDesc* descs, uint32_t count) override;
         IRHICommandList* GetImmediateCommandList() override;
+        void ApplyPendingResourceInvalidation() override;
 
         std::unique_ptr<IRHIImGuiBackend> CreateImGuiBackend(void* windowHandle) override;
         std::unique_ptr<IRHIGPUProfiler> CreateGPUProfiler() override;

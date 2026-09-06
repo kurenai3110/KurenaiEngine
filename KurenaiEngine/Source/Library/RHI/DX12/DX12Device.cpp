@@ -2923,6 +2923,29 @@ namespace Kurenai::RHI
         return m_ImmediateCommandList.get();
     }
 
+    void DX12Device::ApplyPendingResourceInvalidation()
+    {
+        ApplyPendingShadowedDescriptorInvalidation();
+    }
+
+    void DX12Device::OnGPUResourceDestroyed()
+    {
+        // どのスレッドから破棄されても安全なよう、ここではatomicな印を立てるだけにする。
+        m_ShadowedDescriptorsDirty.store(true, std::memory_order_release);
+    }
+
+    void DX12Device::ApplyPendingShadowedDescriptorInvalidation()
+    {
+        // このメソッドはRenderスレッドからだけ呼び、シャドウ配列を他スレッドから変更しない。
+        // Loaderスレッドがフレーム途中で破棄した場合、そのフレームの残りは古いハンドルが残り、
+        // 消去は次フレーム先頭になる。修正前は永久に残っていたものを1フレーム以内に縮めるが、
+        // このフレーム途中の残存は限界として残る。
+        if (m_ShadowedDescriptorsDirty.exchange(false, std::memory_order_acq_rel) && m_ImmediateCommandList)
+        {
+            m_ImmediateCommandList->InvalidateShadowedDescriptors();
+        }
+    }
+
     std::unique_ptr<IRHIImGuiBackend> DX12Device::CreateImGuiBackend(void* windowHandle)
     {
         return std::make_unique<DX12ImGuiBackend>(this, windowHandle);
