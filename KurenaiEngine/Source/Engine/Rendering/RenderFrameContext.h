@@ -72,6 +72,13 @@ namespace Kurenai::Rendering
         // **ラムダへは値で渡すこと** ―― 登録関数を抜けたあとにExecuteが走る
         RHI::Viewport GBufferViewport{};
 
+        // シャドウマップ解像度のビューポート
+        RHI::Viewport ShadowViewport{};
+
+        // カスケードごとのライト視点ビュー射影。**Render()のローカル配列を指す。**
+        // 要素数は KurenaiEngine3D::kCascadeCount。graph.Execute()が終わるまで生きている
+        const DirectX::XMMATRIX* CascadeViewProj = nullptr;
+
         // このフレームの空が手続き空か(.ksceneのDDSではないか)
         bool UsingProceduralSky = false;
 
