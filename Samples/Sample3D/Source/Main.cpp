@@ -9,6 +9,7 @@
 #include <exception>
 #include <fstream>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -495,12 +496,29 @@ namespace
         return dumps;
     }
 
+    // -sceneを指定したのに解決できなかったときに投げる。
+    //
+    // 【既定のシーンへ落とさない】以前は警告を1行出して0番(一覧の先頭)で起動していたが、
+    // 終了コードも0のままなので、**無人実行では指定ミスが静かに別のシーンの計測になる**。
+    // 実際に -scene LODSwitchTest が _PlateauDebug.kscene を読み、
+    // 新旧ビルドのバイト比較が丸ごと別シーンのものになった
+    // (docs/ImplementationHistory.md 85章)。
+    //
+    // 【専用の型にしてMessageBoxを出さない理由】wWinMainのstd::exceptionハンドラは
+    // ダイアログを出す。無人実行ではそこで止まってしまうため、この失敗だけは
+    // ログと終了コードだけで返す
+    struct SceneNotResolvedError : std::runtime_error
+    {
+        using std::runtime_error::runtime_error;
+    };
+
     // コマンドラインの「-scene <名前>」(拡張子を除いたファイル名。例: MontSaintMichel)を、
     // KurenaiEngine3Dが構築するシーン一覧上の番号へ解決する。
     // 一覧の作り方(列挙→_wcsicmpで昇順ソート→Assets::ReadSceneNameが成功したものだけ採用)は
     // KurenaiEngine3D::DiscoverScenes()(KurenaiEngine3D.cpp)と厳密に一致させる必要がある
     // (手順がずれると番号が一覧側とずれ、意図と別のシーンが開いてしまう)。
-    // 指定が無い/見つからない場合は0を返す(従来どおり一覧の先頭シーンで起動する)
+    // 【-sceneの指定が無いときだけ0を返す】指定があって解決できないときは
+    // SceneNotResolvedErrorを投げる(上のコメント参照)
     size_t ParseInitialSceneIndex()
     {
         int argc = 0;
@@ -534,9 +552,9 @@ namespace
 
         if (requestedName.empty())
         {
-            Kurenai::Core::Logger::Warning(
-                "Main", "-sceneの後にシーン名が指定されていないため、既定のシーンで起動します");
-            return 0;
+            Kurenai::Core::Logger::Error(
+                "Main", "-sceneの後にシーン名が指定されていません");
+            throw SceneNotResolvedError("-sceneの後にシーン名が指定されていません");
         }
 
         // 実行ファイル(Sample3D.exe)自身のあるディレクトリを求める。
@@ -549,9 +567,9 @@ namespace
         DWORD exePathLength = GetModuleFileNameW(nullptr, exePathBuffer, MAX_PATH);
         if (exePathLength == 0 || exePathLength == MAX_PATH)
         {
-            Kurenai::Core::Logger::Warning(
-                "Main", "実行ファイルのパス取得に失敗したため、既定のシーンで起動します");
-            return 0;
+            Kurenai::Core::Logger::Error(
+                "Main", "実行ファイルのパス取得に失敗したため、-sceneの指定を解決できません");
+            throw SceneNotResolvedError("実行ファイルのパス取得に失敗しました");
         }
 
         const std::wstring exePath(exePathBuffer, exePathLength);
@@ -576,11 +594,10 @@ namespace
         }
         else
         {
-            Kurenai::Core::Logger::Warning(
-                "Main",
-                "シーンフォルダを開けなかったため、既定のシーンで起動します (" +
-                    Kurenai::Core::WideToUtf8(sceneDirectory) + ")");
-            return 0;
+            const std::string message =
+                "シーンフォルダを開けませんでした (" + Kurenai::Core::WideToUtf8(sceneDirectory) + ")";
+            Kurenai::Core::Logger::Error("Main", message);
+            throw SceneNotResolvedError(message);
         }
 
         std::sort(fileNames.begin(), fileNames.end(), [](const std::wstring& a, const std::wstring& b)
@@ -621,11 +638,22 @@ namespace
             ++resolvedIndex;
         }
 
-        Kurenai::Core::Logger::Warning(
-            "Main",
-            "指定されたシーンが見つからなかったため、既定のシーンで起動します: " +
-                Kurenai::Core::WideToUtf8(requestedName));
-        return 0;
+        // 【候補を並べて出す】名前の綴りではなく「そのシーンが配布先に無い」ことが
+        // 原因のことがある。エンジンが読むのはビルド出力の Assets\Scenes\ で、
+        // Git管理下の Scenes\ からの自動コピーは無い
+        std::string candidates;
+        for (const std::wstring& fileName : fileNames)
+        {
+            const size_t dotPos = fileName.find_last_of(L'.');
+            const std::wstring stem = dotPos == std::wstring::npos ? fileName : fileName.substr(0, dotPos);
+            if (!candidates.empty()) { candidates += ", "; }
+            candidates += Kurenai::Core::WideToUtf8(stem);
+        }
+        const std::string message =
+            "指定されたシーンが見つかりません: " + Kurenai::Core::WideToUtf8(requestedName) +
+            " (探した場所: " + Kurenai::Core::WideToUtf8(sceneDirectory) + " / 候補: " + candidates + ")";
+        Kurenai::Core::Logger::Error("Main", message);
+        throw SceneNotResolvedError(message);
     }
 }
 
@@ -1010,6 +1038,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             renderHeight = engine.GetRenderHeight();
             sceneIndex = engine.GetCurrentSceneIndex();
         }
+    }
+    catch (const SceneNotResolvedError&)
+    {
+        // 【MessageBoxを出さない】ログには既に出してある。無人実行が
+        // ダイアログで止まらないよう、終了コードだけで失敗を伝える
+        exitCode = 1;
     }
     catch (const std::exception& e)
     {
