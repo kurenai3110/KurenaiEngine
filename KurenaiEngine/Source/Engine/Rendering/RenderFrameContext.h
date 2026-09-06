@@ -72,6 +72,13 @@ namespace Kurenai::Rendering
         DirectX::XMMATRIX JitteredProj{};
         DirectX::XMMATRIX InvViewProj{};
 
+        // 水面での鏡映変換と、それを掛けたビュー射影。平面反射パスが使う
+        DirectX::XMMATRIX ReflectMatrix{};
+        DirectX::XMMATRIX ReflectedViewProj{};
+
+        // 水面の高さ[m]。鏡映の基準になる平面
+        float WaterPlaneY = 0.0f;
+
         // このフレームのTAAジッタ量[UV]
         DirectX::XMFLOAT2 JitterUv{ 0.0f, 0.0f };
 

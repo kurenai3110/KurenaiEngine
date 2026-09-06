@@ -24,6 +24,7 @@
 #include "Passes/EnvironmentPasses.h"
 #include "Passes/DDGIPasses.h"
 #include "Passes/PostProcessPasses.h"
+#include "Passes/ReflectionPasses.h"
 #include "Passes/ReflectionProbePasses.h"
 #include "Passes/ShadowPasses.h"
 #include "Passes/PresentPass.h"
@@ -598,50 +599,6 @@ namespace Kurenai
         static_assert(offsetof(SSILConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
         static_assert(sizeof(SSILConstants) == 32, "SSILConstants の総サイズが変わっている");
 
-        // SSR.hlsl側のcbuffer SSRConstantsと一致させる必要がある
-        struct alignas(16) SSRConstants
-        {
-            // w: 水面の解析空フォールバックを使うか(1=使う)。Render()側で
-            // m_WaterSettings.AnalyticSkyReflection && usingProceduralSky の両方が立っているときだけ1にする
-            // (手続き空が無効なシーンではDDSは任意の絵でPerezモデルとは無関係なため、
-            // このトグルの値に関わらず必ず0にする)
-            DirectX::XMFLOAT4 Params0; // x: 最大レイ距離, y: ヒット判定の厚み, z: ラフネスカットオフ, w: 水面の解析空フォールバック
-            // 平面反射(末尾に追加)。x: 平面反射が有効か(1=使う。m_ReflectionSettings.PlanarEnabled &&
-            // 水面インスタンスが存在するときのみ1)、y: 波の法線による画面UVのずらし量
-            // (m_ReflectionSettings.PlanarDistortion)、zw: 未使用
-            DirectX::XMFLOAT4 Params1;
-        };
-        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
-        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
-        // HLSL側を直さないかぎり黙って別の値を読むことになる。
-        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
-        //
-        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
-        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
-        static_assert(offsetof(SSRConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
-        static_assert(offsetof(SSRConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
-        static_assert(sizeof(SSRConstants) == 32, "SSRConstants の総サイズが変わっている");
-
-        // RTReflection.hlsl側のcbuffer RTReflectionConstantsと一致させる必要がある
-        struct alignas(16) RTReflectionConstants
-        {
-            DirectX::XMFLOAT4 Params0; // xy: 出力サイズ(ピクセル), z: 最大レイ距離, w: ラフネスカットオフ
-            // x: 影レイを撃つか(1で撃つ)
-            // y: メッシュレットのデバッグ表示(1で、反射に映る面をメッシュレット色で塗る)
-            // zw: 未使用
-            DirectX::XMFLOAT4 Params1;
-        };
-        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
-        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
-        // HLSL側を直さないかぎり黙って別の値を読むことになる。
-        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
-        //
-        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
-        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
-        static_assert(offsetof(RTReflectionConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
-        static_assert(offsetof(RTReflectionConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
-        static_assert(sizeof(RTReflectionConstants) == 32, "RTReflectionConstants の総サイズが変わっている");
-
         // RTShadow.hlsl側のcbuffer RTShadowConstantsと一致させる必要がある
         struct alignas(16) RTShadowConstants
         {
@@ -1126,6 +1083,7 @@ namespace Kurenai
         m_EnvironmentPasses = std::make_unique<Passes::EnvironmentPasses>(*this);
         m_PostProcessPasses = std::make_unique<Passes::PostProcessPasses>(*this);
         m_DDGIPasses = std::make_unique<Passes::DDGIPasses>(*this);
+        m_ReflectionPasses = std::make_unique<Passes::ReflectionPasses>(*this);
         m_ReflectionProbePasses = std::make_unique<Passes::ReflectionProbePasses>(*this);
         m_ShadowPasses = std::make_unique<Passes::ShadowPasses>(*this);
         m_PresentPass = std::make_unique<Passes::PresentPass>(*this);
@@ -1580,7 +1538,7 @@ namespace Kurenai
 
         RHI::BufferDesc ssrConstantBufferDesc;
         ssrConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        ssrConstantBufferDesc.SizeInBytes = sizeof(SSRConstants);
+        ssrConstantBufferDesc.SizeInBytes = sizeof(Passes::SSRConstants);
         m_SSRConstantBuffer = m_Device->CreateBuffer(ssrConstantBufferDesc);
 
         // 大気遠近パス(頂点バッファなしのフルスクリーン三角形。反射パスの出力とG-Buffer深度から
@@ -1784,7 +1742,7 @@ namespace Kurenai
 
             RHI::BufferDesc rtReflectionConstantBufferDesc;
             rtReflectionConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-            rtReflectionConstantBufferDesc.SizeInBytes = sizeof(RTReflectionConstants);
+            rtReflectionConstantBufferDesc.SizeInBytes = sizeof(Passes::RTReflectionConstants);
             m_RTReflectionConstantBuffer = m_Device->CreateBuffer(rtReflectionConstantBufferDesc);
 
             // RTシャドウパス(コンピュートシェーダー。TLASへ太陽の円盤方向の影レイを撃ち可視率を求める)。
@@ -6975,6 +6933,9 @@ namespace Kurenai
         frameContext.JitterUv = jitterUv;
         frameContext.UsingProceduralSky = usingProceduralSky;
         frameContext.FogPassRuns = fogPassRuns;
+        frameContext.ReflectMatrix = reflectMatrix;
+        frameContext.ReflectedViewProj = reflectedViewProj;
+        frameContext.WaterPlaneY = waterPlaneY;
         frameContext.BakeSkyThisFrame = bakeSkyThisFrame;
         frameContext.SkyIntegrateThisFrame = skyIntegrateThisFrame;
         frameContext.Sun = &sunLighting;
@@ -9571,358 +9532,10 @@ namespace Kurenai
             },
         });
 
-        // --- 平面反射パス: 水面に不透明ジオメトリの鏡像を映すフォワードパス ---
-        // 水面が無いシーン・無効化時はパスを登録しない(SSR側のフラグも0になる。下のSSRパス参照)
-        if (planarReflectionPassRuns)
-        {
-            RHI::Viewport planarReflectionViewport;
-            planarReflectionViewport.Width = static_cast<float>(m_PlanarReflectionWidth);
-            planarReflectionViewport.Height = static_cast<float>(m_PlanarReflectionHeight);
-
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "PlanarReflection",
-                // ProbeCapture/captureProbeFaceと同じ理由でシャドウ・IBL・DDGIを挙げ、
-                // これらを書くパスより後ろへ順序付ける(実際のバインドはExecute内)
-                .Reads = {
-                    m_ShadowCascadeArray.get(), m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(),
-                    m_BRDFLUTTexture.get(), m_DDGIIrradianceAtlas.get(), m_DDGIDistanceAtlas.get(),
-                    m_SkyViewLUT.get(),
-                },
-                .RenderTargets = { m_PlanarReflectionColor.get() },
-                .DepthTarget = m_PlanarReflectionDepth.get(),
-                // 大気遠近。空パラメータ(m_SkyParametersBuffer)をSkyIntegrateパスの後へ
-                // 順序付けさせるために挙げる(実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
-                // m_DroneBufferはこのパス末尾でドローンショーの機体を描き足すために読む
-                // (実際のバインドはExecute内)
-                .BufferReads = { m_LightBuffer.get(), m_SkyParametersBuffer.get(), m_DroneBuffer.get() },
-                .Execute = [this, &constants, &planarReflectionViewport, reflectedViewProj, reflectMatrix,
-                            waterPlaneY, viewMatrix, jitteredProj, effectiveExposure](RHI::IRHICommandList* cmd)
-                {
-                    // captureProbeFaceとまったく同じ作法(constants.ViewProj/CameraPosition/
-                    // PrevViewProj/TAAParams/PlanarReflectionPlaneだけをこのパス用に差し替える)。
-                    // Viewはカメラのビュー行列のままにする(PlanarReflection.hlsl冒頭の
-                    // 【Viewをカメラのままにする理由】参照。ProbeCaptureとは異なる理由による)
-                    FrameConstants reflectionConstants = constants;
-                    DirectX::XMStoreFloat4x4(&reflectionConstants.ViewProj, DirectX::XMMatrixTranspose(reflectedViewProj));
-                    const DirectX::XMVECTOR reflectedCameraPos =
-                        DirectX::XMVector3Transform(DirectX::XMLoadFloat4(&constants.CameraPosition), reflectMatrix);
-                    DirectX::XMFLOAT4 reflectedCameraPosFloat;
-                    DirectX::XMStoreFloat4(&reflectedCameraPosFloat, reflectedCameraPos);
-                    reflectionConstants.CameraPosition = { reflectedCameraPosFloat.x, reflectedCameraPosFloat.y, reflectedCameraPosFloat.z, 0.0f };
-                    // TAA関連はカメラ視点のものが入ったままなので明示的に潰す(captureProbeFaceと同じ理由)
-                    reflectionConstants.PrevViewProj = reflectionConstants.ViewProj;
-                    reflectionConstants.TAAParams = { 0.0f, 0.0f, 0.0f, 0.0f };
-                    // Hi-Zオクルージョンカリングも潰す(captureProbeFaceと同じ理由)。
-                    // 鏡映カメラから見える範囲とメインカメラのHi-Zは無関係
-                    reflectionConstants.OcclusionCullParams = { 0.0f, 0.0f, 0.0f, 0.0f };
-                    // 統計も止める(captureProbeFaceと同じ理由)
-                    reflectionConstants.MeshletCullStatsParams = { 0.0f, 0.0f, 0.0f, 0.0f };
-                    reflectionConstants.PlanarReflectionPlane = { 0.0f, 1.0f, 0.0f, -waterPlaneY };
-                    cmd->UpdateBuffer(m_PlanarReflectionConstantBuffer.get(), &reflectionConstants, sizeof(reflectionConstants));
-
-                    // RenderTargets/DepthTargetはパス宣言(.RenderTargets/.DepthTarget)により
-                    // RenderGraphが自動的にバインド済みのため、ここではビューポート設定と
-                    // クリアだけでよい(GBuffer/Lightingパスと同じ流儀。captureProbeFaceは
-                    // .Writesのみの宣言のため例外的に手動バインドしている)
-                    cmd->SetViewport(planarReflectionViewport);
-                    cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
-                    // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする
-                    cmd->ClearDepth(0.0f);
-
-                    cmd->SetPipelineState(m_PlanarReflectionPipelineState.get());
-                    cmd->SetConstantBuffer(0, m_PlanarReflectionConstantBuffer.get());
-                    cmd->SetSamplerSet(m_MaterialSamplers.get());
-
-                    // captureProbeFaceと同じ順・同じレジスタでバインドする(PlanarReflection.hlsl参照)
-                    cmd->SetTexture(4, m_ShadowCascadeArray.get());
-                    cmd->SetShaderResourceBuffer(8, m_LightBuffer.get());
-                    cmd->SetTexture(9, m_IrradianceTexture.get());
-                    cmd->SetTexture(10, m_PrefilteredEnvTexture.get());
-                    cmd->SetTexture(11, m_BRDFLUTTexture.get());
-                    cmd->SetTexture(12, m_DDGIIrradianceAtlas.get());
-                    cmd->SetTexture(13, m_DDGIDistanceAtlas.get());
-                    // 大気遠近のin-scatter項が読む空パラメータ(PlanarReflection.hlsl参照)
-                    cmd->SetShaderResourceBuffer(14, m_SkyParametersBuffer.get());
-                    // 大気散乱のSkyView LUT。in-scatter項の空の色はここから引く
-                    cmd->SetTexture(15, m_SkyViewLUT.get());
-
-                    // 鏡映カメラで描くとワインディングが全反転するため、PSOの切り替えは
-                    // instance.IsMirroredの否定で行う(このファイル冒頭のPSO生成箇所のコメント参照)
-                    RHI::IRHIPipelineState* currentPipelineState = m_PlanarReflectionPipelineState.get();
-                    const auto bindPipelineState = [&](bool mirrored)
-                    {
-                        RHI::IRHIPipelineState* const wanted =
-                            mirrored ? m_PlanarReflectionPipelineStateMirrored.get() : m_PlanarReflectionPipelineState.get();
-                        if (wanted == currentPipelineState)
-                        {
-                            return;
-                        }
-                        cmd->SetPipelineState(wanted);
-                        cmd->SetConstantBuffer(0, m_PlanarReflectionConstantBuffer.get());
-                        cmd->SetSamplerSet(m_MaterialSamplers.get());
-                        currentPipelineState = wanted;
-                    };
-
-                    // 鏡映カメラの錐台で間引く。カメラ本体の錐台とは別物なので、
-                    // 画面には映っていないが水面には映るものが正しく残る
-                    const FrustumPlanes reflectionFrustum = ExtractFrustumPlanes(reflectedViewProj);
-
-                    // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
-                    // 深度プリパス/G-Bufferと同じ「そのフレームに選ばれた段」を描くが、
-                    // 【このパスはクロスディザ非対応】なのでフェード中でも段は1つに決め打つ
-                    // (GeometryLODMode::Current)。ストリーミング中で未読み込みなら描かない
-                    GeometryDrawLoopDesc planarLoop;
-                    planarLoop.Frustum = &reflectionFrustum;
-                    planarLoop.LODMode = GeometryLODMode::Current;
-                    // 半透明メッシュは反射に含めない(ProbeCaptureと同じ割り切り。
-                    // PlanarReflection.hlsl冒頭参照)
-                    planarLoop.MeshFilter = GeometryMeshFilter::Opaque;
-
-                    ForEachGeometryDraw(
-                        planarLoop,
-                        // このパスは1ドロー経路(メッシュレット)を持たない
-                        [](const InstanceDrawUnit&, const Assets::Model&, float) { return false; },
-                        [&](const InstanceDrawUnit& unit, const Assets::Model& currentModel,
-                            const Assets::Mesh& mesh, float)
-                        {
-                            const Assets::ModelInstance& instance = *unit.Instance;
-
-                            // 鏡映で巻きが反転するため、ミラーリングの有無に対して逆のPSOを選ぶ。
-                            // バッチ内では IsMirrored が同一(グループ化のキー)なので代表で決めてよい
-                            bindPipelineState(!instance.IsMirrored);
-
-                            ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, currentModel, mesh, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
-                            objectConstants.InstanceBase = unit.InstanceBase;
-                            objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
-                            cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
-                            cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
-
-                            // 【毎回張り直す】このパスはモデルのあとにドローンショーを描き、
-                            // そちらが同じ頂点シェーダー用SRV(t0)へ自分のバッファを張る。
-                            // 張り直さないと全インスタンスがドローンの座標を行列として読む
-                            if (unit.IsBatch())
-                            {
-                                cmd->SetVertexShaderResourceBuffer(0, m_ModelInstanceBuffer.get());
-                            }
-
-                            cmd->SetVertexBuffer(mesh.VertexBuffer.get());
-                            cmd->SetIndexBuffer(mesh.IndexBuffer.get());
-                            cmd->SetTexture(0, mesh.BaseColorTexture);
-                            cmd->SetTexture(1, mesh.NormalTexture);
-                            cmd->SetTexture(2, mesh.MetallicRoughnessTexture);
-                            cmd->SetTexture(3, mesh.EmissiveTexture);
-                            cmd->SetTexture(5, mesh.OcclusionTexture);
-                            cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
-                            return true;
-                        });
-
-                    // --- 水面へ映すドローンショーの機体 ---
-                    // 平面反射は「カメラを鏡映しただけで世界は動かしていない」ので、
-                    // 機体もそのままのワールド座標で、鏡映済みのビュー行列で描き直せばよい。
-                    // これを描かないと、空には編隊が出ているのに水面には何も映らない
-                    // (SSRパスがm_PlanarReflectionColorを水面へ合成する)
-                    if (m_DroneShowEnabled && !m_DroneInstances.empty())
-                    {
-                        DirectX::XMFLOAT4X4 projection;
-                        DirectX::XMStoreFloat4x4(&projection, jitteredProj);
-
-                        Passes::DroneShowConstants droneConstants{};
-                        // 鏡映×カメラのビュー行列。reflectedViewProjの分解と同じ組み合わせで、
-                        // Projはメインカメラのジッター済みProjをそのまま使う
-                        DirectX::XMStoreFloat4x4(
-                            &droneConstants.View, DirectX::XMMatrixTranspose(reflectMatrix * viewMatrix));
-                        DirectX::XMStoreFloat4x4(&droneConstants.Proj, DirectX::XMMatrixTranspose(jitteredProj));
-                        droneConstants.Params0 = {
-                            m_DroneShow.Data().Brightness * effectiveExposure,
-                            m_DroneShowMinScreenRadius,
-                            projection._11,
-                            0.0f,
-                        };
-                        // 水面より下にいる機体は反射に映してはいけない。ジオメトリ側の
-                        // SV_ClipDistance0(FrameConstants.PlanarReflectionPlane)と同じ規約・同じ平面
-                        droneConstants.ClipPlane = { 0.0f, 1.0f, 0.0f, -waterPlaneY };
-                        droneConstants.Params1 = { 1.0f, 0.0f, 0.0f, 0.0f };
-                        cmd->UpdateBuffer(m_DroneShowConstantBuffer.get(), &droneConstants, sizeof(droneConstants));
-
-                        // メイン描画とまったく同じPSOでよい(ビルボードの四隅はビュー空間で
-                        // 足しており鏡映行列を通らないため、巻きが反転しない。
-                        // 詳しい理由はPSO生成箇所のコメント)
-                        cmd->SetPipelineState(m_DroneShowPipelineState.get());
-                        cmd->SetConstantBuffer(1, m_DroneShowConstantBuffer.get());
-                        cmd->SetVertexShaderResourceBuffer(0, m_DroneBuffer.get());
-                        cmd->Draw(static_cast<uint32_t>(m_DroneInstances.size()) * 6u, 0);
-                    }
-                },
-            });
-        }
-
-        // --- 反射パス: Lightingパスが適用した鏡面IBLを、実際に追跡した反射で差し替える(20章)。
-        //     ScreenSpaceならSSR(レイマーチ)、RaytracedならRT反射(RayQuery)。
-        //     Offならスキップし、後段のTonemapが直接m_SceneColorを読む ---
-        if (m_ReflectionSettings.Mode == ReflectionMode::ScreenSpace)
-        {
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "SSR",
-                // SSRはLightingパスが適用した鏡面IBLを「差し替える」ため、そのとき使ったものと
-                // 同じ環境ソース(プローブ配列・グローバルのプリフィルタ済み鏡面)とBRDF LUT・AOを
-                // 読む必要がある(20章)。
-                // 手続き空はm_PrefilteredEnvTextureの焼き込み経由で入ってくるため、
-                // 空のキューブマップをここで直接バインドする必要はない
-                .Reads = {
-                    m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
-                    m_GBufferAlbedo.get(), activeAOTexture, m_BRDFLUTTexture.get(), m_PrefilteredEnvTexture.get(),
-                    m_ProbePrefilteredArray.get(), m_ProbeDistanceArray.get(),
-                    // 平面反射。パスが登録されなかったフレームでもこのReadsは無害
-                    // (今フレームのWriterが無いため単に依存辺が張られないだけ)
-                    m_PlanarReflectionColor.get(),
-                    // 大気散乱のSkyView LUT。水面に映る空をここから引く
-                    m_SkyViewLUT.get(),
-                    // bent normal(34章)。スペキュラ遮蔽をLightingパスと同じ規則で求めるために読む
-                    m_GBufferBentNormal.get(),
-                },
-                .RenderTargets = { m_SSRTexture.get() },
-                // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
-                // (実際のバインドはExecute内)
-                .BufferReads = { m_SkyParametersBuffer.get() },
-                .Execute = [this, &gbufferViewport, activeAOTexture, usingProceduralSky,
-                            planarReflectionPassRuns](RHI::IRHICommandList* cmd)
-                {
-                    // 水面の解析空フォールバック。手続き空が無効(.ksceneがDDSスカイボックスを
-                    // 明示するシーン)なときは、m_WaterSettings.AnalyticSkyReflectionの値に関わらず必ず0にする
-                    // ――DDSは任意の絵でPerezモデルとは無関係なため、SSR.hlsl側のSkyColorで
-                    // 解析評価してはいけない(usingProceduralSkyはRender()前半で既に確定済み。
-                    // DeferredLighting.hlsl向けのconstants.SkyParams.y代入と同じ判断)
-                    const float waterAnalyticSkyFlag =
-                        (m_WaterSettings.AnalyticSkyReflection && usingProceduralSky) ? 1.0f : 0.0f;
-                    // 平面反射。このフレームでPlanarReflectionパスを実際に実行したときだけ
-                    // 有効にする(登録されなかったフレームにm_PlanarReflectionColorの中身は
-                    // 前フレーム/未定義の残骸なので、フラグをそのままSSR.hlsl側へ渡してはいけない)
-                    const float planarReflectionFlag = planarReflectionPassRuns ? 1.0f : 0.0f;
-
-                    SSRConstants ssrConstants{};
-                    ssrConstants.Params0 =
-                        { m_ReflectionSettings.SSRMaxDistance, m_ReflectionSettings.SSRThickness, m_ReflectionSettings.SSRRoughnessCutoff, waterAnalyticSkyFlag };
-                    ssrConstants.Params1 = { planarReflectionFlag, m_ReflectionSettings.PlanarDistortion, 0.0f, 0.0f };
-                    cmd->UpdateBuffer(m_SSRConstantBuffer.get(), &ssrConstants, sizeof(ssrConstants));
-
-                    cmd->SetViewport(gbufferViewport);
-                    cmd->SetPipelineState(m_SSRPipelineState.get());
-                    cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-                    cmd->SetConstantBuffer(1, m_SSRConstantBuffer.get());
-                    cmd->SetSamplerSet(m_ScreenSpaceSamplers.get());
-                    cmd->SetTexture(0, m_SceneColor.get());
-                    cmd->SetTexture(1, m_GBufferNormal.get());
-                    cmd->SetTexture(2, m_GBufferMaterial.get());
-                    cmd->SetTexture(3, m_GBufferDepth.get());
-                    cmd->SetTexture(4, m_GBufferAlbedo.get());
-                    cmd->SetTexture(5, activeAOTexture);
-                    cmd->SetTexture(6, m_BRDFLUTTexture.get());
-                    cmd->SetTexture(7, m_PrefilteredEnvTexture.get());
-                    cmd->SetTexture(8, m_ProbePrefilteredArray.get());
-                    cmd->SetShaderResourceBuffer(9, m_ProbeBuffer.get());
-                    cmd->SetTexture(10, m_ProbeDistanceArray.get());
-                    // 平面反射。DX12はディスクリプタテーブルに未初期化のスロットが残ると
-                    // 動作が未定義になるため、パスが無効なフレームでも常にバインドする
-                    // (反射プローブ・DDGIと同じ理由)
-                    cmd->SetTexture(11, m_PlanarReflectionColor.get());
-                    // 空パラメータ。SSR.hlsl側はt12(t0〜t11が既に使用済み)
-                    cmd->SetShaderResourceBuffer(12, m_SkyParametersBuffer.get());
-                    // ボリュメトリック積雲の3Dノイズ。水面に映る雲も背景とまったく同じ
-                    // 立体にならなければ「空の雲と水面の雲が別物」になるため、ここにも同じものを渡す
-                    cmd->SetTexture(13, m_CloudShapeNoiseTexture.get());
-                    cmd->SetTexture(14, m_CloudDetailNoiseTexture.get());
-                    // 大気散乱のSkyView LUT。雲と同じ理由で、水面に映る空も
-                    // 背景とまったく同じものでなければならない
-                    cmd->SetTexture(15, m_SkyViewLUT.get());
-                    // 焼いたウェザーマップ(H3)。**Lightingパスと同じものを渡さないと、
-                    // 水面に映る雲と空の雲が別の場所に立つ**
-                    cmd->SetTexture(17, m_CloudWeatherNoiseTexture.get());
-                    // bent normal(34章)。Lightingパスとまったく同じものを読まないと、
-                    // SSRが適用される領域とされない領域の境界に段差が出る。
-                    // **t11は平面反射が使っているためt16へ移した**
-                    cmd->SetTexture(16, m_GBufferBentNormal.get());
-                    cmd->Draw(3, 0);
-                },
-            });
-        }
-        else if (ShouldRunRaytracedReflection())
-        {
-            // RT反射パス。読むものはSSRとほぼ同じ(同じ鏡面IBLを差し替えるため)で、
-            // これに加えてTLASとシーンジオメトリの統合バッファを読む。
-            // レジスタ割り当てはRTReflection.hlsl側の宣言と一致させること
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "RTReflection",
-                .Reads = {
-                    m_SceneColor.get(), m_GBufferNormal.get(), m_GBufferMaterial.get(), m_GBufferDepth.get(),
-                    m_GBufferAlbedo.get(), activeAOTexture, m_BRDFLUTTexture.get(), m_PrefilteredEnvTexture.get(),
-                    m_ProbePrefilteredArray.get(), m_GBufferBentNormal.get(),
-                },
-                .Writes = { m_RTReflectionTexture.get() },
-                .Execute = [this, activeAOTexture](RHI::IRHICommandList* cmd)
-                {
-                    RTReflectionConstants rtConstants{};
-                    rtConstants.Params0 = {
-                        static_cast<float>(m_RenderWidth), static_cast<float>(m_RenderHeight),
-                        m_ReflectionSettings.RTReflectionMaxDistance, m_ReflectionSettings.RTReflectionRoughnessCutoff
-                    };
-                    // yはメッシュレットのデバッグ表示。ラスタ側と同じトグルで駆動するので、
-                    // 有効にすると「直接見えている面」と「反射に映る面」の両方が
-                    // メッシュレット色になり、同じ塊が同じ色かを見比べられる
-                    rtConstants.Params1 = {
-                        m_ReflectionSettings.RTReflectionShadowRayEnabled ? 1.0f : 0.0f,
-                        m_GeometrySettings.MeshletDebugViewEnabled ? 1.0f : 0.0f,
-                        0.0f,
-                        0.0f,
-                    };
-                    cmd->UpdateBuffer(m_RTReflectionConstantBuffer.get(), &rtConstants, sizeof(rtConstants));
-
-                    cmd->SetComputePipelineState(m_RTReflectionPipelineState.get());
-                    // 【スクリーン空間用ではなくマテリアル用のセット】ヒット面のマテリアル
-                    // テクスチャをbindlessで引くようになったため、s0にWrapのサンプラーが要る。
-                    // モデルのUVはタイリング前提で[0,1]の外へ出るので、Clampで引くと
-                    // 端のテクセルが引き伸ばされて模様が崩れる。
-                    // s1(色バッファ)・s2(データ)はどちらのセットでも中身が同じで、
-                    // s0でこのシェーダーが他に引くのはキューブマップだけ(アドレスモードは
-                    // 面をまたぐフィルタに使われないため無関係)なので、切り替えの影響はここだけ
-                    cmd->SetComputeSamplerSet(m_MaterialSamplers.get());
-                    cmd->SetComputeConstantBuffer(0, m_FrameConstantBuffer.get());
-                    cmd->SetComputeConstantBuffer(1, m_RTReflectionConstantBuffer.get());
-
-                    cmd->SetComputeAccelerationStructure(0, m_RaytracingScene.GetTopLevelAS());
-                    cmd->SetComputeTexture(1, m_SceneColor.get());
-                    cmd->SetComputeTexture(2, m_GBufferNormal.get());
-                    cmd->SetComputeTexture(3, m_GBufferMaterial.get());
-                    cmd->SetComputeTexture(4, m_GBufferDepth.get());
-                    cmd->SetComputeTexture(5, m_GBufferAlbedo.get());
-                    cmd->SetComputeTexture(6, activeAOTexture);
-                    cmd->SetComputeTexture(7, m_BRDFLUTTexture.get());
-                    cmd->SetComputeTexture(8, m_PrefilteredEnvTexture.get());
-                    cmd->SetComputeTexture(9, m_ProbePrefilteredArray.get());
-                    cmd->SetComputeShaderResourceBuffer(10, m_ProbeBuffer.get());
-                    cmd->SetComputeShaderResourceBuffer(11, m_RaytracingScene.GetVertexAttributeBuffer());
-                    cmd->SetComputeShaderResourceBuffer(12, m_RaytracingScene.GetIndexBuffer());
-                    cmd->SetComputeShaderResourceBuffer(13, m_RaytracingScene.GetMeshInfoBuffer());
-                    cmd->SetComputeShaderResourceBuffer(14, m_RaytracingScene.GetInstanceInfoBuffer());
-                    cmd->SetComputeShaderResourceBuffer(15, m_RaytracingScene.GetMaterialBuffer());
-                    // メッシュレット表(t17)。RTReflection.hlslのKURENAI_RT_MESHLET_REGISTERと
-                    // 一致させること。デバッグ表示でヒット面のメッシュレットを引くのに使う。
-                    // 無いシーンでバインドしない理由はRTAO側と同じ。
-                    // t8はプリフィルタ済み鏡面(上の16行目)が使っており空いていない
-                    if (RHI::IRHIBuffer* meshletBuffer = m_RaytracingScene.GetMeshletTriangleOffsetBuffer())
-                    {
-                        cmd->SetComputeShaderResourceBuffer(17, meshletBuffer);
-                    }
-                    // bent normal(34章)。t0〜t15が埋まっているためt16。
-                    // SSR.hlslと同じくスペキュラ遮蔽の方向依存を再現するために要る
-                    cmd->SetComputeTexture(16, m_GBufferBentNormal.get());
-
-                    // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
-                    cmd->SetComputeUnorderedAccessTexture(0, m_RTReflectionTexture.get());
-                    cmd->Dispatch((m_RenderWidth + 7) / 8, (m_RenderHeight + 7) / 8, 1);
-                },
-            });
-        }
+        // --- 反射のパス群(段階6で Passes/ReflectionPasses へ移設) ---
+        // 【この位置で登録すること】依存が同点のときRenderGraphは最小登録番号を選ぶ。
+        // 登録順そのものが実行順の一部になっている
+        m_ReflectionPasses->Register(graph, frameContext, blackboard);
 
         // --- ポストプロセスのパス群(段階6で Passes/PostProcessPasses へ移設) ---
         // 【この位置で登録すること】依存が同点のときRenderGraphは最小登録番号を選ぶ。

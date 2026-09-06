@@ -85,6 +85,7 @@ namespace Kurenai::Passes
     class DDGIPasses;
     class EnvironmentPasses;
     class PostProcessPasses;
+    class ReflectionPasses;
     class ReflectionProbePasses;
     class ShadowPasses;
     class PresentPass;
@@ -138,6 +139,7 @@ namespace Kurenai
         friend class Passes::DDGIPasses;
         friend class Passes::EnvironmentPasses;
         friend class Passes::PostProcessPasses;
+        friend class Passes::ReflectionPasses;
         friend class Passes::ReflectionProbePasses;
         friend class Passes::ShadowPasses;
         friend class Passes::PresentPass;
@@ -776,6 +778,7 @@ namespace Kurenai
         std::unique_ptr<Passes::DDGIPasses> m_DDGIPasses;
         std::unique_ptr<Passes::EnvironmentPasses> m_EnvironmentPasses;
         std::unique_ptr<Passes::PostProcessPasses> m_PostProcessPasses;
+        std::unique_ptr<Passes::ReflectionPasses> m_ReflectionPasses;
         std::unique_ptr<Passes::ReflectionProbePasses> m_ReflectionProbePasses;
         std::unique_ptr<Passes::ShadowPasses> m_ShadowPasses;
         std::unique_ptr<Passes::PresentPass> m_PresentPass;
