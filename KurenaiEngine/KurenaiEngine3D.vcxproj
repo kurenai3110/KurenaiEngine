@@ -99,6 +99,7 @@
     <ClInclude Include="Source\Engine\Settings\PostProcessSettings.h" />
     <ClInclude Include="Source\Engine\Settings\QualitySettings.h" />
     <ClInclude Include="Source\Engine\Rendering\GeometryDrawLoop.h" />
+    <ClInclude Include="Source\Engine\Rendering\GeometryDrawTypes.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderTargets.h" />
     <ClInclude Include="Source\Engine\Rendering\ShadowConstants.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderBlackboard.h" />

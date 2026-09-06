@@ -122,19 +122,19 @@ namespace Kurenai::Passes
             // 【カリングを一切行わない】上のコメントのとおり、プローブの位置ごとに結果が
             // 変わるため定数バッファの予算計算と食い違う。錐台を渡さないことでそれを表す
             // (統計にも入らない)
-            KurenaiEngine3D::GeometryDrawLoopDesc ddgiLoop;
+            Rendering::GeometryDrawLoopDesc ddgiLoop;
             ddgiLoop.Frustum = nullptr;
             ddgiLoop.UseDrawUnits = false;
-            ddgiLoop.LODMode = KurenaiEngine3D::GeometryLODMode::Coarsest;
+            ddgiLoop.LODMode = Rendering::GeometryLODMode::Coarsest;
             // 半透明メッシュを焼かない理由は反射プローブと同じ(不透明として描かれるため、
             // ガラスが壁になって裏の景色が欠ける)
-            ddgiLoop.MeshFilter = KurenaiEngine3D::GeometryMeshFilter::Opaque;
+            ddgiLoop.MeshFilter = Rendering::GeometryMeshFilter::Opaque;
             ddgiLoop.MeshCulling = false;
 
             m_Engine.ForEachGeometryDraw(
                 ddgiLoop,
-                [](const KurenaiEngine3D::InstanceDrawUnit&, const Assets::Model&, float) { return false; },
-                [&](const KurenaiEngine3D::InstanceDrawUnit& unit, const Assets::Model& coarsestModel,
+                [](const Rendering::InstanceDrawUnit&, const Assets::Model&, float) { return false; },
+                [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& coarsestModel,
                     const Assets::Mesh& mesh, float)
                 {
                     const Assets::ModelInstance& instance = *unit.Instance;

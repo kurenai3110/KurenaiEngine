@@ -252,14 +252,14 @@ namespace Kurenai::Passes
                         // 意味が無い。ストリーミング中で未読み込みなら描かない。
                         // バッチはどの段を描くかを既に決めてある(全員が同じ段であることが
                         // バッチの条件そのもの)
-                        KurenaiEngine3D::GeometryDrawLoopDesc shadowLoop;
+                        Rendering::GeometryDrawLoopDesc shadowLoop;
                         shadowLoop.Frustum = &cascadeFrustum;
-                        shadowLoop.LODMode = KurenaiEngine3D::GeometryLODMode::Coarsest;
-                        shadowLoop.MeshFilter = KurenaiEngine3D::GeometryMeshFilter::All;
+                        shadowLoop.LODMode = Rendering::GeometryLODMode::Coarsest;
+                        shadowLoop.MeshFilter = Rendering::GeometryMeshFilter::All;
 
                         m_Engine.ForEachGeometryDraw(
                             shadowLoop,
-                            [&](const KurenaiEngine3D::InstanceDrawUnit& unit, const Assets::Model& coarsestModel, float)
+                            [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& coarsestModel, float)
                             {
                                 const Assets::ModelInstance& instance = *unit.Instance;
 
@@ -323,7 +323,7 @@ namespace Kurenai::Passes
                                 }
                                 return true;
                             },
-                            [&](const KurenaiEngine3D::InstanceDrawUnit& unit, const Assets::Model& coarsestModel,
+                            [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& coarsestModel,
                                 const Assets::Mesh& mesh, float)
                             {
                                 const Assets::ModelInstance& instance = *unit.Instance;

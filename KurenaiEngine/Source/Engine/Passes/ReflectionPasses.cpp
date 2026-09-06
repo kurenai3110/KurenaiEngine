@@ -150,18 +150,18 @@ namespace Kurenai::Passes
                     // 深度プリパス/G-Bufferと同じ「そのフレームに選ばれた段」を描くが、
                     // 【このパスはクロスディザ非対応】なのでフェード中でも段は1つに決め打つ
                     // (GeometryLODMode::Current)。ストリーミング中で未読み込みなら描かない
-                    KurenaiEngine3D::GeometryDrawLoopDesc planarLoop;
+                    Rendering::GeometryDrawLoopDesc planarLoop;
                     planarLoop.Frustum = &reflectionFrustum;
-                    planarLoop.LODMode = KurenaiEngine3D::GeometryLODMode::Current;
+                    planarLoop.LODMode = Rendering::GeometryLODMode::Current;
                     // 半透明メッシュは反射に含めない(ProbeCaptureと同じ割り切り。
                     // PlanarReflection.hlsl冒頭参照)
-                    planarLoop.MeshFilter = KurenaiEngine3D::GeometryMeshFilter::Opaque;
+                    planarLoop.MeshFilter = Rendering::GeometryMeshFilter::Opaque;
 
                     m_Engine.ForEachGeometryDraw(
                         planarLoop,
                         // このパスは1ドロー経路(メッシュレット)を持たない
-                        [](const KurenaiEngine3D::InstanceDrawUnit&, const Assets::Model&, float) { return false; },
-                        [&](const KurenaiEngine3D::InstanceDrawUnit& unit, const Assets::Model& currentModel,
+                        [](const Rendering::InstanceDrawUnit&, const Assets::Model&, float) { return false; },
+                        [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& currentModel,
                             const Assets::Mesh& mesh, float)
                         {
                             const Assets::ModelInstance& instance = *unit.Instance;

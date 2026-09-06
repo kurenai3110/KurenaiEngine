@@ -166,14 +166,14 @@ namespace Kurenai::Passes
             // 消えてしまう。CPU側の判定は突き合わせ用にcpuVisibleとして数えるだけ。
             // 【バッチは使わない】1モデル1ドロー経路の候補を集めるので、
             // インスタンスを1体ずつ見る
-            KurenaiEngine3D::GeometryDrawLoopDesc cullLoop;
+            Rendering::GeometryDrawLoopDesc cullLoop;
             cullLoop.Frustum = nullptr;
             cullLoop.UseDrawUnits = false;
-            cullLoop.LODMode = KurenaiEngine3D::GeometryLODMode::Fade;
+            cullLoop.LODMode = Rendering::GeometryLODMode::Fade;
 
             m_Engine.ForEachGeometryDraw(
                 cullLoop,
-                [&](const KurenaiEngine3D::InstanceDrawUnit& unit, const Assets::Model& lodModel, float lodDitherFade)
+                [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& lodModel, float lodDitherFade)
                 {
                     const Assets::ModelInstance& instance = *unit.Instance;
                     // このモデル単位で描き切る経路の候補だけを集める。
@@ -258,7 +258,7 @@ namespace Kurenai::Passes
                     return true;
                 },
                 // 上が常に真を返すのでここへは来ない
-                [](const KurenaiEngine3D::InstanceDrawUnit&, const Assets::Model&, const Assets::Mesh&, float) { return true; });
+                [](const Rendering::InstanceDrawUnit&, const Assets::Model&, const Assets::Mesh&, float) { return true; });
 
             // プリパスぶんを前半、G-Bufferぶんを後半に置く
             m_Engine.m_ModelCullPrepassCandidateCount = static_cast<uint32_t>(modelCullDraws.size());
@@ -547,14 +547,14 @@ namespace Kurenai::Passes
                     // まったく同じ引数で同じ関数を呼ぶ。組が食い違うと「深度は書かれているのに
                     // 色が書かれない」穴が開くが、それは絵を見ても気づけない ――
                     // だから手で揃えるのをやめ、同じ関数を通ることで揃うようにしてある
-                    KurenaiEngine3D::GeometryDrawLoopDesc prepassLoop;
+                    Rendering::GeometryDrawLoopDesc prepassLoop;
                     prepassLoop.Frustum = &prepassFrustum;
-                    prepassLoop.LODMode = KurenaiEngine3D::GeometryLODMode::Fade;
-                    prepassLoop.MeshFilter = KurenaiEngine3D::GeometryMeshFilter::Opaque;
+                    prepassLoop.LODMode = Rendering::GeometryLODMode::Fade;
+                    prepassLoop.MeshFilter = Rendering::GeometryMeshFilter::Opaque;
 
                     m_Engine.ForEachGeometryDraw(
                         prepassLoop,
-                        [&](const KurenaiEngine3D::InstanceDrawUnit& unit, const Assets::Model& lodModel,
+                        [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& lodModel,
                             float lodDitherFade)
                         {
                             const Assets::ModelInstance& instance = *unit.Instance;
@@ -640,7 +640,7 @@ namespace Kurenai::Passes
                             }
                             return true;
                         },
-                        [&](const KurenaiEngine3D::InstanceDrawUnit& unit, const Assets::Model& lodModel,
+                        [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& lodModel,
                             const Assets::Mesh& mesh, float lodDitherFade)
                         {
                             const Assets::ModelInstance& instance = *unit.Instance;
@@ -860,14 +860,14 @@ namespace Kurenai::Passes
                 // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
                 // 【深度プリパスとまったく同じ組を使う】引数が同じなら同じ組になる。
                 // まとめ方が食い違うと穴が開くので、ここは必ずプリパス側と同じ形で書くこと
-                KurenaiEngine3D::GeometryDrawLoopDesc gbufferLoop;
+                Rendering::GeometryDrawLoopDesc gbufferLoop;
                 gbufferLoop.Frustum = &frustum;
-                gbufferLoop.LODMode = KurenaiEngine3D::GeometryLODMode::Fade;
-                gbufferLoop.MeshFilter = KurenaiEngine3D::GeometryMeshFilter::Opaque;
+                gbufferLoop.LODMode = Rendering::GeometryLODMode::Fade;
+                gbufferLoop.MeshFilter = Rendering::GeometryMeshFilter::Opaque;
 
                 m_Engine.ForEachGeometryDraw(
                     gbufferLoop,
-                    [&](const KurenaiEngine3D::InstanceDrawUnit& unit, const Assets::Model& lodModel, float lodDitherFade)
+                    [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& lodModel, float lodDitherFade)
                     {
                         const Assets::ModelInstance& instance = *unit.Instance;
 
@@ -907,7 +907,7 @@ namespace Kurenai::Passes
                         ++m_Engine.m_DrawCallsGBuffer;
                         return true;
                     },
-                    [&](const KurenaiEngine3D::InstanceDrawUnit& unit, const Assets::Model& lodModel,
+                    [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& lodModel,
                         const Assets::Mesh& mesh, float lodDitherFade)
                     {
                         const Assets::ModelInstance& instance = *unit.Instance;

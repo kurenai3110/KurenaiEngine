@@ -469,16 +469,16 @@ namespace Kurenai::Passes
                 // 【このパスはクロスディザ非対応】なのでフェード中でも段は1つに決め打つ。
                 // 【バッチは使わない】奥から手前へ並べ替える必要があり、まとめられない
                 const Rendering::FrustumPlanes transparentFrustum = ExtractFrustumPlanes(viewProj);
-                KurenaiEngine3D::GeometryDrawLoopDesc transparentLoop;
+                Rendering::GeometryDrawLoopDesc transparentLoop;
                 transparentLoop.Frustum = &transparentFrustum;
                 transparentLoop.UseDrawUnits = false;
-                transparentLoop.LODMode = KurenaiEngine3D::GeometryLODMode::Current;
-                transparentLoop.MeshFilter = KurenaiEngine3D::GeometryMeshFilter::Transparent;
+                transparentLoop.LODMode = Rendering::GeometryLODMode::Current;
+                transparentLoop.MeshFilter = Rendering::GeometryMeshFilter::Transparent;
 
                 m_Engine.ForEachGeometryDraw(
                     transparentLoop,
-                    [](const KurenaiEngine3D::InstanceDrawUnit&, const Assets::Model&, float) { return false; },
-                    [&](const KurenaiEngine3D::InstanceDrawUnit& unit, const Assets::Model& currentModel,
+                    [](const Rendering::InstanceDrawUnit&, const Assets::Model&, float) { return false; },
+                    [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& currentModel,
                         const Assets::Mesh& mesh, float)
                     {
                         const Assets::ModelInstance& instance = *unit.Instance;

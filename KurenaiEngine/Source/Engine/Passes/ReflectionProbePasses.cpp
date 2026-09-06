@@ -129,21 +129,21 @@ namespace Kurenai::Passes
             // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
             // 【プローブも最も粗い段】焼き込むのは間接光で、細部は残らない。
             // ストリーミング中で未読み込みなら描かない
-            KurenaiEngine3D::GeometryDrawLoopDesc probeLoop;
+            Rendering::GeometryDrawLoopDesc probeLoop;
             probeLoop.Frustum = &faceFrustum;
-            probeLoop.LODMode = KurenaiEngine3D::GeometryLODMode::Coarsest;
+            probeLoop.LODMode = Rendering::GeometryLODMode::Coarsest;
             // 半透明メッシュはプローブへ焼かない。ProbeCapture.hlslは不透明として描くため、
             // ガラスを焼き込むと「向こう側が見えるはずの面」が不透明の壁としてキューブに
             // 残り、その裏にある本来映るべき景色が欠ける。半透明を正しく焼くには
             // キャプチャ側にも奥から手前への描画順とブレンドが要り、コストに見合わない
             // (プローブへ半透明を含めないのは一般的な割り切り)
-            probeLoop.MeshFilter = KurenaiEngine3D::GeometryMeshFilter::Opaque;
+            probeLoop.MeshFilter = Rendering::GeometryMeshFilter::Opaque;
 
             m_Engine.ForEachGeometryDraw(
                 probeLoop,
                 // このパスは1ドロー経路(メッシュレット)を持たない。常にメッシュのループへ入る
-                [](const KurenaiEngine3D::InstanceDrawUnit&, const Assets::Model&, float) { return false; },
-                [&](const KurenaiEngine3D::InstanceDrawUnit& unit, const Assets::Model& coarsestModel,
+                [](const Rendering::InstanceDrawUnit&, const Assets::Model&, float) { return false; },
+                [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& coarsestModel,
                     const Assets::Mesh& mesh, float)
                 {
                     const Assets::ModelInstance& instance = *unit.Instance;
