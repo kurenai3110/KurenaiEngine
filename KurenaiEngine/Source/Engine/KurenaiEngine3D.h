@@ -84,6 +84,7 @@ namespace Kurenai::Passes
     // そちらはこのヘッダをインクルードするため、ここでは前方宣言で止める
     class EnvironmentPasses;
     class PostProcessPasses;
+    class ReflectionProbePasses;
     class ShadowPasses;
     class PresentPass;
 }
@@ -135,6 +136,7 @@ namespace Kurenai
         // m_Engine越しに触る。所有権を群へ移し終えたらこのfriendは外す(段階6)
         friend class Passes::EnvironmentPasses;
         friend class Passes::PostProcessPasses;
+        friend class Passes::ReflectionProbePasses;
         friend class Passes::ShadowPasses;
         friend class Passes::PresentPass;
 
@@ -771,6 +773,7 @@ namespace Kurenai
         // 不完全型のままにするため、デストラクタは.cpp側で定義する
         std::unique_ptr<Passes::EnvironmentPasses> m_EnvironmentPasses;
         std::unique_ptr<Passes::PostProcessPasses> m_PostProcessPasses;
+        std::unique_ptr<Passes::ReflectionProbePasses> m_ReflectionProbePasses;
         std::unique_ptr<Passes::ShadowPasses> m_ShadowPasses;
         std::unique_ptr<Passes::PresentPass> m_PresentPass;
 

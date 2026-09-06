@@ -104,6 +104,8 @@
     <ClInclude Include="Source\Engine\Passes\EnvironmentPasses.h" />
     <ClInclude Include="Source\Engine\Rendering\SunLighting.h" />
     <ClInclude Include="Source\Engine\Passes\PostProcessConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\ReflectionProbePasses.h" />
+    <ClInclude Include="Source\Engine\Rendering\CubeFaceMath.h" />
     <ClInclude Include="Source\Engine\Passes\ShadowPasses.h" />
     <ClInclude Include="Source\Engine\Rendering\ObjectConstants.h" />
     <ClInclude Include="Source\Engine\Rendering\ExposureMath.h" />
@@ -142,6 +144,7 @@
     <ClCompile Include="Source\Engine\Rendering\GeometryDrawLoop.cpp" />
     <ClCompile Include="Source\Engine\Passes\EnvironmentPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\PostProcessPasses.cpp" />
+    <ClCompile Include="Source\Engine\Passes\ReflectionProbePasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\ShadowPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\PresentPass.cpp" />
     <ClCompile Include="Source\Engine\DroneShow.cpp" />

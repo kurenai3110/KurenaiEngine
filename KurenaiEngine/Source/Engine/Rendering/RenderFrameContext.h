@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+#include <vector>
 #include <cstdint>
 
 #include <DirectXMath.h>
@@ -26,6 +28,11 @@
 namespace Kurenai
 {
     struct SunLighting;
+}
+
+namespace Kurenai::RHI
+{
+    class IRHITexture;
 }
 
 namespace Kurenai::ShaderInterop
@@ -74,6 +81,16 @@ namespace Kurenai::Rendering
 
         // シャドウマップ解像度のビューポート
         RHI::Viewport ShadowViewport{};
+
+        // プローブのキューブ面キャプチャが使う射影。反射プローブとDDGIで同じ値を使う
+        DirectX::XMMATRIX ProbeFaceProjection{};
+
+        // プローブのキャプチャが読むテクスチャ一式。**Render()のローカルを指す**
+        const std::vector<RHI::IRHITexture*>* ProbeCaptureReads = nullptr;
+
+        // 焼き込みに入れてよい灯の数。ライト配列の並べ替え後の総数とは別物なので
+        // 添字として使い回さないこと(KurenaiEngine3D.cpp の該当コメント参照)
+        size_t BakedLightCount = 0;
 
         // カスケードごとのライト視点ビュー射影。**Render()のローカル配列を指す。**
         // 要素数は KurenaiEngine3D::kCascadeCount。graph.Execute()が終わるまで生きている
