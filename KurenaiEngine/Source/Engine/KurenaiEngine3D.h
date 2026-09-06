@@ -71,6 +71,13 @@ namespace Kurenai::UI
     class StreamingPanel;
 }
 
+namespace Kurenai::Rendering
+{
+    // ForEachGeometryDrawの引数にポインタでだけ使う。実体はRendering/GeometryDrawLoop.hにあり、
+    // そちらはこのヘッダをインクルードするため、ここでは前方宣言で止める
+    struct FrustumPlanes;
+}
+
 namespace Kurenai
 {
     // メッシュレットLODの段を選ぶために、フレーム内の全パスへ配る値(Stage 6)。
@@ -926,6 +933,59 @@ namespace Kurenai
         // 偽なら深度プリパス/G-Buffer/平面反射用の組を使う。
         // シーンの全インスタンスがちょうど1回ずつ現れる(バッチに入ったものはバッチとして)
         void GetInstanceDrawUnits(bool coarsestLOD, std::vector<InstanceDrawUnit>& outUnits) const;
+        // インスタンシングのバッチを使わないパス(DDGI / 半透明 / ソフトウェアラスタライザ)向けに、
+        // シーンの全インスタンスを単体の描画単位として詰める。列挙順はm_Scene.Instancesの並びのまま
+        void BuildSingleInstanceDrawUnits(std::vector<InstanceDrawUnit>& outUnits) const;
+
+        // --- ジオメトリ描画ループの共通化(Rendering/GeometryDrawLoop.h) --------------------
+        //
+        // どのパスも「インスタンスの列挙 → 錐台カリング → 段の選択 → メッシュのループ」までは
+        // 同じで、違うのはPSOの選び方・定数バッファ・張るテクスチャ・ドローの発行だけ。
+        // 前半をForEachGeometryDrawへ寄せ、後半をコールバックとして呼び出し側に残す
+
+        // どの段を描くか
+        enum class GeometryLODMode
+        {
+            // 常に最も粗い段(シャドウ / 反射プローブ / DDGI)。テクスチャを読まないので
+            // 詳細な段を描く意味が無い
+            Coarsest,
+            // そのフレームに選ばれた段を1つだけ(半透明 / 平面反射 / ソフトウェアラスタライザ)。
+            // **これらはクロスディザを実装していない**ため、フェード中でも1段に決め打つ
+            Current,
+            // そのフレームに選ばれた段。フェード中は2段をクロスディザで重ねる
+            // (深度プリパス / G-Buffer)
+            Fade,
+        };
+
+        // どちらのメッシュを描くか。BLEND(mesh.IsTransparent)はG-Bufferに書けないため、
+        // 不透明のパスとは排他になる
+        enum class GeometryMeshFilter
+        {
+            Opaque,
+            Transparent,
+            // 落とさない。**シャドウパスだけがこれを使う** ―― 従来からBLENDのメッシュも
+            // 実体のまま影を落としており、ここでふるい分けると影の出方が変わってしまう
+            All,
+        };
+
+        struct GeometryDrawLoopDesc
+        {
+            // カリングに使う錐台。**nullptrならカリングを一切行わず統計にも入れない**
+            // (DDGIのラスタ経路がそう。理由はDDGISystem.cppの同箇所)
+            const Rendering::FrustumPlanes* Frustum = nullptr;
+            // 真ならインスタンシングのバッチを含む組(GetInstanceDrawUnits)、
+            // 偽なら全インスタンスを単体として回す(BuildSingleInstanceDrawUnits)
+            bool UseDrawUnits = true;
+            GeometryLODMode LODMode = GeometryLODMode::Fade;
+            GeometryMeshFilter MeshFilter = GeometryMeshFilter::Opaque;
+            // メッシュ単位のカリングを行うか。設定(m_GeometrySettings.MeshCullingEnabled)との論理積を取る
+            bool MeshCulling = true;
+        };
+
+        // onModel: モデル単位で描き切ったなら真を返す(メッシュのループへ入らない)
+        // onMesh : 偽を返すと列挙そのものを打ち切る
+        template <typename ModelFn, typename MeshFn>
+        void ForEachGeometryDraw(const GeometryDrawLoopDesc& desc, ModelFn&& onModel, MeshFn&& onMesh);
         // 上の出力先。パスは順に実行されるので1本を使い回してよい(確保のやり直しを避ける)。
         // **パスのラムダより長生きする必要がある**ため、ローカル変数ではなくここに置く
         mutable std::vector<InstanceDrawUnit> m_DrawUnitScratch;

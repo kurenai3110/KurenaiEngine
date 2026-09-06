@@ -21,6 +21,7 @@
 #include "Core/RenderGraph.h"
 #include "Core/StringUtil.h"
 #include "Diagnostics/RenderDumpService.h"
+#include "Rendering/GeometryDrawLoop.h"
 #include "ShaderInterop/CascadeConstants.h"
 #include "ShaderInterop/FrameConstants.h"
 #include "ShaderInterop/GroupSizes.h"
@@ -35,148 +36,12 @@ namespace Kurenai
         using Core::GetModuleDirectory;
         using Core::WideToUtf8;
 
-        // ビュー射影行列から取り出した視錐台の6平面(左/右/下/上/手前/奥)。
-        // 各要素は平面の方程式 dot(n, p) + d の (n.xyz, d)
-        struct FrustumPlanes
-        {
-            DirectX::XMFLOAT4 Planes[6];
-        };
-
-        // ビュー射影行列から視錐台の6平面を取り出す(Gribb-Hartmann)。
-        //
-        // 【必ず「列」から組み立てる】クリップ座標は c = v * M(行ベクトル×行列)なので、
-        // c.x は v と M の列0 の内積、c.w は列3 との内積になる。したがって
-        // 「c.x + c.w >= 0」という左平面の条件は、列0 + 列3 という平面になる。
-        // XMFLOAT4X4 は行優先なので、列0 は (_11, _21, _31, _41) である。
-        //
-        // 【行と取り違えると、真下を向いたときに全部カリングされる】
-        // 実際に一度間違えた。転置した行列の平面になるため、正面付近では
-        // それらしい結果が出てカメラを振れば間引き数も動く ―― 対照実験を通ってしまう。
-        // ほぼ真下(Pitch -85)を向けて「真下のモデルが間引かれないこと」を見て初めて
-        // 100%間引かれていることが分かった。
-        //
-        // HLSL側(GBufferMeshlet.hlsl の IsSphereInFrustum)も同じ平面を作っている。
-        // 向こうが受け取る ViewProj は C++ から転置して渡したもので、HLSLのメモリ
-        // レイアウト(列優先)と合わさって論理的には同じ行列になるため、
-        // 「_m00,_m10,_m20,_m30 で列0を取る」という同じ形になっている。
-        //
-        // 【Reverse-Zでもこのままでよい】近平面と遠平面の意味は入れ替わるが、
-        // 0 <= z <= w という条件自体は変わらないため式は同じ(HLSL側と同じ理由)。
-        //
-        // 【正規化しない】球との比較では半径と尺度を合わせる必要があるため向こうは正規化するが、
-        // ここが判定するのはAABBで、見るのは符号だけなので不要
-        FrustumPlanes ExtractFrustumPlanes(DirectX::FXMMATRIX viewProj)
-        {
-            using namespace DirectX;
-
-            XMFLOAT4X4 m;
-            XMStoreFloat4x4(&m, viewProj);
-
-            const XMFLOAT4 col0(m._11, m._21, m._31, m._41);
-            const XMFLOAT4 col1(m._12, m._22, m._32, m._42);
-            const XMFLOAT4 col2(m._13, m._23, m._33, m._43);
-            const XMFLOAT4 col3(m._14, m._24, m._34, m._44);
-
-            const auto add = [](const XMFLOAT4& a, const XMFLOAT4& b) {
-                return XMFLOAT4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w);
-            };
-            const auto sub = [](const XMFLOAT4& a, const XMFLOAT4& b) {
-                return XMFLOAT4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w);
-            };
-
-            FrustumPlanes frustum;
-            frustum.Planes[0] = add(col3, col0); // 左   (x >= -w)
-            frustum.Planes[1] = sub(col3, col0); // 右   (x <=  w)
-            frustum.Planes[2] = add(col3, col1); // 下   (y >= -w)
-            frustum.Planes[3] = sub(col3, col1); // 上   (y <=  w)
-            frustum.Planes[4] = col2;            // 手前 (z >=  0)
-            frustum.Planes[5] = sub(col3, col2); // 奥   (z <=  w)
-            return frustum;
-        }
-
-        // ワールド空間の軸並行バウンディングボックスが視錐台と交わるか。
-        // 「完全に外」と確定できたときだけfalseを返す保守的な判定(偽陽性は出るが偽陰性は出ない)。
-        //
-        // 各平面について、平面の法線方向へ最も進んだ頂点(p-vertex)だけを見る。
-        // それが平面の裏側にあるなら、AABBの8頂点すべてが裏側にあることになる
-        bool IsAABBVisible(const FrustumPlanes& frustum, const float (&boundsMin)[3], const float (&boundsMax)[3])
-        {
-            for (const DirectX::XMFLOAT4& plane : frustum.Planes)
-            {
-                const float px = (plane.x >= 0.0f) ? boundsMax[0] : boundsMin[0];
-                const float py = (plane.y >= 0.0f) ? boundsMax[1] : boundsMin[1];
-                const float pz = (plane.z >= 0.0f) ? boundsMax[2] : boundsMin[2];
-
-                if (plane.x * px + plane.y * py + plane.z * pz + plane.w < 0.0f)
-                {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        // メッシュ単位のフラスタムカリング判定。IsAABBVisibleを呼ぶ7つの描画パスすべてが、
-        // モデル単位の判定を通ったあとのメッシュのループから同じ形で呼ぶ。
-        //
-        // 【統計はモデル単位と別のカウンタへ入れる】分母も意味も違うため
-        // (KurenaiEngine3D.h の m_MeshCullTested のコメント参照)。呼び出し側が
-        // どのカウンタを渡すかを見て取れるよう、メンバではなく引数で受ける。
-        //
-        // 【メッシュ番号はポインタ差で引く】各パスのループは
-        // for (const auto& mesh : instance.Model.Meshes) の形で添字を持たない。
-        // Meshesはvectorで連続しているため、先頭との差がそのまま添字になる
-        bool IsMeshVisibleWithStats(
-            bool enabled, const FrustumPlanes& frustum, const Assets::ModelInstance& instance,
-            const Assets::Model& model, const Assets::Mesh& mesh, uint32_t& tested, uint32_t& culled)
-        {
-            if (!enabled)
-            {
-                // 対照実験用のOFF。判定を1回も呼ばないので統計は「判定なし」になり、
-                // 「実行したが間引き0」と区別できる(EngineDefaults.h の MeshCullingEnabled 参照)
-                return true;
-            }
-
-            // 【AABBは基準の段のぶんしか無い】MeshWorldBoundsListはSceneLoaderが
-            // instance.Model(=最も詳細な段)のメッシュに対して1回だけ作る。
-            // モデルLODで別の段を描いているあいだと、ストリーミングで後から読み込まれた
-            // モデルには対応する要素が無く、ポインタ差で引いた添字も別のvectorのものになる。
-            // 判定せず間引かない側(保守側)へ倒す ―― 早さより、見えるものを消さないことを採る。
-            // 【++testedより前に返す】分母を「実際に判定したメッシュ」に揃えないと間引き率が薄まる
-            if (instance.Model.get() != &model)
-            {
-                return true;
-            }
-
-            ++tested;
-
-            const size_t meshIndex = static_cast<size_t>(&mesh - model.Meshes.data());
-            if (meshIndex >= instance.MeshWorldBoundsList.size())
-            {
-                // SceneLoaderが必ずMeshesと同じ要素数で作るのでここへは来ない。
-                // 来た場合は間引かない側(保守側)へ倒す ―― 見えるものを消すより、
-                // 間引けないほうが被害が小さい。毎フレーム何千回も呼ばれるので記録は1回だけ
-                static bool logged = false;
-                if (!logged)
-                {
-                    logged = true;
-                    Core::Logger::Error(
-                        "KurenaiEngine3D",
-                        "メッシュ単位のワールドAABBが足りません(メッシュ数 " +
-                            std::to_string(model.Meshes.size()) + " / AABB " +
-                            std::to_string(instance.MeshWorldBoundsList.size()) +
-                            ")。メッシュ単位のフラスタムカリングを行いません");
-                }
-                return true;
-            }
-
-            const Assets::MeshWorldBounds& bounds = instance.MeshWorldBoundsList[meshIndex];
-            if (!IsAABBVisible(frustum, bounds.Min, bounds.Max))
-            {
-                ++culled;
-                return false;
-            }
-            return true;
-        }
+        // 視錐台カリングの一式は Rendering/GeometryDrawLoop.h へ移した。
+        // 描画パスの共通ループ(ForEachGeometryDraw)と同じ場所にある必要がある
+        using Rendering::FrustumPlanes;
+        using Rendering::ExtractFrustumPlanes;
+        using Rendering::IsAABBVisible;
+        using Rendering::IsMeshVisibleWithStats;
 
         // 濁り(タービディティ)からMie(エアロゾル)密度の倍率を求める。
         //
@@ -5481,37 +5346,42 @@ namespace Kurenai
         uint32_t firstTriangle = 0;
         bool overflowed = false;
 
-        const FrustumPlanes swRasterFrustum = ExtractFrustumPlanes(viewProj);
+        const Rendering::FrustumPlanes swRasterFrustum = ExtractFrustumPlanes(viewProj);
 
-        for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
-        {
-            const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
-            ++m_FrustumCullTested;
-            if (!IsAABBVisible(swRasterFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
-            {
-                ++m_FrustumCullCulled;
-                continue;
-            }
+        // 【このパスはクロスディザ非対応】なのでフェード中でも段は1つに決め打つ。
+        // 【バッチは使わない】ここで作るのはドローではなくメッシュの表なので、
+        // まとめる意味が無い
+        GeometryDrawLoopDesc swRasterLoop;
+        swRasterLoop.Frustum = &swRasterFrustum;
+        swRasterLoop.UseDrawUnits = false;
+        swRasterLoop.LODMode = GeometryLODMode::Current;
+        // 半透明(alphaMode=BLEND)はハードウェア側でもG-Bufferに描かれないため揃える
+        swRasterLoop.MeshFilter = GeometryMeshFilter::Opaque;
+        // 【メッシュ単位のカリングは共通ループに任せない】このパスは三角形が3つ未満の
+        // メッシュも落とすので、判定の順序が変わると分母がずれる。原文どおり
+        // 「描かないメッシュを弾いた後」に自分で呼ぶ
+        swRasterLoop.MeshCulling = false;
 
-            // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
-            // ストリーミング中で未読み込みなら描かない
-            const Assets::Model* const currentModel = GetCurrentLOD(instanceIndex);
-            if (!currentModel) { continue; }
-            for (const auto& mesh : currentModel->Meshes)
+        ForEachGeometryDraw(
+            swRasterLoop,
+            [](const InstanceDrawUnit&, const Assets::Model&, float) { return false; },
+            [&](const InstanceDrawUnit& unit, const Assets::Model& currentModel,
+                const Assets::Mesh& mesh, float)
             {
-                // 半透明(alphaMode=BLEND)はハードウェア側でもG-Bufferに描かれないため揃える
-                if (mesh.IsTransparent || mesh.IndexCount < 3)
+                const Assets::ModelInstance& instance = *unit.Instance;
+                if (mesh.IndexCount < 3)
                 {
-                    continue;
+                    return true;
                 }
 
                 // メッシュ単位のカリング。統計はモデル単位とは別カウンタへ入れる。
                 // 【描かないメッシュを弾いた後に置く】分母を「このパスが実際に描くメッシュ」に
                 // 揃えないと、間引き率が薄まって効きが読めなくなる
-                if (!IsMeshVisibleWithStats(
-                        m_GeometrySettings.MeshCullingEnabled, swRasterFrustum, instance, *currentModel, mesh, m_MeshCullTested, m_MeshCullCulled))
+                if (!Rendering::IsMeshVisibleWithStats(
+                        m_GeometrySettings.MeshCullingEnabled, swRasterFrustum, instance,
+                        currentModel, mesh, m_MeshCullTested, m_MeshCullCulled))
                 {
-                    continue;
+                    return true;
                 }
 
                 const uint32_t vertexBufferIndex =
@@ -5523,13 +5393,14 @@ namespace Kurenai
                 if (vertexBufferIndex == RHI::kInvalidBindlessIndex ||
                     indexBufferIndex == RHI::kInvalidBindlessIndex)
                 {
-                    continue;
+                    return true;
                 }
 
                 if (meshInfos.size() >= kSWRasterMaxMeshes)
                 {
+                    // 表があふれた。**列挙そのものを打ち切る**(偽を返す)
                     overflowed = true;
-                    break;
+                    return false;
                 }
 
                 SWRasterMeshInfo info{};
@@ -5547,13 +5418,8 @@ namespace Kurenai
 
                 firstTriangle += info.TriangleCount;
                 meshInfos.push_back(info);
-            }
-
-            if (overflowed)
-            {
-                break;
-            }
-        }
+                return true;
+            });
 
         if (overflowed && !m_SoftwareRasterMeshOverflowLogged)
         {
@@ -8481,40 +8347,39 @@ namespace Kurenai
                         const FrustumPlanes cascadeFrustum = ExtractFrustumPlanes(cascadeViewProj[cascade]);
 
                         // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
-                        // シャドウは常に最も粗い段なので、その組(coarsestLOD=true)を使う
-                        GetInstanceDrawUnits(/*coarsestLOD=*/true, m_DrawUnitScratch);
-                        for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
-                        {
-                            const Assets::ModelInstance& instance = *unit.Instance;
-                            ++m_FrustumCullTested;
-                            if (!IsAABBVisible(cascadeFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
-                            {
-                                ++m_FrustumCullCulled;
-                                continue;
-                            }
+                        // 【影は常に最も粗い段】影はテクスチャを読まないので詳細な段を描く
+                        // 意味が無い。ストリーミング中で未読み込みなら描かない。
+                        // バッチはどの段を描くかを既に決めてある(全員が同じ段であることが
+                        // バッチの条件そのもの)
+                        GeometryDrawLoopDesc shadowLoop;
+                        shadowLoop.Frustum = &cascadeFrustum;
+                        shadowLoop.LODMode = GeometryLODMode::Coarsest;
+                        shadowLoop.MeshFilter = GeometryMeshFilter::All;
 
-                            // 【影は常に最も粗い段】影はテクスチャを読まないので詳細な段を描く
-                            // 意味が無い。ストリーミング中で未読み込みなら描かない。
-                            // バッチはどの段を描くかを既に決めてある(全員が同じ段であることが
-                            // バッチの条件そのもの)
-                            const Assets::Model* const coarsestModel =
-                                unit.Model ? unit.Model : GetCoarsestLOD(instance);
-                            if (!coarsestModel) { continue; }
-
-                            // G-Bufferが1ドローで描くモデルは、シャドウも1ドローで描く。
-                            //
-                            // 【半透明は落とさない】このパスは従来から、BLENDのメッシュも
-                            // 実体のまま影を落としている。ここでふるい分けると影の出方が変わって
-                            // しまうため、意図的に何も落とさない(カットアウトの切り抜きだけは
-                            // 下で反映する ―― そちらは板ポリゴンの影が出る明確な不具合だった)。
-                            //
-                            // 【カットアウトを持つモデルだけ2回に分ける】不透明ぶんは
-                            // ピクセルシェーダーを持たないPSOで描きたいので、
-                            // 切り抜きが要るぶんとは同じドローにまとめられない
-                            if (m_ShadowMeshletPipelineState && ShouldUseModelMeshletPath(instance, *coarsestModel))
+                        ForEachGeometryDraw(
+                            shadowLoop,
+                            [&](const InstanceDrawUnit& unit, const Assets::Model& coarsestModel, float)
                             {
+                                const Assets::ModelInstance& instance = *unit.Instance;
+
+                                // G-Bufferが1ドローで描くモデルは、シャドウも1ドローで描く。
+                                //
+                                // 【半透明は落とさない】このパスは従来から、BLENDのメッシュも
+                                // 実体のまま影を落としている。ここでふるい分けると影の出方が変わって
+                                // しまうため、意図的に何も落とさない(カットアウトの切り抜きだけは
+                                // 下で反映する ―― そちらは板ポリゴンの影が出る明確な不具合だった)。
+                                //
+                                // 【カットアウトを持つモデルだけ2回に分ける】不透明ぶんは
+                                // ピクセルシェーダーを持たないPSOで描きたいので、
+                                // 切り抜きが要るぶんとは同じドローにまとめられない
+                                if (!m_ShadowMeshletPipelineState
+                                    || !ShouldUseModelMeshletPath(instance, coarsestModel))
+                                {
+                                    return false;
+                                }
+
                                 const uint32_t groupCount =
-                                    (coarsestModel->TotalMeshletCount
+                                    (coarsestModel.TotalMeshletCount
                                      + ShaderInterop::kAmplificationGroupSize - 1)
                                     / ShaderInterop::kAmplificationGroupSize;
 
@@ -8529,7 +8394,7 @@ namespace Kurenai
                                     bindShadowPipelineState(pipelineState);
 
                                     const ObjectConstants objectConstants = MakeModelObjectConstants(
-                                        instance, *coarsestModel, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, rejectMask,
+                                        instance, coarsestModel, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, rejectMask,
                                         requireMask, m_MeshletLODFrame);
                                     cmd->UpdateBuffer(
                                         m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -8541,7 +8406,7 @@ namespace Kurenai
                                 // カットアウト用のPSOが作れていない場合は、従来どおり
                                 // 切り抜きを見ずに全部を1回で描く(影が板のままになる)
                                 const bool splitCutout =
-                                    coarsestModel->HasCutoutMaterial && m_ShadowMeshletCutoutPipelineState;
+                                    coarsestModel.HasCutoutMaterial && m_ShadowMeshletCutoutPipelineState;
 
                                 dispatchShadowMeshlets(
                                     instance.IsMirrored ? m_ShadowMeshletPipelineStateMirrored.get()
@@ -8555,25 +8420,13 @@ namespace Kurenai
                                                             : m_ShadowMeshletCutoutPipelineState.get(),
                                         0u, Assets::kGpuMaterialFlagCutout);
                                 }
-                                continue;
-                            }
-
-                            for (const auto& mesh : coarsestModel->Meshes)
+                                return true;
+                            },
+                            [&](const InstanceDrawUnit& unit, const Assets::Model& coarsestModel,
+                                const Assets::Mesh& mesh, float)
                             {
-                                // メッシュ単位のカリング。錐台はこのカスケードのライト正射影で、
-                                // カスケードごとに4回走る(=統計もカスケードぶん積み上がる)。
-                                //
-                                // 【バッチでは行わない】メッシュ単位のワールドAABBは
-                                // 「インスタンス×メッシュ」の値で、まとめた相手のぶんが無い。
-                                // 判定を代表インスタンスだけで行うと、他の個体の見えている
-                                // メッシュまで落ちて物が消える
-                                if (!unit.IsBatch()
-                                    && !IsMeshVisibleWithStats(
-                                        m_GeometrySettings.MeshCullingEnabled, cascadeFrustum, instance, *coarsestModel, mesh, m_MeshCullTested,
-                                        m_MeshCullCulled))
-                                {
-                                    continue;
-                                }
+                                const Assets::ModelInstance& instance = *unit.Instance;
+
                                 // アルファカットアウトは切り抜きを反映して深度を書く。
                                 // 見ないままだと、葉や柵のようにテクスチャで抜く前提の
                                 // マテリアルが板ポリゴンのまま影を落とす
@@ -8583,7 +8436,7 @@ namespace Kurenai
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
                                 ObjectConstants objectConstants =
-                                    MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
+                                    MakeObjectConstants(instance, coarsestModel, mesh, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
                                 objectConstants.InstanceBase = unit.InstanceBase;
                                 objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                                 cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -8606,8 +8459,8 @@ namespace Kurenai
                                 cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                                 cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                                 ++m_DrawCallsShadow;
-                            }
-                        }
+                                return true;
+                            });
                     }
                 },
             });
@@ -8694,45 +8547,28 @@ namespace Kurenai
             const FrustumPlanes faceFrustum = ExtractFrustumPlanes(faceViewProj);
 
             // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
-            // プローブは常に最も粗い段なので、シャドウと同じ組(coarsestLOD=true)を使う
-            GetInstanceDrawUnits(/*coarsestLOD=*/true, m_DrawUnitScratch);
-            for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
-            {
-                const Assets::ModelInstance& instance = *unit.Instance;
-                ++m_FrustumCullTested;
-                if (!IsAABBVisible(faceFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
+            // 【プローブも最も粗い段】焼き込むのは間接光で、細部は残らない。
+            // ストリーミング中で未読み込みなら描かない
+            GeometryDrawLoopDesc probeLoop;
+            probeLoop.Frustum = &faceFrustum;
+            probeLoop.LODMode = GeometryLODMode::Coarsest;
+            // 半透明メッシュはプローブへ焼かない。ProbeCapture.hlslは不透明として描くため、
+            // ガラスを焼き込むと「向こう側が見えるはずの面」が不透明の壁としてキューブに
+            // 残り、その裏にある本来映るべき景色が欠ける。半透明を正しく焼くには
+            // キャプチャ側にも奥から手前への描画順とブレンドが要り、コストに見合わない
+            // (プローブへ半透明を含めないのは一般的な割り切り)
+            probeLoop.MeshFilter = GeometryMeshFilter::Opaque;
+
+            ForEachGeometryDraw(
+                probeLoop,
+                // このパスは1ドロー経路(メッシュレット)を持たない。常にメッシュのループへ入る
+                [](const InstanceDrawUnit&, const Assets::Model&, float) { return false; },
+                [&](const InstanceDrawUnit& unit, const Assets::Model& coarsestModel,
+                    const Assets::Mesh& mesh, float)
                 {
-                    ++m_FrustumCullCulled;
-                    continue;
-                }
+                    const Assets::ModelInstance& instance = *unit.Instance;
 
-                // 【プローブも最も粗い段】焼き込むのは間接光で、細部は残らない
-                // ストリーミング中で未読み込みなら描かない
-                const Assets::Model* const coarsestModel =
-                    unit.Model ? unit.Model : GetCoarsestLOD(instance);
-                if (!coarsestModel) { continue; }
-                for (const auto& mesh : coarsestModel->Meshes)
-                {
-                    // 半透明メッシュはプローブへ焼かない。ProbeCapture.hlslは不透明として描くため、
-                    // ガラスを焼き込むと「向こう側が見えるはずの面」が不透明の壁としてキューブに
-                    // 残り、その裏にある本来映るべき景色が欠ける。半透明を正しく焼くには
-                    // キャプチャ側にも奥から手前への描画順とブレンドが要り、コストに見合わない
-                    // (プローブへ半透明を含めないのは一般的な割り切り)
-                    if (mesh.IsTransparent)
-                    {
-                        continue;
-                    }
-
-                    // メッシュ単位のカリング。錐台はキューブの1面ぶん。
-                    // 【バッチでは行わない】理由はG-Bufferパスの同じ箇所を参照
-                    if (!unit.IsBatch()
-                        && !IsMeshVisibleWithStats(
-                            m_GeometrySettings.MeshCullingEnabled, faceFrustum, instance, *coarsestModel, mesh, m_MeshCullTested, m_MeshCullCulled))
-                    {
-                        continue;
-                    }
-
-                    ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
+                    ObjectConstants objectConstants = MakeObjectConstants(instance, coarsestModel, mesh, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
                     objectConstants.InstanceBase = unit.InstanceBase;
                     objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -8758,8 +8594,8 @@ namespace Kurenai
                     cmd->SetTexture(6, mesh.BentNormalTexture);
 
                     cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
-                }
-            }
+                    return true;
+                });
 
             // 描き終えたカラー/深度をコンピュートシェーダーからSRVとして読むため、
             // 先にレンダーターゲットのバインドを外す(D3D11は同一リソースの
@@ -9071,29 +8907,36 @@ namespace Kurenai
             uint32_t ddgiEmissiveMeshes = 0;
             uint32_t ddgiSuppressedMeshes = 0;
             uint32_t ddgiLODMismatchMeshes = 0;
-            for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
-            {
-                const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
-                // 【DDGIも最も粗い段】理由は反射プローブと同じ
-                // ストリーミング中で未読み込みなら描かない
-                const Assets::Model* const coarsestModel = GetCoarsestLOD(instance);
-                if (!coarsestModel) { continue; }
-                // 【診断にだけ使う】抑止するかどうかの判定には入れないこと ――
-                // レイトレ側(RaytracingMaterial::Flags)はインスタンスを見ないので、
-                // ここだけ条件を増やすと2経路で判定がずれる軸が1本増える。
-                // いまは「プロキシを作ったインスタンス」と「クラスタを持つメッシュ」が
-                // 必ず一致するため冗長でもあるが、将来プロキシ生成に条件が入ったときに
-                // 静かに乖離する形になる
-                const bool instanceHasProxy =
-                    instanceIndex < m_EmissiveProxyInstances.size() && m_EmissiveProxyInstances[instanceIndex];
-                for (const auto& mesh : coarsestModel->Meshes)
+            // 【DDGIも最も粗い段】理由は反射プローブと同じ。
+            // ストリーミング中で未読み込みなら描かない。
+            // 【カリングを一切行わない】上のコメントのとおり、プローブの位置ごとに結果が
+            // 変わるため定数バッファの予算計算と食い違う。錐台を渡さないことでそれを表す
+            // (統計にも入らない)
+            GeometryDrawLoopDesc ddgiLoop;
+            ddgiLoop.Frustum = nullptr;
+            ddgiLoop.UseDrawUnits = false;
+            ddgiLoop.LODMode = GeometryLODMode::Coarsest;
+            // 半透明メッシュを焼かない理由は反射プローブと同じ(不透明として描かれるため、
+            // ガラスが壁になって裏の景色が欠ける)
+            ddgiLoop.MeshFilter = GeometryMeshFilter::Opaque;
+            ddgiLoop.MeshCulling = false;
+
+            ForEachGeometryDraw(
+                ddgiLoop,
+                [](const InstanceDrawUnit&, const Assets::Model&, float) { return false; },
+                [&](const InstanceDrawUnit& unit, const Assets::Model& coarsestModel,
+                    const Assets::Mesh& mesh, float)
                 {
-                    // 半透明メッシュを焼かない理由は反射プローブと同じ(不透明として描かれるため、
-                    // ガラスが壁になって裏の景色が欠ける)
-                    if (mesh.IsTransparent)
-                    {
-                        continue;
-                    }
+                    const Assets::ModelInstance& instance = *unit.Instance;
+                    // 【診断にだけ使う】抑止するかどうかの判定には入れないこと ――
+                    // レイトレ側(RaytracingMaterial::Flags)はインスタンスを見ないので、
+                    // ここだけ条件を増やすと2経路で判定がずれる軸が1本増える。
+                    // いまは「プロキシを作ったインスタンス」と「クラスタを持つメッシュ」が
+                    // 必ず一致するため冗長でもあるが、将来プロキシ生成に条件が入ったときに
+                    // 静かに乖離する形になる
+                    const bool instanceHasProxy =
+                        unit.InstanceIndex < m_EmissiveProxyInstances.size()
+                        && m_EmissiveProxyInstances[unit.InstanceIndex];
 
                     // 【シェーダーには手を入れない】倍率を0にすればEmissiveFactorごと0になる。
                     // 判定をクラスタの有無で行うのは、係数が0でないのにテクスチャの平均が
@@ -9116,7 +8959,7 @@ namespace Kurenai
                     {
                         ++ddgiLODMismatchMeshes;
                     }
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, *coarsestModel, mesh, ddgiEmissiveIntensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, coarsestModel, mesh, ddgiEmissiveIntensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
                     cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, m_ObjectConstantBuffer.get());
 
@@ -9129,8 +8972,8 @@ namespace Kurenai
                     cmd->SetTexture(3, mesh.EmissiveTexture);
 
                     cmd->DrawIndexed(mesh.IndexCount, 0, 0);
-                }
-            }
+                    return true;
+                });
 
             if (!m_DDGIEmissiveSuppressLoggedRaster)
             {
@@ -9653,21 +9496,29 @@ namespace Kurenai
             const FrustumPlanes cullFrustum = ExtractFrustumPlanes(viewProj);
             modelCullDraws.reserve(m_Scene.Instances.size() * 2);
 
-            for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
-            {
-                const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+            // モデルLOD。フェード中は2段を重ねる。
+            // 【プリパス・G-Bufferと同じ組になる】列挙も段の選択も、あちらと同じ
+            // ForEachGeometryDrawが行う。UpdateModelLODがフレーム先頭で1回だけ決めた
+            // 結果を全員が引くので、ここで距離を測り直さない。
+            // 【カリングはしない】間引くのはGPU側の仕事で、ここで落とすと候補から
+            // 消えてしまう。CPU側の判定は突き合わせ用にcpuVisibleとして数えるだけ。
+            // 【バッチは使わない】1モデル1ドロー経路の候補を集めるので、
+            // インスタンスを1体ずつ見る
+            GeometryDrawLoopDesc cullLoop;
+            cullLoop.Frustum = nullptr;
+            cullLoop.UseDrawUnits = false;
+            cullLoop.LODMode = GeometryLODMode::Fade;
 
-                // モデルLOD。フェード中は2段を重ねる。
-                // 【プリパス・G-Bufferとまったく同じ組であること】UpdateModelLODがフレーム先頭で
-                // 1回だけ決めた結果を全員が引くので、ここで距離を測り直さない
-                LODDraw lodDraws[2]{};
-                const uint32_t lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
-                for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
+            ForEachGeometryDraw(
+                cullLoop,
+                [&](const InstanceDrawUnit& unit, const Assets::Model& lodModel, float lodDitherFade)
                 {
-                    const Assets::Model& lodModel = *lodDraws[lodDrawIndex].Model;
+                    const Assets::ModelInstance& instance = *unit.Instance;
+                    // このモデル単位で描き切る経路の候補だけを集める。
+                    // **必ず真を返してメッシュのループへ入らない**(候補集めであって描画ではない)
                     if (!ShouldUseModelMeshletPath(instance, lodModel))
                     {
-                        continue;
+                        return true;
                     }
 
                     // 起動するのは「モデル全体のメッシュレット数 ÷ 増幅シェーダーのグループサイズ」。
@@ -9676,10 +9527,9 @@ namespace Kurenai
                         + ShaderInterop::kAmplificationGroupSize - 1) / ShaderInterop::kAmplificationGroupSize;
                     if (groupCount == 0)
                     {
-                        continue;
+                        return true;
                     }
 
-                    const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
                     const bool mirrored = instance.IsMirrored;
                     // 同じ候補をCPU側の判定なら間引くか。GPUの「視錐台で間引いた数」と突き合わせる
                     const bool cpuVisible =
@@ -9724,10 +9574,10 @@ namespace Kurenai
                     // 深度プリパス。
                     // 【クロスディザのフェード中は載せない】不透明用のPSOはピクセルシェーダーを
                     // 持たずApplyLODDitherを通せないため、捨てるはずの画素まで深度を書いて
-                    // G-Bufferとの食い違いで穴が開く(元のループと同じ条件)
+                    // G-Bufferとの食い違いで穴が開く(深度プリパスのループと同じ条件)
                     if (!depthPrepassRuns || lodDitherFade < 1.0f)
                     {
-                        continue;
+                        return true;
                     }
                     addCandidate(
                         modelCullDraws,
@@ -9743,8 +9593,10 @@ namespace Kurenai
                             Assets::kGpuMaterialFlagTransparent, Assets::kGpuMaterialFlagCutout, 1.0f, false,
                             prepassOcclusionMode);
                     }
-                }
-            }
+                    return true;
+                },
+                // 上が常に真を返すのでここへは来ない
+                [](const InstanceDrawUnit&, const Assets::Model&, const Assets::Mesh&, float) { return true; });
 
             // プリパスぶんを前半、G-Bufferぶんを後半に置く
             m_ModelCullPrepassCandidateCount = static_cast<uint32_t>(modelCullDraws.size());
@@ -10026,56 +9878,42 @@ namespace Kurenai
                         }
                     }
                     // G-Bufferと同じカメラなので、間引かれるモデルも同じになる
-                    const FrustumPlanes prepassFrustum = ExtractFrustumPlanes(viewProj);
-                    // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
-                    // 【G-Bufferとまったく同じ組を使うこと】まとめ方が食い違うと、
-                    // 深度を書いた画素と色を書く画素がずれて穴が開く
-                    GetInstanceDrawUnits(/*coarsestLOD=*/false, m_DrawUnitScratch);
-                    for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
-                    {
-                        const size_t instanceIndex = unit.InstanceIndex;
-                        const Assets::ModelInstance& instance = *unit.Instance;
-                        ++m_FrustumCullTested;
-                        if (!IsAABBVisible(prepassFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
-                        {
-                            ++m_FrustumCullCulled;
-                            continue;
-                        }
+                    const Rendering::FrustumPlanes prepassFrustum = ExtractFrustumPlanes(viewProj);
 
-                        // モデルLOD。フェード中は2段を重ねる。
-                        // 【G-Bufferとまったく同じ組・同じDitherFadeで描くこと】片方だけが捨てた画素は
-                        // 「深度は書かれているのに色が書かれない」穴になる。
-                        // バッチはフェード中でないものだけで構成されるので必ず1段(BuildInstanceBatches)
-                        LODDraw lodDraws[2];
-                        uint32_t lodDrawCount;
-                        if (unit.IsBatch())
-                        {
-                            lodDraws[0] = { unit.Model, 1.0f };
-                            lodDrawCount = 1;
-                        }
-                        else
-                        {
-                            lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
-                        }
-                        for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
-                        {
-                        const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
-                        const Assets::Model& lodModel = *lodDraws[lodDrawIndex].Model;
+                    // 【G-Bufferとまったく同じ組を描く】列挙・錐台カリング・段の選択・
+                    // メッシュ単位のカリングはForEachGeometryDrawが行い、G-Bufferパスは
+                    // まったく同じ引数で同じ関数を呼ぶ。組が食い違うと「深度は書かれているのに
+                    // 色が書かれない」穴が開くが、それは絵を見ても気づけない ――
+                    // だから手で揃えるのをやめ、同じ関数を通ることで揃うようにしてある
+                    GeometryDrawLoopDesc prepassLoop;
+                    prepassLoop.Frustum = &prepassFrustum;
+                    prepassLoop.LODMode = GeometryLODMode::Fade;
+                    prepassLoop.MeshFilter = GeometryMeshFilter::Opaque;
 
-                        // G-Bufferが1ドローで描くモデルは、プリパスも同じ増幅/メッシュシェーダーで
-                        // 描く。**同じ判断関数(ShouldUseModelMeshletPath)で経路を選ぶことが要点**で、
-                        // 片方だけがメッシュシェーダーになると深度が一致しない。
-                        //
-                        // 不透明とカットアウトでピクセルシェーダーの有無が変わるため、
-                        // カットアウトのマテリアルを持つモデルだけ2回に分ける。
-                        // 持たないモデル(PLATEAUのタイルがそう)は1回で済む
-                        if (ShouldUseModelMeshletPath(instance, lodModel))
+                    ForEachGeometryDraw(
+                        prepassLoop,
+                        [&](const InstanceDrawUnit& unit, const Assets::Model& lodModel,
+                            float lodDitherFade)
                         {
-                            // 間接描画が有効なら、この経路のドローは上でまとめて発行済み。
-                            // **ここで描くと二重になる**
+                            const Assets::ModelInstance& instance = *unit.Instance;
+
+                            // G-Bufferが1ドローで描くモデルは、プリパスも同じ増幅/メッシュシェーダーで
+                            // 描く。**同じ判断関数(ShouldUseModelMeshletPath)で経路を選ぶことが要点**で、
+                            // 片方だけがメッシュシェーダーになると深度が一致しない。
+                            //
+                            // 不透明とカットアウトでピクセルシェーダーの有無が変わるため、
+                            // カットアウトのマテリアルを持つモデルだけ2回に分ける。
+                            // 持たないモデル(PLATEAUのタイルがそう)は1回で済む
+                            if (!ShouldUseModelMeshletPath(instance, lodModel))
+                            {
+                                return false;
+                            }
+
+                            // 間接描画が有効なら、この経路のドローはこのループの前に
+                            // まとめて発行済み。**ここで描くと二重になる**
                             if (modelCullIndirectActive)
                             {
-                                continue;
+                                return true;
                             }
 
                             // 【フェード中は1ドロー経路のプリパスを外す】不透明用のPSOは
@@ -10084,14 +9922,14 @@ namespace Kurenai
                             // 早期Zが効かなくなるだけで、G-Buffer側が深度を書くので絵は壊れない
                             if (lodDitherFade < 1.0f)
                             {
-                                continue;
+                                return true;
                             }
 
                             if (!m_DepthPrepassMeshletPipelineState)
                             {
                                 // メッシュレット版のPSOが無い。このモデルはプリパスから外す
                                 // (早期Zが効かないだけで、G-Buffer側が深度を書くので絵は壊れない)
-                                continue;
+                                return true;
                             }
 
                             const uint32_t groupCount =
@@ -10138,33 +9976,12 @@ namespace Kurenai
                                                         : m_DepthPrepassMeshletCutoutPipelineState.get(),
                                     Assets::kGpuMaterialFlagTransparent, Assets::kGpuMaterialFlagCutout);
                             }
-                            continue;
-                        }
-
-                        for (const auto& mesh : lodModel.Meshes)
+                            return true;
+                        },
+                        [&](const InstanceDrawUnit& unit, const Assets::Model& lodModel,
+                            const Assets::Mesh& mesh, float lodDitherFade)
                         {
-                            // BLENDマテリアルはG-Bufferに描かれないので深度も書かない
-                            // (書くと後ろのものが消える)
-                            if (mesh.IsTransparent)
-                            {
-                                continue;
-                            }
-
-                            // メッシュ単位のカリング。
-                            // 【G-Bufferと同じ錐台・同じ判定にすること】ここで間引いたメッシュが
-                            // G-Bufferでは描かれると、深度プリパスが埋めていない画素で早期Zが効かず
-                            // 遅くなるだけで済むが、逆(プリパスで描いてG-Bufferで間引く)だと
-                            // 描かれていないものの深度が残る
-                            // 【バッチでは行わない】メッシュ単位のワールドAABBは
-                            // 「インスタンス×メッシュ」の値で、まとめた相手のぶんが無い。
-                            // G-Buffer側も同じ条件で外すので、両者の食い違いは起きない
-                            if (!unit.IsBatch()
-                                && !IsMeshVisibleWithStats(
-                                    m_GeometrySettings.MeshCullingEnabled, prepassFrustum, instance, lodModel, mesh, m_MeshCullTested,
-                                    m_MeshCullCulled))
-                            {
-                                continue;
-                            }
+                            const Assets::ModelInstance& instance = *unit.Instance;
 
                             // カットアウトは切り抜きを反映しないと深度に嘘が入る。
                             // ミラーリングは表裏判定が逆のPSOでないとカリングされる面が入れ替わり、
@@ -10209,9 +10026,8 @@ namespace Kurenai
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                             ++m_DrawCallsDepthPrepass;
-                        }
-                        }   // モデルLODの段のループ
-                    }
+                            return true;
+                        });
                 },
             });
         }
@@ -10381,53 +10197,36 @@ namespace Kurenai
                 }
 
                 // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
-                // 【深度プリパスとまったく同じ組を使うこと】まとめ方が食い違うと穴が開く
-                GetInstanceDrawUnits(/*coarsestLOD=*/false, m_DrawUnitScratch);
-                for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
-                {
-                    const size_t instanceIndex = unit.InstanceIndex;
-                    const Assets::ModelInstance& instance = *unit.Instance;
-                    ++m_FrustumCullTested;
-                    if (!IsAABBVisible(frustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
-                    {
-                        ++m_FrustumCullCulled;
-                        continue;
-                    }
+                // 【深度プリパスとまったく同じ組を使う】引数が同じなら同じ組になる。
+                // まとめ方が食い違うと穴が開くので、ここは必ずプリパス側と同じ形で書くこと
+                GeometryDrawLoopDesc gbufferLoop;
+                gbufferLoop.Frustum = &frustum;
+                gbufferLoop.LODMode = GeometryLODMode::Fade;
+                gbufferLoop.MeshFilter = GeometryMeshFilter::Opaque;
 
-                    // モデルLOD。フェード中は2段を重ねる。
-                    // 【深度プリパスとまったく同じ組・同じDitherFadeであること】UpdateModelLODが
-                    // フレーム先頭で1回だけ決めた結果を両方が引くので、ここで距離を測り直さない。
-                    // バッチはフェード中でないものだけで構成されるので必ず1段(BuildInstanceBatches)
-                    LODDraw lodDraws[2];
-                    uint32_t lodDrawCount;
-                    if (unit.IsBatch())
+                ForEachGeometryDraw(
+                    gbufferLoop,
+                    [&](const InstanceDrawUnit& unit, const Assets::Model& lodModel, float lodDitherFade)
                     {
-                        lodDraws[0] = { unit.Model, 1.0f };
-                        lodDrawCount = 1;
-                    }
-                    else
-                    {
-                        lodDrawCount = GetLODDraws(instanceIndex, lodDraws);
-                    }
-                    for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
-                    {
-                    const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
-                    const Assets::Model& lodModel = *lodDraws[lodDrawIndex].Model;
+                        const Assets::ModelInstance& instance = *unit.Instance;
 
-                    // モデル全体を1回のDispatchMeshで描ける場合はメッシュのループへ入らない。
-                    // マテリアルはメッシュシェーダーが出力した番号でピクセルシェーダーが引くため、
-                    // メッシュごとのSetTextureも定数バッファの更新も要らない。
-                    //
-                    // 【BLENDだけは増幅シェーダーが落とす】半透明はG-Bufferに書かず専用の
-                    // Transparentパスでフォワードシェーディングする。ドローを分けられない以上、
-                    // メッシュレット単位のふるい分けでしか除外できない
-                    if (ShouldUseModelMeshletPath(instance, lodModel))
-                    {
+                        // モデル全体を1回のDispatchMeshで描ける場合はメッシュのループへ入らない。
+                        // マテリアルはメッシュシェーダーが出力した番号でピクセルシェーダーが引くため、
+                        // メッシュごとのSetTextureも定数バッファの更新も要らない。
+                        //
+                        // 【BLENDだけは増幅シェーダーが落とす】半透明はG-Bufferに書かず専用の
+                        // Transparentパスでフォワードシェーディングする。ドローを分けられない以上、
+                        // メッシュレット単位のふるい分けでしか除外できない
+                        if (!ShouldUseModelMeshletPath(instance, lodModel))
+                        {
+                            return false;
+                        }
+
                         // 間接描画が有効なら、この経路のドローはこのループの前に
                         // まとめて発行済み。**ここで描くと二重になる**
                         if (modelCullIndirectActive)
                         {
-                            continue;
+                            return true;
                         }
 
                         bindPipelineState(instance.IsMirrored, false, true);
@@ -10445,28 +10244,13 @@ namespace Kurenai
                             + ShaderInterop::kAmplificationGroupSize - 1) / ShaderInterop::kAmplificationGroupSize;
                         cmd->DispatchMesh(groupCount, 1, 1);
                         ++m_DrawCallsGBuffer;
-                        continue;
-                    }
-
-                    for (const auto& mesh : lodModel.Meshes)
+                        return true;
+                    },
+                    [&](const InstanceDrawUnit& unit, const Assets::Model& lodModel,
+                        const Assets::Mesh& mesh, float lodDitherFade)
                     {
-                        // BLENDマテリアル(mesh.IsTransparent)はG-Bufferに書き込まず、専用のTransparentパスで
-                        // フォワードシェーディングする(G-Bufferのアルファは常に1.0で半透明合成ができないため)
-                        if (mesh.IsTransparent)
-                        {
-                            continue;
-                        }
+                        const Assets::ModelInstance& instance = *unit.Instance;
 
-                        // メッシュ単位のカリング。深度プリパスとまったく同じ錐台・同じ判定
-                        // (片方だけで間引くと深度とG-Bufferが食い違う)
-                        // 【バッチでは行わない】理由と、深度プリパスと条件を揃えることの
-                        // 必要性はプリパス側の同じ箇所を参照
-                        if (!unit.IsBatch()
-                            && !IsMeshVisibleWithStats(
-                                m_GeometrySettings.MeshCullingEnabled, frustum, instance, lodModel, mesh, m_MeshCullTested, m_MeshCullCulled))
-                        {
-                            continue;
-                        }
                         // 【ここへ来た時点でメッシュレット経路は使わない】上のモデル単位の
                         // 判定を通らなかったインスタンス(水面、メッシュレットを持たない
                         // メッシュが混ざるモデル、メッシュレット描画が無効)なので、
@@ -10508,9 +10292,8 @@ namespace Kurenai
                         cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                         cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
                         ++m_DrawCallsGBuffer;
-                    }
-                    }   // モデルLODの段のループ
-                }
+                        return true;
+                    });
 
                 // 数え終わったカウンタを受け皿へ写す。読むのは数フレーム後(下のリングの説明参照)。
                 //
@@ -12037,43 +11820,30 @@ namespace Kurenai
                 };
                 std::vector<TransparentDraw> draws;
                 // 半透明もカメラの錐台で間引く。ここは描画リストの構築なので、
-                // 間引いた分はソートの対象からも外れる
-                const FrustumPlanes transparentFrustum = ExtractFrustumPlanes(viewProj);
-                for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
-                {
-                    const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
-                    ++m_FrustumCullTested;
-                    if (!IsAABBVisible(transparentFrustum, instance.WorldBoundsMin, instance.WorldBoundsMax))
-                    {
-                        ++m_FrustumCullCulled;
-                        continue;
-                    }
+                // 間引いた分はソートの対象からも外れる。
+                // 【このパスはクロスディザ非対応】なのでフェード中でも段は1つに決め打つ。
+                // 【バッチは使わない】奥から手前へ並べ替える必要があり、まとめられない
+                const Rendering::FrustumPlanes transparentFrustum = ExtractFrustumPlanes(viewProj);
+                GeometryDrawLoopDesc transparentLoop;
+                transparentLoop.Frustum = &transparentFrustum;
+                transparentLoop.UseDrawUnits = false;
+                transparentLoop.LODMode = GeometryLODMode::Current;
+                transparentLoop.MeshFilter = GeometryMeshFilter::Transparent;
 
-                    const float dx = instance.World._14 - cameraPosition.x;
-                    const float dy = instance.World._24 - cameraPosition.y;
-                    const float dz = instance.World._34 - cameraPosition.z;
-                    const float distanceSq = dx * dx + dy * dy + dz * dz;
-                    // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
-                    // ストリーミング中で未読み込みなら描かない
-                    const Assets::Model* const currentModel = GetCurrentLOD(instanceIndex);
-                    if (!currentModel) { continue; }
-                    for (const auto& mesh : currentModel->Meshes)
+                ForEachGeometryDraw(
+                    transparentLoop,
+                    [](const InstanceDrawUnit&, const Assets::Model&, float) { return false; },
+                    [&](const InstanceDrawUnit& unit, const Assets::Model& currentModel,
+                        const Assets::Mesh& mesh, float)
                     {
-                        if (!mesh.IsTransparent)
-                        {
-                            continue;
-                        }
-                        // メッシュ単位のカリング。ここだけはループ内で描かず描画リストを作るので、
-                        // 判定はpush_backの直前に入れる(描かないものをリストへ積まない)
-                        if (!IsMeshVisibleWithStats(
-                                m_GeometrySettings.MeshCullingEnabled, transparentFrustum, instance, *currentModel, mesh, m_MeshCullTested,
-                                m_MeshCullCulled))
-                        {
-                            continue;
-                        }
-                        draws.push_back({ &instance, currentModel, &mesh, distanceSq });
-                    }
-                }
+                        const Assets::ModelInstance& instance = *unit.Instance;
+                        const float dx = instance.World._14 - cameraPosition.x;
+                        const float dy = instance.World._24 - cameraPosition.y;
+                        const float dz = instance.World._34 - cameraPosition.z;
+                        const float distanceSq = dx * dx + dy * dy + dz * dz;
+                        draws.push_back({ &instance, &currentModel, &mesh, distanceSq });
+                        return true;
+                    });
                 if (draws.empty())
                 {
                     return;
@@ -12259,51 +12029,31 @@ namespace Kurenai
                     const FrustumPlanes reflectionFrustum = ExtractFrustumPlanes(reflectedViewProj);
 
                     // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
-                    // 深度プリパス/G-Bufferと同じ「そのフレームに選ばれた段」の組を使う
-                    GetInstanceDrawUnits(/*coarsestLOD=*/false, m_DrawUnitScratch);
-                    for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
-                    {
-                        const size_t instanceIndex = unit.InstanceIndex;
-                        const Assets::ModelInstance& instance = *unit.Instance;
-                        ++m_FrustumCullTested;
-                        if (!IsAABBVisible(reflectionFrustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
-                        {
-                            ++m_FrustumCullCulled;
-                            continue;
-                        }
+                    // 深度プリパス/G-Bufferと同じ「そのフレームに選ばれた段」を描くが、
+                    // 【このパスはクロスディザ非対応】なのでフェード中でも段は1つに決め打つ
+                    // (GeometryLODMode::Current)。ストリーミング中で未読み込みなら描かない
+                    GeometryDrawLoopDesc planarLoop;
+                    planarLoop.Frustum = &reflectionFrustum;
+                    planarLoop.LODMode = GeometryLODMode::Current;
+                    // 半透明メッシュは反射に含めない(ProbeCaptureと同じ割り切り。
+                    // PlanarReflection.hlsl冒頭参照)
+                    planarLoop.MeshFilter = GeometryMeshFilter::Opaque;
 
-                        // クロスディザ非対応の経路なので、フェード中でも段は1つに決め打つ
-                        // ストリーミング中で未読み込みなら描かない。
-                        // バッチはフェード中でないものだけで構成されるので、
-                        // unit.Model と GetCurrentLOD は同じ段を指す
-                        const Assets::Model* const currentModel =
-                            unit.Model ? unit.Model : GetCurrentLOD(instanceIndex);
-                        if (!currentModel) { continue; }
-                        for (const auto& mesh : currentModel->Meshes)
+                    ForEachGeometryDraw(
+                        planarLoop,
+                        // このパスは1ドロー経路(メッシュレット)を持たない
+                        [](const InstanceDrawUnit&, const Assets::Model&, float) { return false; },
+                        [&](const InstanceDrawUnit& unit, const Assets::Model& currentModel,
+                            const Assets::Mesh& mesh, float)
                         {
-                            // 半透明メッシュは反射に含めない(ProbeCaptureと同じ割り切り。
-                            // PlanarReflection.hlsl冒頭参照)
-                            if (mesh.IsTransparent)
-                            {
-                                continue;
-                            }
-
-                            // メッシュ単位のカリング。錐台は鏡映カメラのもの。
-                            // 【バッチでは行わない】理由はG-Bufferパスの同じ箇所を参照
-                            if (!unit.IsBatch()
-                                && !IsMeshVisibleWithStats(
-                                    m_GeometrySettings.MeshCullingEnabled, reflectionFrustum, instance, *currentModel, mesh, m_MeshCullTested,
-                                    m_MeshCullCulled))
-                            {
-                                continue;
-                            }
+                            const Assets::ModelInstance& instance = *unit.Instance;
 
                             // 鏡映で巻きが反転するため、ミラーリングの有無に対して逆のPSOを選ぶ。
                             // バッチ内では IsMirrored が同一(グループ化のキー)なので代表で決めてよい
                             bindPipelineState(!instance.IsMirrored);
 
                             ObjectConstants objectConstants =
-                                MakeObjectConstants(instance, *currentModel, mesh, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
+                                MakeObjectConstants(instance, currentModel, mesh, m_EmissiveLightSettings.Intensity, m_AmbientOcclusionSettings.OcclusionMapEnabled, m_MeshletLODFrame);
                             objectConstants.InstanceBase = unit.InstanceBase;
                             objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                             cmd->UpdateBuffer(m_ObjectConstantBuffer.get(), &objectConstants, sizeof(objectConstants));
@@ -12325,8 +12075,8 @@ namespace Kurenai
                             cmd->SetTexture(3, mesh.EmissiveTexture);
                             cmd->SetTexture(5, mesh.OcclusionTexture);
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
-                        }
-                    }
+                            return true;
+                        });
 
                     // --- 水面へ映すドローンショーの機体 ---
                     // 平面反射は「カメラを鏡映しただけで世界は動かしていない」ので、
