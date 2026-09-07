@@ -938,7 +938,7 @@ namespace Kurenai::Passes
                         readbackDesc.Usage = RHI::BufferUsage::Readback;
                         readbackDesc.SizeInBytes = accumBytes;
                         readbackDesc.StrideInBytes = static_cast<uint32_t>(sizeof(float) * 4);
-                        m_Engine.m_MegaLightsAccumReadback = m_Engine.m_Device->CreateBuffer(readbackDesc);
+                        m_Engine.m_MegaLightsAccumReadback = frame.Device->CreateBuffer(readbackDesc);
                     }
                     catch (const std::exception& e)
                     {

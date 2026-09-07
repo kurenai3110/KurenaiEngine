@@ -30,5 +30,10 @@ namespace Kurenai
         // デバイスが対応していて、かつシェーダー/リソースの作成に成功したか。
         // どちらかが欠けたらUIのチェックボックスごと無効化する
         bool SoftwareRasterAvailable = false;
+
+        // 間接引数からメッシュシェーダーのディスパッチを発行できるか
+        // (IRHIDevice::SupportsIndirectDispatchMesh()の写し)。DX11とメッシュシェーダー
+        // 非対応環境では偽で、モデルカリングは従来のCPUループへ縮退する
+        bool IndirectDispatchMeshAvailable = false;
     };
 }

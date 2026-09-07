@@ -7,6 +7,7 @@
 #include <DirectXMath.h>
 
 #include "RHI/IRHICommandList.h"
+#include "../Diagnostics/RenderCapabilities.h"
 #include "MeshletLODFrameConstants.h"
 #include "RenderSettingsSnapshot.h"
 
@@ -41,7 +42,9 @@ namespace Kurenai::Passes
 namespace Kurenai::RHI
 {
     class IRHIBuffer;
+    class IRHIDevice;
     class IRHISamplerSet;
+    class IRHISwapChain;
     class IRHITexture;
 }
 
@@ -57,6 +60,23 @@ namespace Kurenai::Rendering
         // 内部レンダー解像度。フレーム先頭の作り直しブロックで確定し、登録中は変わらない
         uint32_t RenderWidth = 0;
         uint32_t RenderHeight = 0;
+
+        // ウィンドウのクライアント領域。**内部レンダー解像度とは別物**で、
+        // Presentがレターボックスの余白を計算するのにだけ使う
+        uint32_t WindowWidth = 0;
+        uint32_t WindowHeight = 0;
+
+        // デバイスの能力の写し。起動時とリソースの作り直しでしか変わらない
+        RenderCapabilities Capabilities;
+
+        // PresentパスがRenderGraphPassDesc::SwapChainTargetへ渡す
+        RHI::IRHISwapChain* SwapChain = nullptr;
+
+        // 【登録の途中で作るものにだけ使う】MegaLightsのダンプ構成が、読み戻しバッファを
+        // 初めて要ったフレームでここから作る。**生成をフレーム先頭へ引き上げてはいけない**
+        // ―― ダンプ構成でしか作られないバッファなので、位置を動かすとDX12の
+        // ディスクリプタ枠の割り当て順が変わる
+        RHI::IRHIDevice* Device = nullptr;
 
         // フレーム全体で共有する定数バッファとサンプラー。所有権は KurenaiEngine3D にあり、
         // 所有権を動かさない下ごしらえとして、ここでは借用する生ポインタだけを保持する

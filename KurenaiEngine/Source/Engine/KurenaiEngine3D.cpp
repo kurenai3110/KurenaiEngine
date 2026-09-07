@@ -1159,6 +1159,8 @@ namespace Kurenai
         m_RenderCapabilities.RaytracingAvailable = m_Device->SupportsRaytracing();
         // メッシュシェーダーの可否もここで控える(UIパネルが参照する)
         m_RenderCapabilities.MeshShaderAvailable = m_Device->SupportsMeshShader();
+        // 間接ディスパッチの可否も同じ理由でここへ控える(パス群が毎フレーム問い合わせない)
+        m_RenderCapabilities.IndirectDispatchMeshAvailable = m_Device->SupportsIndirectDispatchMesh();
         // bindless区画の容量も同じ理由でここへ控える(使用数はフレームごとに更新する)
         m_RenderStats.BindlessCapacity = m_Device->GetBindlessCapacity();
 
@@ -6354,6 +6356,12 @@ namespace Kurenai
         frameContext.TAAPrevEffectiveExposureEV100 = m_TAAPrevEffectiveExposureEV100;
         frameContext.RenderWidth = m_RenderWidth;
         frameContext.RenderHeight = m_RenderHeight;
+        frameContext.WindowWidth = m_Window->GetWidth();
+        frameContext.WindowHeight = m_Window->GetHeight();
+        frameContext.Capabilities = m_RenderCapabilities;
+        frameContext.SwapChain = m_SwapChain.get();
+        // 【遅延生成のためだけに渡す】使ってよいのはMegaLightsの読み戻しバッファだけ
+        frameContext.Device = m_Device.get();
         frameContext.FrameConstantBuffer = m_FrameConstantBuffer.get();
         frameContext.ObjectConstantBuffer = m_ObjectConstantBuffer.get();
         frameContext.MaterialSamplers = m_MaterialSamplers.get();

@@ -287,7 +287,8 @@ namespace Kurenai::Passes
         // 実際に描画発行まで任せるか。
         // 【DX11とメッシュシェーダー非対応環境では常にfalse】従来のCPUループへ縮退する
         const bool modelCullIndirectActive =
-            modelCullReady && frame.Settings.Geometry.ModelCullIndirectEnabled && m_Engine.m_Device->SupportsIndirectDispatchMesh();
+            modelCullReady && frame.Settings.Geometry.ModelCullIndirectEnabled &&
+            frame.Capabilities.IndirectDispatchMeshAvailable;
         m_Engine.m_ModelCullIndirectActiveLastFrame = modelCullIndirectActive;
         m_Engine.m_HiZFromDepthPrepassLastFrame = hiZFromDepthPrepass;
         m_Engine.m_ModelCullDispatchCounts[0] = hiZFromDepthPrepass
@@ -1015,7 +1016,7 @@ namespace Kurenai::Passes
         // 【なぜハードウェアと比べられるのか】GBufferパスとまったく同じjitteredProjを渡すため、
         // 深度は丸め誤差とフィルルールの差を除いて一致するはず。差が面全体に出たら
         // 座標変換の間違いで、シルエットの±1画素ならフィルルールの差(想定内)
-        const bool softwareRasterPassRuns = frame.Settings.Geometry.SoftwareRasterEnabled && m_Engine.m_RenderCapabilities.SoftwareRasterAvailable &&
+        const bool softwareRasterPassRuns = frame.Settings.Geometry.SoftwareRasterEnabled && frame.Capabilities.SoftwareRasterAvailable &&
                                             m_Engine.m_SoftwareRasterVisibilityBuffer && !m_Engine.m_Scene.Instances.empty();
         bb.SoftwareRasterPassRuns = softwareRasterPassRuns;
         if (softwareRasterPassRuns)

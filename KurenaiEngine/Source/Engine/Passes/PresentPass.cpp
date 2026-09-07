@@ -493,7 +493,7 @@ namespace Kurenai::Passes
 
         // レターボックス/ピラーボックスの余白もクリア色のまま残るよう、絞ったビューポートで描画する
         const RHI::Viewport letterboxViewport = ComputeLetterboxViewport(
-            m_Engine.m_Window->GetWidth(), m_Engine.m_Window->GetHeight(), presentSourceWidth, presentSourceHeight);
+            frame.WindowWidth, frame.WindowHeight, presentSourceWidth, presentSourceHeight);
 
         // グラフィックスデバッガ向けの名前を焼く。**フレームの記録とは独立**なので
         // レンダーグラフへは積まず、ここで直接呼ぶ(ID3D12Object::SetNameはコマンドではない)。
@@ -516,7 +516,7 @@ namespace Kurenai::Passes
             // 読むため、それぞれの書き手より後に順序付ける(表示していないフレームでも
             // 同じポインタになるだけで無害)
             .BufferReads = { m_Engine.m_LightTileBuffer.get(), presentTileBuffer, m_Engine.m_MegaLightsAccumBuffer.get() },
-            .SwapChainTarget = m_Engine.m_SwapChain.get(),
+            .SwapChainTarget = frame.SwapChain,
             .Execute = [this, letterboxViewport, presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture, presentDebugCubeArrayTexture, presentDebugVolumeTexture, presentTileBuffer, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
