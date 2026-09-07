@@ -61,6 +61,15 @@ namespace Kurenai::Rendering
         // 階層深度。ミップ段数はKurenaiEngine3D側が決めてCreateHiZへ渡す
         std::unique_ptr<RHI::IRHITexture> HiZTexture;
 
+        // 自前ソフトウェアラスタライザ(46章)の出力3枚。
+        // 【なぜここが持つか】書くのはGeometryPassesだけだが、PresentPassのデバッグ表示
+        // (Mode 4/5/7)が読む。群に持たせると群間の依存になるため、共有の持ち主をここに置く。
+        // フォーマットはハードウェア側と揃えてある ―― 色はHDR、深度は生値、法線は
+        // GBufferNormalと同じR16G16_Floatのオクタヘドラル符号化。揃えていないと差分が取れない
+        std::unique_ptr<RHI::IRHITexture> SoftwareRasterColor;
+        std::unique_ptr<RHI::IRHITexture> SoftwareRasterDepth;
+        std::unique_ptr<RHI::IRHITexture> SoftwareRasterNormal;
+
         // G-Buffer の生成は元の位置ごとに3つへ分ける。間に他のテクスチャ生成があるため、
         // 順序を変えるとDX12のディスクリプタ枠の割り当て順が変わり、意味の無い差分になる。
         // 呼び出し元のtry内から呼ぶこと。確保失敗時のHDR→Legacy8bitフォールバックは
@@ -74,5 +83,9 @@ namespace Kurenai::Rendering
         void CreateTAAHistory(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         void CreateHiZ(RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t mipLevels);
         void CreateShadowCascadeArray(RHI::IRHIDevice& device, uint32_t size, uint32_t cascadeCount);
+        // ソフトウェアラスタライザの出力3枚。visibility bufferの生成に挟まれた位置で呼ぶこと。
+        // 失敗時にこの機能だけを無効化する縮退はKurenaiEngine3D::CreateRenderTargetsが持つ
+        void CreateSoftwareRasterOutputs(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+        void ResetSoftwareRasterOutputs();
     };
 }

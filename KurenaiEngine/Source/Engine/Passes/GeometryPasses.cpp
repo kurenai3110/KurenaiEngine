@@ -1029,7 +1029,8 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SWRaster",
-                .Writes = { m_Engine.m_SoftwareRasterColor.get(), m_Engine.m_SoftwareRasterDepth.get(), m_Engine.m_SoftwareRasterNormal.get() },
+                .Writes = { targets->SoftwareRasterColor.get(), targets->SoftwareRasterDepth.get(),
+                            targets->SoftwareRasterNormal.get() },
                 .BufferReads = { m_Engine.m_SoftwareRasterMeshInfoBuffer.get() },
                 .BufferWrites = { m_Engine.m_SoftwareRasterVisibilityBuffer.get(),
                                   m_Engine.m_SoftwareRasterLargeEntriesBuffer.get(),

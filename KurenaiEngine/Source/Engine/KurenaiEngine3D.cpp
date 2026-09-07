@@ -3666,13 +3666,7 @@ namespace Kurenai
                     visibilityDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint64_t));
                     m_SoftwareRasterVisibilityBuffer = m_Device->CreateBuffer(visibilityDesc);
 
-                    // 【フォーマットはハードウェア側と揃える】色はHDR(Present Mode 4)、
-                    // 深度は生値(Mode 5)、法線はGBufferNormalと同じR16G16_Floatの
-                    // オクタヘドラル符号化(Mode 7)。揃えていないと差分が取れない
-                    m_SoftwareRasterColor =
-                        m_Device->CreateUAVTexture(width, height, RHI::Format::R16G16B16A16_Float);
-                    m_SoftwareRasterDepth = m_Device->CreateUAVTexture(width, height, RHI::Format::R32_Float);
-                    m_SoftwareRasterNormal = m_Device->CreateUAVTexture(width, height, RHI::Format::R16G16_Float);
+                    m_RenderTargets.CreateSoftwareRasterOutputs(*m_Device, width, height);
                 }
                 catch (const std::exception& e)
                 {
@@ -3682,9 +3676,7 @@ namespace Kurenai
                             std::to_string(width) + "x" + std::to_string(height) + "): " + e.what());
                     m_RenderCapabilities.SoftwareRasterAvailable = false;
                     m_SoftwareRasterVisibilityBuffer.reset();
-                    m_SoftwareRasterColor.reset();
-                    m_SoftwareRasterDepth.reset();
-                    m_SoftwareRasterNormal.reset();
+                    m_RenderTargets.ResetSoftwareRasterOutputs();
                 }
             }
         }
@@ -3964,9 +3956,9 @@ namespace Kurenai
         cmd->SetComputeConstantBuffer(1, m_SoftwareRasterConstantBuffer.get());
         cmd->SetComputeShaderResourceBuffer(0, m_SoftwareRasterMeshInfoBuffer.get());
         cmd->SetComputeShaderResourceBuffer(1, m_SoftwareRasterVisibilityBuffer.get());
-        cmd->SetComputeUnorderedAccessTexture(0, m_SoftwareRasterColor.get());
-        cmd->SetComputeUnorderedAccessTexture(1, m_SoftwareRasterDepth.get());
-        cmd->SetComputeUnorderedAccessTexture(2, m_SoftwareRasterNormal.get());
+        cmd->SetComputeUnorderedAccessTexture(0, m_RenderTargets.SoftwareRasterColor.get());
+        cmd->SetComputeUnorderedAccessTexture(1, m_RenderTargets.SoftwareRasterDepth.get());
+        cmd->SetComputeUnorderedAccessTexture(2, m_RenderTargets.SoftwareRasterNormal.get());
         cmd->SetComputeUnorderedAccessBuffer(3, m_SoftwareRasterIndirectArgsBuffer.get());
         cmd->Dispatch(
             (m_RenderWidth + kResolveGroupSize - 1) / kResolveGroupSize,

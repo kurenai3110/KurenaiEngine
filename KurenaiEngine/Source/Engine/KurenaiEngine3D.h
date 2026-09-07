@@ -2538,11 +2538,8 @@ namespace Kurenai
         // 以下は解像度に依存するためCreateRenderTargetsで作る。
         // visibility bufferは画素あたり64bit(深度32 + 三角形番号32)
         std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterVisibilityBuffer;
-        std::unique_ptr<RHI::IRHITexture> m_SoftwareRasterColor;
-        std::unique_ptr<RHI::IRHITexture> m_SoftwareRasterDepth;
-        // RenderTargets::GBufferNormalとまったく同じR16G16_Floatのオクタヘドラル符号化。
-        // Present.hlslのMode 7で並べて差分を取れるようにするため
-        std::unique_ptr<RHI::IRHITexture> m_SoftwareRasterNormal;
+        // 出力3枚(色・深度・法線)はPresentPassのデバッグ表示も読むため、
+        // 持ち主をRenderTargets(m_RenderTargets.SoftwareRaster*)へ移した
 
         // 巨大三角形とみなすbbox画素面積のしきい値と、その既定値・可動範囲(kSWRasterDefault/Min/Max
         // LargeTriangleArea)はm_GeometrySettings.SoftwareRasterLargeTriangleAreaへ移した

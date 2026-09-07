@@ -72,4 +72,21 @@ namespace Kurenai::Rendering
     {
         ShadowCascadeArray = device.CreateDepthTextureArray(size, size, cascadeCount);
     }
+
+    void RenderTargets::CreateSoftwareRasterOutputs(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        // 【フォーマットはハードウェア側と揃える】色はHDR(Present Mode 4)、
+        // 深度は生値(Mode 5)、法線はGBufferNormalと同じR16G16_Floatの
+        // オクタヘドラル符号化(Mode 7)。揃えていないと差分が取れない
+        SoftwareRasterColor = device.CreateUAVTexture(width, height, RHI::Format::R16G16B16A16_Float);
+        SoftwareRasterDepth = device.CreateUAVTexture(width, height, RHI::Format::R32_Float);
+        SoftwareRasterNormal = device.CreateUAVTexture(width, height, RHI::Format::R16G16_Float);
+    }
+
+    void RenderTargets::ResetSoftwareRasterOutputs()
+    {
+        SoftwareRasterColor.reset();
+        SoftwareRasterDepth.reset();
+        SoftwareRasterNormal.reset();
+    }
 }

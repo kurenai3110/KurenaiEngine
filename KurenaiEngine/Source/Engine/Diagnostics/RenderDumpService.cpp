@@ -91,9 +91,9 @@ namespace Kurenai
             { "TAAHistory", m_RenderTargets.TAAHistory[m_TAAHistoryIndex].get() },
             { "TAAHistoryPrev", m_RenderTargets.TAAHistory[m_TAAHistoryIndex ^ 1u].get() },
             // 自前ソフトウェアラスタライザ
-            { "SoftwareRasterColor", m_SoftwareRasterColor.get() },
-            { "SoftwareRasterDepth", m_SoftwareRasterDepth.get() },
-            { "SoftwareRasterNormal", m_SoftwareRasterNormal.get() },
+            { "SoftwareRasterColor", m_RenderTargets.SoftwareRasterColor.get() },
+            { "SoftwareRasterDepth", m_RenderTargets.SoftwareRasterDepth.get() },
+            { "SoftwareRasterNormal", m_RenderTargets.SoftwareRasterNormal.get() },
         };
     }
 

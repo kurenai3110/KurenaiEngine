@@ -379,18 +379,18 @@ namespace Kurenai::Passes
             {
                 if (frame.Settings.DebugView.View == DebugView::SoftwareRasterDepth)
                 {
-                    presentSourceTexture = m_Engine.m_SoftwareRasterDepth.get();
+                    presentSourceTexture = targets->SoftwareRasterDepth.get();
                     presentMode = 5;
                 }
                 else if (frame.Settings.DebugView.View == DebugView::SoftwareRasterNormal)
                 {
-                    presentSourceTexture = m_Engine.m_SoftwareRasterNormal.get();
+                    presentSourceTexture = targets->SoftwareRasterNormal.get();
                     presentMode = 7;
                 }
                 else
                 {
                     // フラット陰影はHDRのためMode 4(Reinhard+ガンマ)
-                    presentSourceTexture = m_Engine.m_SoftwareRasterColor.get();
+                    presentSourceTexture = targets->SoftwareRasterColor.get();
                     presentMode = 4;
                 }
             }
