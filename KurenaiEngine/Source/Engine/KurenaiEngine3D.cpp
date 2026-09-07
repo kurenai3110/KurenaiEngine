@@ -1676,15 +1676,14 @@ namespace Kurenai
         // IBL(Image Based Lighting)の3つの畳み込み結果を保持するテクスチャと、それを生成する
         // コンピュートシェーダー一式。実際の畳み込み(スカイボックスのサンプリング)はRender()の
         // 最初のフレームで一度だけ行う(m_IBLBaked参照)。ここではリソースの作成のみ行う
-        m_IrradianceTexture = m_Device->CreateUAVTextureCube(kIBLIrradianceSize, RHI::Format::R16G16B16A16_Float);
-        m_PrefilteredEnvTexture = m_Device->CreateMippedUAVTextureCube(
-            kIBLPrefilterBaseSize, RHI::Format::R16G16B16A16_Float, kIBLPrefilterMipLevels);
+        m_IBLResources.CreateEnvironmentMaps(
+            *m_Device, kIBLIrradianceSize, kIBLPrefilterBaseSize, kIBLPrefilterMipLevels);
         // BRDF積分LUTは2パスで焼く。パス1(CSMain)が(A, B)をスクラッチへ書き、
         // パス2(CSCombineEavg)がそれを読んでEavgを足した float4(A, B, Eavg, 0) を最終LUTへ書く。
         // 同一リソースをSRVとUAVへ同時バインドできないためスクラッチが要る(BRDFLUT.hlsl参照)
         m_BRDFLUTScratchTexture = m_Device->CreateUAVTexture(kIBLBRDFLUTSize, kIBLBRDFLUTSize, RHI::Format::R16G16_Float);
-        m_BRDFLUTTexture = m_Device->CreateUAVTexture(kIBLBRDFLUTSize, kIBLBRDFLUTSize, RHI::Format::R16G16B16A16_Float);
-        if (!m_BRDFLUTScratchTexture || !m_BRDFLUTTexture)
+        m_IBLResources.CreateBRDFLUT(*m_Device, kIBLBRDFLUTSize);
+        if (!m_BRDFLUTScratchTexture || !m_IBLResources.BRDFLUTTexture)
         {
             Core::Logger::Error("KurenaiEngine3D",
                 "BRDF積分LUTのテクスチャ作成に失敗しました(スペキュラのエネルギー補正が正しく動作しません)");
@@ -1949,10 +1948,7 @@ namespace Kurenai
         skyParametersBufferDesc.StrideInBytes = sizeof(GPUSkyParameters);
         m_SkyParametersBuffer = m_Device->CreateBuffer(skyParametersBufferDesc);
 
-        RHI::BufferDesc iblPrefilterConstantBufferDesc;
-        iblPrefilterConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        iblPrefilterConstantBufferDesc.SizeInBytes = sizeof(Passes::IBLFaceConstants);
-        m_IBLPrefilterConstantBuffer = m_Device->CreateBuffer(iblPrefilterConstantBufferDesc);
+        m_IBLResources.CreatePrefilterConstantBuffer(*m_Device, sizeof(Passes::IBLFaceConstants));
 
         // --- 反射プローブ(19章) ---
         // キャプチャ先(1面ぶんを6面で使い回す)。キューブへ写す前のHDR値を保つためFloatにする
@@ -6402,6 +6398,7 @@ namespace Kurenai
         frameContext.Sun = &sunLighting;
         frameContext.Constants = &constants;
         frameContext.SkyTexture = skyTexture;
+        frameContext.IBL = &m_IBLResources;
 
         Rendering::RenderBlackboard blackboard{};
 
@@ -6432,7 +6429,7 @@ namespace Kurenai
         // プローブのキャプチャが読むテクスチャ一式。反射プローブとDDGIが同じ組を読む
         const std::vector<RHI::IRHITexture*> probeCaptureReads = {
             m_RenderTargets.ShadowCascadeArray.get(),
-            skyTexture, m_IrradianceTexture.get(), m_PrefilteredEnvTexture.get(), m_BRDFLUTTexture.get(),
+            skyTexture, m_IBLResources.IrradianceTexture.get(), m_IBLResources.PrefilteredEnvTexture.get(), m_IBLResources.BRDFLUTTexture.get(),
         };
         frameContext.ProbeCaptureReads = &probeCaptureReads;
         frameContext.CascadeViewProj = cascadeViewProj;

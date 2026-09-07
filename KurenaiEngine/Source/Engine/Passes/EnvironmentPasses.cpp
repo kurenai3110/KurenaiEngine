@@ -43,6 +43,12 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
+        RHI::IRHIBuffer* const iblPrefilterConstantBuffer = frame.IBL->PrefilterConstantBuffer.get();
+        RHI::IRHITexture* const irradianceTexture = frame.IBL->IrradianceTexture.get();
+        RHI::IRHITexture* const prefilteredEnvTexture = frame.IBL->PrefilteredEnvTexture.get();
+
         // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
         // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
         const IBLSettings iblSettings = frame.Settings.IBL;
@@ -306,8 +312,8 @@ namespace Kurenai::Passes
                 .Name = "BRDFLUTBake",
                 // 2パス構成のためスクラッチも書き込み対象として挙げる(RenderGraphが
                 // パス内の依存を追えるように)。中身の説明はBRDFLUT.hlsl参照
-                .Writes = { m_Engine.m_BRDFLUTTexture.get(), m_Engine.m_BRDFLUTScratchTexture.get() },
-                .Execute = [this](RHI::IRHICommandList* cmd)
+                .Writes = { brdfLUTTexture, m_Engine.m_BRDFLUTScratchTexture.get() },
+                .Execute = [this, brdfLUTTexture](RHI::IRHICommandList* cmd)
                 {
                     // パス1: (A, B)をスクラッチへ焼く
                     cmd->SetComputePipelineState(m_Engine.m_BRDFLUTPipelineState.get());
@@ -319,7 +325,7 @@ namespace Kurenai::Passes
                     // (IRHICommandList.hのバインド寿命の説明を参照)
                     cmd->SetComputePipelineState(m_Engine.m_BRDFLUTCombinePipelineState.get());
                     cmd->SetComputeTexture(0, m_Engine.m_BRDFLUTScratchTexture.get());
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_BRDFLUTTexture.get(), 0);
+                    cmd->SetComputeUnorderedAccessTexture(0, brdfLUTTexture, 0);
                     cmd->Dispatch((kIBLBRDFLUTSize + 7) / 8, (kIBLBRDFLUTSize + 7) / 8, 1);
                 },
             });
@@ -376,8 +382,8 @@ namespace Kurenai::Passes
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "IBLPrefilter",
                 .Reads = { skyTexture },
-                .Writes = { m_Engine.m_PrefilteredEnvTexture.get() },
-                .Execute = [this, skyTexture, materialSamplers](RHI::IRHICommandList* cmd)
+                .Writes = { prefilteredEnvTexture },
+                .Execute = [this, iblPrefilterConstantBuffer, prefilteredEnvTexture, skyTexture, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_Engine.m_PrefilterPipelineState.get());
                     cmd->SetComputeTexture(0, skyTexture);
@@ -391,9 +397,9 @@ namespace Kurenai::Passes
                             IBLFaceConstants faceConstants{};
                             faceConstants.Face = face;
                             faceConstants.Roughness = roughness;
-                            cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
-                            cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
-                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_PrefilteredEnvTexture.get(), face, mip);
+                            cmd->UpdateBuffer(iblPrefilterConstantBuffer, &faceConstants, sizeof(faceConstants));
+                            cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
+                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, prefilteredEnvTexture, face, mip);
                             cmd->Dispatch((mipSize + 7) / 8, (mipSize + 7) / 8, 1);
                         }
                     }
@@ -418,8 +424,8 @@ namespace Kurenai::Passes
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "IBLIrradianceBake",
                 .Reads = { skyTexture },
-                .Writes = { m_Engine.m_IrradianceTexture.get() },
-                .Execute = [this, iblSettings, skyTexture, materialSamplers](RHI::IRHICommandList* cmd)
+                .Writes = { irradianceTexture },
+                .Execute = [this, iblPrefilterConstantBuffer, irradianceTexture, iblSettings, skyTexture, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     // 拡散イラディアンス(本物のTextureCube、32x32x6面)。HLSLはリソースを動的に
                     // スライス選択できないため、面ごとに1回ずつディスパッチする。
@@ -427,7 +433,7 @@ namespace Kurenai::Passes
                     // m_IBLSettings.UseSHIrradianceでCSIrradiance(総当たり積分、約9,750万
                     // サンプル)とSH L2経路(CSProjectSH→CSProjectSHFinal→CSEvaluateSH、
                     // 射影は24,576テクセルを1回ずつ読むだけ)を切り替えられる。
-                    // 出力(m_IrradianceTexture)の形・規約はどちらの経路でも完全に同一
+                    // 出力(IBLResources::IrradianceTexture)の形・規約はどちらの経路でも完全に同一
                     if (iblSettings.UseSHIrradiance)
                     {
                         IBLFaceConstants shConstants{};
@@ -435,8 +441,8 @@ namespace Kurenai::Passes
                         shConstants.SHWindowLambda = iblSettings.SHWindowLambda;
 
                         // --- 1. 射影: ソースキューブ全体を1回だけ読んで9個の係数(RGB)へ集約する ---
-                        cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &shConstants, sizeof(shConstants));
-                        cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
+                        cmd->UpdateBuffer(iblPrefilterConstantBuffer, &shConstants, sizeof(shConstants));
+                        cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
                         cmd->SetComputePipelineState(m_Engine.m_ProjectSHPipelineState.get());
                         cmd->SetComputeTexture(0, skyTexture);
                         cmd->SetComputeSamplerSet(materialSamplers);
@@ -446,8 +452,8 @@ namespace Kurenai::Passes
 
                         // --- 2. 最終合算: 全グループぶんの部分和を1ディスパッチでまとめる ---
                         // (SHProjectionSizeはCSProjectSHと同じ値でなければグループ番号の対応がずれる)
-                        cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &shConstants, sizeof(shConstants));
-                        cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
+                        cmd->UpdateBuffer(iblPrefilterConstantBuffer, &shConstants, sizeof(shConstants));
+                        cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
                         cmd->SetComputePipelineState(m_Engine.m_ProjectSHFinalPipelineState.get());
                         cmd->SetComputeShaderResourceBuffer(1, m_Engine.m_SHPartialSumsBuffer.get());
                         cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_SHCoefficientsBuffer.get());
@@ -461,9 +467,9 @@ namespace Kurenai::Passes
                             IBLFaceConstants faceConstants{};
                             faceConstants.Face = face;
                             faceConstants.SHWindowLambda = iblSettings.SHWindowLambda;
-                            cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
-                            cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
-                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_IrradianceTexture.get(), face, 0);
+                            cmd->UpdateBuffer(iblPrefilterConstantBuffer, &faceConstants, sizeof(faceConstants));
+                            cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
+                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, irradianceTexture, face, 0);
                             cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
                         }
                     }
@@ -476,9 +482,9 @@ namespace Kurenai::Passes
                         {
                             IBLFaceConstants faceConstants{};
                             faceConstants.Face = face;
-                            cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
-                            cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
-                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_IrradianceTexture.get(), face, 0);
+                            cmd->UpdateBuffer(iblPrefilterConstantBuffer, &faceConstants, sizeof(faceConstants));
+                            cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
+                            cmd->SetComputeUnorderedAccessTextureCubeFace(0, irradianceTexture, face, 0);
                             cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
                         }
                     }

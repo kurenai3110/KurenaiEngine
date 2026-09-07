@@ -32,6 +32,12 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
+        RHI::IRHIBuffer* const iblPrefilterConstantBuffer = frame.IBL->PrefilterConstantBuffer.get();
+        RHI::IRHITexture* const irradianceTexture = frame.IBL->IrradianceTexture.get();
+        RHI::IRHITexture* const prefilteredEnvTexture = frame.IBL->PrefilteredEnvTexture.get();
+
         // 【フレームの写しをローカルで受ける】ラムダへ値で渡すため
         const float effectiveExposureEV100 = frame.EffectiveExposureEV100;
         const MeshletLODFrameConstants meshletLOD = frame.MeshletLOD;
@@ -75,7 +81,7 @@ namespace Kurenai::Passes
         // RWTexture2DArray<float>なので、キューブ配列だけでなく単体のキューブ(=6要素の2D配列)の
         // 面へもそのまま書ける
         const auto captureDDGIProbeFace =
-            [this, meshletLOD, suppressEmissiveForGI, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, suppressEmissiveForGI, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
 
@@ -106,9 +112,9 @@ namespace Kurenai::Passes
 
             cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
             cmd->SetShaderResourceBuffer(8, m_Engine.m_LightBuffer.get());
-            cmd->SetTexture(9, m_Engine.m_IrradianceTexture.get());
-            cmd->SetTexture(10, m_Engine.m_PrefilteredEnvTexture.get());
-            cmd->SetTexture(11, m_Engine.m_BRDFLUTTexture.get());
+            cmd->SetTexture(9, irradianceTexture);
+            cmd->SetTexture(10, prefilteredEnvTexture);
+            cmd->SetTexture(11, brdfLUTTexture);
             // DDGI(22章)の多重バウンス。ProbeCapture.hlslは拡散の環境光をここから引く。
             // 参照するのは「前フレームまでに焼けているアトラス」で、同じフレームの中でも
             // 既に更新済みのプローブぶんは新しい値になる。DDGIは元々ヒステリシスで
@@ -227,8 +233,8 @@ namespace Kurenai::Passes
             IBLFaceConstants faceConstants{};
             faceConstants.Face = face;
             cmd->SetComputePipelineState(m_Engine.m_ProbeCubeCopyPipelineState.get());
-            cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
-            cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
+            cmd->UpdateBuffer(iblPrefilterConstantBuffer, &faceConstants, sizeof(faceConstants));
+            cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
             cmd->SetComputeSamplerSet(materialSamplers);
             cmd->SetComputeTexture(0, skyTexture);
             cmd->SetComputeTexture(1, m_Engine.m_DDGICaptureColor.get());
@@ -247,7 +253,7 @@ namespace Kurenai::Passes
         // RWTexture2DArrayとして張る」メソッドをDX11/DX12の両方へ足す必要がある。
         // ドローとメッシュ走査が消えるのが本題なので、そこは測ってから決める
         const auto traceDDGIProbeFace =
-            [this, suppressEmissiveForGI, ddgiSettings, emissiveLightSettings, skyTexture, bakedLightCount, materialSamplers, frameConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, suppressEmissiveForGI, ddgiSettings, emissiveLightSettings, skyTexture, bakedLightCount, materialSamplers, frameConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
 
@@ -301,9 +307,9 @@ namespace Kurenai::Passes
                 cmd->SetComputeShaderResourceBuffer(6, meshletBuffer);
             }
             cmd->SetComputeShaderResourceBuffer(7, m_Engine.m_LightBuffer.get());
-            cmd->SetComputeTexture(8, m_Engine.m_IrradianceTexture.get());
-            cmd->SetComputeTexture(9, m_Engine.m_PrefilteredEnvTexture.get());
-            cmd->SetComputeTexture(10, m_Engine.m_BRDFLUTTexture.get());
+            cmd->SetComputeTexture(8, irradianceTexture);
+            cmd->SetComputeTexture(9, prefilteredEnvTexture);
+            cmd->SetComputeTexture(10, brdfLUTTexture);
             cmd->SetComputeTexture(11, skyTexture);
             // DDGIの多重バウンス。ラスタ経路がt12/t13で引いているのと同じアトラス
             cmd->SetComputeTexture(12, m_Engine.m_DDGIIrradianceAtlas.get());

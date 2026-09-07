@@ -42,6 +42,7 @@
 #include "Settings/QualitySettings.h"
 #include "Settings/ReflectionProbeSettings.h"
 #include "Settings/ReflectionSettings.h"
+#include "Rendering/IBLResources.h"
 #include "Rendering/RenderTargets.h"
 #include "Rendering/ShadowConstants.h"
 #include "Rendering/MeshletLODFrameConstants.h"
@@ -1855,7 +1856,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_ProceduralSkyTexture;
         std::unique_ptr<RHI::IRHIShader> m_SkyGenerateComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_SkyGeneratePipelineState;
-        // SkyGenerate用の専用定数バッファ。m_IBLPrefilterConstantBufferと共用しないこと
+        // SkyGenerate用の専用定数バッファ。m_IBLResources.PrefilterConstantBufferと共用しないこと
         // (UpdateBuffer→SetComputeConstantBufferの順序制約があり、共用すると事故りやすい。
         //  詳細はRHI/IRHICommandList.hのSetConstantBufferのコメント)
         std::unique_ptr<RHI::IRHIBuffer> m_SkyBakeConstantBuffer;
@@ -1942,11 +1943,8 @@ namespace Kurenai
         // 検証用の拡散イラディアンスマップを焼き終えたか(m_IBLBakedとは別管理)。既定の描画経路は
         // プリフィルタ済み鏡面の最終ミップなので、こちらは検証を有効にしたときにだけ焼く
         bool m_IBLIrradianceBaked = false;
-        std::unique_ptr<RHI::IRHITexture> m_IrradianceTexture;
-        std::unique_ptr<RHI::IRHITexture> m_PrefilteredEnvTexture;
-        // BRDF積分LUT。float4(A, B, Eavg, 0)。第3成分Eavgはスペキュラのエネルギー補正のうち
-        // Kulla-Conty(加算ローブ)方式だけが使う半球平均で、行(ラフネス)内では同じ値が入る
-        std::unique_ptr<RHI::IRHITexture> m_BRDFLUTTexture;
+        // 畳み込み結果とBRDF積分LUTの持ち主は Rendering/IBLResources.h
+        Rendering::IBLResources m_IBLResources;
         // 上のLUTを焼く2パス構成の中間バッファ。パス1が(A, B)をここへ書き、パス2がこれをSRVで
         // 読んでEavgを足しつつ最終LUTへ書く。同一リソースをSRVとUAVへ同時バインドできないため必要
         std::unique_ptr<RHI::IRHITexture> m_BRDFLUTScratchTexture;
@@ -2057,8 +2055,6 @@ namespace Kurenai
         // 合算した最終係数(9個)。どちらもRGB(float4のxyz、wは詰め物)
         std::unique_ptr<RHI::IRHIBuffer> m_SHPartialSumsBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_SHCoefficientsBuffer;
-        // プリフィルタ済み鏡面のミップごとの畳み込みで使うラフネス値を渡す専用の定数バッファ
-        std::unique_ptr<RHI::IRHIBuffer> m_IBLPrefilterConstantBuffer;
         // IBLの有効/強度・SH経路・専用イラディアンス・環境光の拡散/鏡面/フォールバック強度は
         // m_IBLSettingsへ移した(Settings/IBLSettings.h)。bent normal/multi-bounce AOの
         // ソース選択はm_AmbientOcclusionSettingsへ移した(Settings/AmbientOcclusionSettings.h)

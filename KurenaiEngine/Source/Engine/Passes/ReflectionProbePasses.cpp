@@ -32,6 +32,12 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
+        RHI::IRHIBuffer* const iblPrefilterConstantBuffer = frame.IBL->PrefilterConstantBuffer.get();
+        RHI::IRHITexture* const irradianceTexture = frame.IBL->IrradianceTexture.get();
+        RHI::IRHITexture* const prefilteredEnvTexture = frame.IBL->PrefilteredEnvTexture.get();
+
         // 【フレームの写しをローカルで受ける】ラムダへ値で渡すため
         const float effectiveExposureEV100 = frame.EffectiveExposureEV100;
         const MeshletLODFrameConstants meshletLOD = frame.MeshletLOD;
@@ -66,7 +72,7 @@ namespace Kurenai::Passes
         // プローブ1面ぶんのキャプチャ(フォワード描画 → スクラッチのキューブ面へコピー)。
         // フルベイクと時間分割の両方から呼ぶためラムダへ切り出してある
         const auto captureProbeFace =
-            [this, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
+            [this, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
         {
             const Assets::ReflectionProbe& probe = m_Engine.m_ReflectionProbes[probeIndex];
             const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
@@ -121,9 +127,9 @@ namespace Kurenai::Passes
             // ループ内の各Drawへ引き継がれる
             cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
             cmd->SetShaderResourceBuffer(8, m_Engine.m_LightBuffer.get());
-            cmd->SetTexture(9, m_Engine.m_IrradianceTexture.get());
-            cmd->SetTexture(10, m_Engine.m_PrefilteredEnvTexture.get());
-            cmd->SetTexture(11, m_Engine.m_BRDFLUTTexture.get());
+            cmd->SetTexture(9, irradianceTexture);
+            cmd->SetTexture(10, prefilteredEnvTexture);
+            cmd->SetTexture(11, brdfLUTTexture);
             // DDGI(22章)の多重バウンス。ProbeCapture.hlslは拡散の環境光をここから引く。
             // 参照するのは「前フレームまでに焼けているアトラス」で、同じフレームの中でも
             // 既に更新済みのプローブぶんは新しい値になる。DDGIは元々ヒステリシスで
@@ -194,8 +200,8 @@ namespace Kurenai::Passes
             Passes::IBLFaceConstants faceConstants{};
             faceConstants.Face = face;
             cmd->SetComputePipelineState(m_Engine.m_ProbeCubeCopyPipelineState.get());
-            cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
-            cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
+            cmd->UpdateBuffer(iblPrefilterConstantBuffer, &faceConstants, sizeof(faceConstants));
+            cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
             cmd->SetComputeSamplerSet(materialSamplers);
             // ジオメトリが描かれなかったテクセルを埋める空。手続き空が有効なフレームでは
             // そちらを使わないと、プローブにだけ古いDDSの空が焼き込まれて本編と食い違う
@@ -220,7 +226,7 @@ namespace Kurenai::Passes
         // SetComputeSamplerSetは呼び出し側が先に1回済ませておくこと(同じプローブの複数ステップを
         // 1パスにまとめて呼ぶ場合、毎回張り直す必要が無いため。Realtimeの時間分割参照)
         const auto convolveProbePrefilterStep =
-            [this](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t mip, uint32_t face)
+            [this, iblPrefilterConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t mip, uint32_t face)
         {
             const uint32_t cubeIndex = static_cast<uint32_t>(probeIndex);
             const uint32_t mipSize = std::max(1u, kIBLPrefilterBaseSize >> mip);
@@ -229,8 +235,8 @@ namespace Kurenai::Passes
             Passes::IBLFaceConstants faceConstants{};
             faceConstants.Face = face;
             faceConstants.Roughness = roughness;
-            cmd->UpdateBuffer(m_Engine.m_IBLPrefilterConstantBuffer.get(), &faceConstants, sizeof(faceConstants));
-            cmd->SetComputeConstantBuffer(0, m_Engine.m_IBLPrefilterConstantBuffer.get());
+            cmd->UpdateBuffer(iblPrefilterConstantBuffer, &faceConstants, sizeof(faceConstants));
+            cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
             cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_ProbePrefilteredArray.get(), face, mip, cubeIndex);
             cmd->Dispatch((mipSize + 7) / 8, (mipSize + 7) / 8, 1);
         };

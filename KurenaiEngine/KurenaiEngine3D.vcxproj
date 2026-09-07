@@ -102,6 +102,7 @@
     <ClInclude Include="Source\Engine\Rendering\GeometryDrawTypes.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderSettingsSnapshot.h" />
     <ClInclude Include="Source\Engine\Rendering\MeshletLODFrameConstants.h" />
+    <ClInclude Include="Source\Engine\Rendering\IBLResources.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderTargets.h" />
     <ClInclude Include="Source\Engine\Rendering\ShadowConstants.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderBlackboard.h" />
@@ -160,6 +161,7 @@
     <ClCompile Include="Source\Engine\Scene\ModelResidencySystem.cpp" />
     <ClCompile Include="Source\Engine\Scene\SceneLoadService.cpp" />
     <ClCompile Include="Source\Engine\Rendering\GeometryDrawLoop.cpp" />
+    <ClCompile Include="Source\Engine\Rendering\IBLResources.cpp" />
     <ClCompile Include="Source\Engine\Rendering\RenderTargets.cpp" />
     <ClCompile Include="Source\Engine\Passes\DDGIPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\EnvironmentPasses.cpp" />

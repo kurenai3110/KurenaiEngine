@@ -30,6 +30,9 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
+
         // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
         // ここで作り直さない。ラムダへ値で渡すためローカルで受ける
         const int32_t megaLightsSamplesPerPixel = frame.MegaLightsSamplesPerPixel;
@@ -207,7 +210,7 @@ namespace Kurenai::Passes
                     m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
                     // スペキュラのエネルギー補正でEssを引く。Readsへ挙げることでBRDFLUTBakeパス
                     // (このLUTの書き手)より後ろに順序付けられる
-                    m_Engine.m_BRDFLUTTexture.get(),
+                    brdfLUTTexture,
                 },
                 .Writes = { m_Engine.m_MegaLightsTexture.get() },
                 // ライトリストはグラフの外(UpdateBuffer)で更新済みだが、読むものは宣言しておく
@@ -215,7 +218,7 @@ namespace Kurenai::Passes
                 // 読むが、宣言しておくことで候補プールパスより後ろへ順序付けられる
                 // (参照実装のフレームでは辺が1本余分に張られるだけで無害)
                 .BufferReads = { m_Engine.m_LightBuffer.get(), tilePoolBufferForBinding, meshLightBufferForBinding },
-                .Execute = [this, emissiveLightSettings, megaLightsSettings, &gpuLights, tilePoolBufferForBinding, meshLightBufferForBinding, meshLightTriangleCount, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, brdfLUTTexture, emissiveLightSettings, megaLightsSettings, &gpuLights, tilePoolBufferForBinding, meshLightBufferForBinding, meshLightTriangleCount, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     Passes::MegaLightsConstants megaLightsConstants{};
                     megaLightsConstants.Params0 =
@@ -252,7 +255,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
                     cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                     cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
-                    cmd->SetComputeTexture(5, m_Engine.m_BRDFLUTTexture.get());
+                    cmd->SetComputeTexture(5, brdfLUTTexture);
                     // ライトが0灯のフレームでも必ずバインドする(DX12はSetPipelineStateのたびに
                     // ルート引数が無効化されるため、シェーダが宣言しているリソースを未バインドで
                     // Dispatchすることになる)
@@ -448,11 +451,11 @@ namespace Kurenai::Passes
                 .Reads =
                 {
                     m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
-                    m_Engine.m_BRDFLUTTexture.get(),
+                    brdfLUTTexture,
                 },
                 .BufferReads = { m_Engine.m_LightBuffer.get(), tilePoolBufferForBinding },
                 .BufferWrites = { m_Engine.m_MegaLightsReservoirBuffer.get(), m_Engine.m_MegaLightsBlockedLightBuffer.get() },
-                .Execute = [this, tilePoolBufferForBinding, updateStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, brdfLUTTexture, tilePoolBufferForBinding, updateStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     updateStochasticConstants(cmd);
 
@@ -468,7 +471,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
                     cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                     cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
-                    cmd->SetComputeTexture(5, m_Engine.m_BRDFLUTTexture.get());
+                    cmd->SetComputeTexture(5, brdfLUTTexture);
                     cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
                     cmd->SetComputeShaderResourceBuffer(7, tilePoolBufferForBinding);
 
@@ -488,7 +491,7 @@ namespace Kurenai::Passes
                     .Reads =
                     {
                         m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
-                        m_Engine.m_BRDFLUTTexture.get(), m_Engine.m_RenderTargets.GBufferVelocity.get(),
+                        brdfLUTTexture, m_Engine.m_RenderTargets.GBufferVelocity.get(),
                     },
                     // 【読むのは前フレームが書いた側】今フレームが書くのはもう片方なので、
                     // 同じバッファへの読み書きが同一フレーム内で起きない(WARが生じない)。
@@ -498,7 +501,7 @@ namespace Kurenai::Passes
                                      m_Engine.m_MegaLightsHistoryGuide[historyReadIndex].get() },
                     .BufferWrites = { m_Engine.m_MegaLightsReservoirHistory[historyWriteIndex].get(),
                                       m_Engine.m_MegaLightsHistoryGuide[historyWriteIndex].get() },
-                    .Execute = [this, historyReadIndex, historyWriteIndex, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                    .Execute = [this, brdfLUTTexture, historyReadIndex, historyWriteIndex, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
                         // 定数はInitial側で更新済み(中身はフレーム内で不変)
                         cmd->SetComputePipelineState(m_Engine.m_MegaLightsTemporalPipelineState.get());
@@ -515,7 +518,7 @@ namespace Kurenai::Passes
                         cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
                         cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                         cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
-                        cmd->SetComputeTexture(5, m_Engine.m_BRDFLUTTexture.get());
+                        cmd->SetComputeTexture(5, brdfLUTTexture);
                         cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
                         cmd->SetComputeShaderResourceBuffer(7, m_Engine.m_MegaLightsReservoirBuffer.get());
                         cmd->SetComputeShaderResourceBuffer(
@@ -553,14 +556,14 @@ namespace Kurenai::Passes
                     .Reads =
                     {
                         m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
-                        m_Engine.m_BRDFLUTTexture.get(),
+                        brdfLUTTexture,
                     },
                     // 入力は「時間再利用を挟んだならその出力、挟まないならInitialの出力」。
                     // 初期リザーバ(今フレームの殺しの持ち回り)も自画素の遮蔽の確定情報として読む
                     .BufferReads = { m_Engine.m_LightBuffer.get(), spatialInput, m_Engine.m_MegaLightsTilePoolBuffer.get(),
                                      m_Engine.m_MegaLightsReservoirBuffer.get(), m_Engine.m_MegaLightsBlockedLightBuffer.get() },
                     .BufferWrites = { spatialOutput },
-                    .Execute = [this, spatialInput, spatialOutput, spatialConstants, spatialIteration, buildStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                    .Execute = [this, brdfLUTTexture, spatialInput, spatialOutput, spatialConstants, spatialIteration, buildStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
                         // 【この定数だけは自分で更新する】反復番号が反復ごとに違うため、
                         // Initial が更新する共有分は使えない。UpdateBuffer と
@@ -582,7 +585,7 @@ namespace Kurenai::Passes
                         cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
                         cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                         cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
-                        cmd->SetComputeTexture(5, m_Engine.m_BRDFLUTTexture.get());
+                        cmd->SetComputeTexture(5, brdfLUTTexture);
                         cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
                         cmd->SetComputeShaderResourceBuffer(7, spatialInput);
                         // MIS重みが「その灯が隣のタイルへ届くか」を判定するのに、
@@ -616,12 +619,12 @@ namespace Kurenai::Passes
                     .Reads =
                     {
                         m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(),
-                        m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_BRDFLUTTexture.get(),
+                        m_Engine.m_RenderTargets.GBufferDepth.get(), brdfLUTTexture,
                     },
                     .Writes = { m_Engine.m_MegaLightsTexture.get() },
                     .BufferReads = { m_Engine.m_LightBuffer.get(), m_Engine.m_MegaLightsReservoirBuffer.get() },
                     .BufferWrites = { guideWriteBuffer },
-                    .Execute = [this, guideWriteBuffer, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                    .Execute = [this, brdfLUTTexture, guideWriteBuffer, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
                         // 定数はInitial側で更新済み。ここでバインドし直すのは、DX12が
                         // SetPipelineStateのたびにルート引数を無効化するため
@@ -636,7 +639,7 @@ namespace Kurenai::Passes
                         cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
                         cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                         cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
-                        cmd->SetComputeTexture(5, m_Engine.m_BRDFLUTTexture.get());
+                        cmd->SetComputeTexture(5, brdfLUTTexture);
                         cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
                         cmd->SetComputeShaderResourceBuffer(7, m_Engine.m_MegaLightsReservoirBuffer.get());
 
@@ -653,11 +656,11 @@ namespace Kurenai::Passes
                 .Reads =
                 {
                     m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
-                    m_Engine.m_BRDFLUTTexture.get(),
+                    brdfLUTTexture,
                 },
                 .Writes = { m_Engine.m_MegaLightsTexture.get() },
                 .BufferReads = { m_Engine.m_LightBuffer.get(), shadeReservoirBuffer },
-                .Execute = [this, shadeReservoirBuffer, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, brdfLUTTexture, shadeReservoirBuffer, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     // 定数はInitial側で更新済み。ここでバインドし直すのは、DX12が
                     // SetPipelineStateのたびにルート引数を無効化するため
@@ -672,7 +675,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
                     cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                     cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
-                    cmd->SetComputeTexture(5, m_Engine.m_BRDFLUTTexture.get());
+                    cmd->SetComputeTexture(5, brdfLUTTexture);
                     cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
                     // 空間再利用を挟んだフレームはその出力を、挟まないフレームはInitialの出力を読む
                     cmd->SetComputeShaderResourceBuffer(7, shadeReservoirBuffer);

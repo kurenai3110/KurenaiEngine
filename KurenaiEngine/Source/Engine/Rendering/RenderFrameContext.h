@@ -9,6 +9,7 @@
 #include "RHI/IRHICommandList.h"
 #include "../Diagnostics/RenderCapabilities.h"
 #include "MeshletLODFrameConstants.h"
+#include "IBLResources.h"
 #include "RenderSettingsSnapshot.h"
 
 // フレームの先頭で確定し、グラフ登録の間ずっと変わらない値をまとめたスナップショット(段階6)。
@@ -90,6 +91,10 @@ namespace Kurenai::Rendering
         // **Reads 宣言と実際のバインドの両方でこれを使うこと。**
         // ActiveSkyTexture() を都度呼ぶと両者が食い違って依存解決が壊れる
         RHI::IRHITexture* SkyTexture = nullptr;
+
+        // IBLの畳み込み結果一式。**エンジンが持ったままで、ここにはポインタだけ載せる**。
+        // 中身はフレーム先頭で確定し、登録中は変わらない
+        const IBLResources* IBL = nullptr;
 
         // PresentパスがRenderGraphPassDesc::SwapChainTargetへ渡す
         RHI::IRHISwapChain* SwapChain = nullptr;

@@ -80,7 +80,7 @@ namespace Kurenai
             { "DDGIResolveTexture", m_DDGIResolveTexture.get() },
             { "DDGIResolveDepthTexture", m_DDGIResolveDepthTexture.get() },
             // IBL
-            { "BRDFLUTTexture", m_BRDFLUTTexture.get() },
+            { "BRDFLUTTexture", m_IBLResources.BRDFLUTTexture.get() },
             // ポストプロセスと最終段
             { "TonemapTexture", m_RenderTargets.TonemapTexture.get() },
             { "UpscaleTexture", m_UpscaleTexture.get() },

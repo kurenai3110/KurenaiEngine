@@ -52,6 +52,11 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
+        RHI::IRHITexture* const irradianceTexture = frame.IBL->IrradianceTexture.get();
+        RHI::IRHITexture* const prefilteredEnvTexture = frame.IBL->PrefilteredEnvTexture.get();
+
         // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
         // ここで作り直さない。ラムダへ値で渡すためローカルで受ける
         const bool megaLightsRuns = frame.MegaLightsRuns;
@@ -186,13 +191,13 @@ namespace Kurenai::Passes
         case DebugView::IBLIrradiance:
             // 本物のTextureCubeのため、SourceTexture(t0、Texture2D)ではなくDebugCubeTexture(t1)を
             // 現在のカメラ視線方向でサンプルする(Present.hlsl Mode 9、presentDebugCubeTexture参照)
-            presentDebugCubeTexture = m_Engine.m_IrradianceTexture.get();
+            presentDebugCubeTexture = irradianceTexture;
             presentMode = 9;
             presentSourceWidth = renderWidth;
             presentSourceHeight = renderHeight;
             break;
         case DebugView::IBLPrefilter:
-            presentDebugCubeTexture = m_Engine.m_PrefilteredEnvTexture.get();
+            presentDebugCubeTexture = prefilteredEnvTexture;
             presentMode = 9;
             presentSourceWidth = renderWidth;
             presentSourceHeight = renderHeight;
@@ -213,7 +218,7 @@ namespace Kurenai::Passes
             presentMode = 13;
             break;
         case DebugView::IBLBRDFLUT:
-            presentSourceTexture = m_Engine.m_BRDFLUTTexture.get();
+            presentSourceTexture = brdfLUTTexture;
             presentMode = 0; // (A, B, Eavg)の生値をそのままRGBとして表示(値域はおおむね[0,1])
             presentSourceWidth = kIBLBRDFLUTSize;
             presentSourceHeight = kIBLBRDFLUTSize;

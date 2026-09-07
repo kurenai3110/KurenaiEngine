@@ -28,6 +28,9 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
+
         // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
         // ここで作り直さない。ラムダへ値で渡すためローカルで受ける
         const bool raytracedAORuns = frame.RaytracedAORuns;
@@ -93,10 +96,10 @@ namespace Kurenai::Passes
                 megaLightsTextureForBinding,
                 // スペキュラのエネルギー補正(14.9節)でEss=brdf.x+brdf.yを引くためBRDF積分LUTを読む。
                 // Readsに挙げることでRenderGraphがBRDFLUTBakeパス(このLUTのWriter)より後に順序付ける
-                m_Engine.m_BRDFLUTTexture.get(),
+                brdfLUTTexture,
             },
             .RenderTargets = { m_Engine.m_RenderTargets.DirectLightTexture.get() },
-            .Execute = [this, gbufferViewport, &gpuLights, &lightingConstants, rtShadowTextureForBinding, megaLightsTextureForBinding, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, brdfLUTTexture, gbufferViewport, &gpuLights, &lightingConstants, rtShadowTextureForBinding, megaLightsTextureForBinding, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
 
@@ -128,7 +131,7 @@ namespace Kurenai::Passes
                 cmd->SetShaderResourceBuffer(5, m_Engine.m_LightTileBuffer.get());
                 // スペキュラのエネルギー補正(14.9節)用のBRDF積分LUT。t8はライトリスト
                 // (StructuredBuffer)が占有しているためt9に置く
-                cmd->SetTexture(9, m_Engine.m_BRDFLUTTexture.get());
+                cmd->SetTexture(9, brdfLUTTexture);
 
                 cmd->Draw(3, 0);
             },
@@ -329,6 +332,11 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
+        RHI::IRHITexture* const irradianceTexture = frame.IBL->IrradianceTexture.get();
+        RHI::IRHITexture* const prefilteredEnvTexture = frame.IBL->PrefilteredEnvTexture.get();
+
         // 【フレームの写しをローカルで受ける】ラムダへ値で渡すため
         const MeshletLODFrameConstants meshletLOD = frame.MeshletLOD;
 
@@ -364,7 +372,7 @@ namespace Kurenai::Passes
             .Reads = {
                 m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.DirectLightTexture.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
                 skyTexture, activeAOTexture, m_Engine.m_RenderTargets.GBufferEmissive.get(), m_Engine.m_RenderTargets.GBufferNormal.get(),
-                m_Engine.m_IrradianceTexture.get(), m_Engine.m_PrefilteredEnvTexture.get(), m_Engine.m_BRDFLUTTexture.get(),
+                irradianceTexture, prefilteredEnvTexture, brdfLUTTexture,
                 m_Engine.m_RenderTargets.GBufferBentNormal.get(),
                 // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)。
                 // 反射プローブは鏡面専任なので拡散イラディアンス側の配列は無い
@@ -384,7 +392,7 @@ namespace Kurenai::Passes
             // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
             // (実際のバインドはExecute内)
             .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
-            .Execute = [this, gbufferViewport, activeAOTexture, skyTexture, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, gbufferViewport, activeAOTexture, skyTexture, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
                 // 深度テストに失敗した(=何も描かれていない)ピクセル用の背景色。discardされた箇所に前フレームのデータが
@@ -402,9 +410,9 @@ namespace Kurenai::Passes
                 cmd->SetTexture(5, activeAOTexture);
                 cmd->SetTexture(6, m_Engine.m_RenderTargets.GBufferEmissive.get());
                 cmd->SetTexture(7, m_Engine.m_RenderTargets.GBufferNormal.get());
-                cmd->SetTexture(8, m_Engine.m_IrradianceTexture.get());
-                cmd->SetTexture(9, m_Engine.m_PrefilteredEnvTexture.get());
-                cmd->SetTexture(10, m_Engine.m_BRDFLUTTexture.get());
+                cmd->SetTexture(8, irradianceTexture);
+                cmd->SetTexture(9, prefilteredEnvTexture);
+                cmd->SetTexture(10, brdfLUTTexture);
                 // 反射プローブ(19章、鏡面専任なので拡散イラディアンス側のスロットは無い)。
                 // FrameConstants.ProbeParams.xが0のとき(未ベイク・無効時)はシェーダー側が
                 // 選択ループを回さないため中身は参照されないが、DX12はディスクリプタテーブルに
@@ -459,7 +467,7 @@ namespace Kurenai::Passes
             },
             .RenderTargets = { m_Engine.m_RenderTargets.SceneColor.get() },
             .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
-            .Execute = [this, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &gpuLights, &cameraPosition, &viewProj, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &gpuLights, &cameraPosition, &viewProj, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
             {
                 // 半透明メッシュをインスタンス単位でカメラからの距離降順(奥から手前)に並べる。
                 // instance.WorldはHLSL(mul(vec, World))に合わせて転置済みのため、ワールド座標の
@@ -521,9 +529,9 @@ namespace Kurenai::Passes
                 cmd->SetShaderResourceBuffer(8, m_Engine.m_LightBuffer.get());
                 // IBL(14章)。このパスにはSSRが適用されないため、半透明サーフェスの環境の
                 // 映り込みはこの環境ソースだけが担う
-                cmd->SetTexture(9, m_Engine.m_IrradianceTexture.get());
-                cmd->SetTexture(10, m_Engine.m_PrefilteredEnvTexture.get());
-                cmd->SetTexture(11, m_Engine.m_BRDFLUTTexture.get());
+                cmd->SetTexture(9, irradianceTexture);
+                cmd->SetTexture(10, prefilteredEnvTexture);
+                cmd->SetTexture(11, brdfLUTTexture);
                 // 反射プローブ(19章、鏡面専任)。Lightingパスと同じReflectionProbe.hlsliを
                 // 共有しており、半透明サーフェスも室内なら室内の環境が映るようになる。
                 // t0〜t4とt8〜t11が埋まっているため、このパスではt5・t7を割り当てている

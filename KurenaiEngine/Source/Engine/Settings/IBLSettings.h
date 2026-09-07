@@ -27,7 +27,7 @@ namespace Kurenai
         // デバッグ表示(Render Targets)で確認するプリフィルタ済み鏡面マップのミップレベル
         int32_t PrefilterDebugMipLevel = 0;
 
-        // 拡散イラディアンスを専用マップ(m_IrradianceTexture)から取るかどうか。既定はfalseで、
+        // 拡散イラディアンスを専用マップ(m_IBLResources.IrradianceTexture)から取るかどうか。既定はfalseで、
         // プリフィルタ済み鏡面の最終ミップ(roughness=1)を使う。CSPrefilterがV=R=Nを仮定して
         // いるためroughness=1ではGGXの実効カーネルがコサイン畳み込みへ厳密に退化し、両者は同じ
         // E(N)/πを格納する(14.10節)。White Furnace Testで画素一致、実スカイボックスでも
