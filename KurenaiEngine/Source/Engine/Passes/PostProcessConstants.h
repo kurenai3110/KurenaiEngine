@@ -17,6 +17,9 @@
 // **通すために期待値を書き換えないこと。**
 namespace Kurenai::Passes
 {
+        // 輝度ヒストグラムのビン数。AutoExposure.hlslのHISTOGRAM_BINSと一致させること
+        inline constexpr uint32_t kExposureHistogramBins = 256;
+
         // Tonemap.hlsl側のcbuffer TonemapConstantsと一致させる必要がある
         struct alignas(16) TonemapConstants
         {

@@ -70,7 +70,7 @@ namespace Kurenai
             // 空と大気
             { "SkyCloudTexture", m_RenderTargets.SkyCloudTexture.get() },
             { "SkyCloudFogTexture", m_RenderTargets.SkyCloudFogTexture.get() },
-            { "AerialPerspectiveTexture", m_AerialPerspectiveTexture.get() },
+            { "AerialPerspectiveTexture", m_RenderTargets.AerialPerspectiveTexture.get() },
             { "TransmittanceLUT", m_SkyResources.TransmittanceLUT.get() },
             { "MultiScatteringLUT", m_SkyResources.MultiScatteringLUT.get() },
             { "SkyViewLUT", m_SkyResources.SkyViewLUT.get() },
@@ -85,7 +85,7 @@ namespace Kurenai
             { "TonemapTexture", m_RenderTargets.TonemapTexture.get() },
             { "UpscaleTexture", m_RenderTargets.UpscaleTexture.get() },
             { "UpscaleSharpTexture", m_RenderTargets.UpscaleSharpTexture.get() },
-            { "ExposureTexture", m_ExposureTexture.get() },
+            { "ExposureTexture", m_RenderTargets.ExposureTexture.get() },
             // TAAの履歴。今フレームの書き込み先が m_TAAHistoryIndex なので、
             // 「前フレームの履歴」を見たいときは Prev のほうを指定する
             { "TAAHistory", m_RenderTargets.TAAHistory[m_TAAHistoryIndex].get() },

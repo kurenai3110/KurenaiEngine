@@ -255,6 +255,12 @@ namespace Kurenai::Rendering
         // 前フレームの露出。TAAが履歴の明るさを今フレームへ合わせ直すのに使う
         float TAAPrevEffectiveExposureEV100 = 0.0f;
 
+        // 今フレームのTAA履歴の書き込み先(RenderTargets::TAAHistoryの添字)。
+        // もう一方が前フレームの結果=履歴。Render()の末尾で入れ替わる
+        uint32_t TAAHistoryIndex = 0;
+        // 前フレームからの経過秒。自動露出の時間順応だけが読む。
+        // **上限の切り詰めは読む側が行う**(一時停止やシーン読み込み直後の巨大なdtへの備え)
+        float DeltaTime = 0.0f;
         // ジオメトリの経路で、このフレームに何が有効かを配る一式
         bool DepthPrepassRuns = false;
         bool HiZFromDepthPrepass = false;

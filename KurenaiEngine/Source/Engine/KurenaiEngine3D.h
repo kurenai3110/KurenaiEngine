@@ -130,7 +130,6 @@ namespace Kurenai
         friend class Passes::EnvironmentPasses;
         friend class Passes::GeometryPasses;
         friend class Passes::MegaLightsPasses;
-        friend class Passes::PostProcessPasses;
 
         // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
         //   実行時に「システム」パネルからも変更できる)。
@@ -836,7 +835,12 @@ namespace Kurenai
             uint32_t& outRenderWidth, uint32_t& outRenderHeight);
         // UIのシャープネス(0〜1)を、シェーダーへ渡す線形スケールへ変換する。
         // FSR1のsharpnessは「何ストップ弱めるか」で0が最大なので、2^(-2*(1-v)) とする
+    public:
+        // 【publicにしてある】Passes::PostProcessPasses が RCAS の定数を組むときに呼ぶ。
+        // 状態を持たない純粋な変換なので、公開しても持ち主は変わらない
         static float ComputeRcasSharpnessScale(float sharpness);
+
+    private:
 
         // 出力解像度のテクスチャを作り直す。GPUがそれらを参照していない状態で呼ぶこと
         void CreateUpscaleTargets(uint32_t width, uint32_t height);
@@ -1566,10 +1570,8 @@ namespace Kurenai
         // Lightingパスの中へ入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl
         // 冒頭のコメント参照。無効時(m_FogSettings.Enabled=falseまたはm_FogSettings.Density<=0)はパス自体を
         // 登録せず、GetActiveReflectionOutput()の結果がそのままTAA(またはTonemap)へ渡る
-        std::unique_ptr<RHI::IRHIShader> m_AerialPerspectiveVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_AerialPerspectivePixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_AerialPerspectivePipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_AerialPerspectiveTexture;
+        // シェーダーとPSOはPasses/PostProcessPassesへ移した。書き先は
+        // レンダー解像度に追従するためRenderTargets(AerialPerspectiveTexture)にある
         FogSettings m_FogSettings;
         WaterSettings m_WaterSettings;
 
@@ -1578,10 +1580,7 @@ namespace Kurenai
         // モーションベクターで前フレームの結果を今フレームの画素へ再投影して蓄積する。
         // 静止していれば十数フレームで収束し、実質的なスーパーサンプリングになる。
         // 詳細な原理と各工夫の理由はArchitecture.htmlのTAAの章を参照
-        std::unique_ptr<RHI::IRHIShader> m_TAAVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_TAAPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_TAAPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_TAAConstantBuffer;
+        // シェーダーとPSOと定数バッファはPasses/PostProcessPassesへ移した
         // 履歴バッファ2枚。読みながら同じテクスチャへ書けないため役割を毎フレーム入れ替える。
         // m_TAAHistoryIndexが今フレームの書き込み先で、もう一方が前フレームの結果(=履歴)。
         // このパスの出力がそのまま後段(自動露出/ブルーム/トーンマップ)の入力にもなる
@@ -1621,55 +1620,27 @@ namespace Kurenai
         // ガンマ補正でLDRへ変換し、Presentパスへ渡す。SSR等のHDR演算より後、Present直前の
         // 独立したステージとして置くことで、反射や将来のブルーム/露出制御(M7)がトーンマップの
         // 影響を受けないHDR値の上に成立できるようにする
-        std::unique_ptr<RHI::IRHIShader> m_TonemapVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_TonemapPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_TonemapPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_TonemapConstantBuffer;
+        // シェーダーとPSOと定数バッファはPasses/PostProcessPassesへ移した
 
         // 超解像パス(Upscale.hlsl): Tonemapが出したLDR画像を、EASUで出力解像度へ再構成し、
         // RCASでシャープ化してからPresentへ渡す。出力2枚と実寸(RenderTargets::UpscaleTexture /
         // UpscaleSharpTexture / UpscaleTargetWidth / Height)はPresentPassも読むため
         // 持ち主をRenderTargetsへ移した。作り直しはCreateRenderTargets()とは別の契機で走る
-        std::unique_ptr<RHI::IRHIShader> m_UpscaleEASUComputeShader;
-        std::unique_ptr<RHI::IRHIShader> m_UpscaleRCASComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_UpscaleEASUPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_UpscaleRCASPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_UpscaleConstantBuffer;
+        // シェーダーとPSO2本と定数バッファはPasses/PostProcessPassesへ移した
 
 
         // 自動露出(eye adaptation)パス: SceneColorの輝度ヒストグラムをGPUで作り、
         // 低/高パーセンタイルを除外した加重平均から目標EV100を求めて時間方向に追従させる。
-        // 結果はm_ExposureTextureへ書かれ、Tonemapパスが読んで露出倍率に変換する。
+        // 結果はRenderTargets::ExposureTextureへ書かれ、Tonemapパスが読んで露出倍率に変換する。
         //
         // 露出そのものはCPU側でライト強度へ事前乗算されている(プリ露出方式、
         // m_PostProcessSettings.SceneExposureEV100)。自動露出の結果をライト強度へ戻すとフィードバックループになり、
         // かつGPU→CPUのリードバック(同期待ち)が要るため、プリ露出は固定のままにして
         // 「プリ露出EVと自動露出EVの差」だけをTonemapで掛ける構成にしている
         // (詳細はAutoExposure.hlsl冒頭)
-        std::unique_ptr<RHI::IRHIShader> m_AutoExposureClearComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_AutoExposureClearPipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_AutoExposureHistogramComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_AutoExposureHistogramPipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_AutoExposureResolveComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_AutoExposureResolvePipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_ExposureHistogramBuffer;
-        std::unique_ptr<RHI::IRHIBuffer> m_AutoExposureConstantBuffer;
-        // 2x1のR32_Float。texel(0,0)=平滑化後のEV100、texel(1,0)=初期化済みフラグ。
-        // フレームをまたいで保持する必要があるためCreateRenderTargetsではなく一度だけ作る
-        // (ウィンドウリサイズで作り直すと順応がリセットされてしまうため)
-        std::unique_ptr<RHI::IRHITexture> m_ExposureTexture;
-        // 輝度ヒストグラムのビン数。AutoExposure.hlslのHISTOGRAM_BINSと一致させること
-        static constexpr uint32_t kExposureHistogramBins = 256;
-
-        // 次のAutoExposureパスで順応を飛ばして測光値へ即座に合わせる要求。LoadSceneが立て、
-        // パスを積んだ時点で消費する。
-        //
-        // 順応の状態はGPU側のm_ExposureTexture(2x1)に入っており、初回だけ順応を飛ばすための
-        // フラグもそこのテクセル(1,0)にある(UAVがゼロ初期化されることを利用している)。
-        // つまりCPU側からは「初回に戻す」手段が無く、シーンを切り替えても前のシーンの露出から
-        // 順応が続いてしまう。シーン切り替えは視点の移動ではなく場面の切り替わりなので、
-        // 目の順応を模す理由が無い(AutoExposure.hlslのCSResolveのコメントもそう宣言している)
-        bool m_AutoExposureResetRequested = false;
+        // シェーダー3本・PSO3本・ヒストグラムバッファ・定数バッファ・順応リセットの要求は
+        // Passes/PostProcessPassesへ移した(ビン数の定数はPasses/PostProcessConstants.hへ)。
+        // 露出の保存先はRenderTargets(ExposureTexture)にある
 
         // ブルームパス(Bloom.hlsl): 半解像度から始まるピラミッドを段階的にダウンサンプルし、
         // 3x3テントで戻しながら加算することで広く滑らかな光の裾を作る。
@@ -1678,11 +1649,7 @@ namespace Kurenai
         // 同一リソースのSRV/UAV同時バインドを避けるため(理由の詳細はBloom.hlsl冒頭)。
         // ピラミッド本体(RenderTargets::BloomDownTextures / BloomUpTextures / BloomLevelSizes)は
         // PresentPassのデバッグ表示も読むため、持ち主をRenderTargetsへ移した
-        std::unique_ptr<RHI::IRHIShader> m_BloomDownsampleComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_BloomDownsamplePipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_BloomUpsampleComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_BloomUpsamplePipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_BloomConstantBuffer;
+        // シェーダーとPSO2本と定数バッファはPasses/PostProcessPassesへ移した
         // ピラミッドの段数。半解像度を第0段として、これ以上小さくしても見た目が変わらない範囲で選ぶ
         static constexpr uint32_t kBloomLevelCount = 6;
 

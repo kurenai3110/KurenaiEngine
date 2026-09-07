@@ -952,24 +952,9 @@ namespace Kurenai
         // 大気遠近パス(頂点バッファなしのフルスクリーン三角形。反射パスの出力とG-Buffer深度から
         // フォグを合成する)。専用のb1定数バッファは持たない(パラメータはFrameConstants末尾の
         // FogParams0/1に入れているため。AerialPerspective.hlsl冒頭参照)
-        RHI::ShaderDesc aerialPerspectiveVsDesc;
-        aerialPerspectiveVsDesc.Stage = RHI::ShaderStage::Vertex;
-        aerialPerspectiveVsDesc.FilePath = shaderDirectory + L"AerialPerspective.kshader";
-        aerialPerspectiveVsDesc.EntryPoint = "VSMain";
-        m_AerialPerspectiveVertexShader = m_Device->CreateShader(aerialPerspectiveVsDesc);
-
-        RHI::ShaderDesc aerialPerspectivePsDesc;
-        aerialPerspectivePsDesc.Stage = RHI::ShaderStage::Pixel;
-        aerialPerspectivePsDesc.FilePath = shaderDirectory + L"AerialPerspective.kshader";
-        aerialPerspectivePsDesc.EntryPoint = "PSMain";
-        m_AerialPerspectivePixelShader = m_Device->CreateShader(aerialPerspectivePsDesc);
-
-        RHI::PipelineStateDesc aerialPerspectivePipelineDesc;
-        aerialPerspectivePipelineDesc.VertexShader = m_AerialPerspectiveVertexShader.get();
-        aerialPerspectivePipelineDesc.PixelShader = m_AerialPerspectivePixelShader.get();
-        aerialPerspectivePipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        aerialPerspectivePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
-        m_AerialPerspectivePipelineState = m_Device->CreatePipelineState(aerialPerspectivePipelineDesc);
+        // 【元の行位置のまま呼ぶ】DX12はディスクリプタ枠を生成順に割り当てるため、
+        // 所有権をPostProcessPassesへ移しても生成の順序はここから動かさない
+        m_PostProcessPasses->CreateAerialPerspectivePipelineState(*m_Device, shaderDirectory);
 
         m_LightingPasses->CreateSkyCloudPipelineState(*m_Device, shaderDirectory);
 
@@ -1321,142 +1306,21 @@ namespace Kurenai
                 "レイトレーシングは利用できません(反射・シャドウ・AO/GIはいずれもスクリーンスペース手法のみ)");
         }
 
-        // TAAパス(頂点バッファなしのフルスクリーン三角形。前フレームの結果をモーションベクターで
-        // 再投影して蓄積する)。出力は履歴バッファ(常にfp16)で、バッファ精度の設定に依存しないため
-        // CreatePrecisionDependentPipelineStatesではなくここで一度だけ作ればよい
-        RHI::ShaderDesc taaVsDesc;
-        taaVsDesc.Stage = RHI::ShaderStage::Vertex;
-        taaVsDesc.FilePath = shaderDirectory + L"TAA.kshader";
-        taaVsDesc.EntryPoint = "VSMain";
-        m_TAAVertexShader = m_Device->CreateShader(taaVsDesc);
+        m_PostProcessPasses->CreateTAAPipelineState(*m_Device, shaderDirectory);
 
-        RHI::ShaderDesc taaPsDesc;
-        taaPsDesc.Stage = RHI::ShaderStage::Pixel;
-        taaPsDesc.FilePath = shaderDirectory + L"TAA.kshader";
-        taaPsDesc.EntryPoint = "PSMain";
-        m_TAAPixelShader = m_Device->CreateShader(taaPsDesc);
+        m_PostProcessPasses->CreateTonemapPipelineState(*m_Device, shaderDirectory);
 
-        RHI::PipelineStateDesc taaPipelineDesc;
-        taaPipelineDesc.VertexShader = m_TAAVertexShader.get();
-        taaPipelineDesc.PixelShader = m_TAAPixelShader.get();
-        taaPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        taaPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
-        m_TAAPipelineState = m_Device->CreatePipelineState(taaPipelineDesc);
+        m_PostProcessPasses->CreateUpscalePipelineStates(*m_Device, shaderDirectory);
 
-        RHI::BufferDesc taaConstantBufferDesc;
-        taaConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        taaConstantBufferDesc.SizeInBytes = sizeof(Passes::TAAConstants);
-        m_TAAConstantBuffer = m_Device->CreateBuffer(taaConstantBufferDesc);
-
-        // Tonemapパス(頂点バッファなしのフルスクリーン三角形。HDRのSceneColorをLDRへ変換する)
-        RHI::ShaderDesc tonemapVsDesc;
-        tonemapVsDesc.Stage = RHI::ShaderStage::Vertex;
-        tonemapVsDesc.FilePath = shaderDirectory + L"Tonemap.kshader";
-        tonemapVsDesc.EntryPoint = "VSMain";
-        m_TonemapVertexShader = m_Device->CreateShader(tonemapVsDesc);
-
-        RHI::ShaderDesc tonemapPsDesc;
-        tonemapPsDesc.Stage = RHI::ShaderStage::Pixel;
-        tonemapPsDesc.FilePath = shaderDirectory + L"Tonemap.kshader";
-        tonemapPsDesc.EntryPoint = "PSMain";
-        m_TonemapPixelShader = m_Device->CreateShader(tonemapPsDesc);
-
-        RHI::PipelineStateDesc tonemapPipelineDesc;
-        tonemapPipelineDesc.VertexShader = m_TonemapVertexShader.get();
-        tonemapPipelineDesc.PixelShader = m_TonemapPixelShader.get();
-        tonemapPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        tonemapPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
-        m_TonemapPipelineState = m_Device->CreatePipelineState(tonemapPipelineDesc);
-
-        RHI::BufferDesc tonemapConstantBufferDesc;
-        tonemapConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        tonemapConstantBufferDesc.SizeInBytes = sizeof(Passes::TonemapConstants);
-        m_TonemapConstantBuffer = m_Device->CreateBuffer(tonemapConstantBufferDesc);
-
-        // 超解像パス(EASU=拡大、RCAS=シャープ化。どちらもコンピュートシェーダー)。
-        // レンダーターゲットではなくUAVへ書くのでPSOにフォーマットの指定は要らない
-        RHI::ShaderDesc upscaleEasuCsDesc;
-        upscaleEasuCsDesc.Stage = RHI::ShaderStage::Compute;
-        upscaleEasuCsDesc.FilePath = shaderDirectory + L"Upscale.kshader";
-        upscaleEasuCsDesc.EntryPoint = "CSEASU";
-        m_UpscaleEASUComputeShader = m_Device->CreateShader(upscaleEasuCsDesc);
-        m_UpscaleEASUPipelineState = m_Device->CreateComputePipelineState({ m_UpscaleEASUComputeShader.get() });
-
-        RHI::ShaderDesc upscaleRcasCsDesc;
-        upscaleRcasCsDesc.Stage = RHI::ShaderStage::Compute;
-        upscaleRcasCsDesc.FilePath = shaderDirectory + L"Upscale.kshader";
-        upscaleRcasCsDesc.EntryPoint = "CSRCAS";
-        m_UpscaleRCASComputeShader = m_Device->CreateShader(upscaleRcasCsDesc);
-        m_UpscaleRCASPipelineState = m_Device->CreateComputePipelineState({ m_UpscaleRCASComputeShader.get() });
-
-        RHI::BufferDesc upscaleConstantBufferDesc;
-        upscaleConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        upscaleConstantBufferDesc.SizeInBytes = sizeof(Passes::UpscaleConstants);
-        m_UpscaleConstantBuffer = m_Device->CreateBuffer(upscaleConstantBufferDesc);
-
-        // 自動露出パス(輝度ヒストグラムの構築→縮約→時間方向の順応。すべてコンピュートシェーダー)
-        RHI::ShaderDesc autoExposureClearCsDesc;
-        autoExposureClearCsDesc.Stage = RHI::ShaderStage::Compute;
-        autoExposureClearCsDesc.FilePath = shaderDirectory + L"AutoExposure.kshader";
-        autoExposureClearCsDesc.EntryPoint = "CSClearHistogram";
-        m_AutoExposureClearComputeShader = m_Device->CreateShader(autoExposureClearCsDesc);
-        m_AutoExposureClearPipelineState =
-            m_Device->CreateComputePipelineState({ m_AutoExposureClearComputeShader.get() });
-
-        RHI::ShaderDesc autoExposureHistogramCsDesc;
-        autoExposureHistogramCsDesc.Stage = RHI::ShaderStage::Compute;
-        autoExposureHistogramCsDesc.FilePath = shaderDirectory + L"AutoExposure.kshader";
-        autoExposureHistogramCsDesc.EntryPoint = "CSHistogram";
-        m_AutoExposureHistogramComputeShader = m_Device->CreateShader(autoExposureHistogramCsDesc);
-        m_AutoExposureHistogramPipelineState =
-            m_Device->CreateComputePipelineState({ m_AutoExposureHistogramComputeShader.get() });
-
-        RHI::ShaderDesc autoExposureResolveCsDesc;
-        autoExposureResolveCsDesc.Stage = RHI::ShaderStage::Compute;
-        autoExposureResolveCsDesc.FilePath = shaderDirectory + L"AutoExposure.kshader";
-        autoExposureResolveCsDesc.EntryPoint = "CSResolve";
-        m_AutoExposureResolveComputeShader = m_Device->CreateShader(autoExposureResolveCsDesc);
-        m_AutoExposureResolvePipelineState =
-            m_Device->CreateComputePipelineState({ m_AutoExposureResolveComputeShader.get() });
-
-        RHI::BufferDesc exposureHistogramBufferDesc;
-        exposureHistogramBufferDesc.Usage = RHI::BufferUsage::Structured;
-        exposureHistogramBufferDesc.SizeInBytes = sizeof(uint32_t) * kExposureHistogramBins;
-        exposureHistogramBufferDesc.StrideInBytes = sizeof(uint32_t);
-        m_ExposureHistogramBuffer = m_Device->CreateBuffer(exposureHistogramBufferDesc);
-
-        RHI::BufferDesc autoExposureConstantBufferDesc;
-        autoExposureConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        autoExposureConstantBufferDesc.SizeInBytes = sizeof(Passes::AutoExposureConstants);
-        m_AutoExposureConstantBuffer = m_Device->CreateBuffer(autoExposureConstantBufferDesc);
+        m_PostProcessPasses->CreateAutoExposureResources(*m_Device, shaderDirectory);
 
         // 露出の保存先。フレームをまたいで順応の履歴を保持するため、ウィンドウリサイズで
         // 作り直されるCreateRenderTargetsではなくここで一度だけ作る。
         // 生成直後はゼロクリアされており、texel(1,0)=0が「未初期化」を意味する
         // (CSResolveがこれを見て初回だけ順応を飛ばして即座に目標値へ合わせる)
-        m_ExposureTexture = m_Device->CreateUAVTexture(2, 1, RHI::Format::R32_Float);
+        m_RenderTargets.ExposureTexture = m_Device->CreateUAVTexture(2, 1, RHI::Format::R32_Float);
 
-        // ブルームパス(ダウンサンプル/アップサンプルの2エントリ。テクスチャはCreateRenderTargetsで作る)
-        RHI::ShaderDesc bloomDownCsDesc;
-        bloomDownCsDesc.Stage = RHI::ShaderStage::Compute;
-        bloomDownCsDesc.FilePath = shaderDirectory + L"Bloom.kshader";
-        bloomDownCsDesc.EntryPoint = "CSDownsample";
-        m_BloomDownsampleComputeShader = m_Device->CreateShader(bloomDownCsDesc);
-        m_BloomDownsamplePipelineState =
-            m_Device->CreateComputePipelineState({ m_BloomDownsampleComputeShader.get() });
-
-        RHI::ShaderDesc bloomUpCsDesc;
-        bloomUpCsDesc.Stage = RHI::ShaderStage::Compute;
-        bloomUpCsDesc.FilePath = shaderDirectory + L"Bloom.kshader";
-        bloomUpCsDesc.EntryPoint = "CSUpsample";
-        m_BloomUpsampleComputeShader = m_Device->CreateShader(bloomUpCsDesc);
-        m_BloomUpsamplePipelineState =
-            m_Device->CreateComputePipelineState({ m_BloomUpsampleComputeShader.get() });
-
-        RHI::BufferDesc bloomConstantBufferDesc;
-        bloomConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        bloomConstantBufferDesc.SizeInBytes = sizeof(Passes::BloomConstants);
-        m_BloomConstantBuffer = m_Device->CreateBuffer(bloomConstantBufferDesc);
+        m_PostProcessPasses->CreateBloomPipelineStates(*m_Device, shaderDirectory);
 
         // 【元の行位置のまま呼ぶ】DX12はディスクリプタ枠を生成順に割り当てるため、
         // 所有権をPresentPassへ移しても生成の順序はここから動かさない
@@ -3180,7 +3044,7 @@ namespace Kurenai
             m_RenderTargets.CreateGBufferCore(*m_Device, width, height, emissiveFormat);
             m_RenderTargets.CreateLightingChain(*m_Device, width, height, aoFormat);
             // 大気遠近パスの出力。m_RenderTargets.SSRTextureと同じ作法(HDR、R16G16B16A16_Float)で永続確保する
-            m_AerialPerspectiveTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+            m_RenderTargets.AerialPerspectiveTexture = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
             // 雲パスの出力(rgb=事前乗算済みの散乱光、a=透過率)。内部レンダー解像度の1/2で持つ。
             // 【R16G16B16A16_Float固定にする理由】平面反射(CreatePlanarReflectionTargets)と同じで、
             // 散乱光はHDRの輝度をそのまま持つためLegacy8bitでは飽和して雲が白く潰れる。
@@ -6023,6 +5887,8 @@ namespace Kurenai
             m_TAAPrevViewProjValid ? m_TAAPrevViewProj : DirectX::XMFLOAT4X4{};
         frameContext.TAAPrevJitterUv = m_TAAPrevJitterUv;
         frameContext.TAAPrevEffectiveExposureEV100 = m_TAAPrevEffectiveExposureEV100;
+        frameContext.TAAHistoryIndex = m_TAAHistoryIndex;
+        frameContext.DeltaTime = m_RenderDeltaTime;
         frameContext.RenderWidth = m_RenderWidth;
         frameContext.RenderHeight = m_RenderHeight;
         frameContext.WindowWidth = m_Window->GetWidth();

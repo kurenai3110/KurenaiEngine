@@ -10,6 +10,176 @@
 
 namespace Kurenai::Passes
 {
+    void PostProcessPasses::CreateAerialPerspectivePipelineState(
+        RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        RHI::ShaderDesc aerialPerspectiveVsDesc;
+        aerialPerspectiveVsDesc.Stage = RHI::ShaderStage::Vertex;
+        aerialPerspectiveVsDesc.FilePath = shaderDirectory + L"AerialPerspective.kshader";
+        aerialPerspectiveVsDesc.EntryPoint = "VSMain";
+        m_AerialPerspectiveVertexShader = device.CreateShader(aerialPerspectiveVsDesc);
+
+        RHI::ShaderDesc aerialPerspectivePsDesc;
+        aerialPerspectivePsDesc.Stage = RHI::ShaderStage::Pixel;
+        aerialPerspectivePsDesc.FilePath = shaderDirectory + L"AerialPerspective.kshader";
+        aerialPerspectivePsDesc.EntryPoint = "PSMain";
+        m_AerialPerspectivePixelShader = device.CreateShader(aerialPerspectivePsDesc);
+
+        RHI::PipelineStateDesc aerialPerspectivePipelineDesc;
+        aerialPerspectivePipelineDesc.VertexShader = m_AerialPerspectiveVertexShader.get();
+        aerialPerspectivePipelineDesc.PixelShader = m_AerialPerspectivePixelShader.get();
+        aerialPerspectivePipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        aerialPerspectivePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        m_AerialPerspectivePipelineState = device.CreatePipelineState(aerialPerspectivePipelineDesc);
+    }
+
+    void PostProcessPasses::CreateTAAPipelineState(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        // TAAパス(頂点バッファなしのフルスクリーン三角形。前フレームの結果をモーションベクターで
+        // 再投影して蓄積する)。出力は履歴バッファ(常にfp16)で、バッファ精度の設定に依存しないため
+        // CreatePrecisionDependentPipelineStatesではなくここで一度だけ作ればよい
+        RHI::ShaderDesc taaVsDesc;
+        taaVsDesc.Stage = RHI::ShaderStage::Vertex;
+        taaVsDesc.FilePath = shaderDirectory + L"TAA.kshader";
+        taaVsDesc.EntryPoint = "VSMain";
+        m_TAAVertexShader = device.CreateShader(taaVsDesc);
+
+        RHI::ShaderDesc taaPsDesc;
+        taaPsDesc.Stage = RHI::ShaderStage::Pixel;
+        taaPsDesc.FilePath = shaderDirectory + L"TAA.kshader";
+        taaPsDesc.EntryPoint = "PSMain";
+        m_TAAPixelShader = device.CreateShader(taaPsDesc);
+
+        RHI::PipelineStateDesc taaPipelineDesc;
+        taaPipelineDesc.VertexShader = m_TAAVertexShader.get();
+        taaPipelineDesc.PixelShader = m_TAAPixelShader.get();
+        taaPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        taaPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        m_TAAPipelineState = device.CreatePipelineState(taaPipelineDesc);
+
+        RHI::BufferDesc taaConstantBufferDesc;
+        taaConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        taaConstantBufferDesc.SizeInBytes = sizeof(TAAConstants);
+        m_TAAConstantBuffer = device.CreateBuffer(taaConstantBufferDesc);
+    }
+
+    void PostProcessPasses::CreateTonemapPipelineState(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        // Tonemapパス(頂点バッファなしのフルスクリーン三角形。HDRのSceneColorをLDRへ変換する)
+        RHI::ShaderDesc tonemapVsDesc;
+        tonemapVsDesc.Stage = RHI::ShaderStage::Vertex;
+        tonemapVsDesc.FilePath = shaderDirectory + L"Tonemap.kshader";
+        tonemapVsDesc.EntryPoint = "VSMain";
+        m_TonemapVertexShader = device.CreateShader(tonemapVsDesc);
+
+        RHI::ShaderDesc tonemapPsDesc;
+        tonemapPsDesc.Stage = RHI::ShaderStage::Pixel;
+        tonemapPsDesc.FilePath = shaderDirectory + L"Tonemap.kshader";
+        tonemapPsDesc.EntryPoint = "PSMain";
+        m_TonemapPixelShader = device.CreateShader(tonemapPsDesc);
+
+        RHI::PipelineStateDesc tonemapPipelineDesc;
+        tonemapPipelineDesc.VertexShader = m_TonemapVertexShader.get();
+        tonemapPipelineDesc.PixelShader = m_TonemapPixelShader.get();
+        tonemapPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        tonemapPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+        m_TonemapPipelineState = device.CreatePipelineState(tonemapPipelineDesc);
+
+        RHI::BufferDesc tonemapConstantBufferDesc;
+        tonemapConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        tonemapConstantBufferDesc.SizeInBytes = sizeof(TonemapConstants);
+        m_TonemapConstantBuffer = device.CreateBuffer(tonemapConstantBufferDesc);
+    }
+
+    void PostProcessPasses::CreateUpscalePipelineStates(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        // 超解像パス(EASU=拡大、RCAS=シャープ化。どちらもコンピュートシェーダー)。
+        // レンダーターゲットではなくUAVへ書くのでPSOにフォーマットの指定は要らない
+        RHI::ShaderDesc upscaleEasuCsDesc;
+        upscaleEasuCsDesc.Stage = RHI::ShaderStage::Compute;
+        upscaleEasuCsDesc.FilePath = shaderDirectory + L"Upscale.kshader";
+        upscaleEasuCsDesc.EntryPoint = "CSEASU";
+        m_UpscaleEASUComputeShader = device.CreateShader(upscaleEasuCsDesc);
+        m_UpscaleEASUPipelineState = device.CreateComputePipelineState({ m_UpscaleEASUComputeShader.get() });
+
+        RHI::ShaderDesc upscaleRcasCsDesc;
+        upscaleRcasCsDesc.Stage = RHI::ShaderStage::Compute;
+        upscaleRcasCsDesc.FilePath = shaderDirectory + L"Upscale.kshader";
+        upscaleRcasCsDesc.EntryPoint = "CSRCAS";
+        m_UpscaleRCASComputeShader = device.CreateShader(upscaleRcasCsDesc);
+        m_UpscaleRCASPipelineState = device.CreateComputePipelineState({ m_UpscaleRCASComputeShader.get() });
+
+        RHI::BufferDesc upscaleConstantBufferDesc;
+        upscaleConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        upscaleConstantBufferDesc.SizeInBytes = sizeof(UpscaleConstants);
+        m_UpscaleConstantBuffer = device.CreateBuffer(upscaleConstantBufferDesc);
+    }
+
+    void PostProcessPasses::CreateAutoExposureResources(
+        RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        // 自動露出パス(輝度ヒストグラムの構築→縮約→時間方向の順応。すべてコンピュートシェーダー)
+        RHI::ShaderDesc autoExposureClearCsDesc;
+        autoExposureClearCsDesc.Stage = RHI::ShaderStage::Compute;
+        autoExposureClearCsDesc.FilePath = shaderDirectory + L"AutoExposure.kshader";
+        autoExposureClearCsDesc.EntryPoint = "CSClearHistogram";
+        m_AutoExposureClearComputeShader = device.CreateShader(autoExposureClearCsDesc);
+        m_AutoExposureClearPipelineState =
+            device.CreateComputePipelineState({ m_AutoExposureClearComputeShader.get() });
+
+        RHI::ShaderDesc autoExposureHistogramCsDesc;
+        autoExposureHistogramCsDesc.Stage = RHI::ShaderStage::Compute;
+        autoExposureHistogramCsDesc.FilePath = shaderDirectory + L"AutoExposure.kshader";
+        autoExposureHistogramCsDesc.EntryPoint = "CSHistogram";
+        m_AutoExposureHistogramComputeShader = device.CreateShader(autoExposureHistogramCsDesc);
+        m_AutoExposureHistogramPipelineState =
+            device.CreateComputePipelineState({ m_AutoExposureHistogramComputeShader.get() });
+
+        RHI::ShaderDesc autoExposureResolveCsDesc;
+        autoExposureResolveCsDesc.Stage = RHI::ShaderStage::Compute;
+        autoExposureResolveCsDesc.FilePath = shaderDirectory + L"AutoExposure.kshader";
+        autoExposureResolveCsDesc.EntryPoint = "CSResolve";
+        m_AutoExposureResolveComputeShader = device.CreateShader(autoExposureResolveCsDesc);
+        m_AutoExposureResolvePipelineState =
+            device.CreateComputePipelineState({ m_AutoExposureResolveComputeShader.get() });
+
+        RHI::BufferDesc exposureHistogramBufferDesc;
+        exposureHistogramBufferDesc.Usage = RHI::BufferUsage::Structured;
+        exposureHistogramBufferDesc.SizeInBytes = sizeof(uint32_t) * kExposureHistogramBins;
+        exposureHistogramBufferDesc.StrideInBytes = sizeof(uint32_t);
+        m_ExposureHistogramBuffer = device.CreateBuffer(exposureHistogramBufferDesc);
+
+        RHI::BufferDesc autoExposureConstantBufferDesc;
+        autoExposureConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        autoExposureConstantBufferDesc.SizeInBytes = sizeof(AutoExposureConstants);
+        m_AutoExposureConstantBuffer = device.CreateBuffer(autoExposureConstantBufferDesc);
+    }
+
+    void PostProcessPasses::CreateBloomPipelineStates(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        // ブルームパス(ダウンサンプル/アップサンプルの2エントリ。テクスチャはCreateRenderTargetsで作る)
+        RHI::ShaderDesc bloomDownCsDesc;
+        bloomDownCsDesc.Stage = RHI::ShaderStage::Compute;
+        bloomDownCsDesc.FilePath = shaderDirectory + L"Bloom.kshader";
+        bloomDownCsDesc.EntryPoint = "CSDownsample";
+        m_BloomDownsampleComputeShader = device.CreateShader(bloomDownCsDesc);
+        m_BloomDownsamplePipelineState =
+            device.CreateComputePipelineState({ m_BloomDownsampleComputeShader.get() });
+
+        RHI::ShaderDesc bloomUpCsDesc;
+        bloomUpCsDesc.Stage = RHI::ShaderStage::Compute;
+        bloomUpCsDesc.FilePath = shaderDirectory + L"Bloom.kshader";
+        bloomUpCsDesc.EntryPoint = "CSUpsample";
+        m_BloomUpsampleComputeShader = device.CreateShader(bloomUpCsDesc);
+        m_BloomUpsamplePipelineState =
+            device.CreateComputePipelineState({ m_BloomUpsampleComputeShader.get() });
+
+        RHI::BufferDesc bloomConstantBufferDesc;
+        bloomConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        bloomConstantBufferDesc.SizeInBytes = sizeof(BloomConstants);
+        m_BloomConstantBuffer = device.CreateBuffer(bloomConstantBufferDesc);
+    }
+
     void PostProcessPasses::Register(
         Core::RenderGraph& graph,
         const Rendering::RenderFrameContext& frame,
@@ -31,6 +201,7 @@ namespace Kurenai::Passes
         const float effectiveExposureEV100 = frame.EffectiveExposureEV100;
         const DirectX::XMFLOAT2 taaPrevJitterUv = frame.TAAPrevJitterUv;
         const float taaPrevEffectiveExposureEV100 = frame.TAAPrevEffectiveExposureEV100;
+        const float deltaTime = frame.DeltaTime;
         const DirectX::XMFLOAT4X4 taaPrevViewProj = frame.TAAPrevViewProj;
 
         // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
@@ -69,14 +240,14 @@ namespace Kurenai::Passes
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AerialPerspective",
                 .Reads = { reflectionOutput, targets->GBufferDepth.get(), skyViewLUT },
-                .RenderTargets = { m_Engine.m_AerialPerspectiveTexture.get() },
+                .RenderTargets = { targets->AerialPerspectiveTexture.get() },
                 // 空パラメータ。SkyIntegrateパスの後へ順序付けさせるために挙げる
                 // (実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
                 .BufferReads = { skyParametersBuffer },
                 .Execute = [this, targets, skyParametersBuffer, skyViewLUT, gbufferViewport, reflectionOutput, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(gbufferViewport);
-                    cmd->SetPipelineState(m_Engine.m_AerialPerspectivePipelineState.get());
+                    cmd->SetPipelineState(m_AerialPerspectivePipelineState.get());
                     cmd->SetConstantBuffer(0, frameConstantBuffer);
                     cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, reflectionOutput);
@@ -97,7 +268,7 @@ namespace Kurenai::Passes
         //     入力はGetActiveReflectionOutput()(反射Off/SSR/RT反射のいずれか、または大気遠近が
         //     有効ならその出力)で、SSRだけを見ていた従来の判定ではRT反射有効時にTAAが古い
         //     SceneColorを拾ってしまうため、ここも合わせて直す ---
-        RHI::IRHITexture* const taaInputColor = fogPassRuns ? m_Engine.m_AerialPerspectiveTexture.get() : reflectionOutput;
+        RHI::IRHITexture* const taaInputColor = fogPassRuns ? targets->AerialPerspectiveTexture.get() : reflectionOutput;
 
         // --- ドローンショーパス: 夜空の機体を発光ビルボードとして加算合成で描く ---
         //
@@ -160,7 +331,7 @@ namespace Kurenai::Passes
         if (frame.Settings.PostProcess.TAAEnabled)
         {
             // 今フレームの書き込み先と、前フレームの結果(履歴)。Render()の末尾で役割が入れ替わる
-            const uint32_t historyWriteIndex = m_Engine.m_TAAHistoryIndex;
+            const uint32_t historyWriteIndex = frame.TAAHistoryIndex;
             const uint32_t historyReadIndex = 1u - historyWriteIndex;
             RHI::IRHITexture* const historyTexture = targets->TAAHistory[historyReadIndex].get();
 
@@ -185,7 +356,7 @@ namespace Kurenai::Passes
 
                     // 履歴が無効な間は「サンプルすらするな」をシェーダへ伝える(TAA.hlsl参照)。
                     // 作りたてのfp16バッファはNaNを含みうるため、混ぜる割合を0にするだけでは足りない
-                    const bool historyValid = m_Engine.m_TAAHistoryValid.load(std::memory_order_relaxed);
+                    const bool historyValid = m_Engine.GetTAAHistoryValid().load(std::memory_order_relaxed);
 
                     // プリ露出はm_EffectiveExposureEV100の時間順応で毎フレーム変わる。履歴は前フレームの
                     // 露出で焼かれた明るさのままなので、比率を掛けて今の露出へ揃える。
@@ -203,11 +374,11 @@ namespace Kurenai::Passes
                     taaConstants.Params1 = {
                         static_cast<float>(postProcessSettings.TAAClip), postProcessSettings.TAAAntiFlicker, 0.0f, 0.0f
                     };
-                    cmd->UpdateBuffer(m_Engine.m_TAAConstantBuffer.get(), &taaConstants, sizeof(taaConstants));
+                    cmd->UpdateBuffer(m_TAAConstantBuffer.get(), &taaConstants, sizeof(taaConstants));
 
                     cmd->SetViewport(gbufferViewport);
-                    cmd->SetPipelineState(m_Engine.m_TAAPipelineState.get());
-                    cmd->SetConstantBuffer(1, m_Engine.m_TAAConstantBuffer.get());
+                    cmd->SetPipelineState(m_TAAPipelineState.get());
+                    cmd->SetConstantBuffer(1, m_TAAConstantBuffer.get());
                     cmd->SetSamplerSet(screenSpaceSamplers);
                     // t0〜t3はすべて必ずバインドすること。SRVのバインドは上書きするまで維持されるため、
                     // 省くと直前のパスが張ったテクスチャを読んでしまう
@@ -225,25 +396,25 @@ namespace Kurenai::Passes
         //     常に実行する ---
         // この行はTAAパスのAddPassより後に置くこと。ラムダは値キャプチャなので、先に差し替えると
         // TAAが自分の出力を入力として読む形になる(RenderGraphが循環を検出して例外を投げる)
-        RHI::IRHITexture* hdrSceneColor = frame.Settings.PostProcess.TAAEnabled ? targets->TAAHistory[m_Engine.m_TAAHistoryIndex].get() : taaInputColor;
+        RHI::IRHITexture* hdrSceneColor = frame.Settings.PostProcess.TAAEnabled ? targets->TAAHistory[frame.TAAHistoryIndex].get() : taaInputColor;
         // 【TAAパスの登録より後で確定させること】上のコメントの理由がそのまま効くため、
         // ブラックボードへ載せるのもこの位置にする
         bb.HdrSceneColor = hdrSceneColor;
 
         // --- 自動露出パス: SceneColorの輝度ヒストグラムから目標EV100を求め、時間方向に順応させる。
-        //     結果はm_ExposureTextureへ書かれ、後段のTonemapパスが読む(AutoExposure.hlsl参照) ---
+        //     結果はRenderTargets::ExposureTextureへ書かれ、後段のTonemapパスが読む(AutoExposure.hlsl参照) ---
         if (frame.Settings.PostProcess.AutoExposureEnabled)
         {
             // シーン切り替え直後の1回だけ順応を飛ばす。パスを積んだ時点で消費しておくことで、
             // Executeが呼ばれる保証(グラフの枝刈り)に依存せず必ず1回で消える
-            const bool resetAdaptation = m_Engine.m_AutoExposureResetRequested;
-            m_Engine.m_AutoExposureResetRequested = false;
+            const bool resetAdaptation = m_AutoExposureResetRequested;
+            m_AutoExposureResetRequested = false;
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AutoExposure",
                 .Reads = { hdrSceneColor, targets->GBufferDepth.get() },
-                .Writes = { m_Engine.m_ExposureTexture.get() },
-                .Execute = [this, targets, effectiveExposureEV100, postProcessSettings, hdrSceneColor, keyReferenceEV100, usingProceduralSky, resetAdaptation, renderWidth, renderHeight](
+                .Writes = { targets->ExposureTexture.get() },
+                .Execute = [this, targets, effectiveExposureEV100, postProcessSettings, hdrSceneColor, keyReferenceEV100, usingProceduralSky, resetAdaptation, deltaTime, renderWidth, renderHeight](
                     RHI::IRHICommandList* cmd)
                 {
                     AutoExposureConstants autoExposureConstants{};
@@ -253,7 +424,7 @@ namespace Kurenai::Passes
                     autoExposureConstants.MaxEV100 = std::max(postProcessSettings.AutoExposureMinEV100, postProcessSettings.AutoExposureMaxEV100);
                     autoExposureConstants.PreExposureEV100 = effectiveExposureEV100;
                     // 一時停止やシーン読み込み直後の巨大なdtで順応が飛ばないよう上限を設ける
-                    autoExposureConstants.DeltaTime = std::clamp(m_Engine.m_RenderDeltaTime, 0.0f, 0.1f);
+                    autoExposureConstants.DeltaTime = std::clamp(deltaTime, 0.0f, 0.1f);
                     autoExposureConstants.AdaptationSpeedUp = postProcessSettings.AutoExposureSpeedUp;
                     autoExposureConstants.AdaptationSpeedDown = postProcessSettings.AutoExposureSpeedDown;
                     autoExposureConstants.LowPercentile = std::min(postProcessSettings.AutoExposureLowPercentile, postProcessSettings.AutoExposureHighPercentile);
@@ -278,29 +449,29 @@ namespace Kurenai::Passes
                     autoExposureConstants.KeyCeilingEV =
                         usingProceduralSky ? postProcessSettings.AutoExposureKeyCeilingEV : 1.0e4f;
                     autoExposureConstants.ResetAdaptation = resetAdaptation ? 1.0f : 0.0f;
-                    cmd->UpdateBuffer(m_Engine.m_AutoExposureConstantBuffer.get(), &autoExposureConstants, sizeof(autoExposureConstants));
+                    cmd->UpdateBuffer(m_AutoExposureConstantBuffer.get(), &autoExposureConstants, sizeof(autoExposureConstants));
 
                     // 1) ヒストグラムをゼロクリア
-                    cmd->SetComputePipelineState(m_Engine.m_AutoExposureClearPipelineState.get());
-                    cmd->SetComputeConstantBuffer(1, m_Engine.m_AutoExposureConstantBuffer.get());
-                    cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_ExposureHistogramBuffer.get());
+                    cmd->SetComputePipelineState(m_AutoExposureClearPipelineState.get());
+                    cmd->SetComputeConstantBuffer(1, m_AutoExposureConstantBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_ExposureHistogramBuffer.get());
                     cmd->Dispatch(1, 1, 1);
 
                     // 2) SceneColorから輝度ヒストグラムを構築
                     //    (UAVはDispatch直後に解除されるため毎回バインドし直す。IRHICommandList.h参照)
-                    cmd->SetComputePipelineState(m_Engine.m_AutoExposureHistogramPipelineState.get());
-                    cmd->SetComputeConstantBuffer(1, m_Engine.m_AutoExposureConstantBuffer.get());
+                    cmd->SetComputePipelineState(m_AutoExposureHistogramPipelineState.get());
+                    cmd->SetComputeConstantBuffer(1, m_AutoExposureConstantBuffer.get());
                     cmd->SetComputeTexture(0, hdrSceneColor);
                     // 空(背景)を測光から外すために深度を読む(AutoExposure.hlsl参照)
                     cmd->SetComputeTexture(1, targets->GBufferDepth.get());
-                    cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_ExposureHistogramBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_ExposureHistogramBuffer.get());
                     cmd->Dispatch((renderWidth + 15) / 16, (renderHeight + 15) / 16, 1);
 
                     // 3) 縮約して目標EV100を求め、前フレームの値から指数的に順応させて書き戻す
-                    cmd->SetComputePipelineState(m_Engine.m_AutoExposureResolvePipelineState.get());
-                    cmd->SetComputeConstantBuffer(1, m_Engine.m_AutoExposureConstantBuffer.get());
-                    cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_ExposureHistogramBuffer.get());
-                    cmd->SetComputeUnorderedAccessTexture(1, m_Engine.m_ExposureTexture.get());
+                    cmd->SetComputePipelineState(m_AutoExposureResolvePipelineState.get());
+                    cmd->SetComputeConstantBuffer(1, m_AutoExposureConstantBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_ExposureHistogramBuffer.get());
+                    cmd->SetComputeUnorderedAccessTexture(1, targets->ExposureTexture.get());
                     cmd->Dispatch(1, 1, 1);
                 },
             });
@@ -323,7 +494,7 @@ namespace Kurenai::Passes
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "Bloom",
-                .Reads = { hdrSceneColor, m_Engine.m_ExposureTexture.get() },
+                .Reads = { hdrSceneColor, targets->ExposureTexture.get() },
                 .Writes = std::move(bloomWrites),
                 .Execute = [this, targets, effectiveExposureEV100, postProcessSettings, hdrSceneColor, manualExposureScale, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
@@ -340,7 +511,7 @@ namespace Kurenai::Passes
                     bloomConstants.ExposureScale = manualExposureScale;
 
                     // --- ダウンサンプル: SceneColor -> down[0] -> down[1] -> ... ---
-                    cmd->SetComputePipelineState(m_Engine.m_BloomDownsamplePipelineState.get());
+                    cmd->SetComputePipelineState(m_BloomDownsamplePipelineState.get());
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
                     for (uint32_t level = 0; level < levelCount; ++level)
                     {
@@ -355,18 +526,18 @@ namespace Kurenai::Passes
                         bloomConstants.DstSize = dstSize;
                         // 最初のダウンサンプルだけKaris平均としきい値を適用する(理由はBloom.hlsl冒頭)
                         bloomConstants.ApplyKarisAndThreshold = isFirst ? 1.0f : 0.0f;
-                        cmd->UpdateBuffer(m_Engine.m_BloomConstantBuffer.get(), &bloomConstants, sizeof(bloomConstants));
+                        cmd->UpdateBuffer(m_BloomConstantBuffer.get(), &bloomConstants, sizeof(bloomConstants));
 
-                        cmd->SetComputeConstantBuffer(1, m_Engine.m_BloomConstantBuffer.get());
+                        cmd->SetComputeConstantBuffer(1, m_BloomConstantBuffer.get());
                         cmd->SetComputeTexture(0, source);
-                        cmd->SetComputeTexture(2, m_Engine.m_ExposureTexture.get());
+                        cmd->SetComputeTexture(2, targets->ExposureTexture.get());
                         // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
                         cmd->SetComputeUnorderedAccessTexture(0, targets->BloomDownTextures[level].get());
                         cmd->Dispatch((dstSize.x + 7) / 8, (dstSize.y + 7) / 8, 1);
                     }
 
                     // --- アップサンプル: 最下段から上へ、down[level] + tent(1段下) を up[level] へ書く ---
-                    cmd->SetComputePipelineState(m_Engine.m_BloomUpsamplePipelineState.get());
+                    cmd->SetComputePipelineState(m_BloomUpsamplePipelineState.get());
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
                     for (int32_t level = static_cast<int32_t>(levelCount) - 2; level >= 0; --level)
                     {
@@ -382,9 +553,9 @@ namespace Kurenai::Passes
                         bloomConstants.SrcSize = srcSize;
                         bloomConstants.DstSize = dstSize;
                         bloomConstants.ApplyKarisAndThreshold = 0.0f;
-                        cmd->UpdateBuffer(m_Engine.m_BloomConstantBuffer.get(), &bloomConstants, sizeof(bloomConstants));
+                        cmd->UpdateBuffer(m_BloomConstantBuffer.get(), &bloomConstants, sizeof(bloomConstants));
 
-                        cmd->SetComputeConstantBuffer(1, m_Engine.m_BloomConstantBuffer.get());
+                        cmd->SetComputeConstantBuffer(1, m_BloomConstantBuffer.get());
                         cmd->SetComputeTexture(0, targets->BloomDownTextures[level].get());
                         cmd->SetComputeTexture(1, lower);
                         cmd->SetComputeUnorderedAccessTexture(0, targets->BloomUpTextures[level].get());
@@ -407,7 +578,7 @@ namespace Kurenai::Passes
 
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Tonemap",
-            .Reads = { hdrSceneColor, m_Engine.m_ExposureTexture.get(), bloomResultTexture },
+            .Reads = { hdrSceneColor, targets->ExposureTexture.get(), bloomResultTexture },
             .RenderTargets = { targets->TonemapTexture.get() },
             .Execute = [this, targets, effectiveExposureEV100, postProcessSettings, gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale, keyReferenceEV100, upscaleActive, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
@@ -436,14 +607,14 @@ namespace Kurenai::Passes
                 tonemapConstants.InvRenderWidth = 1.0f / static_cast<float>(renderWidth);
                 tonemapConstants.InvRenderHeight = 1.0f / static_cast<float>(renderHeight);
                 tonemapConstants.BlackPoint = postProcessSettings.TonemapBlackPoint;
-                cmd->UpdateBuffer(m_Engine.m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
+                cmd->UpdateBuffer(m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
 
                 cmd->SetViewport(gbufferViewport);
-                cmd->SetPipelineState(m_Engine.m_TonemapPipelineState.get());
-                cmd->SetConstantBuffer(1, m_Engine.m_TonemapConstantBuffer.get());
+                cmd->SetPipelineState(m_TonemapPipelineState.get());
+                cmd->SetConstantBuffer(1, m_TonemapConstantBuffer.get());
                 cmd->SetSamplerSet(screenSpaceSamplers);
                 cmd->SetTexture(0, hdrSceneColor);
-                cmd->SetTexture(1, m_Engine.m_ExposureTexture.get());
+                cmd->SetTexture(1, targets->ExposureTexture.get());
                 // t2は必ずバインドすること。SRVのバインドは上書きするまで維持されるため、
                 // ここを省くと直前のパスが張ったテクスチャをブルームとして読んでしまう
                 // (省くとG-Bufferのバッファを読んで画面全体が緑に転ぶ)
@@ -476,11 +647,11 @@ namespace Kurenai::Passes
                 .Writes = { targets->UpscaleTexture.get() },
                 .Execute = [this, targets, upscaleConstants, upscaleOutputWidth, upscaleOutputHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
-                    cmd->SetComputePipelineState(m_Engine.m_UpscaleEASUPipelineState.get());
+                    cmd->SetComputePipelineState(m_UpscaleEASUPipelineState.get());
                     // Gather4のアドレスモードがClampであることがEASUの前提(Upscale.hlslのコメント参照)
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
-                    cmd->UpdateBuffer(m_Engine.m_UpscaleConstantBuffer.get(), &upscaleConstants, sizeof(upscaleConstants));
-                    cmd->SetComputeConstantBuffer(1, m_Engine.m_UpscaleConstantBuffer.get());
+                    cmd->UpdateBuffer(m_UpscaleConstantBuffer.get(), &upscaleConstants, sizeof(upscaleConstants));
+                    cmd->SetComputeConstantBuffer(1, m_UpscaleConstantBuffer.get());
                     cmd->SetComputeTexture(0, targets->TonemapTexture.get());
                     // UAVはDispatch直後に解除されるため毎回バインドし直す
                     cmd->SetComputeUnorderedAccessTexture(0, targets->UpscaleTexture.get());
@@ -494,12 +665,12 @@ namespace Kurenai::Passes
                 .Writes = { targets->UpscaleSharpTexture.get() },
                 .Execute = [this, targets, upscaleConstants, upscaleOutputWidth, upscaleOutputHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
-                    cmd->SetComputePipelineState(m_Engine.m_UpscaleRCASPipelineState.get());
+                    cmd->SetComputePipelineState(m_UpscaleRCASPipelineState.get());
                     // RCASはLoadで整数座標を引くのでサンプラーは使わないが、シェーダーが
                     // Samplers.hlsliを取り込んで宣言している以上バインドはしておく
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
-                    cmd->UpdateBuffer(m_Engine.m_UpscaleConstantBuffer.get(), &upscaleConstants, sizeof(upscaleConstants));
-                    cmd->SetComputeConstantBuffer(1, m_Engine.m_UpscaleConstantBuffer.get());
+                    cmd->UpdateBuffer(m_UpscaleConstantBuffer.get(), &upscaleConstants, sizeof(upscaleConstants));
+                    cmd->SetComputeConstantBuffer(1, m_UpscaleConstantBuffer.get());
                     cmd->SetComputeTexture(0, targets->UpscaleTexture.get());
                     cmd->SetComputeUnorderedAccessTexture(0, targets->UpscaleSharpTexture.get());
                     cmd->Dispatch((upscaleOutputWidth + 7) / 8, (upscaleOutputHeight + 7) / 8, 1);

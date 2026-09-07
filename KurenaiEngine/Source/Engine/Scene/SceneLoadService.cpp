@@ -12,6 +12,7 @@
 #include "Assets/SceneLoader.h"
 #include "Core/Logger.h"
 #include "Core/StringUtil.h"
+#include "../Passes/PostProcessPasses.h"
 #include "../Passes/ReflectionProbePasses.h"
 
 // シーンの探索・読み込み要求・ホットリロード監視と、Loaderスレッドでの読み込み、
@@ -913,9 +914,9 @@ namespace Kurenai
 
         // 露出の追従状態はシーンをまたいで持ち越さない。時刻が入れ替わると実効プリ露出は
         // 最大18段跳ぶため、追従の途中で反射プローブが焼かれると桁違いの明るさで固定される
-        // (ReflectionProbePasses::m_ProbeBakedExposureEV100・m_AutoExposureResetRequestedのコメント参照)
+        // (ReflectionProbePasses::m_ProbeBakedExposureEV100・PostProcessPasses::m_AutoExposureResetRequestedのコメント参照)
         m_EffectiveExposureInitialized = false;
-        m_AutoExposureResetRequested = true;
+        m_PostProcessPasses->GetAutoExposureResetRequested() = true;
 
         // TAAの履歴には前のシーンの絵が入っており、この後カメラも新シーンの初期位置へ飛ぶため、
         // 再投影しても対応する画素が存在しない。捨てて今フレームの色から積み直す。

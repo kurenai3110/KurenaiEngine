@@ -109,6 +109,16 @@ namespace Kurenai::Rendering
         uint32_t SkyCloudWidth = 0;
         uint32_t SkyCloudHeight = 0;
 
+        // 大気遠近パスの書き先。レンダー解像度に追従して作り直す。
+        // 読み書きするのはPostProcessPassesだけだが、RenderDumpService(-dumptex)も読む
+        std::unique_ptr<RHI::IRHITexture> AerialPerspectiveTexture;
+
+        // 自動露出の保存先。2x1のR32_Float、texel(0,0)=平滑化後のEV100、texel(1,0)=初期化済みフラグ。
+        // 【他と違い解像度に依存しない】フレームをまたいで順応の履歴を保持するため、
+        // ウィンドウリサイズで作り直すCreateRenderTargetsではなくCreateSceneResourcesが一度だけ作る
+        // (作り直すと順応がリセットされてしまう)。ShadowCascadeArrayと同じ扱い
+        std::unique_ptr<RHI::IRHITexture> ExposureTexture;
+
         // ブルームのピラミッド。第0段が半解像度で、以降1段ごとに半分になる。
         // ピラミッドをミップチェーン1枚ではなくレベルごとの独立テクスチャで持っているのは、
         // 同一リソースのSRV/UAV同時バインドを避けるため(理由の詳細はBloom.hlsl冒頭)。
