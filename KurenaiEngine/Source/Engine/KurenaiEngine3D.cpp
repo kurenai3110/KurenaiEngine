@@ -743,129 +743,22 @@ namespace Kurenai
         // G-BufferのPSOはEmissiveのフォーマットがバッファ精度に依存するため、
         // この関数の末尾でCreatePrecisionDependentPipelineStates()がまとめて作る
 
-        // 直接光パス(頂点バッファなしのフルスクリーン三角形。G-Buffer+シャドウマップからPBRの
-        // 直接光を計算しHDRで書き出す)
-        RHI::ShaderDesc directLightVsDesc;
-        directLightVsDesc.Stage = RHI::ShaderStage::Vertex;
-        directLightVsDesc.FilePath = shaderDirectory + L"DirectLighting.kshader";
-        directLightVsDesc.EntryPoint = "VSMain";
-        m_DirectLightVertexShader = m_Device->CreateShader(directLightVsDesc);
+        // 【元の行位置のまま呼ぶ】DX12はディスクリプタ枠を生成順に割り当てるため、
+        // 所有権をLightingPassesへ移しても生成の順序はここから動かさない
+        m_LightingPasses->CreateDirectLightPipelineState(*m_Device, shaderDirectory);
 
-        RHI::ShaderDesc directLightPsDesc;
-        directLightPsDesc.Stage = RHI::ShaderStage::Pixel;
-        directLightPsDesc.FilePath = shaderDirectory + L"DirectLighting.kshader";
-        directLightPsDesc.EntryPoint = "PSMain";
-        m_DirectLightPixelShader = m_Device->CreateShader(directLightPsDesc);
-
-        RHI::PipelineStateDesc directLightPipelineDesc;
-        directLightPipelineDesc.VertexShader = m_DirectLightVertexShader.get();
-        directLightPipelineDesc.PixelShader = m_DirectLightPixelShader.get();
-        directLightPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        directLightPipelineDesc.RenderTargetFormats = { RHI::Format::R32G32B32A32_Float };
-        m_DirectLightPipelineState = m_Device->CreatePipelineState(directLightPipelineDesc);
-
-        // AO/GI共通の頂点シェーダ(頂点バッファなしのフルスクリーン三角形)。SSAO/SSIL/共通ブラーの
-        // 3つのピクセルシェーダで使い回す
-        RHI::ShaderDesc aoVsDesc;
-        aoVsDesc.Stage = RHI::ShaderStage::Vertex;
-        aoVsDesc.FilePath = shaderDirectory + L"SSAO.kshader";
-        aoVsDesc.EntryPoint = "VSMain";
-        m_AOVertexShader = m_Device->CreateShader(aoVsDesc);
-
-        // SSAOパス
-        RHI::ShaderDesc ssaoPsDesc;
-        ssaoPsDesc.Stage = RHI::ShaderStage::Pixel;
-        ssaoPsDesc.FilePath = shaderDirectory + L"SSAO.kshader";
-        ssaoPsDesc.EntryPoint = "PSMain";
-        m_SSAOPixelShader = m_Device->CreateShader(ssaoPsDesc);
-
-        // SSAO/SSIL/AOブラーのPSOは出力先(AO/GIバッファ)のフォーマットがバッファ精度に依存するため、
-        // この関数の末尾でCreatePrecisionDependentPipelineStates()がまとめて作る
-
-        m_SSAOKernel = Passes::GenerateSSAOKernel(m_AmbientOcclusionSettings.SSAOKernelSize);
-
-        RHI::BufferDesc ssaoConstantBufferDesc;
-        ssaoConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        ssaoConstantBufferDesc.SizeInBytes = sizeof(Passes::SSAOConstants);
-        m_SSAOConstantBuffer = m_Device->CreateBuffer(ssaoConstantBufferDesc);
-
-        // SSILパス(Visibility Bitmask)
-        RHI::ShaderDesc ssilPsDesc;
-        ssilPsDesc.Stage = RHI::ShaderStage::Pixel;
-        ssilPsDesc.FilePath = shaderDirectory + L"SSIL_VisibilityBitmask.kshader";
-        ssilPsDesc.EntryPoint = "PSMain";
-        m_SSILPixelShader = m_Device->CreateShader(ssilPsDesc);
-
-        RHI::BufferDesc ssilConstantBufferDesc;
-        ssilConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        ssilConstantBufferDesc.SizeInBytes = sizeof(Passes::SSILConstants);
-        m_SSILConstantBuffer = m_Device->CreateBuffer(ssilConstantBufferDesc);
-
-        // AO/GI共通のブラーパス(SSAO.hlslのPSMainBlurを、rgbaフォーマットが同じSSAO/SSIL両方で使い回す)
-        RHI::ShaderDesc aoBlurPsDesc;
-        aoBlurPsDesc.Stage = RHI::ShaderStage::Pixel;
-        aoBlurPsDesc.FilePath = shaderDirectory + L"SSAO.kshader";
-        aoBlurPsDesc.EntryPoint = "PSMainBlur";
-        m_AOBlurPixelShader = m_Device->CreateShader(aoBlurPsDesc);
+        // 【元の行位置のまま呼ぶ】上と同じ理由。SSAO/SSIL/AOブラーのPSOだけは出力先の
+        // フォーマットがバッファ精度に依存するため、この関数の末尾で
+        // CreatePrecisionDependentPipelineStates()がまとめて作る
+        m_LightingPasses->CreateAOResources(
+            *m_Device, shaderDirectory, m_AmbientOcclusionSettings.SSAOKernelSize);
 
         // AO/GI無効時はこの常に黒・不透明(遮蔽なし=a:1、間接光なし=rgb:0)のテクスチャをライティングパスに渡す
         m_AODisabledTexture = m_Device->CreateSolidColorTexture(0, 0, 0, 255);
 
-        // ライティングパス(頂点バッファなしのフルスクリーン三角形)
-        RHI::ShaderDesc lightingVsDesc;
-        lightingVsDesc.Stage = RHI::ShaderStage::Vertex;
-        lightingVsDesc.FilePath = shaderDirectory + L"DeferredLighting.kshader";
-        lightingVsDesc.EntryPoint = "VSMain";
-        m_LightingVertexShader = m_Device->CreateShader(lightingVsDesc);
+        m_LightingPasses->CreateLightingPipelineState(*m_Device, shaderDirectory);
 
-        RHI::ShaderDesc lightingPsDesc;
-        lightingPsDesc.Stage = RHI::ShaderStage::Pixel;
-        lightingPsDesc.FilePath = shaderDirectory + L"DeferredLighting.kshader";
-        lightingPsDesc.EntryPoint = "PSMain";
-        m_LightingPixelShader = m_Device->CreateShader(lightingPsDesc);
-
-        RHI::PipelineStateDesc lightingPipelineDesc;
-        lightingPipelineDesc.VertexShader = m_LightingVertexShader.get();
-        lightingPipelineDesc.PixelShader = m_LightingPixelShader.get();
-        lightingPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        lightingPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
-        m_LightingPipelineState = m_Device->CreatePipelineState(lightingPipelineDesc);
-
-        // 半透明フォワードパス(Transparent.hlsl)。頂点入力・トポロジはGBufferパスと共通で、
-        // 出力先はLightingパスと同じSceneColor(R16G16B16A16_Float)
-        RHI::ShaderDesc transparentVsDesc;
-        transparentVsDesc.Stage = RHI::ShaderStage::Vertex;
-        transparentVsDesc.FilePath = shaderDirectory + L"Transparent.kshader";
-        transparentVsDesc.EntryPoint = "VSMain";
-        m_TransparentVertexShader = m_Device->CreateShader(transparentVsDesc);
-
-        RHI::ShaderDesc transparentPsDesc;
-        transparentPsDesc.Stage = RHI::ShaderStage::Pixel;
-        transparentPsDesc.FilePath = shaderDirectory + L"Transparent.kshader";
-        transparentPsDesc.EntryPoint = "PSMain";
-        m_TransparentPixelShader = m_Device->CreateShader(transparentPsDesc);
-
-        RHI::PipelineStateDesc transparentPipelineDesc;
-        transparentPipelineDesc.InputLayout = modelInputLayout;
-        transparentPipelineDesc.VertexShader = m_TransparentVertexShader.get();
-        transparentPipelineDesc.PixelShader = m_TransparentPixelShader.get();
-        transparentPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        transparentPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
-        transparentPipelineDesc.HasDepthStencil = true;
-        // 既存の不透明物体には隠れさせたいが(テストは有効)、奥から手前に描く半透明同士が互いの深度で
-        // 隠し合わないよう書き込みは行わない
-        transparentPipelineDesc.DepthWriteEnabled = false;
-        transparentPipelineDesc.ReverseZ = true;
-        // 事前乗算済みアルファ(src.rgb + dst.rgb * (1 - src.a))。標準アルファブレンドではなく
-        // こちらを使うのは、ガラスの鏡面反射(スペキュラ)を不透明度で減衰させないため。
-        // 標準アルファブレンドはシェーダーの出力色全体にsrc.aを掛けるので、Bistroの酒瓶のように
-        // 不透明度が0.04しかないマテリアルではハイライトまで1/25に潰れ、ガラスが「透明」ではなく
-        // 「何も無い」ように見えてしまう。Transparent.hlsl側で拡散光にのみ不透明度を乗じ、
-        // 鏡面反射は減衰させずに加算した色を出力する(詳細はdocs/Architecture.htmlの半透明描画の章を参照)
-        transparentPipelineDesc.BlendMode = RHI::BlendMode::PremultipliedAlpha;
-        m_TransparentPipelineState = m_Device->CreatePipelineState(transparentPipelineDesc);
-        transparentPipelineDesc.FrontCounterClockwise = true;
-        m_TransparentPipelineStateMirrored = m_Device->CreatePipelineState(transparentPipelineDesc);
+        m_LightingPasses->CreateTransparentPipelineStates(*m_Device, shaderDirectory, modelInputLayout);
 
         // ドローンショーパス(DroneShow.hlsl)。頂点バッファを持たず、Draw(6*機体数, 0)と
         // SV_VertexIDでビルボードのクアッドを展開する(InputLayoutは空のまま)
@@ -906,7 +799,7 @@ namespace Kurenai
         // 「光は足すが遮蔽はしない」という発光点の正しい意味になる
         droneShowPipelineDesc.BlendMode = RHI::BlendMode::PremultipliedAlpha;
         // 【平面反射用にワインディングを反転したPSOは要らない】
-        // メッシュの描画(m_TransparentPipelineStateMirrored等)では鏡映ビュー行列が頂点そのものを
+        // メッシュの描画(LightingPasses::m_TransparentPipelineStateMirrored等)では鏡映ビュー行列が頂点そのものを
         // 変換するため画面上の巻きが反転するが、このパスのビルボードは
         // 「ワールド座標をViewで変換した"後"に、ビュー空間で四隅のオフセットを足す」
         // という作り方をしている(DroneShow.hlslのVSMain)。四隅のオフセットは鏡映行列を
@@ -1078,33 +971,7 @@ namespace Kurenai
         aerialPerspectivePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
         m_AerialPerspectivePipelineState = m_Device->CreatePipelineState(aerialPerspectivePipelineDesc);
 
-        // 雲パス(頂点バッファなしのフルスクリーン三角形。積雲と巻雲だけを1/2解像度で評価し、
-        // 透過率と事前乗算済みの散乱光を書く)。専用のb1定数バッファは持たない
-        // (パラメータはFrameConstants末尾のCloudParams0-3等に入っているため)
-        RHI::ShaderDesc skyCloudVsDesc;
-        skyCloudVsDesc.Stage = RHI::ShaderStage::Vertex;
-        skyCloudVsDesc.FilePath = shaderDirectory + L"SkyCloud.kshader";
-        skyCloudVsDesc.EntryPoint = "VSMain";
-        m_SkyCloudVertexShader = m_Device->CreateShader(skyCloudVsDesc);
-
-        RHI::ShaderDesc skyCloudPsDesc;
-        skyCloudPsDesc.Stage = RHI::ShaderStage::Pixel;
-        skyCloudPsDesc.FilePath = shaderDirectory + L"SkyCloud.kshader";
-        skyCloudPsDesc.EntryPoint = "PSMain";
-        m_SkyCloudPixelShader = m_Device->CreateShader(skyCloudPsDesc);
-
-        RHI::PipelineStateDesc skyCloudPipelineDesc;
-        skyCloudPipelineDesc.VertexShader = m_SkyCloudVertexShader.get();
-        skyCloudPipelineDesc.PixelShader = m_SkyCloudPixelShader.get();
-        skyCloudPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        // 2枚目は fogInFront(雲に最初に当たった位置の霞の透過率、P18b)。並びはSkyCloud.hlslの
-        // PSOutputおよびSkyCloudパスのRenderTargetsと一致させること。
-        // 1チャンネルなのでDDGIResolveの低解像度深度と同じR32_Floatにする
-        skyCloudPipelineDesc.RenderTargetFormats = {
-            RHI::Format::R16G16B16A16_Float,
-            RHI::Format::R32_Float,
-        };
-        m_SkyCloudPipelineState = m_Device->CreatePipelineState(skyCloudPipelineDesc);
+        m_LightingPasses->CreateSkyCloudPipelineState(*m_Device, shaderDirectory);
 
         // DDGIの低解像度解決パス(雲パスと同じ作り。拡散イラディアンスとinsideWeightを書く)
         RHI::ShaderDesc ddgiResolveVsDesc;
@@ -1390,18 +1257,7 @@ namespace Kurenai
             megaLightsAccumConstantBufferDesc.SizeInBytes = sizeof(Passes::MegaLightsAccumConstants);
             m_MegaLightsAccumConstantBuffer = m_Device->CreateBuffer(megaLightsAccumConstantBufferDesc);
 
-            // RTAOパス(コンピュートシェーダー。半球へレイを撃ち遮蔽率と間接拡散光を求める)
-            RHI::ShaderDesc rtAOCsDesc;
-            rtAOCsDesc.Stage = RHI::ShaderStage::Compute;
-            rtAOCsDesc.FilePath = shaderDirectory + L"RTAO.kshader";
-            rtAOCsDesc.EntryPoint = "CSMain";
-            m_RTAOComputeShader = m_Device->CreateShader(rtAOCsDesc);
-            m_RTAOPipelineState = m_Device->CreateComputePipelineState({ m_RTAOComputeShader.get() });
-
-            RHI::BufferDesc rtAOConstantBufferDesc;
-            rtAOConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-            rtAOConstantBufferDesc.SizeInBytes = sizeof(Passes::RTAOConstants);
-            m_RTAOConstantBuffer = m_Device->CreateBuffer(rtAOConstantBufferDesc);
+            m_LightingPasses->CreateRaytracedAOResources(*m_Device, shaderDirectory);
 
             // DDGIのプローブ取得(コンピュートシェーダー。プローブから6面ぶんのレイを撃ち、
             // ラスタ経路と同じ形のスクラッチキューブを直接埋める)
@@ -2046,10 +1902,7 @@ namespace Kurenai
         lightBufferDesc.StrideInBytes = sizeof(GPULight);
         m_SceneGPUResources.LightBuffer = m_Device->CreateBuffer(lightBufferDesc);
 
-        RHI::BufferDesc lightingConstantBufferDesc;
-        lightingConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        lightingConstantBufferDesc.SizeInBytes = sizeof(Passes::LightingConstants);
-        m_LightingConstantBuffer = m_Device->CreateBuffer(lightingConstantBufferDesc);
+        m_LightingPasses->CreateLightingConstantBuffer(*m_Device);
 
         // 【元の行位置のまま呼ぶ】上のCreatePipelineStateと同じ理由
         m_PresentPass->CreateConstantBuffer(*m_Device);
@@ -2177,7 +2030,8 @@ namespace Kurenai
     bool KurenaiEngine3D::ShouldRunRaytracedAO() const
     {
         return m_AmbientOcclusionSettings.Technique == AOTechnique::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
-               m_RTAOPipelineState != nullptr && m_RTAORawTexture != nullptr && m_RTAOTexture != nullptr;
+               m_LightingPasses->HasRaytracedPipelineState() && m_RenderTargets.RTAORawTexture != nullptr &&
+               m_RenderTargets.RTAOTexture != nullptr;
     }
 
     void KurenaiEngine3D::SetDebugViewIndex(int index)
@@ -3017,7 +2871,7 @@ namespace Kurenai
         }
         if (ShouldRunRaytracedAO())
         {
-            return m_RTAOTexture.get();
+            return m_RenderTargets.RTAOTexture.get();
         }
         if (m_AmbientOcclusionSettings.Technique == AOTechnique::SSILVisibilityBitmask)
         {
@@ -3035,7 +2889,7 @@ namespace Kurenai
         }
         if (ShouldRunRaytracedAO())
         {
-            return m_RTAORawTexture.get();
+            return m_RenderTargets.RTAORawTexture.get();
         }
         if (m_AmbientOcclusionSettings.Technique == AOTechnique::SSILVisibilityBitmask)
         {
@@ -3204,29 +3058,7 @@ namespace Kurenai
                 }
             }
 
-            // SSAOパス
-            RHI::PipelineStateDesc ssaoPipelineDesc;
-            ssaoPipelineDesc.VertexShader = m_AOVertexShader.get();
-            ssaoPipelineDesc.PixelShader = m_SSAOPixelShader.get();
-            ssaoPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-            ssaoPipelineDesc.RenderTargetFormats = { aoFormat };
-            m_SSAOPipelineState = m_Device->CreatePipelineState(ssaoPipelineDesc);
-
-            // SSILパス(Visibility Bitmask)
-            RHI::PipelineStateDesc ssilPipelineDesc;
-            ssilPipelineDesc.VertexShader = m_AOVertexShader.get();
-            ssilPipelineDesc.PixelShader = m_SSILPixelShader.get();
-            ssilPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-            ssilPipelineDesc.RenderTargetFormats = { aoFormat };
-            m_SSILPipelineState = m_Device->CreatePipelineState(ssilPipelineDesc);
-
-            // AO/GI共通のブラーパス(SSAO/SSILのどちらの出力にも同じフォーマットで書き戻す)
-            RHI::PipelineStateDesc aoBlurPipelineDesc;
-            aoBlurPipelineDesc.VertexShader = m_AOVertexShader.get();
-            aoBlurPipelineDesc.PixelShader = m_AOBlurPixelShader.get();
-            aoBlurPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-            aoBlurPipelineDesc.RenderTargetFormats = { aoFormat };
-            m_AOBlurPipelineState = m_Device->CreatePipelineState(aoBlurPipelineDesc);
+            m_LightingPasses->CreatePrecisionDependentPipelineStates(*m_Device, aoFormat);
         }
         catch (const std::exception& e)
         {
@@ -3353,18 +3185,18 @@ namespace Kurenai
             // 【R16G16B16A16_Float固定にする理由】平面反射(CreatePlanarReflectionTargets)と同じで、
             // 散乱光はHDRの輝度をそのまま持つためLegacy8bitでは飽和して雲が白く潰れる。
             // また透過率は乗算に使うので8bitの量子化がそのままバンディングになる
-            m_SkyCloudWidth = std::max(1u, width / 2);
-            m_SkyCloudHeight = std::max(1u, height / 2);
-            m_SkyCloudTexture =
-                m_Device->CreateRenderTexture(m_SkyCloudWidth, m_SkyCloudHeight, RHI::Format::R16G16B16A16_Float);
+            m_RenderTargets.SkyCloudWidth = std::max(1u, width / 2);
+            m_RenderTargets.SkyCloudHeight = std::max(1u, height / 2);
+            m_RenderTargets.SkyCloudTexture =
+                m_Device->CreateRenderTexture(m_RenderTargets.SkyCloudWidth, m_RenderTargets.SkyCloudHeight, RHI::Format::R16G16B16A16_Float);
             // 上のパスが同時に書く fogInFront(雲に最初に当たった位置の霞の透過率、P18b)。
             // 合成側(DeferredLighting.hlsl)が clearColor * (CloudSkyLight - 1) * (1 - fogInFront) を
             // フル解像度で掛けるためだけに要る。1チャンネルなのでDDGIResolveの低解像度深度と
             // 同じR32_Floatにする。
             // 【t19/t21と同じ理由で常に確保する】雲パスが登録されないフレーム(DDSスカイボックス)でも
             // t22を空のままにできない(DX12のディスクリプタテーブルを埋め切るため)
-            m_SkyCloudFogTexture =
-                m_Device->CreateRenderTexture(m_SkyCloudWidth, m_SkyCloudHeight, RHI::Format::R32_Float);
+            m_RenderTargets.SkyCloudFogTexture =
+                m_Device->CreateRenderTexture(m_RenderTargets.SkyCloudWidth, m_RenderTargets.SkyCloudHeight, RHI::Format::R32_Float);
             // DDGIの低解像度解決パスの出力(rgb=イラディアンス、a=insideWeight)。雲と同じく1/2解像度。
             // 【常に確保する】m_DDGISettings.HalfResolutionが無効でもシェーダーのt19には何かを
             // バインドしておく必要がある(DX12のディスクリプタテーブルを埋め切るため)。
@@ -3388,8 +3220,8 @@ namespace Kurenai
                 // RTAOの生バッファはコンピュートがUAVで書くためUAVテクスチャ、ブラー後は
                 // 従来どおりピクセルシェーダーが書くレンダーターゲット。
                 // フォーマットはSSAO/SSILと同じaoFormat(バッファ精度の設定に追従する)
-                m_RTAORawTexture = m_Device->CreateUAVTexture(width, height, aoFormat);
-                m_RTAOTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
+                m_RenderTargets.RTAORawTexture = m_Device->CreateUAVTexture(width, height, aoFormat);
+                m_RenderTargets.RTAOTexture = m_Device->CreateRenderTexture(width, height, aoFormat);
                 // MegaLightsが書くポイント/スポットライトの直接光(HDR)。DirectLighting.hlslが
                 // t7で読んで加算する。
                 //

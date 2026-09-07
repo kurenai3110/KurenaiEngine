@@ -52,8 +52,8 @@ namespace Kurenai
             { "SSAOTexture", m_RenderTargets.SSAOTexture.get() },
             { "SSILRawTexture", m_RenderTargets.SSILRawTexture.get() },
             { "SSILTexture", m_RenderTargets.SSILTexture.get() },
-            { "RTAORawTexture", m_RTAORawTexture.get() },
-            { "RTAOTexture", m_RTAOTexture.get() },
+            { "RTAORawTexture", m_RenderTargets.RTAORawTexture.get() },
+            { "RTAOTexture", m_RenderTargets.RTAOTexture.get() },
             { "RTShadowTexture", m_RenderTargets.RTShadowTexture.get() },
             { "SceneColor", m_RenderTargets.SceneColor.get() },
             // 反射
@@ -68,8 +68,8 @@ namespace Kurenai
             { "ShadowCascadeArray", m_RenderTargets.ShadowCascadeArray.get() },
             { "HiZTexture", m_RenderTargets.HiZTexture.get() },
             // 空と大気
-            { "SkyCloudTexture", m_SkyCloudTexture.get() },
-            { "SkyCloudFogTexture", m_SkyCloudFogTexture.get() },
+            { "SkyCloudTexture", m_RenderTargets.SkyCloudTexture.get() },
+            { "SkyCloudFogTexture", m_RenderTargets.SkyCloudFogTexture.get() },
             { "AerialPerspectiveTexture", m_AerialPerspectiveTexture.get() },
             { "TransmittanceLUT", m_SkyResources.TransmittanceLUT.get() },
             { "MultiScatteringLUT", m_SkyResources.MultiScatteringLUT.get() },

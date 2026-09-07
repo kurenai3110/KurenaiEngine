@@ -23,6 +23,224 @@ namespace Kurenai::Passes
         using ShaderInterop::FrameConstants;
     }
 
+    void LightingPasses::CreateDirectLightPipelineState(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        // 直接光パス(頂点バッファなしのフルスクリーン三角形。G-Buffer+シャドウマップからPBRの
+        // 直接光を計算しHDRで書き出す)
+        RHI::ShaderDesc directLightVsDesc;
+        directLightVsDesc.Stage = RHI::ShaderStage::Vertex;
+        directLightVsDesc.FilePath = shaderDirectory + L"DirectLighting.kshader";
+        directLightVsDesc.EntryPoint = "VSMain";
+        m_DirectLightVertexShader = device.CreateShader(directLightVsDesc);
+
+        RHI::ShaderDesc directLightPsDesc;
+        directLightPsDesc.Stage = RHI::ShaderStage::Pixel;
+        directLightPsDesc.FilePath = shaderDirectory + L"DirectLighting.kshader";
+        directLightPsDesc.EntryPoint = "PSMain";
+        m_DirectLightPixelShader = device.CreateShader(directLightPsDesc);
+
+        RHI::PipelineStateDesc directLightPipelineDesc;
+        directLightPipelineDesc.VertexShader = m_DirectLightVertexShader.get();
+        directLightPipelineDesc.PixelShader = m_DirectLightPixelShader.get();
+        directLightPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        directLightPipelineDesc.RenderTargetFormats = { RHI::Format::R32G32B32A32_Float };
+        m_DirectLightPipelineState = device.CreatePipelineState(directLightPipelineDesc);
+    }
+
+    void LightingPasses::CreateAOResources(
+        RHI::IRHIDevice& device, const std::wstring& shaderDirectory, uint32_t ssaoKernelSize)
+    {
+        // AO/GI共通の頂点シェーダ(頂点バッファなしのフルスクリーン三角形)。SSAO/SSIL/共通ブラーの
+        // 3つのピクセルシェーダで使い回す
+        RHI::ShaderDesc aoVsDesc;
+        aoVsDesc.Stage = RHI::ShaderStage::Vertex;
+        aoVsDesc.FilePath = shaderDirectory + L"SSAO.kshader";
+        aoVsDesc.EntryPoint = "VSMain";
+        m_AOVertexShader = device.CreateShader(aoVsDesc);
+
+        // SSAOパス
+        RHI::ShaderDesc ssaoPsDesc;
+        ssaoPsDesc.Stage = RHI::ShaderStage::Pixel;
+        ssaoPsDesc.FilePath = shaderDirectory + L"SSAO.kshader";
+        ssaoPsDesc.EntryPoint = "PSMain";
+        m_SSAOPixelShader = device.CreateShader(ssaoPsDesc);
+
+        // SSAO/SSIL/AOブラーのPSOは出力先(AO/GIバッファ)のフォーマットがバッファ精度に依存するため、
+        // CreatePrecisionDependentPipelineStates()がまとめて作る
+
+        m_SSAOKernel = GenerateSSAOKernel(ssaoKernelSize);
+
+        RHI::BufferDesc ssaoConstantBufferDesc;
+        ssaoConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        ssaoConstantBufferDesc.SizeInBytes = sizeof(SSAOConstants);
+        m_SSAOConstantBuffer = device.CreateBuffer(ssaoConstantBufferDesc);
+
+        // SSILパス(Visibility Bitmask)
+        RHI::ShaderDesc ssilPsDesc;
+        ssilPsDesc.Stage = RHI::ShaderStage::Pixel;
+        ssilPsDesc.FilePath = shaderDirectory + L"SSIL_VisibilityBitmask.kshader";
+        ssilPsDesc.EntryPoint = "PSMain";
+        m_SSILPixelShader = device.CreateShader(ssilPsDesc);
+
+        RHI::BufferDesc ssilConstantBufferDesc;
+        ssilConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        ssilConstantBufferDesc.SizeInBytes = sizeof(SSILConstants);
+        m_SSILConstantBuffer = device.CreateBuffer(ssilConstantBufferDesc);
+
+        // AO/GI共通のブラーパス(SSAO.hlslのPSMainBlurを、rgbaフォーマットが同じSSAO/SSIL両方で使い回す)
+        RHI::ShaderDesc aoBlurPsDesc;
+        aoBlurPsDesc.Stage = RHI::ShaderStage::Pixel;
+        aoBlurPsDesc.FilePath = shaderDirectory + L"SSAO.kshader";
+        aoBlurPsDesc.EntryPoint = "PSMainBlur";
+        m_AOBlurPixelShader = device.CreateShader(aoBlurPsDesc);
+    }
+
+    void LightingPasses::CreateLightingPipelineState(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        // ライティングパス(頂点バッファなしのフルスクリーン三角形)
+        RHI::ShaderDesc lightingVsDesc;
+        lightingVsDesc.Stage = RHI::ShaderStage::Vertex;
+        lightingVsDesc.FilePath = shaderDirectory + L"DeferredLighting.kshader";
+        lightingVsDesc.EntryPoint = "VSMain";
+        m_LightingVertexShader = device.CreateShader(lightingVsDesc);
+
+        RHI::ShaderDesc lightingPsDesc;
+        lightingPsDesc.Stage = RHI::ShaderStage::Pixel;
+        lightingPsDesc.FilePath = shaderDirectory + L"DeferredLighting.kshader";
+        lightingPsDesc.EntryPoint = "PSMain";
+        m_LightingPixelShader = device.CreateShader(lightingPsDesc);
+
+        RHI::PipelineStateDesc lightingPipelineDesc;
+        lightingPipelineDesc.VertexShader = m_LightingVertexShader.get();
+        lightingPipelineDesc.PixelShader = m_LightingPixelShader.get();
+        lightingPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        lightingPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        m_LightingPipelineState = device.CreatePipelineState(lightingPipelineDesc);
+    }
+
+    void LightingPasses::CreateTransparentPipelineStates(
+        RHI::IRHIDevice& device, const std::wstring& shaderDirectory,
+        const std::vector<RHI::InputElementDesc>& modelInputLayout)
+    {
+        // 半透明フォワードパス(Transparent.hlsl)。頂点入力・トポロジはGBufferパスと共通で、
+        // 出力先はLightingパスと同じSceneColor(R16G16B16A16_Float)
+        RHI::ShaderDesc transparentVsDesc;
+        transparentVsDesc.Stage = RHI::ShaderStage::Vertex;
+        transparentVsDesc.FilePath = shaderDirectory + L"Transparent.kshader";
+        transparentVsDesc.EntryPoint = "VSMain";
+        m_TransparentVertexShader = device.CreateShader(transparentVsDesc);
+
+        RHI::ShaderDesc transparentPsDesc;
+        transparentPsDesc.Stage = RHI::ShaderStage::Pixel;
+        transparentPsDesc.FilePath = shaderDirectory + L"Transparent.kshader";
+        transparentPsDesc.EntryPoint = "PSMain";
+        m_TransparentPixelShader = device.CreateShader(transparentPsDesc);
+
+        RHI::PipelineStateDesc transparentPipelineDesc;
+        transparentPipelineDesc.InputLayout = modelInputLayout;
+        transparentPipelineDesc.VertexShader = m_TransparentVertexShader.get();
+        transparentPipelineDesc.PixelShader = m_TransparentPixelShader.get();
+        transparentPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        transparentPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        transparentPipelineDesc.HasDepthStencil = true;
+        // 既存の不透明物体には隠れさせたいが(テストは有効)、奥から手前に描く半透明同士が互いの深度で
+        // 隠し合わないよう書き込みは行わない
+        transparentPipelineDesc.DepthWriteEnabled = false;
+        transparentPipelineDesc.ReverseZ = true;
+        // 事前乗算済みアルファ(src.rgb + dst.rgb * (1 - src.a))。標準アルファブレンドではなく
+        // こちらを使うのは、ガラスの鏡面反射(スペキュラ)を不透明度で減衰させないため。
+        // 標準アルファブレンドはシェーダーの出力色全体にsrc.aを掛けるので、Bistroの酒瓶のように
+        // 不透明度が0.04しかないマテリアルではハイライトまで1/25に潰れ、ガラスが「透明」ではなく
+        // 「何も無い」ように見えてしまう。Transparent.hlsl側で拡散光にのみ不透明度を乗じ、
+        // 鏡面反射は減衰させずに加算した色を出力する(詳細はdocs/Architecture.htmlの半透明描画の章を参照)
+        transparentPipelineDesc.BlendMode = RHI::BlendMode::PremultipliedAlpha;
+        m_TransparentPipelineState = device.CreatePipelineState(transparentPipelineDesc);
+        transparentPipelineDesc.FrontCounterClockwise = true;
+        m_TransparentPipelineStateMirrored = device.CreatePipelineState(transparentPipelineDesc);
+    }
+
+    void LightingPasses::CreateSkyCloudPipelineState(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        // 雲パス(頂点バッファなしのフルスクリーン三角形。積雲と巻雲だけを1/2解像度で評価し、
+        // 透過率と事前乗算済みの散乱光を書く)。専用のb1定数バッファは持たない
+        // (パラメータはFrameConstants末尾のCloudParams0-3等に入っているため)
+        RHI::ShaderDesc skyCloudVsDesc;
+        skyCloudVsDesc.Stage = RHI::ShaderStage::Vertex;
+        skyCloudVsDesc.FilePath = shaderDirectory + L"SkyCloud.kshader";
+        skyCloudVsDesc.EntryPoint = "VSMain";
+        m_SkyCloudVertexShader = device.CreateShader(skyCloudVsDesc);
+
+        RHI::ShaderDesc skyCloudPsDesc;
+        skyCloudPsDesc.Stage = RHI::ShaderStage::Pixel;
+        skyCloudPsDesc.FilePath = shaderDirectory + L"SkyCloud.kshader";
+        skyCloudPsDesc.EntryPoint = "PSMain";
+        m_SkyCloudPixelShader = device.CreateShader(skyCloudPsDesc);
+
+        RHI::PipelineStateDesc skyCloudPipelineDesc;
+        skyCloudPipelineDesc.VertexShader = m_SkyCloudVertexShader.get();
+        skyCloudPipelineDesc.PixelShader = m_SkyCloudPixelShader.get();
+        skyCloudPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        // 2枚目は fogInFront(雲に最初に当たった位置の霞の透過率、P18b)。並びはSkyCloud.hlslの
+        // PSOutputおよびSkyCloudパスのRenderTargetsと一致させること。
+        // 1チャンネルなのでDDGIResolveの低解像度深度と同じR32_Floatにする
+        skyCloudPipelineDesc.RenderTargetFormats = {
+            RHI::Format::R16G16B16A16_Float,
+            RHI::Format::R32_Float,
+        };
+        m_SkyCloudPipelineState = device.CreatePipelineState(skyCloudPipelineDesc);
+    }
+
+    void LightingPasses::CreateRaytracedAOResources(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        // RTAOパス(コンピュートシェーダー。半球へレイを撃ち遮蔽率と間接拡散光を求める)
+        RHI::ShaderDesc rtAOCsDesc;
+        rtAOCsDesc.Stage = RHI::ShaderStage::Compute;
+        rtAOCsDesc.FilePath = shaderDirectory + L"RTAO.kshader";
+        rtAOCsDesc.EntryPoint = "CSMain";
+        m_RTAOComputeShader = device.CreateShader(rtAOCsDesc);
+        m_RTAOPipelineState = device.CreateComputePipelineState({ m_RTAOComputeShader.get() });
+
+        RHI::BufferDesc rtAOConstantBufferDesc;
+        rtAOConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        rtAOConstantBufferDesc.SizeInBytes = sizeof(RTAOConstants);
+        m_RTAOConstantBuffer = device.CreateBuffer(rtAOConstantBufferDesc);
+    }
+
+    void LightingPasses::CreateLightingConstantBuffer(RHI::IRHIDevice& device)
+    {
+        RHI::BufferDesc lightingConstantBufferDesc;
+        lightingConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        lightingConstantBufferDesc.SizeInBytes = sizeof(LightingConstants);
+        m_LightingConstantBuffer = device.CreateBuffer(lightingConstantBufferDesc);
+    }
+
+    void LightingPasses::CreatePrecisionDependentPipelineStates(RHI::IRHIDevice& device, RHI::Format aoFormat)
+    {
+        // SSAOパス
+        RHI::PipelineStateDesc ssaoPipelineDesc;
+        ssaoPipelineDesc.VertexShader = m_AOVertexShader.get();
+        ssaoPipelineDesc.PixelShader = m_SSAOPixelShader.get();
+        ssaoPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        ssaoPipelineDesc.RenderTargetFormats = { aoFormat };
+        m_SSAOPipelineState = device.CreatePipelineState(ssaoPipelineDesc);
+
+        // SSILパス(Visibility Bitmask)
+        RHI::PipelineStateDesc ssilPipelineDesc;
+        ssilPipelineDesc.VertexShader = m_AOVertexShader.get();
+        ssilPipelineDesc.PixelShader = m_SSILPixelShader.get();
+        ssilPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        ssilPipelineDesc.RenderTargetFormats = { aoFormat };
+        m_SSILPipelineState = device.CreatePipelineState(ssilPipelineDesc);
+
+        // AO/GI共通のブラーパス(SSAO/SSILのどちらの出力にも同じフォーマットで書き戻す)
+        RHI::PipelineStateDesc aoBlurPipelineDesc;
+        aoBlurPipelineDesc.VertexShader = m_AOVertexShader.get();
+        aoBlurPipelineDesc.PixelShader = m_AOBlurPixelShader.get();
+        aoBlurPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        aoBlurPipelineDesc.RenderTargetFormats = { aoFormat };
+        m_AOBlurPipelineState = device.CreatePipelineState(aoBlurPipelineDesc);
+    }
+
     void LightingPasses::RegisterDirectAndAO(
         Core::RenderGraph& graph,
         const Rendering::RenderFrameContext& frame,
@@ -117,13 +335,13 @@ namespace Kurenai::Passes
             {
                 cmd->SetViewport(gbufferViewport);
 
-                cmd->SetPipelineState(m_Engine.m_DirectLightPipelineState.get());
+                cmd->SetPipelineState(m_DirectLightPipelineState.get());
                 cmd->SetConstantBuffer(0, frameConstantBuffer);
 
                 // UpdateBufferはSetConstantBufferより前に呼ぶ必要がある。DX12の定数バッファは
                 // リングバッファで、GetGPUVirtualAddress()が現在のリングスロットのアドレスを返すため
-                cmd->UpdateBuffer(m_Engine.m_LightingConstantBuffer.get(), &lightingConstants, sizeof(lightingConstants));
-                cmd->SetConstantBuffer(1, m_Engine.m_LightingConstantBuffer.get());
+                cmd->UpdateBuffer(m_LightingConstantBuffer.get(), &lightingConstants, sizeof(lightingConstants));
+                cmd->SetConstantBuffer(1, m_LightingConstantBuffer.get());
 
                 cmd->SetSamplerSet(screenSpaceSamplers);
                 cmd->SetTexture(0, targets->GBufferAlbedo.get());
@@ -180,16 +398,16 @@ namespace Kurenai::Passes
                             static_cast<float>(std::max(1, ambientOcclusionSettings.RTAOSampleCount)), ambientOcclusionSettings.RTAOIntensity,
                             ambientOcclusionSettings.RTAOBounceShadowRayEnabled ? 1.0f : 0.0f, 0.0f
                         };
-                        cmd->UpdateBuffer(m_Engine.m_RTAOConstantBuffer.get(), &rtAOConstants, sizeof(rtAOConstants));
+                        cmd->UpdateBuffer(m_RTAOConstantBuffer.get(), &rtAOConstants, sizeof(rtAOConstants));
 
-                        cmd->SetComputePipelineState(m_Engine.m_RTAOPipelineState.get());
+                        cmd->SetComputePipelineState(m_RTAOPipelineState.get());
                         // ヒット面のマテリアルテクスチャをbindlessで引くためs0にWrapが要る
                         // (理由はRT反射パスの同じ呼び出しのコメント参照)。
                         // このパスは以前サンプラーセットを一度もバインドしておらず、
                         // 直前のパスが残したセットに依存していた
                         cmd->SetComputeSamplerSet(materialSamplers);
                         cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
-                        cmd->SetComputeConstantBuffer(1, m_Engine.m_RTAOConstantBuffer.get());
+                        cmd->SetComputeConstantBuffer(1, m_RTAOConstantBuffer.get());
 
                         cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
                         cmd->SetComputeTexture(1, targets->GBufferNormal.get());
@@ -211,7 +429,7 @@ namespace Kurenai::Passes
                         cmd->SetComputeTexture(8, targets->DirectLightTexture.get());
 
                         // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
-                        cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RTAORawTexture.get());
+                        cmd->SetComputeUnorderedAccessTexture(0, targets->RTAORawTexture.get());
                         cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                     },
                 });
@@ -235,10 +453,10 @@ namespace Kurenai::Passes
                             Passes::SSILConstants ssilConstants{};
                             ssilConstants.Params0 = { ambientOcclusionSettings.SSILRadius, ambientOcclusionSettings.SSILThickness, ambientOcclusionSettings.SSILIntensity, ambientOcclusionSettings.SSILPower };
                             ssilConstants.Params1 = { ambientOcclusionSettings.SSILSliceCount, ambientOcclusionSettings.SSILStepCount, 0u, 0u };
-                            cmd->UpdateBuffer(m_Engine.m_SSILConstantBuffer.get(), &ssilConstants, sizeof(ssilConstants));
+                            cmd->UpdateBuffer(m_SSILConstantBuffer.get(), &ssilConstants, sizeof(ssilConstants));
 
-                            cmd->SetPipelineState(m_Engine.m_SSILPipelineState.get());
-                            cmd->SetConstantBuffer(1, m_Engine.m_SSILConstantBuffer.get());
+                            cmd->SetPipelineState(m_SSILPipelineState.get());
+                            cmd->SetConstantBuffer(1, m_SSILConstantBuffer.get());
                             cmd->SetTexture(0, targets->GBufferNormal.get());
                             cmd->SetTexture(1, targets->GBufferDepth.get());
                             cmd->SetTexture(2, targets->DirectLightTexture.get());
@@ -251,20 +469,20 @@ namespace Kurenai::Passes
                             // 生成は16回のRNGだけなので毎フレーム比較しても問題にならない
                             const uint32_t kernelSize =
                                 std::clamp(ambientOcclusionSettings.SSAOKernelSize, 1u, Passes::kSSAOKernelSizeMax);
-                            if (m_Engine.m_SSAOKernel.size() != kernelSize)
+                            if (m_SSAOKernel.size() != kernelSize)
                             {
-                                m_Engine.m_SSAOKernel = Passes::GenerateSSAOKernel(kernelSize);
+                                m_SSAOKernel = Passes::GenerateSSAOKernel(kernelSize);
                             }
 
                             // 使わない残りの要素は0のまま(シェーダはsampleCountまでしか読まない)
                             Passes::SSAOConstants ssaoConstants{};
-                            std::copy(m_Engine.m_SSAOKernel.begin(), m_Engine.m_SSAOKernel.end(), ssaoConstants.Samples);
+                            std::copy(m_SSAOKernel.begin(), m_SSAOKernel.end(), ssaoConstants.Samples);
                             ssaoConstants.Params = {
                                 ambientOcclusionSettings.SSAORadius, ambientOcclusionSettings.SSAORadius * 0.05f, ambientOcclusionSettings.SSAOPower, static_cast<float>(kernelSize) };
-                            cmd->UpdateBuffer(m_Engine.m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
+                            cmd->UpdateBuffer(m_SSAOConstantBuffer.get(), &ssaoConstants, sizeof(ssaoConstants));
 
-                            cmd->SetPipelineState(m_Engine.m_SSAOPipelineState.get());
-                            cmd->SetConstantBuffer(1, m_Engine.m_SSAOConstantBuffer.get());
+                            cmd->SetPipelineState(m_SSAOPipelineState.get());
+                            cmd->SetConstantBuffer(1, m_SSAOConstantBuffer.get());
                             cmd->SetTexture(0, targets->GBufferNormal.get());
                             cmd->SetTexture(1, targets->GBufferDepth.get());
                             cmd->Draw(3, 0);
@@ -281,7 +499,7 @@ namespace Kurenai::Passes
                 .Execute = [this, gbufferViewport, aoRawTexture, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(gbufferViewport);
-                    cmd->SetPipelineState(m_Engine.m_AOBlurPipelineState.get());
+                    cmd->SetPipelineState(m_AOBlurPipelineState.get());
                     // ブラーはカーネルのタップが画面端で[0,1]を出るため、Wrapのサンプラーが
                     // 1つも入っていないこのセットを明示的にバインドする(直前のパスのバインドが
                     // そのまま残るのに依存してはいけない)
@@ -303,12 +521,12 @@ namespace Kurenai::Passes
         //
         // 【手続き空が無効なら登録しない】.ksceneでDDSスカイボックスを使う場合、Lightingパスは
         // キューブマップをサンプルする経路(SkyParams.y <= 0.5)へ入り、この結果を一切読まない
-        const bool skyCloudPassRuns = m_Engine.m_SkyCloudTexture && (frame.Settings.Sky.AnalyticBackground && usingProceduralSky);
+        const bool skyCloudPassRuns = targets->SkyCloudTexture && (frame.Settings.Sky.AnalyticBackground && usingProceduralSky);
         if (skyCloudPassRuns)
         {
             RHI::Viewport skyCloudViewport;
-            skyCloudViewport.Width = static_cast<float>(m_Engine.m_SkyCloudWidth);
-            skyCloudViewport.Height = static_cast<float>(m_Engine.m_SkyCloudHeight);
+            skyCloudViewport.Width = static_cast<float>(targets->SkyCloudWidth);
+            skyCloudViewport.Height = static_cast<float>(targets->SkyCloudHeight);
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyCloud",
@@ -321,13 +539,13 @@ namespace Kurenai::Passes
                     cloudWeatherNoiseTexture,
                 },
                 // 2枚出す。0=散乱光rgb+透過率a、1=fogInFront(P18b。SkyCloud.hlslのPSOutput参照)
-                .RenderTargets = { m_Engine.m_SkyCloudTexture.get(), m_Engine.m_SkyCloudFogTexture.get() },
+                .RenderTargets = { targets->SkyCloudTexture.get(), targets->SkyCloudFogTexture.get() },
                 // 空パラメータ。SkyIntegrateパスより後に順序付けさせる
                 .BufferReads = { skyParametersBuffer },
                 .Execute = [this, cloudDetailNoiseTexture, cloudShapeNoiseTexture, cloudWeatherNoiseTexture, skyParametersBuffer, skyViewLUT, skyCloudViewport, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(skyCloudViewport);
-                    cmd->SetPipelineState(m_Engine.m_SkyCloudPipelineState.get());
+                    cmd->SetPipelineState(m_SkyCloudPipelineState.get());
                     cmd->SetConstantBuffer(0, frameConstantBuffer);
                     cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, skyViewLUT);
@@ -411,7 +629,7 @@ namespace Kurenai::Passes
                 skyViewLUT,
                 // 低解像度で評価済みの雲。SkyCloudパスより後に順序付けさせるために挙げる
                 // (パスが登録されないフレームでは書き手が居ないので依存も張られない)
-                m_Engine.m_SkyCloudTexture.get(), m_Engine.m_SkyCloudFogTexture.get(),
+                targets->SkyCloudTexture.get(), targets->SkyCloudFogTexture.get(),
                 // 同じく低解像度で評価済みのDDGI。DDGIResolveパスより後に順序付けさせる
                 gi->DDGIResolveTexture.get(), gi->DDGIResolveDepthTexture.get(),
             },
@@ -426,7 +644,7 @@ namespace Kurenai::Passes
                 // 残らないよう、フルスクリーン三角形を描く前に明示的にクリアしておく
                 cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
 
-                cmd->SetPipelineState(m_Engine.m_LightingPipelineState.get());
+                cmd->SetPipelineState(m_LightingPipelineState.get());
                 cmd->SetConstantBuffer(0, frameConstantBuffer);
                 cmd->SetSamplerSet(screenSpaceSamplers);
                 cmd->SetTexture(0, targets->GBufferAlbedo.get());
@@ -457,10 +675,10 @@ namespace Kurenai::Passes
                 // 低解像度で評価済みの雲(rgb=事前乗算済みの散乱光、a=透過率)。
                 // このシェーダーは雲を自前で評価しなくなったため、3Dノイズが使っていたt18を
                 // そのまま流用している(DeferredLighting.hlsl冒頭のコメント参照)
-                cmd->SetTexture(18, m_Engine.m_SkyCloudTexture.get());
+                cmd->SetTexture(18, targets->SkyCloudTexture.get());
                 // 同じパスが書いた fogInFront(P18b)。雲の手前の霞の色を晴天から曇天へ直す
                 // 補正にだけ使う。t19/t21と同じ理由で、雲パスが走らないフレームでも常にバインドする
-                cmd->SetTexture(22, m_Engine.m_SkyCloudFogTexture.get());
+                cmd->SetTexture(22, targets->SkyCloudFogTexture.get());
                 // 低解像度で評価済みのDDGI(rgb=イラディアンス、a=insideWeight)。
                 // 【無効時も常にバインドする】シェーダーはDDGIParams4.yで読むかどうかを分けるが、
                 // DX12のディスクリプタテーブルは21スロットぶんをまとめてコピーするため、
@@ -542,7 +760,7 @@ namespace Kurenai::Passes
                     [](const TransparentDraw& a, const TransparentDraw& b) { return a.DistanceSq > b.DistanceSq; });
 
                 cmd->SetViewport(gbufferViewport);
-                cmd->SetPipelineState(m_Engine.m_TransparentPipelineState.get());
+                cmd->SetPipelineState(m_TransparentPipelineState.get());
                 cmd->SetConstantBuffer(0, frameConstantBuffer);
                 cmd->SetSamplerSet(materialSamplers);
 
@@ -577,11 +795,11 @@ namespace Kurenai::Passes
 
                 // 半透明は奥から手前への描画順そのものが正しさの前提なので並べ替えられない。
                 // そのため必要になった時点でパイプラインを切り替える(GBufferパスと同じ方式)
-                RHI::IRHIPipelineState* currentPipelineState = m_Engine.m_TransparentPipelineState.get();
+                RHI::IRHIPipelineState* currentPipelineState = m_TransparentPipelineState.get();
                 const auto bindPipelineState = [&](bool mirrored)
                 {
                     RHI::IRHIPipelineState* const wanted =
-                        mirrored ? m_Engine.m_TransparentPipelineStateMirrored.get() : m_Engine.m_TransparentPipelineState.get();
+                        mirrored ? m_TransparentPipelineStateMirrored.get() : m_TransparentPipelineState.get();
                     if (wanted == currentPipelineState)
                     {
                         return;

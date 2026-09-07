@@ -129,7 +129,6 @@ namespace Kurenai
         friend class Passes::DDGIPasses;
         friend class Passes::EnvironmentPasses;
         friend class Passes::GeometryPasses;
-        friend class Passes::LightingPasses;
         friend class Passes::MegaLightsPasses;
         friend class Passes::PostProcessPasses;
 
@@ -1139,58 +1138,22 @@ namespace Kurenai
         // 間接光(DDGI・反射プローブ)のリソースの持ち主は Rendering/GIResources.h
         Rendering::GIResources m_GIResources;
 
-        // 直接光パス(G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
-        // 計算しHDRで書き出す。DeferredLightingパスとSSIL_VisibilityBitmask.hlslの両方から
-        // サンプルされるため、G-Bufferと同じレンダー解像度・R32G32B32A32_Float(HDR)で保持する)
-        std::unique_ptr<RHI::IRHIShader> m_DirectLightVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_DirectLightPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DirectLightPipelineState;
+        // 直接光パスのシェーダーとPSOはPasses/LightingPassesへ移した
 
         AmbientOcclusionSettings m_AmbientOcclusionSettings;
         std::unique_ptr<RHI::IRHITexture> m_AODisabledTexture; // AO無効時に使う、遮蔽なし・間接光なしのテクスチャ
 
-        // AO/GI共通のブラーパス(4x4ボックスブラーでrgba全チャンネルを均す。SSAO/SSIL両方から使い回す)
-        std::unique_ptr<RHI::IRHIShader> m_AOVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_AOBlurPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_AOBlurPipelineState;
+        // AO/GI(共通ブラー・SSAO・SSIL)のシェーダー・PSO・定数バッファ・SSAOカーネルは
+        // Passes/LightingPassesへ移した
 
-        // SSAOパス(G-BufferのNormal/Depthから遮蔽率を計算する。G-Bufferと同じレンダー解像度)
-        std::unique_ptr<RHI::IRHIShader> m_SSAOPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_SSAOPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_SSAOConstantBuffer;
-        std::vector<DirectX::XMFLOAT4> m_SSAOKernel;
 
-        // SSILパス(Visibility Bitmask): G-BufferのAlbedo/Normal/Depthから遮蔽率と間接拡散光を計算する
-        std::unique_ptr<RHI::IRHIShader> m_SSILPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_SSILPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_SSILConstantBuffer;
 
-        // RTAOパス: 法線周りの半球へ余弦重みでレイを撃ち、遮蔽率と1バウンスの間接拡散光を求める
-        // コンピュートパス。出力はSSAO/SSILとまったく同じ意味・同じフォーマットなので、
-        // 後段のAOBlurパスとライティングパスは無変更で使い回せる(27章)。
-        // シェーダーとパイプラインステートはm_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る。
-        // 生バッファだけはコンピュートがUAVで書くためCreateUAVTextureで作る(ブラー後は従来どおり
-        // ピクセルシェーダーが書くレンダーターゲット)
-        std::unique_ptr<RHI::IRHIShader> m_RTAOComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_RTAOPipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_RTAORawTexture;
-        std::unique_ptr<RHI::IRHITexture> m_RTAOTexture;
-        std::unique_ptr<RHI::IRHIBuffer> m_RTAOConstantBuffer;
+        // RTAOのシェーダー・PSO・定数バッファはPasses/LightingPassesへ移した。
+        // 出力2枚はレンダー解像度に追従して作り直すためRenderTargets(RTAORawTexture / RTAOTexture)にある
 
-        // ライティングパス(G-Bufferを読みSceneColorへ出力。G-Bufferと同じレンダー解像度)。
-        // SceneColorはHDR(R16G16B16A16_Float)で、トーンマッピングは行わない(Tonemapパス参照)
-        std::unique_ptr<RHI::IRHIShader> m_LightingVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_LightingPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_LightingPipelineState;
+        // ライティングパスのシェーダー・PSO・定数バッファはPasses/LightingPassesへ移した
 
-        // 半透明フォワードパス: Deferred(G-Buffer)には書き込まれなかったBLENDマテリアルのメッシュを、
-        // Lightingパスの後にSceneColorへ直接フォワードシェーディングしてアルファブレンド合成する
-        // (深度テストはGBuffer深度に対して行うが書き込みは行わない)。頂点レイアウトはGBufferパスと
-        // 共通(POSITION/NORMAL/TEXCOORD/TANGENT)
-        std::unique_ptr<RHI::IRHIShader> m_TransparentVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_TransparentPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineStateMirrored;
+        // 半透明フォワードパスのシェーダーとPSO2本はPasses/LightingPassesへ移した
 
         // --- ドローンショー(発光点の描画) ---------------------------------------------
         // 夜空を編隊飛行する多数のドローンを、1機につきカメラ正対のビルボード1枚として
@@ -1576,20 +1539,8 @@ namespace Kurenai
         // Lightingパスの背景分岐がこれをバイリニアで引いて
         // SkyColorWithoutClouds(rayDir) * a + rgb を合成する。
         // 分離の根拠と、太陽・星がフル解像度のまま保たれる理由はShaders/3D/SkyCloud.hlsl冒頭を参照
-        std::unique_ptr<RHI::IRHIShader> m_SkyCloudVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_SkyCloudPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_SkyCloudPipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_SkyCloudTexture;
-        // 上のパスが同時に書く fogInFront(雲に最初に当たった位置の霞の透過率、P18b)。
-        // Lightingパスが CloudAirlightCorrection をフル解像度で掛けるためだけに要る。
-        // 【なぜm_SkyCloudTextureのaに同居できないか】aには既に雲の透過率が入っており、
-        // 補正式に必要な画素ごとの量は (透過率, fogInFront) の2スカラ + 散乱光3成分=5chになる
-        std::unique_ptr<RHI::IRHITexture> m_SkyCloudFogTexture;
-        // m_SkyCloudTextureの実寸(内部レンダー解像度を割った後の値。奇数解像度の切り捨てと
-        // 最低1pxの下限があるため、割り算をその場でやり直さずここへ保存する)。
-        // パスのビューポート指定に使う
-        uint32_t m_SkyCloudWidth = 0;
-        uint32_t m_SkyCloudHeight = 0;
+        // シェーダーとPSOはPasses/LightingPassesへ移した。書き先2枚と実寸は
+        // レンダー解像度に追従して作り直すためRenderTargets(SkyCloud*)にある
 
         // --- DDGIの低解像度解決パス ---
         // 雲と同じくLightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
@@ -1605,7 +1556,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_DDGIResolvePixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_DDGIResolvePipelineState;
         // DDGIの解決2枚の持ち主は Rendering/GIResources.h
-        // m_SkyCloudWidth/Heightと同じ理由でここへ保存する(パスのビューポート指定に使う)
+        // RenderTargets::SkyCloudWidth/Heightと同じ理由でここへ保存する(パスのビューポート指定に使う)
         uint32_t m_DDGIResolveWidth = 0;
         uint32_t m_DDGIResolveHeight = 0;
         DDGISettings m_DDGISettings;
@@ -2354,8 +2305,8 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_ObjectConstantBuffer;
 
-        // 有効ライト数を渡すb1。ライトのリスト本体は m_SceneGPUResources.LightBuffer
-        std::unique_ptr<RHI::IRHIBuffer> m_LightingConstantBuffer;
+        // 有効ライト数を渡すb1の持ち主は Passes/LightingPasses。
+        // ライトのリスト本体は m_SceneGPUResources.LightBuffer
         // 容量(kMaxLights)超過を検出した最初のフレームだけ警告ログを出すためのフラグ
         bool m_LightOverflowLogged = false;
 

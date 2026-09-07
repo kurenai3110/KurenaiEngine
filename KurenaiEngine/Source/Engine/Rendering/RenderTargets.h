@@ -57,6 +57,12 @@ namespace Kurenai::Rendering
         std::unique_ptr<RHI::IRHITexture> SSAOTexture;
         std::unique_ptr<RHI::IRHITexture> SSILRawTexture;
         std::unique_ptr<RHI::IRHITexture> SSILTexture;
+        // RTAOの生バッファとブラー後。**上のSSAO/SSILと同じ意味・同じフォーマット**なので、
+        // 後段のAOBlurパスとライティングパスは3者を区別せず使い回せる(27章)。
+        // 生バッファだけはコンピュートがUAVで書くためUAVテクスチャで作る。
+        // RTShadowTexture / RTReflectionTexture と同じくDXR対応環境でだけ確保される
+        std::unique_ptr<RHI::IRHITexture> RTAORawTexture;
+        std::unique_ptr<RHI::IRHITexture> RTAOTexture;
         // ライティングパスの出力。トーンマッピング前のHDR値をそのまま持つ
         std::unique_ptr<RHI::IRHITexture> SceneColor;
         // SSRの出力。後段(Tonemap)から見るとSceneColorと入れ替え可能なバッファになる
@@ -89,6 +95,19 @@ namespace Kurenai::Rendering
         // 上2枚の実寸。デバッグ表示(Present.hlslのレターボックス計算)が実寸を必要とする
         uint32_t PlanarReflectionWidth = 0;
         uint32_t PlanarReflectionHeight = 0;
+
+        // 雲パスの出力2枚。1枚目は透過率と事前乗算済みの散乱光、2枚目は fogInFront
+        // (雲に最初に当たった位置の霞の透過率)。
+        // 【なぜここが持つか】読み書きするのはLightingPassesだけだが、レンダー解像度に
+        // 追従して作り直すものなのでCreateRenderTargetsが作る。加えて
+        // RenderDumpService(-dumptex)がエンジン側から読む。
+        // **上の平面反射と違いPresentPassのデバッグ表示には出ない**(DebugViewに項目が無い)。
+        // **内部レンダー解像度の1/2**で、平面反射と同じく実寸も持つ
+        // (奇数解像度の切り捨てと最低1pxの下限があるため width/2 を再計算してはいけない)
+        std::unique_ptr<RHI::IRHITexture> SkyCloudTexture;
+        std::unique_ptr<RHI::IRHITexture> SkyCloudFogTexture;
+        uint32_t SkyCloudWidth = 0;
+        uint32_t SkyCloudHeight = 0;
 
         // ブルームのピラミッド。第0段が半解像度で、以降1段ごとに半分になる。
         // ピラミッドをミップチェーン1枚ではなくレベルごとの独立テクスチャで持っているのは、
