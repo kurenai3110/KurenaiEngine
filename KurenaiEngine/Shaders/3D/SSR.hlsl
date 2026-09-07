@@ -90,7 +90,7 @@ Texture2D BentNormalTexture : register(t16);
 #include "ReflectionProbe.hlsli"
 
 // 平面反射。KurenaiEngine3D::Renderが鏡映カメラで描いたPlanarReflection.hlslの結果
-// (m_PlanarReflectionColor)。t0〜t10は上ですべて埋まっているためt11を使う
+// (m_RenderTargets.PlanarReflectionColor)。t0〜t10は上ですべて埋まっているためt11を使う
 Texture2D PlanarReflectionTexture : register(t11);
 // SkyIntegrate.hlslが書いた空パラメータ。ティント4本と正規化済みの天頂輝度が入る。
 // t0〜t11が既に使用済みのためt12を使う
@@ -125,7 +125,7 @@ bool ProjectToScreen(float3 worldPos, out float2 uv, out float viewZ)
 // が立っている水面画素)からのみ呼ばれる想定。
 //
 // 平面反射はSSRのレイマーチとは完全に別経路――鏡映カメラで景色を描き直したPlanarReflection.hlsl
-// の結果(m_PlanarReflectionColor)を、反射ベクトルを再投影せず同じ画面UV(input.UV)でそのまま
+// の結果(m_RenderTargets.PlanarReflectionColor)を、反射ベクトルを再投影せず同じ画面UV(input.UV)でそのまま
 // サンプルするだけでよい(平面鏡の反射は鏡映カメラで撮り直すことと数学的に等価なため。
 // 詳細はPlanarReflection.hlsl冒頭のコメント参照)。波の法線でその画面UVを少しだけずらすことで、
 // 波打つ水面らしい歪みを付ける。
