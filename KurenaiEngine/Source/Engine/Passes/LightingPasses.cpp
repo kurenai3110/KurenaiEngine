@@ -142,7 +142,7 @@ namespace Kurenai::Passes
                 cmd->SetShaderResourceBuffer(8, lightBuffer);
                 // タイルライトカリングが書いたライトグリッド。カリング無効時もシェーダが宣言している
                 // リソースは必ずバインドする(上と同じ理由)
-                cmd->SetShaderResourceBuffer(5, m_Engine.m_LightTileBuffer.get());
+                cmd->SetShaderResourceBuffer(5, targets->LightTileBuffer.get());
                 // スペキュラのエネルギー補正(14.9節)用のBRDF積分LUT。t8はライトリスト
                 // (StructuredBuffer)が占有しているためt9に置く
                 cmd->SetTexture(9, brdfLUTTexture);

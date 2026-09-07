@@ -522,8 +522,8 @@ namespace Kurenai
         const std::vector<std::wstring>& GetSceneDisplayNames() const { return m_SceneDisplayNames; }
         size_t GetSceneLoadingIndex() const { return m_SceneLoadingIndex; }
         const QualitySettings& GetQualitySettings() const { return m_QualitySettings; }
-        uint32_t GetLightTileCountX() const { return m_LightTileCountX; }
-        uint32_t GetLightTileCountY() const { return m_LightTileCountY; }
+        uint32_t GetLightTileCountX() const { return m_RenderTargets.LightTileCountX; }
+        uint32_t GetLightTileCountY() const { return m_RenderTargets.LightTileCountY; }
         GraphicsAPI GetGraphicsAPI() const { return m_GraphicsAPI; }
 
         // m_DeviceはKurenaiEngineBaseのprotectedメンバであり、GetLastFrameGPUWaitTimeMsと
@@ -1312,8 +1312,8 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsTilePoolComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTilePoolPipelineState;
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsTilePoolConstantBuffer;
-        // 候補プール本体(BufferUsage::StructuredRW)。解像度に依存するためCreateRenderTargetsで作り直す
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsTilePoolBuffer;
+        // 候補プール本体は、PresentPassのタイル表示も読むため持ち主を
+        // RenderTargets(m_RenderTargets.MegaLightsTilePoolBuffer)へ移した
 
         // 確率的サンプリング本体。2パスに分かれる。
         //   Initial (MegaLightsInitialSample.hlsl) … 候補プールからM個引きRISで1灯へ絞り、
@@ -2477,11 +2477,8 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_LightCullingComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_LightCullingPipelineState;
         std::unique_ptr<RHI::IRHIBuffer> m_LightCullingConstantBuffer;
-        // ライトグリッド本体(BufferUsage::StructuredRW)。コンピュートがUAVで書き、
-        // 直接光パスのピクセルシェーダがSRVで読む。解像度に依存するためCreateRenderTargetsで作り直す
-        std::unique_ptr<RHI::IRHIBuffer> m_LightTileBuffer;
-        uint32_t m_LightTileCountX = 0;
-        uint32_t m_LightTileCountY = 0;
+        // ライトグリッド本体とタイル数は、3群(Lighting / MegaLights / Present)が読むため
+        // 持ち主をRenderTargets(m_RenderTargets.LightTileBuffer / LightTileCountX / Y)へ移した
         // タイル容量の超過"条件"(シーンのライト数が容量を超えている)を検出した最初のフレームだけ
         // 警告ログを出すためのフラグ(m_LightOverflowLoggedと同じ作法)。
         // 実際に超過したかはGPU側にしか無いため、確認はDebugView::LightTilesのマゼンタで行う

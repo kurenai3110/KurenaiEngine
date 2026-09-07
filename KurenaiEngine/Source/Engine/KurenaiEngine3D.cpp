@@ -947,7 +947,7 @@ namespace Kurenai
         m_HiZConstantBuffer = m_Device->CreateBuffer(hizConstantBufferDesc);
 
         // タイルライトカリングパス(コンピュートシェーダー)。タイルごとに届くライトのインデックスリストを作る。
-        // ライトグリッド本体(m_LightTileBuffer)は解像度に依存するためCreateRenderTargetsで作る
+        // ライトグリッド本体(m_RenderTargets.LightTileBuffer)は解像度に依存するためCreateRenderTargetsで作る
         RHI::ShaderDesc lightCullingCsDesc;
         lightCullingCsDesc.Stage = RHI::ShaderStage::Compute;
         lightCullingCsDesc.FilePath = shaderDirectory + L"LightCulling.kshader";
@@ -1923,7 +1923,7 @@ namespace Kurenai
         m_SkyIntegrateConstantBuffer = m_Device->CreateBuffer(skyIntegrateConstantBufferDesc);
 
         // SkyIntegrate.hlslが書き、SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む
-        // 要素数1のStructuredRWバッファ(m_LightTileBufferと同じ作法)。
+        // 要素数1のStructuredRWバッファ(m_RenderTargets.LightTileBufferと同じ作法)。
         //
         // 【CPU側からのゼロ初期化はできない】UpdateBuffer(CPU→GPU書き込み)でゼロ埋めする案を
         // 最初に採ったが、DX12のStructuredRWバッファはUAV/SRVでのGPUアクセス専用にDEFAULTヒープへ
@@ -2221,7 +2221,7 @@ namespace Kurenai
         if (m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic)
         {
             return m_MegaLightsInitialPipelineState != nullptr && m_MegaLightsShadePipelineState != nullptr &&
-                   m_MegaLightsTilePoolPipelineState != nullptr && m_MegaLightsTilePoolBuffer != nullptr &&
+                   m_MegaLightsTilePoolPipelineState != nullptr && m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
                    m_MegaLightsReservoirBuffer != nullptr;
         }
         if (m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared)
@@ -2229,7 +2229,7 @@ namespace Kurenai
             // Shade ではなく Resolve が色を書く。時間・空間再利用は使わないので、
             // 履歴バッファや空間再利用のping-pongが無くても走れる
             return m_MegaLightsInitialPipelineState != nullptr && m_MegaLightsResolvePipelineState != nullptr &&
-                   m_MegaLightsTilePoolPipelineState != nullptr && m_MegaLightsTilePoolBuffer != nullptr &&
+                   m_MegaLightsTilePoolPipelineState != nullptr && m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
                    m_MegaLightsReservoirBuffer != nullptr && m_MegaLightsHistoryGuide[0] != nullptr;
         }
         return m_MegaLightsReferencePipelineState != nullptr;
@@ -3501,28 +3501,13 @@ namespace Kurenai
 
             // タイルライトカリングのライトグリッド。タイル数は解像度に依存するためここで作り直す。
             // 端のタイルは部分的にしか埋まらないので切り上げる
-            m_LightTileCountX = (width + kLightTileSize - 1) / kLightTileSize;
-            m_LightTileCountY = (height + kLightTileSize - 1) / kLightTileSize;
-            RHI::BufferDesc lightTileBufferDesc;
-            lightTileBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
-            lightTileBufferDesc.SizeInBytes =
-                static_cast<uint32_t>(sizeof(uint32_t)) * kLightTileStride * m_LightTileCountX * m_LightTileCountY;
-            lightTileBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
-            m_LightTileBuffer = m_Device->CreateBuffer(lightTileBufferDesc);
+            m_RenderTargets.CreateLightTiles(*m_Device, width, height, kLightTileSize, kLightTileStride);
 
             // MegaLightsの候補プール。タイルの切り方はライトグリッドと同じで、1タイルあたりの
             // 要素数だけが違う。非対応環境ではパス自体が走らないので確保しない
             if (m_RenderCapabilities.RaytracingAvailable)
             {
-                RHI::BufferDesc tilePoolBufferDesc;
-                tilePoolBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
-                // ジッター有効時は右端・下端のタイル座標が1つ増える。トグル変更でGPUを
-                // 待って再確保しなくて済むよう、無効時も常に+1ぶんを確保しておく
-                tilePoolBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) *
-                                                 kMegaLightsTilePoolStride * (m_LightTileCountX + 1u) *
-                                                 (m_LightTileCountY + 1u);
-                tilePoolBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
-                m_MegaLightsTilePoolBuffer = m_Device->CreateBuffer(tilePoolBufferDesc);
+                m_RenderTargets.CreateMegaLightsTilePool(*m_Device, kMegaLightsTilePoolStride);
 
                 // 1画素につきN本のリザーバ(1本16バイト)。MegaLightsCommon.hlsli の
                 // MegaLightsReservoir と**ストライドを一致させること**。
@@ -5207,9 +5192,9 @@ namespace Kurenai
         // 無効時だけ従来のタイル数をそのまま使い、添字・乱数の種・ディスパッチ数を保存する。
         // モード2は対照実験なので、オフセット0でも有効側と同じ+1タイルを通す
         const uint32_t megaLightsEffectiveTilesX =
-            megaLightsTileJitterEnabled ? (m_LightTileCountX + 1u) : m_LightTileCountX;
+            megaLightsTileJitterEnabled ? (m_RenderTargets.LightTileCountX + 1u) : m_RenderTargets.LightTileCountX;
         const uint32_t megaLightsEffectiveTilesY =
-            megaLightsTileJitterEnabled ? (m_LightTileCountY + 1u) : m_LightTileCountY;
+            megaLightsTileJitterEnabled ? (m_RenderTargets.LightTileCountY + 1u) : m_RenderTargets.LightTileCountY;
 
         DirectX::XMFLOAT2 jitterOffsetPixels{ 0.0f, 0.0f };
         if (m_PostProcessSettings.TAAEnabled)
@@ -6219,7 +6204,7 @@ namespace Kurenai
         };
         lightingConstants.TileParams =
         {
-            m_LightTileCountX,
+            m_RenderTargets.LightTileCountX,
             kLightTileSize,
             kLightTileCapacity,
             // 「このフレームのライトグリッドは有効か」。**パスを積む述語と同じものを使う** ――

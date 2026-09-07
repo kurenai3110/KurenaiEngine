@@ -146,6 +146,32 @@ namespace Kurenai::Rendering
         UpscaleTargetHeight = 0;
     }
 
+    void RenderTargets::CreateLightTiles(
+        RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t tileSize, uint32_t stride)
+    {
+        // 端のタイルは部分的にしか埋まらないので切り上げる
+        LightTileCountX = (width + tileSize - 1) / tileSize;
+        LightTileCountY = (height + tileSize - 1) / tileSize;
+        RHI::BufferDesc lightTileBufferDesc;
+        lightTileBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+        lightTileBufferDesc.SizeInBytes =
+            static_cast<uint32_t>(sizeof(uint32_t)) * stride * LightTileCountX * LightTileCountY;
+        lightTileBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+        LightTileBuffer = device.CreateBuffer(lightTileBufferDesc);
+    }
+
+    void RenderTargets::CreateMegaLightsTilePool(RHI::IRHIDevice& device, uint32_t stride)
+    {
+        RHI::BufferDesc tilePoolBufferDesc;
+        tilePoolBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+        // ジッター有効時は右端・下端のタイル座標が1つ増える。トグル変更でGPUを
+        // 待って再確保しなくて済むよう、無効時も常に+1ぶんを確保しておく
+        tilePoolBufferDesc.SizeInBytes =
+            static_cast<uint32_t>(sizeof(uint32_t)) * stride * (LightTileCountX + 1u) * (LightTileCountY + 1u);
+        tilePoolBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+        MegaLightsTilePoolBuffer = device.CreateBuffer(tilePoolBufferDesc);
+    }
+
     void RenderTargets::ResetSoftwareRasterOutputs()
     {
         SoftwareRasterColor.reset();

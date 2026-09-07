@@ -81,7 +81,7 @@ namespace Kurenai::Passes
                 .Name = "LightCull",
                 .Reads = { targets->GBufferDepth.get() },
                 .BufferReads = { lightBuffer },
-                .BufferWrites = { m_Engine.m_LightTileBuffer.get() },
+                .BufferWrites = { targets->LightTileBuffer.get() },
                 .Execute = [this, targets, lightBuffer, &gpuLights, viewMatrix, jitteredProj, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     Passes::LightCullingConstants cullingConstants{};
@@ -89,8 +89,8 @@ namespace Kurenai::Passes
                         &cullingConstants.View, DirectX::XMMatrixTranspose(viewMatrix));
                     cullingConstants.TileParams =
                     {
-                        m_Engine.m_LightTileCountX,
-                        m_Engine.m_LightTileCountY,
+                        targets->LightTileCountX,
+                        targets->LightTileCountY,
                         static_cast<uint32_t>(gpuLights.size()),
                         kLightTileCapacity,
                     };
@@ -116,8 +116,8 @@ namespace Kurenai::Passes
                     cmd->SetComputeConstantBuffer(0, m_Engine.m_LightCullingConstantBuffer.get());
                     cmd->SetComputeShaderResourceBuffer(0, lightBuffer);
                     cmd->SetComputeTexture(1, targets->GBufferDepth.get());
-                    cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_LightTileBuffer.get());
-                    cmd->Dispatch(m_Engine.m_LightTileCountX, m_Engine.m_LightTileCountY, 1);
+                    cmd->SetComputeUnorderedAccessBuffer(0, targets->LightTileBuffer.get());
+                    cmd->Dispatch(targets->LightTileCountX, targets->LightTileCountY, 1);
                 },
             });
         }
@@ -126,13 +126,13 @@ namespace Kurenai::Passes
         //     確率でK灯を重みつきで抽出する。到達判定はタイルライトカリングと共有している
         //     (TileLightCulling.hlsli)ので、両者の「届いた灯数」は一致するはず。
         //     現段階では参照実装がこれを読まない(全灯を回す)ため、出力の消費者はまだいない ---
-        if (megaLightsRuns && m_Engine.m_MegaLightsTilePoolBuffer && m_Engine.m_MegaLightsTilePoolPipelineState)
+        if (megaLightsRuns && targets->MegaLightsTilePoolBuffer && m_Engine.m_MegaLightsTilePoolPipelineState)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLightsPool",
                 .Reads = { targets->GBufferDepth.get() },
                 .BufferReads = { lightBuffer },
-                .BufferWrites = { m_Engine.m_MegaLightsTilePoolBuffer.get() },
+                .BufferWrites = { targets->MegaLightsTilePoolBuffer.get() },
                 .Execute = [this, targets, lightBuffer, megaLightsSettings, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     Passes::MegaLightsTilePoolConstants poolConstants{};
@@ -176,7 +176,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeShaderResourceBuffer(0, lightBuffer);
                     cmd->SetComputeTexture(1, targets->GBufferDepth.get());
                     // UAVはDispatch直後に解除されるため毎回バインドし直す
-                    cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_MegaLightsTilePoolBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, targets->MegaLightsTilePoolBuffer.get());
                     cmd->Dispatch(megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, 1);
                 },
             });
@@ -193,7 +193,7 @@ namespace Kurenai::Passes
         // 環境では読まれないダミーとしてライトグリッドを張る(DX12はPSO切替でルート引数が
         // 無効化されるため、シェーダが宣言しているリソースは必ず何かをバインドする必要がある)
         RHI::IRHIBuffer* const tilePoolBufferForBinding =
-            m_Engine.m_MegaLightsTilePoolBuffer ? m_Engine.m_MegaLightsTilePoolBuffer.get() : m_Engine.m_LightTileBuffer.get();
+            targets->MegaLightsTilePoolBuffer ? targets->MegaLightsTilePoolBuffer.get() : targets->LightTileBuffer.get();
 
         // 段階2のメッシュライトを、このフレームで三角形として積むかどうか。
         // 【フレーム単位の1変数に閉じること】画素やタイルごとに切り替えると境界で
@@ -567,7 +567,7 @@ namespace Kurenai::Passes
                     },
                     // 入力は「時間再利用を挟んだならその出力、挟まないならInitialの出力」。
                     // 初期リザーバ(今フレームの殺しの持ち回り)も自画素の遮蔽の確定情報として読む
-                    .BufferReads = { lightBuffer, spatialInput, m_Engine.m_MegaLightsTilePoolBuffer.get(),
+                    .BufferReads = { lightBuffer, spatialInput, targets->MegaLightsTilePoolBuffer.get(),
                                      m_Engine.m_MegaLightsReservoirBuffer.get(), m_Engine.m_MegaLightsBlockedLightBuffer.get() },
                     .BufferWrites = { spatialOutput },
                     .Execute = [this, targets, lightBuffer, raytracingScene, brdfLUTTexture, spatialInput, spatialOutput, spatialConstants, spatialIteration, buildStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
@@ -597,7 +597,7 @@ namespace Kurenai::Passes
                         cmd->SetComputeShaderResourceBuffer(7, spatialInput);
                         // MIS重みが「その灯が隣のタイルへ届くか」を判定するのに、
                         // 候補プールのヘッダ(タイルの深度スラブ)を読む
-                        cmd->SetComputeShaderResourceBuffer(8, m_Engine.m_MegaLightsTilePoolBuffer.get());
+                        cmd->SetComputeShaderResourceBuffer(8, targets->MegaLightsTilePoolBuffer.get());
                         // 今フレームの初期リザーバ。殺しの持ち回り(=自画素の遮蔽の確定情報)を
                         // 選択から外すのに使う
                         cmd->SetComputeShaderResourceBuffer(9, m_Engine.m_MegaLightsReservoirBuffer.get());

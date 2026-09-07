@@ -108,6 +108,17 @@ namespace Kurenai::Rendering
         uint32_t UpscaleTargetWidth = 0;
         uint32_t UpscaleTargetHeight = 0;
 
+        // タイルライトカリングのライトグリッド(BufferUsage::StructuredRW)。コンピュートがUAVで書き、
+        // 直接光パスのピクセルシェーダがSRVで読む。タイル数は解像度に依存する。
+        // 【なぜここが持つか】書くのはMegaLightsPassesだが、LightingPassesが直接光で読み、
+        // PresentPassのライトグリッド表示(Mode 11)も読む。3群にまたがる
+        std::unique_ptr<RHI::IRHIBuffer> LightTileBuffer;
+        uint32_t LightTileCountX = 0;
+        uint32_t LightTileCountY = 0;
+        // MegaLightsの候補プール。タイルの切り方はライトグリッドと同じで、1タイルあたりの
+        // 要素数だけが違う。非対応環境ではパス自体が走らないので確保しない(nullptrのまま)
+        std::unique_ptr<RHI::IRHIBuffer> MegaLightsTilePoolBuffer;
+
         // G-Buffer の生成は元の位置ごとに3つへ分ける。間に他のテクスチャ生成があるため、
         // 順序を変えるとDX12のディスクリプタ枠の割り当て順が変わり、意味の無い差分になる。
         // 呼び出し元のtry内から呼ぶこと。確保失敗時のHDR→Legacy8bitフォールバックは
@@ -136,5 +147,14 @@ namespace Kurenai::Rendering
         void CreateUpscale(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         // 上を解放し、実寸を0(未確保)に戻す
         void ResetUpscale();
+        // ライトグリッドを作り直す。タイル数は解像度から切り上げで決まり、ここで記録する。
+        // strideは1タイルあたりのuint数(KurenaiEngine3D::kLightTileStride)
+        void CreateLightTiles(
+            RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t tileSize, uint32_t stride);
+        // MegaLightsの候補プールを作り直す。**CreateLightTilesの後に呼ぶこと**
+        // (上で記録したタイル数から大きさが決まる)。
+        // ジッター有効時は右端・下端のタイル座標が1つ増える。トグル変更でGPUを待って
+        // 再確保しなくて済むよう、無効時も常に+1ぶんを確保しておく
+        void CreateMegaLightsTilePool(RHI::IRHIDevice& device, uint32_t stride);
     };
 }

@@ -265,7 +265,7 @@ namespace Kurenai::Passes
             // 候補プールも構造化バッファなのでt3から読む(Present.hlsl Mode 21)。t0の扱いは
             // Mode 11と同じ。パスが走っていないフレームは中身が前フレーム/未定義の残骸なので、
             // 最終結果のまま何も切り替えない(他のMegaLights系の表示と同じ方針)
-            if (megaLightsRuns && m_Engine.m_MegaLightsTilePoolBuffer)
+            if (megaLightsRuns && targets->MegaLightsTilePoolBuffer)
             {
                 presentSourceTexture = targets->TonemapTexture.get();
                 presentMode = 21;
@@ -413,15 +413,15 @@ namespace Kurenai::Passes
         // Mode 11(ライトグリッド)とMode 21(MegaLightsの候補プール)はどちらもt3の構造化バッファを
         // 読むが、1タイルぶんの要素数が違う。バッファと容量は必ず対で切り替えること
         // (片方だけ切り替えると、正しいバッファを別のストライドで読んで無関係な値をヒートマップにする)
-        const bool presentUsesTilePool = (presentMode == 21) && m_Engine.m_MegaLightsTilePoolBuffer != nullptr;
+        const bool presentUsesTilePool = (presentMode == 21) && targets->MegaLightsTilePoolBuffer != nullptr;
         RHI::IRHIBuffer* const presentTileBuffer =
-            presentUsesTilePool ? m_Engine.m_MegaLightsTilePoolBuffer.get() : m_Engine.m_LightTileBuffer.get();
+            presentUsesTilePool ? targets->MegaLightsTilePoolBuffer.get() : targets->LightTileBuffer.get();
         const uint32_t presentTileCapacity =
             presentUsesTilePool ? static_cast<uint32_t>(frame.Settings.MegaLights.TilePoolCapacity) : kLightTileCapacity;
         // Mode 21だけは候補プールを書いた有効タイル幅を使う。Mode 11は従来のライトグリッドなので
-        // m_LightTileCountXのままにし、デバッグ表示が実データと別の添字を読まないようにする
+        // LightTileCountXのままにし、デバッグ表示が実データと別の添字を読まないようにする
         const uint32_t presentTileCountX =
-            presentUsesTilePool ? frame.MegaLightsEffectiveTilesX : m_Engine.m_LightTileCountX;
+            presentUsesTilePool ? frame.MegaLightsEffectiveTilesX : targets->LightTileCountX;
 
         PresentConstants presentConstants{};
         presentConstants.Mode = presentMode;
@@ -533,7 +533,7 @@ namespace Kurenai::Passes
             // DebugView::LightTilesでライトグリッドを、DebugView::MegaLightsTilePoolで候補プールを
             // 読むため、それぞれの書き手より後に順序付ける(表示していないフレームでも
             // 同じポインタになるだけで無害)
-            .BufferReads = { m_Engine.m_LightTileBuffer.get(), presentTileBuffer, m_Engine.m_MegaLightsAccumBuffer.get() },
+            .BufferReads = { targets->LightTileBuffer.get(), presentTileBuffer, m_Engine.m_MegaLightsAccumBuffer.get() },
             .SwapChainTarget = frame.SwapChain,
             .Execute = [this, letterboxViewport, presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture, presentDebugCubeArrayTexture, presentDebugVolumeTexture, presentTileBuffer, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
