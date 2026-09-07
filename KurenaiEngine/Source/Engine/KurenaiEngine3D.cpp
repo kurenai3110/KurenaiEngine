@@ -1952,12 +1952,12 @@ namespace Kurenai
         // 畳み込み結果はプローブごとに保持するためキューブマップ配列で確保する。
         // 反射プローブは鏡面専任なので拡散イラディアンス側の配列は持たない
         // (拡散はDDGIへ一本化。ReflectionProbe.hlsli冒頭のコメント参照)
-        m_ProbePrefilteredArray = m_Device->CreateMippedUAVTextureCubeArray(
+        m_GIResources.ProbePrefilteredArray = m_Device->CreateMippedUAVTextureCubeArray(
             kIBLPrefilterBaseSize, RHI::Format::R16G16B16A16_Float, kIBLPrefilterMipLevels, kMaxReflectionProbes);
         // 距離キューブ(19.12節)。畳み込まないためミップは1段だけでよく、スクラッチのキューブも要らない
         // (キャプチャからこの配列のスライスへ直接書き込む)。
         // 128²×6面×8枚×4バイト = 3.1MB
-        m_ProbeDistanceArray = m_Device->CreateMippedUAVTextureCubeArray(
+        m_GIResources.ProbeDistanceArray = m_Device->CreateMippedUAVTextureCubeArray(
             kProbeCaptureSize, RHI::Format::R32_Float, 1, kMaxReflectionProbes);
 
         RHI::ShaderDesc probeCaptureVsDesc;
@@ -1996,7 +1996,7 @@ namespace Kurenai
         probeBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
         probeBufferDesc.SizeInBytes = sizeof(GPUReflectionProbe) * kMaxReflectionProbes;
         probeBufferDesc.StrideInBytes = sizeof(GPUReflectionProbe);
-        m_ProbeBuffer = m_Device->CreateBuffer(probeBufferDesc);
+        m_GIResources.ProbeBuffer = m_Device->CreateBuffer(probeBufferDesc);
 
         // キャプチャの面ごとに更新するFrameConstants(共有のm_FrameConstantBufferとは別インスタンス)
         RHI::BufferDesc probeCaptureConstantBufferDesc;
@@ -2912,19 +2912,19 @@ namespace Kurenai
 
     void KurenaiEngine3D::OverrideDDGILOD(uint32_t lodCount, bool followCamera)
     {
-        if (!m_HasGIVolume)
+        if (!m_GIResources.HasGIVolume)
         {
             Core::Logger::Warning("KurenaiEngine3D", "[GIVolume]が無いためLODの上書きは効きません");
             return;
         }
 
         // 0は「.ksceneの指定のまま」を意味する(追従だけを切り替えたいとき)
-        const uint32_t requested = (lodCount == 0u) ? m_GIVolume.LODCount : lodCount;
+        const uint32_t requested = (lodCount == 0u) ? m_GIResources.GIVolume.LODCount : lodCount;
         const uint32_t clamped = std::clamp(requested, 1u, kDDGIMaxLODCount);
         const uint64_t probeCount =
-            static_cast<uint64_t>(m_GIVolume.ProbeCounts[0]) *
-            static_cast<uint64_t>(m_GIVolume.ProbeCounts[1]) *
-            static_cast<uint64_t>(m_GIVolume.ProbeCounts[2]) *
+            static_cast<uint64_t>(m_GIResources.GIVolume.ProbeCounts[0]) *
+            static_cast<uint64_t>(m_GIResources.GIVolume.ProbeCounts[1]) *
+            static_cast<uint64_t>(m_GIResources.GIVolume.ProbeCounts[2]) *
             static_cast<uint64_t>(clamped);
         if (probeCount > kDDGIMaxProbes)
         {
@@ -2935,8 +2935,8 @@ namespace Kurenai
             return;
         }
 
-        m_GIVolume.LODCount = clamped;
-        m_GIVolume.FollowCamera = followCamera;
+        m_GIResources.GIVolume.LODCount = clamped;
+        m_GIResources.GIVolume.FollowCamera = followCamera;
         // 段数が変わるとアトラスの行数が変わるので確保し直す(中身も作り直しになる)
         RecreateDDGIAtlases();
         Core::Logger::Info(
@@ -3452,12 +3452,12 @@ namespace Kurenai
             // 8bitでは飽和と量子化がそのまま間接光のバンディングになる
             m_DDGIResolveWidth = std::max(1u, width / 2);
             m_DDGIResolveHeight = std::max(1u, height / 2);
-            m_DDGIResolveTexture = m_Device->CreateRenderTexture(
+            m_GIResources.DDGIResolveTexture = m_Device->CreateRenderTexture(
                 m_DDGIResolveWidth, m_DDGIResolveHeight, RHI::Format::R16G16B16A16_Float);
             // 上のパスが同時に書く「そのテクセルが代表している全解像度の深度」(41.24節)。
             // 合成側(DeferredLighting.hlsl)がGatherRed 1回で4テクセルぶんを取るためのもので、
             // t19と同じ理由で常に確保する(t21を空のままにできない)
-            m_DDGIResolveDepthTexture = m_Device->CreateRenderTexture(
+            m_GIResources.DDGIResolveDepthTexture = m_Device->CreateRenderTexture(
                 m_DDGIResolveWidth, m_DDGIResolveHeight, RHI::Format::R32_Float);
             // RT反射はコンピュートシェーダーがUAVで書くため、レンダーターゲットではなくUAVテクスチャを作る。
             // 非対応環境ではパス自体が実行されないので確保しない
@@ -5978,7 +5978,7 @@ namespace Kurenai
         }
         if (!gpuProbes.empty())
         {
-            commandList->UpdateBuffer(m_ProbeBuffer.get(), gpuProbes.data(), sizeof(GPUReflectionProbe) * gpuProbes.size());
+            commandList->UpdateBuffer(m_GIResources.ProbeBuffer.get(), gpuProbes.data(), sizeof(GPUReflectionProbe) * gpuProbes.size());
         }
 
         const float probeInfluenceDebug = (m_DebugViewSettings.View == DebugView::ProbeInfluence) ? 1.0f : 0.0f;
@@ -6017,20 +6017,20 @@ namespace Kurenai
 
         // DDGI(22章)。一度も焼けていない間はアトラスの中身が未定義なので無効にしておく
         // (反射プローブのm_ProbeBakedと同じ方針)
-        const bool ddgiActive = m_DDGISettings.Enabled && m_HasGIVolume && m_DDGIBaked;
+        const bool ddgiActive = m_DDGISettings.Enabled && m_GIResources.HasGIVolume && m_DDGIBaked;
         constants.DDGIParams0 = {
-            m_GIVolume.Origin[0], m_GIVolume.Origin[1], m_GIVolume.Origin[2],
+            m_GIResources.GIVolume.Origin[0], m_GIResources.GIVolume.Origin[1], m_GIResources.GIVolume.Origin[2],
             ddgiActive ? 1.0f : 0.0f,
         };
         constants.DDGIParams1 = {
-            m_GIVolume.ProbeSpacing[0], m_GIVolume.ProbeSpacing[1], m_GIVolume.ProbeSpacing[2],
-            m_GIVolume.NormalBias,
+            m_GIResources.GIVolume.ProbeSpacing[0], m_GIResources.GIVolume.ProbeSpacing[1], m_GIResources.GIVolume.ProbeSpacing[2],
+            m_GIResources.GIVolume.NormalBias,
         };
         constants.DDGIParams2 = {
-            static_cast<float>(m_GIVolume.ProbeCounts[0]),
-            static_cast<float>(m_GIVolume.ProbeCounts[1]),
-            static_cast<float>(m_GIVolume.ProbeCounts[2]),
-            m_GIVolume.ViewBias,
+            static_cast<float>(m_GIResources.GIVolume.ProbeCounts[0]),
+            static_cast<float>(m_GIResources.GIVolume.ProbeCounts[1]),
+            static_cast<float>(m_GIResources.GIVolume.ProbeCounts[2]),
+            m_GIResources.GIVolume.ViewBias,
         };
         constants.DDGIParams3 = {
             static_cast<float>(kDDGIIrradianceTexels),
@@ -6043,7 +6043,7 @@ namespace Kurenai
         // (あるいは未初期化の)低解像度バッファを読んで間接光が固まる/壊れる。
         // 条件はDDGIResolveパスの登録側(ddgiResolvePassRuns)と同じものを並べている
         const bool ddgiHalfResolutionActive =
-            m_DDGISettings.HalfResolution && m_DDGIResolveTexture && m_DDGISettings.Enabled && m_HasGIVolume && m_DDGIBaked;
+            m_DDGISettings.HalfResolution && m_GIResources.DDGIResolveTexture && m_DDGISettings.Enabled && m_GIResources.HasGIVolume && m_DDGIBaked;
         // プローブ分類のしきい値。裏面の情報を持てるのはレイトレース経路だけなので、
         // ラスタ経路では分類そのものを無効(0)にして従来どおりの挙動に保つ
         // (ラスタ経路のαは常に0なのでどのしきい値でも有効側に倒れるが、
@@ -6064,7 +6064,7 @@ namespace Kurenai
             "(ずれるとcbufferのレイアウトが静かに食い違う)");
         for (uint32_t lod = 0; lod < kDDGIMaxLODCount; ++lod)
         {
-            if (m_HasGIVolume && lod < m_DDGILODCount)
+            if (m_GIResources.HasGIVolume && lod < m_DDGILODCount)
             {
                 const DirectX::XMFLOAT3 lodOrigin = ComputeDDGILODOrigin(lod);
                 const DirectX::XMINT3 lodBase = ComputeDDGILODBaseIndex(lod);
@@ -6390,6 +6390,7 @@ namespace Kurenai
         frameContext.Sky = &m_SkyResources;
         frameContext.Scene = &m_SceneGPUResources;
         frameContext.Targets = &m_RenderTargets;
+        frameContext.GI = &m_GIResources;
 
         Rendering::RenderBlackboard blackboard{};
 

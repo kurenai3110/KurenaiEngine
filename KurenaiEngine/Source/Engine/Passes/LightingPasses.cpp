@@ -347,6 +347,9 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::GIResources* const gi = frame.GI;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         const Rendering::RenderTargets* const targets = frame.Targets;
 
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
@@ -400,9 +403,9 @@ namespace Kurenai::Passes
                 targets->GBufferBentNormal.get(),
                 // ProbeBakeパスより後に順序付けさせるために挙げる(実際のバインドはExecute内)。
                 // 反射プローブは鏡面専任なので拡散イラディアンス側の配列は無い
-                m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_ProbeDistanceArray.get(),
+                gi->ProbePrefilteredArray.get(), gi->ProbeDistanceArray.get(),
                 // 同じくDDGIUpdateパスより後に順序付けさせるために挙げる(22章)
-                m_Engine.m_DDGIIrradianceAtlas.get(), m_Engine.m_DDGIDistanceAtlas.get(),
+                gi->DDGIIrradianceAtlas.get(), gi->DDGIDistanceAtlas.get(),
                 // 大気散乱のSkyView LUT。背景の空をここから引くため、
                 // SkyViewBakeパスより後に順序付けさせる
                 skyViewLUT,
@@ -410,13 +413,13 @@ namespace Kurenai::Passes
                 // (パスが登録されないフレームでは書き手が居ないので依存も張られない)
                 m_Engine.m_SkyCloudTexture.get(), m_Engine.m_SkyCloudFogTexture.get(),
                 // 同じく低解像度で評価済みのDDGI。DDGIResolveパスより後に順序付けさせる
-                m_Engine.m_DDGIResolveTexture.get(), m_Engine.m_DDGIResolveDepthTexture.get(),
+                gi->DDGIResolveTexture.get(), gi->DDGIResolveDepthTexture.get(),
             },
             .RenderTargets = { targets->SceneColor.get() },
             // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
             // (実際のバインドはExecute内)
             .BufferReads = { skyParametersBuffer },
-            .Execute = [this, targets, skyParametersBuffer, skyViewLUT, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, gbufferViewport, activeAOTexture, skyTexture, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, gi, targets, skyParametersBuffer, skyViewLUT, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, gbufferViewport, activeAOTexture, skyTexture, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
                 // 深度テストに失敗した(=何も描かれていない)ピクセル用の背景色。discardされた箇所に前フレームのデータが
@@ -441,12 +444,12 @@ namespace Kurenai::Passes
                 // FrameConstants.ProbeParams.xが0のとき(未ベイク・無効時)はシェーダー側が
                 // 選択ループを回さないため中身は参照されないが、DX12はディスクリプタテーブルに
                 // 未初期化のスロットが残ると動作が未定義になるため常にバインドする
-                cmd->SetTexture(12, m_Engine.m_ProbePrefilteredArray.get());
-                cmd->SetShaderResourceBuffer(13, m_Engine.m_ProbeBuffer.get());
-                cmd->SetTexture(14, m_Engine.m_ProbeDistanceArray.get());
+                cmd->SetTexture(12, gi->ProbePrefilteredArray.get());
+                cmd->SetShaderResourceBuffer(13, gi->ProbeBuffer.get());
+                cmd->SetTexture(14, gi->ProbeDistanceArray.get());
                 // DDGI(22章)。反射プローブと同じ理由で、無効時も含めて常にバインドする
-                cmd->SetTexture(15, m_Engine.m_DDGIIrradianceAtlas.get());
-                cmd->SetTexture(16, m_Engine.m_DDGIDistanceAtlas.get());
+                cmd->SetTexture(15, gi->DDGIIrradianceAtlas.get());
+                cmd->SetTexture(16, gi->DDGIDistanceAtlas.get());
                 // 空パラメータ。t11に置く(t17はbent normalが使う)
                 cmd->SetShaderResourceBuffer(11, skyParametersBuffer);
                 // bent normal(34章)
@@ -464,9 +467,9 @@ namespace Kurenai::Passes
                 // 未初期化のスロットを残せない(反射プローブ・DDGIアトラスと同じ理由)。
                 // 以前はここへ雲の3Dノイズを差していたが、Texture2Dの宣言と型が食い違うため
                 // このテクスチャへ置き換えた
-                cmd->SetTexture(19, m_Engine.m_DDGIResolveTexture.get());
+                cmd->SetTexture(19, gi->DDGIResolveTexture.get());
                 // 低解像度の深度(41.24節)。UpsampleDDGIがGatherRed 1回で4テクセルぶんを取る
-                cmd->SetTexture(21, m_Engine.m_DDGIResolveDepthTexture.get());
+                cmd->SetTexture(21, gi->DDGIResolveDepthTexture.get());
                 // 大気散乱のSkyView LUT。日中の空の色はここから引く
                 cmd->SetTexture(20, skyViewLUT);
                 cmd->Draw(3, 0);
@@ -486,12 +489,12 @@ namespace Kurenai::Passes
             // 焼き上がる前のプローブを読まないようにする必要がある。
             // DDGIアトラスもReadsへ挙げ、DDGIProbeUpdateパスより後ろへ順序付ける
             .Reads = {
-                m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_ProbeDistanceArray.get(),
-                m_Engine.m_DDGIIrradianceAtlas.get(), m_Engine.m_DDGIDistanceAtlas.get(),
+                gi->ProbePrefilteredArray.get(), gi->ProbeDistanceArray.get(),
+                gi->DDGIIrradianceAtlas.get(), gi->DDGIDistanceAtlas.get(),
             },
             .RenderTargets = { targets->SceneColor.get() },
             .DepthTarget = targets->GBufferDepth.get(),
-            .Execute = [this, targets, lightBuffer, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &gpuLights, &cameraPosition, &viewProj, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, gi, targets, lightBuffer, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &gpuLights, &cameraPosition, &viewProj, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
             {
                 // 半透明メッシュをインスタンス単位でカメラからの距離降順(奥から手前)に並べる。
                 // instance.WorldはHLSL(mul(vec, World))に合わせて転置済みのため、ワールド座標の
@@ -562,15 +565,15 @@ namespace Kurenai::Passes
                 // (Transparent.hlsl冒頭。t6は使わない)。
                 // マテリアルの遮蔽マップ(OcclusionTexture)はt5〜t7と衝突するためt13を使う
                 // ProbeParams.xが0でも常にバインドするのはLightingパスと同じ理由
-                cmd->SetTexture(5, m_Engine.m_ProbePrefilteredArray.get());
-                cmd->SetShaderResourceBuffer(7, m_Engine.m_ProbeBuffer.get());
-                cmd->SetTexture(12, m_Engine.m_ProbeDistanceArray.get());
+                cmd->SetTexture(5, gi->ProbePrefilteredArray.get());
+                cmd->SetShaderResourceBuffer(7, gi->ProbeBuffer.get());
+                cmd->SetTexture(12, gi->ProbeDistanceArray.get());
                 // DDGI(22章)。Lighting/ProbeCaptureパスと同じアトラスを共有する。
                 // ProbeParams同様、DDGIParams0.wが0でも常にバインドする。
                 // t14はメッシュごとのbent normal(34章)が使うためt15/t16へ置く
                 // ——ここを14/15のままにするとメッシュのループが毎回上書きしてしまう
-                cmd->SetTexture(15, m_Engine.m_DDGIIrradianceAtlas.get());
-                cmd->SetTexture(16, m_Engine.m_DDGIDistanceAtlas.get());
+                cmd->SetTexture(15, gi->DDGIIrradianceAtlas.get());
+                cmd->SetTexture(16, gi->DDGIDistanceAtlas.get());
 
                 // 半透明は奥から手前への描画順そのものが正しさの前提なので並べ替えられない。
                 // そのため必要になった時点でパイプラインを切り替える(GBufferパスと同じ方式)

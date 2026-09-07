@@ -33,6 +33,9 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::GIResources* const gi = frame.GI;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         const Rendering::RenderTargets* const targets = frame.Targets;
 
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
@@ -79,7 +82,7 @@ namespace Kurenai::Passes
         // プローブ1面ぶんのキャプチャ(フォワード描画 → スクラッチのキューブ面へコピー)。
         // フルベイクと時間分割の両方から呼ぶためラムダへ切り出してある
         const auto captureProbeFace =
-            [this, targets, lightBuffer, modelInstanceBuffer, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
+            [this, gi, targets, lightBuffer, modelInstanceBuffer, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
         {
             const Assets::ReflectionProbe& probe = m_Engine.m_ReflectionProbes[probeIndex];
             const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
@@ -141,8 +144,8 @@ namespace Kurenai::Passes
             // 参照するのは「前フレームまでに焼けているアトラス」で、同じフレームの中でも
             // 既に更新済みのプローブぶんは新しい値になる。DDGIは元々ヒステリシスで
             // 時間収束させる手法なので、この程度の混在は問題にならない
-            cmd->SetTexture(12, m_Engine.m_DDGIIrradianceAtlas.get());
-            cmd->SetTexture(13, m_Engine.m_DDGIDistanceAtlas.get());
+            cmd->SetTexture(12, gi->DDGIIrradianceAtlas.get());
+            cmd->SetTexture(13, gi->DDGIDistanceAtlas.get());
 
             // このキューブ面の錐台で間引く。6面それぞれで判定するので、どこかの面には入る
             // モデルが全部消えることはない
@@ -220,7 +223,7 @@ namespace Kurenai::Passes
             cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_ProbeRadianceCube.get(), face, 0, 0);
             // 距離は畳み込まないため、スクラッチのキューブを経由せずプローブのスライスへ直接書く
             cmd->SetComputeUnorderedAccessTextureCubeFace(
-                1, m_Engine.m_ProbeDistanceArray.get(), face, 0, static_cast<uint32_t>(probeIndex));
+                1, gi->ProbeDistanceArray.get(), face, 0, static_cast<uint32_t>(probeIndex));
             cmd->Dispatch((kProbeCaptureSize + 7) / 8, (kProbeCaptureSize + 7) / 8, 1);
         };
 
@@ -233,7 +236,7 @@ namespace Kurenai::Passes
         // SetComputeSamplerSetは呼び出し側が先に1回済ませておくこと(同じプローブの複数ステップを
         // 1パスにまとめて呼ぶ場合、毎回張り直す必要が無いため。Realtimeの時間分割参照)
         const auto convolveProbePrefilterStep =
-            [this, iblPrefilterConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t mip, uint32_t face)
+            [this, gi, iblPrefilterConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t mip, uint32_t face)
         {
             const uint32_t cubeIndex = static_cast<uint32_t>(probeIndex);
             const uint32_t mipSize = std::max(1u, kIBLPrefilterBaseSize >> mip);
@@ -244,7 +247,7 @@ namespace Kurenai::Passes
             faceConstants.Roughness = roughness;
             cmd->UpdateBuffer(iblPrefilterConstantBuffer, &faceConstants, sizeof(faceConstants));
             cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
-            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_ProbePrefilteredArray.get(), face, mip, cubeIndex);
+            cmd->SetComputeUnorderedAccessTextureCubeFace(0, gi->ProbePrefilteredArray.get(), face, mip, cubeIndex);
             cmd->Dispatch((mipSize + 7) / 8, (mipSize + 7) / 8, 1);
         };
 
@@ -292,7 +295,7 @@ namespace Kurenai::Passes
                     .Reads = probeCaptureReads,
                     .Writes = {
                         m_Engine.m_ProbeCaptureColor.get(), m_Engine.m_ProbeCaptureDistance.get(), m_Engine.m_ProbeCaptureDepth.get(),
-                        m_Engine.m_ProbeRadianceCube.get(), m_Engine.m_ProbeDistanceArray.get(),
+                        m_Engine.m_ProbeRadianceCube.get(), gi->ProbeDistanceArray.get(),
                     },
                     .Execute = [captureProbeFace, probeIndex](RHI::IRHICommandList* cmd)
                     {
@@ -305,7 +308,7 @@ namespace Kurenai::Passes
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "ProbeBakeConvolvePrefilter" + std::to_string(probeIndex),
                     .Reads = { m_Engine.m_ProbeRadianceCube.get() },
-                    .Writes = { m_Engine.m_ProbePrefilteredArray.get() },
+                    .Writes = { gi->ProbePrefilteredArray.get() },
                     .Execute = [convolveProbePrefilter, probeIndex](RHI::IRHICommandList* cmd)
                     {
                         convolveProbePrefilter(cmd, probeIndex);
@@ -358,7 +361,7 @@ namespace Kurenai::Passes
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "ProbeRealtimeConvolvePrefilterStep",
                     .Reads = { m_Engine.m_ProbeRadianceCube.get() },
-                    .Writes = { m_Engine.m_ProbePrefilteredArray.get() },
+                    .Writes = { gi->ProbePrefilteredArray.get() },
                 .Execute = [this, convolveProbePrefilterStep, realtimeProbe, startStep, stepsThisFrame, materialSamplers](
                         RHI::IRHICommandList* cmd)
                     {
@@ -410,7 +413,7 @@ namespace Kurenai::Passes
                     .Reads = probeCaptureReads,
                     .Writes = {
                         m_Engine.m_ProbeCaptureColor.get(), m_Engine.m_ProbeCaptureDistance.get(), m_Engine.m_ProbeCaptureDepth.get(),
-                        m_Engine.m_ProbeRadianceCube.get(), m_Engine.m_ProbeDistanceArray.get(),
+                        m_Engine.m_ProbeRadianceCube.get(), gi->ProbeDistanceArray.get(),
                     },
                     .Execute = [captureProbeFace, realtimeProbe, realtimeFace](RHI::IRHICommandList* cmd)
                     {

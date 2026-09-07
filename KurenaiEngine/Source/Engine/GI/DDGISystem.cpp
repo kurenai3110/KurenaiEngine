@@ -17,12 +17,12 @@ namespace Kurenai
         // XY平面のスライスを横に並べ、Zをそのまま行にする(RTXGIと同じ並び)。
         // プローブ番号との対応は index = x + y*Cx + z*Cx*Cy で、シェーダー側の
         // DDGIProbeAtlasCoord()と一致させること
-        const uint32_t countX = m_HasGIVolume ? m_GIVolume.ProbeCounts[0] : 1u;
-        const uint32_t countY = m_HasGIVolume ? m_GIVolume.ProbeCounts[1] : 1u;
-        const uint32_t countZ = m_HasGIVolume ? m_GIVolume.ProbeCounts[2] : 1u;
+        const uint32_t countX = m_GIResources.HasGIVolume ? m_GIResources.GIVolume.ProbeCounts[0] : 1u;
+        const uint32_t countY = m_GIResources.HasGIVolume ? m_GIResources.GIVolume.ProbeCounts[1] : 1u;
+        const uint32_t countZ = m_GIResources.HasGIVolume ? m_GIResources.GIVolume.ProbeCounts[2] : 1u;
 
-        m_DDGILODCount = m_HasGIVolume
-            ? std::clamp(m_GIVolume.LODCount, 1u, kDDGIMaxLODCount)
+        m_DDGILODCount = m_GIResources.HasGIVolume
+            ? std::clamp(m_GIResources.GIVolume.LODCount, 1u, kDDGIMaxLODCount)
             : 1u;
         m_DDGIProbesPerLOD = countX * countY * countZ;
         m_DDGIProbeCount = m_DDGIProbesPerLOD * m_DDGILODCount;
@@ -39,10 +39,10 @@ namespace Kurenai
         // fp16で読むにはTypedUAVLoadAdditionalFormatsが要る(AutoExposure.hlslが同じ理由で
         // R32_Floatを2テクセル並べる構成にしている)。
         // アトラスは455プローブでも合計1.4MB程度と小さいため、精度と可搬性を取って素直にR32にする
-        m_DDGIIrradianceAtlas = m_Device->CreateUAVTexture(
+        m_GIResources.DDGIIrradianceAtlas = m_Device->CreateUAVTexture(
             columns * kDDGIIrradianceCell, rows * kDDGIIrradianceCell, RHI::Format::R32G32B32A32_Float);
         // R=平均距離、G=平均二乗距離
-        m_DDGIDistanceAtlas = m_Device->CreateUAVTexture(
+        m_GIResources.DDGIDistanceAtlas = m_Device->CreateUAVTexture(
             columns * kDDGIDistanceCell, rows * kDDGIDistanceCell, RHI::Format::R32G32_Float);
 
         // 確保し直した直後のアトラスは中身が未定義なので、全スロットを「未確定」として持つ。
@@ -61,11 +61,11 @@ namespace Kurenai
         m_DDGIOverwriteRemaining = 0;
         m_DDGILastExposureValid = false;
 
-        if (m_HasGIVolume)
+        if (m_GIResources.HasGIVolume)
         {
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                "DDGIボリューム '" + m_GIVolume.Name + "' を確保しました: " +
+                "DDGIボリューム '" + m_GIResources.GIVolume.Name + "' を確保しました: " +
                     std::to_string(countX) + "x" + std::to_string(countY) + "x" + std::to_string(countZ) +
                     " = " + std::to_string(m_DDGIProbeCount) + "プローブ, アトラス " +
                     std::to_string(columns * kDDGIIrradianceCell) + "x" + std::to_string(rows * kDDGIIrradianceCell) +
@@ -143,20 +143,20 @@ namespace Kurenai
         // LODが1つ上がるごとに間隔が2倍(=覆う範囲が2倍)
         const float scale = static_cast<float>(1u << lod);
         return DirectX::XMFLOAT3{
-            m_GIVolume.ProbeSpacing[0] * scale,
-            m_GIVolume.ProbeSpacing[1] * scale,
-            m_GIVolume.ProbeSpacing[2] * scale,
+            m_GIResources.GIVolume.ProbeSpacing[0] * scale,
+            m_GIResources.GIVolume.ProbeSpacing[1] * scale,
+            m_GIResources.GIVolume.ProbeSpacing[2] * scale,
         };
     }
 
     DirectX::XMINT3 KurenaiEngine3D::ComputeDDGILODBaseIndex(uint32_t lod) const
     {
         const DirectX::XMFLOAT3 spacing = ComputeDDGILODSpacing(lod);
-        const int32_t countX = static_cast<int32_t>(m_GIVolume.ProbeCounts[0]);
-        const int32_t countY = static_cast<int32_t>(m_GIVolume.ProbeCounts[1]);
-        const int32_t countZ = static_cast<int32_t>(m_GIVolume.ProbeCounts[2]);
+        const int32_t countX = static_cast<int32_t>(m_GIResources.GIVolume.ProbeCounts[0]);
+        const int32_t countY = static_cast<int32_t>(m_GIResources.GIVolume.ProbeCounts[1]);
+        const int32_t countZ = static_cast<int32_t>(m_GIResources.GIVolume.ProbeCounts[2]);
 
-        if (!m_GIVolume.FollowCamera)
+        if (!m_GIResources.GIVolume.FollowCamera)
         {
             // 追従しないので格子は動かない。基準は0でよい
             // (トロイダルの写像は基準が何であっても自己整合するが、動かないなら0が素直)
@@ -190,7 +190,7 @@ namespace Kurenai
     {
         const DirectX::XMFLOAT3 spacing = ComputeDDGILODSpacing(lod);
 
-        if (m_GIVolume.FollowCamera)
+        if (m_GIResources.GIVolume.FollowCamera)
         {
             const DirectX::XMINT3 base = ComputeDDGILODBaseIndex(lod);
             return DirectX::XMFLOAT3{
@@ -204,23 +204,23 @@ namespace Kurenai
         // 変えないため)。上のLODは同じ中心を保ったまま広がるように置く
         if (lod == 0)
         {
-            return DirectX::XMFLOAT3{ m_GIVolume.Origin[0], m_GIVolume.Origin[1], m_GIVolume.Origin[2] };
+            return DirectX::XMFLOAT3{ m_GIResources.GIVolume.Origin[0], m_GIResources.GIVolume.Origin[1], m_GIResources.GIVolume.Origin[2] };
         }
 
         const auto centered = [this, &spacing](int axis) -> float
         {
-            const float count = static_cast<float>(m_GIVolume.ProbeCounts[axis]);
-            const float extent0 = (count - 1.0f) * m_GIVolume.ProbeSpacing[axis];
+            const float count = static_cast<float>(m_GIResources.GIVolume.ProbeCounts[axis]);
+            const float extent0 = (count - 1.0f) * m_GIResources.GIVolume.ProbeSpacing[axis];
             const float extentK = (count - 1.0f) * (&spacing.x)[axis];
-            return m_GIVolume.Origin[axis] + (extent0 - extentK) * 0.5f;
+            return m_GIResources.GIVolume.Origin[axis] + (extent0 - extentK) * 0.5f;
         };
         return DirectX::XMFLOAT3{ centered(0), centered(1), centered(2) };
     }
 
     DirectX::XMINT3 KurenaiEngine3D::ComputeDDGIProbeWorldCoord(uint32_t probeIndex) const
     {
-        const uint32_t countX = m_GIVolume.ProbeCounts[0];
-        const uint32_t countY = m_GIVolume.ProbeCounts[1];
+        const uint32_t countX = m_GIResources.GIVolume.ProbeCounts[0];
+        const uint32_t countY = m_GIResources.GIVolume.ProbeCounts[1];
 
         const uint32_t perLOD = std::max(1u, m_DDGIProbesPerLOD);
         const uint32_t lod = std::min(probeIndex / perLOD, m_DDGILODCount - 1u);
@@ -238,16 +238,16 @@ namespace Kurenai
 
         return DirectX::XMINT3{
             unwrap(atlasX, base.x, static_cast<int32_t>(countX)),
-            unwrap(atlasY, base.y, static_cast<int32_t>(m_GIVolume.ProbeCounts[1])),
-            unwrap(atlasZ, base.z, static_cast<int32_t>(m_GIVolume.ProbeCounts[2])),
+            unwrap(atlasY, base.y, static_cast<int32_t>(m_GIResources.GIVolume.ProbeCounts[1])),
+            unwrap(atlasZ, base.z, static_cast<int32_t>(m_GIResources.GIVolume.ProbeCounts[2])),
         };
     }
 
     DirectX::XMFLOAT3 KurenaiEngine3D::ComputeDDGIProbePosition(uint32_t probeIndex) const
     {
-        const uint32_t countX = m_GIVolume.ProbeCounts[0];
-        const uint32_t countY = m_GIVolume.ProbeCounts[1];
-        const uint32_t countZ = m_GIVolume.ProbeCounts[2];
+        const uint32_t countX = m_GIResources.GIVolume.ProbeCounts[0];
+        const uint32_t countY = m_GIResources.GIVolume.ProbeCounts[1];
+        const uint32_t countZ = m_GIResources.GIVolume.ProbeCounts[2];
 
         // 通し番号 → LOD段 → その段の中の位置
         const uint32_t perLOD = std::max(1u, m_DDGIProbesPerLOD);

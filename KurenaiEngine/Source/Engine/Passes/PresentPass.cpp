@@ -53,6 +53,9 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::GIResources* const gi = frame.GI;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         const Rendering::RenderTargets* const targets = frame.Targets;
 
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
@@ -90,7 +93,7 @@ namespace Kurenai::Passes
         // Mode 12(反射プローブのキューブマップ配列)専用。TextureCube(t1)ともTexture2DArray(t2)とも
         // 型が違うためさらに別スロット(t4)が要る。こちらも常に有効なテクスチャをバインドしておく
         // (反射プローブは鏡面専任なので、既定値はプリフィルタ済み鏡面の配列にしてある)
-        RHI::IRHITexture* presentDebugCubeArrayTexture = m_Engine.m_ProbePrefilteredArray.get();
+        RHI::IRHITexture* presentDebugCubeArrayTexture = gi->ProbePrefilteredArray.get();
         // Mode 18(雲の3Dノイズ)専用。Texture3Dはここまでのどの型とも別なのでさらに
         // 別スロット(t5)が要る。他と同じく常に有効なテクスチャをバインドしておく
         RHI::IRHITexture* presentDebugVolumeTexture = cloudShapeNoiseTexture;
@@ -213,7 +216,7 @@ namespace Kurenai::Passes
             presentSourceHeight = renderHeight;
             break;
         case DebugView::ProbePrefilter:
-            presentDebugCubeArrayTexture = m_Engine.m_ProbePrefilteredArray.get();
+            presentDebugCubeArrayTexture = gi->ProbePrefilteredArray.get();
             presentMode = 12;
             break;
         case DebugView::ProbeInfluence:
@@ -224,7 +227,7 @@ namespace Kurenai::Passes
         case DebugView::ProbeDistance:
             // 距離キューブ(19.12節)。格納値はワールド距離なので専用のMode 13でGain倍して
             // グレースケール表示する(Mode 12でそのまま出すと数メートルで白飛びする)
-            presentDebugCubeArrayTexture = m_Engine.m_ProbeDistanceArray.get();
+            presentDebugCubeArrayTexture = gi->ProbeDistanceArray.get();
             presentMode = 13;
             break;
         case DebugView::IBLBRDFLUT:
@@ -307,15 +310,15 @@ namespace Kurenai::Passes
             const bool isIrradiance =
                 (frame.Settings.DebugView.View == DebugView::DDGIIrradiance || frame.Settings.DebugView.View == DebugView::DDGIProbeBackface);
             const uint32_t cell = isIrradiance ? kDDGIIrradianceCell : kDDGIDistanceCell;
-            const uint32_t columns = m_Engine.m_GIVolume.ProbeCounts[0] * m_Engine.m_GIVolume.ProbeCounts[1];
-            const uint32_t rows = m_Engine.m_GIVolume.ProbeCounts[2];
+            const uint32_t columns = gi->GIVolume.ProbeCounts[0] * gi->GIVolume.ProbeCounts[1];
+            const uint32_t rows = gi->GIVolume.ProbeCounts[2];
 
-            presentSourceTexture = isIrradiance ? m_Engine.m_DDGIIrradianceAtlas.get() : m_Engine.m_DDGIDistanceAtlas.get();
+            presentSourceTexture = isIrradiance ? gi->DDGIIrradianceAtlas.get() : gi->DDGIDistanceAtlas.get();
             // Present.hlslのMode 14はモーションベクター(TAA、23章)が既に使っているため、
             // DDGIのイラディアンス/距離モーメントはMode 15/16にずらしてある
             presentMode = (frame.Settings.DebugView.View == DebugView::DDGIProbeBackface) ? 20 : (isIrradiance ? 15 : 16);
-            presentSourceWidth = m_Engine.m_HasGIVolume ? columns * cell : cell;
-            presentSourceHeight = m_Engine.m_HasGIVolume ? rows * cell : cell;
+            presentSourceWidth = gi->HasGIVolume ? columns * cell : cell;
+            presentSourceHeight = gi->HasGIVolume ? rows * cell : cell;
             break;
         }
         case DebugView::WaterMask:
@@ -488,7 +491,7 @@ namespace Kurenai::Passes
             // DDGI側は距離がMaxRayDistanceでクランプされているので、そこを白にすると
             // 「クランプに当たっている方向」が一目で分かる
             const float whiteAt = (frame.Settings.DebugView.View == DebugView::DDGIDistance)
-                ? m_Engine.m_GIVolume.MaxRayDistance
+                ? gi->GIVolume.MaxRayDistance
                 : frame.Settings.ReflectionProbe.DistanceDebugRange;
             presentConstants.Gain = 1.0f / std::max(whiteAt, 0.01f);
         }

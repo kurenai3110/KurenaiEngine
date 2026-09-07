@@ -867,7 +867,7 @@ namespace Kurenai
 
         // DDGIボリューム(22章)。現状は先頭の1つだけを使う。複数ボリュームは重なりと優先順位を
         // 決める仕組みがまだ無いため、2つ目以降は警告を出して切り捨てる
-        m_HasGIVolume = !m_Scene.GIVolumes.empty();
+        m_GIResources.HasGIVolume = !m_Scene.GIVolumes.empty();
         if (m_Scene.GIVolumes.size() > 1)
         {
             Core::Logger::Warning(
@@ -875,24 +875,24 @@ namespace Kurenai
                 "[GIVolume]が複数ありますが、現状は先頭の1つだけを使用します: " +
                     std::to_string(m_Scene.GIVolumes.size()) + "個");
         }
-        if (m_HasGIVolume)
+        if (m_GIResources.HasGIVolume)
         {
-            m_GIVolume = m_Scene.GIVolumes.front();
-            const uint32_t lodCount = std::clamp(m_GIVolume.LODCount, 1u, kDDGIMaxLODCount);
-            if (m_GIVolume.LODCount > kDDGIMaxLODCount)
+            m_GIResources.GIVolume = m_Scene.GIVolumes.front();
+            const uint32_t lodCount = std::clamp(m_GIResources.GIVolume.LODCount, 1u, kDDGIMaxLODCount);
+            if (m_GIResources.GIVolume.LODCount > kDDGIMaxLODCount)
             {
                 Core::Logger::Warning(
                     "KurenaiEngine3D",
                     "[GIVolume]のLODCountが上限(" + std::to_string(kDDGIMaxLODCount) + ")を超えているため丸めます: " +
-                        std::to_string(m_GIVolume.LODCount));
-                m_GIVolume.LODCount = lodCount;
+                        std::to_string(m_GIResources.GIVolume.LODCount));
+                m_GIResources.GIVolume.LODCount = lodCount;
             }
             // 【段数ぶん掛けること】クリップマップLODはプローブ数が段数倍になる。
             // 掛け忘れると上限のチェックが素通りし、確保だけが膨らむ
             const uint64_t probeCount =
-                static_cast<uint64_t>(m_GIVolume.ProbeCounts[0]) *
-                static_cast<uint64_t>(m_GIVolume.ProbeCounts[1]) *
-                static_cast<uint64_t>(m_GIVolume.ProbeCounts[2]) *
+                static_cast<uint64_t>(m_GIResources.GIVolume.ProbeCounts[0]) *
+                static_cast<uint64_t>(m_GIResources.GIVolume.ProbeCounts[1]) *
+                static_cast<uint64_t>(m_GIResources.GIVolume.ProbeCounts[2]) *
                 static_cast<uint64_t>(lodCount);
             if (probeCount > kDDGIMaxProbes)
             {
@@ -903,7 +903,7 @@ namespace Kurenai
                     "[GIVolume]のプローブ数が上限(" + std::to_string(kDDGIMaxProbes) + ")を超えたためDDGIを無効にします: " +
                         std::to_string(probeCount) + "個(格子 × LOD" + std::to_string(lodCount) +
                         "段)。ProbeCountsかLODCountを減らすかProbeSpacingを広げてください");
-                m_HasGIVolume = false;
+                m_GIResources.HasGIVolume = false;
             }
         }
         RecreateDDGIAtlases();

@@ -42,6 +42,7 @@
 #include "Settings/QualitySettings.h"
 #include "Settings/ReflectionProbeSettings.h"
 #include "Settings/ReflectionSettings.h"
+#include "Rendering/GIResources.h"
 #include "Rendering/IBLResources.h"
 #include "Rendering/SkyResources.h"
 #include "Rendering/SceneGPUResources.h"
@@ -513,8 +514,8 @@ namespace Kurenai
         uint32_t GetProbeRealtimeFace() const { return m_ProbeRealtimeFace; }
         const Assets::Scene& GetScene() const { return m_Scene; }
         const RenderCapabilities& GetRenderCapabilities() const { return m_RenderCapabilities; }
-        bool GetHasGIVolume() const { return m_HasGIVolume; }
-        const Assets::GIVolume& GetGIVolume() const { return m_GIVolume; }
+        bool GetHasGIVolume() const { return m_GIResources.HasGIVolume; }
+        const Assets::GIVolume& GetGIVolume() const { return m_GIResources.GIVolume; }
         uint32_t GetDDGIProbeCount() const { return m_DDGIProbeCount; }
         bool GetDDGIWarmingUp() const { return m_DDGIWarmingUp; }
         ReflectionMode GetSceneDefaultReflectionMode() const { return m_SceneDefaultReflectionMode; }
@@ -1134,6 +1135,8 @@ namespace Kurenai
 
         // G-Bufferは複数のパス群が共有するため、特定のパス群ではなく唯一の所有者へ集める。
         Rendering::RenderTargets m_RenderTargets;
+        // 間接光(DDGI・反射プローブ)のリソースの持ち主は Rendering/GIResources.h
+        Rendering::GIResources m_GIResources;
 
         // 直接光パス(G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
         // 計算しHDRで書き出す。DeferredLightingパスとSSIL_VisibilityBitmask.hlslの両方から
@@ -1602,10 +1605,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_DDGIResolveVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_DDGIResolvePixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_DDGIResolvePipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_DDGIResolveTexture;
-        // 上のパスが2枚目のレンダーターゲットへ書く低解像度の深度(41.24節)。
-        // 合成側のバイラテラルアップサンプルがGatherRed 1回で4テクセルぶんを取るために使う
-        std::unique_ptr<RHI::IRHITexture> m_DDGIResolveDepthTexture;
+        // DDGIの解決2枚の持ち主は Rendering/GIResources.h
         // m_SkyCloudWidth/Heightと同じ理由でここへ保存する(パスのビューポート指定に使う)
         uint32_t m_DDGIResolveWidth = 0;
         uint32_t m_DDGIResolveHeight = 0;
@@ -2086,17 +2086,6 @@ namespace Kurenai
         // TextureCube宣言のまま。これによりIBLの畳み込みシェーダーを一切変更せず再利用できる)。
         // プローブは1つずつ順に焼くため1枚で足りる
         std::unique_ptr<RHI::IRHITexture> m_ProbeRadianceCube;
-        // 畳み込み結果(プローブごと)。DeferredLighting.hlslがTextureCubeArrayとして読む。
-        // 反射プローブは鏡面専任なので拡散イラディアンス側の配列は持たない(拡散はDDGIへ一本化)
-        std::unique_ptr<RHI::IRHITexture> m_ProbePrefilteredArray;
-        // 距離キューブ(プローブごと、19.12節)。プローブ位置から各方向の被写体までのワールド距離。
-        // 放射輝度と違い畳み込まないため、キャプチャからキューブ配列へ直接書き込む
-        // (スクラッチのキューブマップを経由しない)。用途は2つ:
-        //   1. 視差補正を「箱との交差」から「実際に記録された形状との交差」へ精密化する
-        //   2. プローブから見えない位置(壁の向こう)のピクセルで重みを落とし、光漏れを抑える
-        std::unique_ptr<RHI::IRHITexture> m_ProbeDistanceArray;
-        // プローブの影響範囲(位置・半径)をシェーダーへ渡すStructuredBuffer(t13)
-        std::unique_ptr<RHI::IRHIBuffer> m_ProbeBuffer;
         // キャプチャの面ごとに値を更新して使い回すFrameConstants(共有のm_FrameConstantBufferとは別。
         // ViewProj/CameraPositionだけをプローブのものへ差し替える。詳細はProbeCapture.hlsl冒頭)
         std::unique_ptr<RHI::IRHIBuffer> m_ProbeCaptureConstantBuffer;
@@ -2204,28 +2193,18 @@ namespace Kurenai
         // 出所は Passes/DDGIConstants.h(移行中の別名)
         static constexpr uint32_t kDDGICaptureSize = Passes::kDDGICaptureSize;
 
-        // シーンから読み込んだボリューム(先頭の1つだけを使う)。m_HasGIVolumeがfalseの間は
-        // アトラスは1プローブぶんのダミーとして確保され、シェーダー側もDDGIParams0.w=0で無効になる
-        Assets::GIVolume m_GIVolume;
-        bool m_HasGIVolume = false;
         // シーン全体の総プローブ数(= ProbeCountsの3軸の積 × LOD段数)。ダミー時は1。
         // アトラスの確保と更新のラウンドロビンはこの数で回る
         uint32_t m_DDGIProbeCount = 1;
         // LOD 1段ぶんのプローブ数(ProbeCountsの3軸の積)。通し番号からLODを割り出すのに使う
         uint32_t m_DDGIProbesPerLOD = 1;
-        // 実際に使うLOD段数(m_GIVolume.LODCountをkDDGIMaxLODCountでクランプしたもの)
+        // 実際に使うLOD段数(m_GIResources.GIVolume.LODCountをkDDGIMaxLODCountでクランプしたもの)
         uint32_t m_DDGILODCount = 1;
         // 格子を追従させる中心(カメラのワールド座標)。
         // 【Render中に固定する】格子の原点・プローブ位置・dirty判定・シェーダーへ渡す値が
         // すべてこれを基準に決まるので、1フレームの途中で動くと食い違う
         DirectX::XMFLOAT3 m_DDGIFollowCenter{ 0.0f, 0.0f, 0.0f };
 
-        // オクタヘドラル2Dアトラス。RGBがイラディアンス、距離側はR=平均距離・G=平均二乗距離。
-        // どちらもR32系で確保する。更新CSがヒステリシスのために「前の値を読んでから書く」ため、
-        // 型付きUAV読み出しがR32系しか保証されていないという制約に従う必要がある
-        // (AutoExposure.hlslの同じ判断を参照)
-        std::unique_ptr<RHI::IRHITexture> m_DDGIIrradianceAtlas;
-        std::unique_ptr<RHI::IRHITexture> m_DDGIDistanceAtlas;
         std::unique_ptr<RHI::IRHIShader> m_DDGIProbeUpdateComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_DDGIProbeUpdatePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_DDGIBorderCopyComputeShader;
@@ -2350,7 +2329,7 @@ namespace Kurenai
 
         DirectX::XMFLOAT3 ComputeDDGIProbePosition(uint32_t probeIndex) const;
 
-        // m_GIVolumeのProbeCountsに合わせてアトラス2枚を確保し直す。ボリュームが無いシーンでは
+        // m_GIResources.GIVolumeのProbeCountsに合わせてアトラス2枚を確保し直す。ボリュームが無いシーンでは
         // 1プローブぶんのダミーを確保する(SRVは常にバインドできる必要があるため、
         // 「確保しない」という選択肢は取れない。無効化はDDGIParams0.wで行う)
         void RecreateDDGIAtlases();

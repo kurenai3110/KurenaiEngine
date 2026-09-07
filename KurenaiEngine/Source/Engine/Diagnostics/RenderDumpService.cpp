@@ -75,10 +75,10 @@ namespace Kurenai
             { "MultiScatteringLUT", m_SkyResources.MultiScatteringLUT.get() },
             { "SkyViewLUT", m_SkyResources.SkyViewLUT.get() },
             // DDGI
-            { "DDGIIrradianceAtlas", m_DDGIIrradianceAtlas.get() },
-            { "DDGIDistanceAtlas", m_DDGIDistanceAtlas.get() },
-            { "DDGIResolveTexture", m_DDGIResolveTexture.get() },
-            { "DDGIResolveDepthTexture", m_DDGIResolveDepthTexture.get() },
+            { "DDGIIrradianceAtlas", m_GIResources.DDGIIrradianceAtlas.get() },
+            { "DDGIDistanceAtlas", m_GIResources.DDGIDistanceAtlas.get() },
+            { "DDGIResolveTexture", m_GIResources.DDGIResolveTexture.get() },
+            { "DDGIResolveDepthTexture", m_GIResources.DDGIResolveDepthTexture.get() },
             // IBL
             { "BRDFLUTTexture", m_IBLResources.BRDFLUTTexture.get() },
             // ポストプロセスと最終段
