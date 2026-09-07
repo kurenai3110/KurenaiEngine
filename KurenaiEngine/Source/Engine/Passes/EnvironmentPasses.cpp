@@ -55,6 +55,7 @@ namespace Kurenai::Passes
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
         RHI::IRHIBuffer* const iblPrefilterConstantBuffer = frame.IBL->PrefilterConstantBuffer.get();
+        RHI::IRHIPipelineState* const iblPrefilterPipelineState = frame.IBL->PrefilterPipelineState.get();
         RHI::IRHITexture* const irradianceTexture = frame.IBL->IrradianceTexture.get();
         RHI::IRHITexture* const prefilteredEnvTexture = frame.IBL->PrefilteredEnvTexture.get();
 
@@ -392,9 +393,9 @@ namespace Kurenai::Passes
                 .Name = "IBLPrefilter",
                 .Reads = { skyTexture },
                 .Writes = { prefilteredEnvTexture },
-                .Execute = [this, iblPrefilterConstantBuffer, prefilteredEnvTexture, skyTexture, materialSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, iblPrefilterConstantBuffer, iblPrefilterPipelineState, prefilteredEnvTexture, skyTexture, materialSamplers](RHI::IRHICommandList* cmd)
                 {
-                    cmd->SetComputePipelineState(m_Engine.m_PrefilterPipelineState.get());
+                    cmd->SetComputePipelineState(iblPrefilterPipelineState);
                     cmd->SetComputeTexture(0, skyTexture);
                     cmd->SetComputeSamplerSet(materialSamplers);
                     for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)

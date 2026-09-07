@@ -1980,7 +1980,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_IrradianceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_IrradiancePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_PrefilterPipelineState;
+        // 畳み込みのPSOは持ち主を IBLResources::PrefilterPipelineState へ移した
         // 拡散イラディアンスの球面調和関数(SH L2)経路。CSIrradianceの高速な
         // 代替で、m_IBLSettings.UseSHIrradianceでA/B比較できるようトグルにしてある。詳細は
         // IBLConvolve.hlsl冒頭のコメントとdocs/Architecture.htmlを参照

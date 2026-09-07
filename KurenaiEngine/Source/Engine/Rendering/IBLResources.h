@@ -25,6 +25,10 @@ namespace Kurenai::Rendering
         std::unique_ptr<RHI::IRHITexture> BRDFLUTTexture;
         // プリフィルタ済み鏡面のミップごとの畳み込みで使うラフネス値を渡す専用の定数バッファ
         std::unique_ptr<RHI::IRHIBuffer> PrefilterConstantBuffer;
+        // ミップごとの畳み込みを行うコンピュートのPSO。
+        // 【なぜここが持つか】グローバルIBL(EnvironmentPasses)と反射プローブ
+        // (ReflectionProbePasses)がまったく同じシェーダーで畳み込む。上の定数バッファと対で使う
+        std::unique_ptr<RHI::IRHIPipelineState> PrefilterPipelineState;
 
         // 畳み込み結果の2枚。BRDF積分LUTの前に作る
         void CreateEnvironmentMaps(

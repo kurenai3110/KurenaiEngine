@@ -1845,7 +1845,7 @@ namespace Kurenai
         prefilterCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         prefilterCsDesc.EntryPoint = "CSPrefilter";
         m_PrefilterComputeShader = m_Device->CreateShader(prefilterCsDesc);
-        m_PrefilterPipelineState = m_Device->CreateComputePipelineState({ m_PrefilterComputeShader.get() });
+        m_IBLResources.PrefilterPipelineState = m_Device->CreateComputePipelineState({ m_PrefilterComputeShader.get() });
 
         // 拡散イラディアンスの球面調和関数(SH L2)経路。CSIrradianceの
         // 高速な代替で、A/B比較用にトグルで切り替える(m_IBLSettings.UseSHIrradiance、既定false)。

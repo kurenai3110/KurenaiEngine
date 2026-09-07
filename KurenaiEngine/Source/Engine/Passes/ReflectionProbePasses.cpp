@@ -45,6 +45,7 @@ namespace Kurenai::Passes
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
         RHI::IRHIBuffer* const iblPrefilterConstantBuffer = frame.IBL->PrefilterConstantBuffer.get();
+        RHI::IRHIPipelineState* const iblPrefilterPipelineState = frame.IBL->PrefilterPipelineState.get();
         RHI::IRHITexture* const irradianceTexture = frame.IBL->IrradianceTexture.get();
         RHI::IRHITexture* const prefilteredEnvTexture = frame.IBL->PrefilteredEnvTexture.get();
 
@@ -253,9 +254,9 @@ namespace Kurenai::Passes
 
         // 6ミップ×6面ぶん全部を1回で焼く(フルベイク用。Realtimeの時間分割はconvolveProbePrefilterStepを
         // 直接、複数フレームに分けて呼ぶ。下のRealtimeブロック参照)
-        const auto convolveProbePrefilter = [this, convolveProbePrefilterStep, materialSamplers](RHI::IRHICommandList* cmd, size_t probeIndex)
+        const auto convolveProbePrefilter = [this, convolveProbePrefilterStep, iblPrefilterPipelineState, materialSamplers](RHI::IRHICommandList* cmd, size_t probeIndex)
         {
-            cmd->SetComputePipelineState(m_Engine.m_PrefilterPipelineState.get());
+            cmd->SetComputePipelineState(iblPrefilterPipelineState);
             cmd->SetComputeTexture(0, m_Engine.m_ProbeRadianceCube.get());
             cmd->SetComputeSamplerSet(materialSamplers);
             for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
@@ -362,10 +363,10 @@ namespace Kurenai::Passes
                     .Name = "ProbeRealtimeConvolvePrefilterStep",
                     .Reads = { m_Engine.m_ProbeRadianceCube.get() },
                     .Writes = { gi->ProbePrefilteredArray.get() },
-                .Execute = [this, convolveProbePrefilterStep, realtimeProbe, startStep, stepsThisFrame, materialSamplers](
+                .Execute = [this, convolveProbePrefilterStep, iblPrefilterPipelineState, realtimeProbe, startStep, stepsThisFrame, materialSamplers](
                         RHI::IRHICommandList* cmd)
                     {
-                        cmd->SetComputePipelineState(m_Engine.m_PrefilterPipelineState.get());
+                        cmd->SetComputePipelineState(iblPrefilterPipelineState);
                         cmd->SetComputeTexture(0, m_Engine.m_ProbeRadianceCube.get());
                         cmd->SetComputeSamplerSet(materialSamplers);
                         for (uint32_t s = 0; s < stepsThisFrame; ++s)
