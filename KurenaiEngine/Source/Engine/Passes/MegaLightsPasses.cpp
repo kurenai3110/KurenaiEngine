@@ -31,6 +31,10 @@ namespace Kurenai::Passes
         Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHIBuffer* const lightBuffer = frame.Scene->LightBuffer.get();
+        const Assets::RaytracingScene* const raytracingScene = &frame.Scene->RaytracingScene;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
 
         // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
@@ -73,9 +77,9 @@ namespace Kurenai::Passes
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "LightCull",
                 .Reads = { m_Engine.m_RenderTargets.GBufferDepth.get() },
-                .BufferReads = { m_Engine.m_LightBuffer.get() },
+                .BufferReads = { lightBuffer },
                 .BufferWrites = { m_Engine.m_LightTileBuffer.get() },
-                .Execute = [this, &gpuLights, viewMatrix, jitteredProj, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
+                .Execute = [this, lightBuffer, &gpuLights, viewMatrix, jitteredProj, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     Passes::LightCullingConstants cullingConstants{};
                     DirectX::XMStoreFloat4x4(
@@ -107,7 +111,7 @@ namespace Kurenai::Passes
 
                     cmd->SetComputePipelineState(m_Engine.m_LightCullingPipelineState.get());
                     cmd->SetComputeConstantBuffer(0, m_Engine.m_LightCullingConstantBuffer.get());
-                    cmd->SetComputeShaderResourceBuffer(0, m_Engine.m_LightBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(0, lightBuffer);
                     cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferDepth.get());
                     cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_LightTileBuffer.get());
                     cmd->Dispatch(m_Engine.m_LightTileCountX, m_Engine.m_LightTileCountY, 1);
@@ -124,9 +128,9 @@ namespace Kurenai::Passes
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLightsPool",
                 .Reads = { m_Engine.m_RenderTargets.GBufferDepth.get() },
-                .BufferReads = { m_Engine.m_LightBuffer.get() },
+                .BufferReads = { lightBuffer },
                 .BufferWrites = { m_Engine.m_MegaLightsTilePoolBuffer.get() },
-                .Execute = [this, megaLightsSettings, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
+                .Execute = [this, lightBuffer, megaLightsSettings, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     Passes::MegaLightsTilePoolConstants poolConstants{};
                     DirectX::XMStoreFloat4x4(&poolConstants.View, DirectX::XMMatrixTranspose(viewMatrix));
@@ -166,7 +170,7 @@ namespace Kurenai::Passes
 
                     cmd->SetComputePipelineState(m_Engine.m_MegaLightsTilePoolPipelineState.get());
                     cmd->SetComputeConstantBuffer(0, m_Engine.m_MegaLightsTilePoolConstantBuffer.get());
-                    cmd->SetComputeShaderResourceBuffer(0, m_Engine.m_LightBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(0, lightBuffer);
                     cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferDepth.get());
                     // UAVはDispatch直後に解除されるため毎回バインドし直す
                     cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_MegaLightsTilePoolBuffer.get());
@@ -199,7 +203,7 @@ namespace Kurenai::Passes
         // (DX12はPSO切替でルート引数が無効化されるため)。読まれないダミーとして
         // ライトリストを張る ―― 三角形数0なのでループが1周も回らない
         RHI::IRHIBuffer* const meshLightBufferForBinding =
-            meshLightsActive ? m_Engine.m_MeshLightScene.GetTriangleBuffer() : m_Engine.m_LightBuffer.get();
+            meshLightsActive ? m_Engine.m_MeshLightScene.GetTriangleBuffer() : lightBuffer;
 
         if (megaLightsRuns && frame.Settings.MegaLights.Mode == MegaLightsMode::Reference)
         {
@@ -217,8 +221,8 @@ namespace Kurenai::Passes
                 // というこのコードベースの規約に従う。候補プールは確率的サンプリングのときだけ
                 // 読むが、宣言しておくことで候補プールパスより後ろへ順序付けられる
                 // (参照実装のフレームでは辺が1本余分に張られるだけで無害)
-                .BufferReads = { m_Engine.m_LightBuffer.get(), tilePoolBufferForBinding, meshLightBufferForBinding },
-                .Execute = [this, brdfLUTTexture, emissiveLightSettings, megaLightsSettings, &gpuLights, tilePoolBufferForBinding, meshLightBufferForBinding, meshLightTriangleCount, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .BufferReads = { lightBuffer, tilePoolBufferForBinding, meshLightBufferForBinding },
+                .Execute = [this, lightBuffer, raytracingScene, brdfLUTTexture, emissiveLightSettings, megaLightsSettings, &gpuLights, tilePoolBufferForBinding, meshLightBufferForBinding, meshLightTriangleCount, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     Passes::MegaLightsConstants megaLightsConstants{};
                     megaLightsConstants.Params0 =
@@ -250,7 +254,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
 
                     // レジスタ割り当てはMegaLightsReference.hlsl側の宣言と一致させること
-                    cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
+                    cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
                     cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
                     cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
                     cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
@@ -259,7 +263,7 @@ namespace Kurenai::Passes
                     // ライトが0灯のフレームでも必ずバインドする(DX12はSetPipelineStateのたびに
                     // ルート引数が無効化されるため、シェーダが宣言しているリソースを未バインドで
                     // Dispatchすることになる)
-                    cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
                     // 候補プール。参照実装は宣言していないが、DX12はPSO切替でルート引数が
                     // 無効化されるため、確率的サンプリングのときは必ずバインドする必要がある。
                     // 常に張っても害は無いので分岐させない
@@ -453,9 +457,9 @@ namespace Kurenai::Passes
                     m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
                     brdfLUTTexture,
                 },
-                .BufferReads = { m_Engine.m_LightBuffer.get(), tilePoolBufferForBinding },
+                .BufferReads = { lightBuffer, tilePoolBufferForBinding },
                 .BufferWrites = { m_Engine.m_MegaLightsReservoirBuffer.get(), m_Engine.m_MegaLightsBlockedLightBuffer.get() },
-                .Execute = [this, brdfLUTTexture, tilePoolBufferForBinding, updateStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, lightBuffer, raytracingScene, brdfLUTTexture, tilePoolBufferForBinding, updateStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     updateStochasticConstants(cmd);
 
@@ -466,13 +470,13 @@ namespace Kurenai::Passes
 
                     // レジスタ割り当てはMegaLightsInitialSample.hlsl側の宣言と一致させること。
                     // 初期可視レイ(選んだサンプルが遮蔽されていたら殺す)を撃つのでTLASが要る
-                    cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
+                    cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
                     cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
                     cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
                     cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                     cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
                     cmd->SetComputeTexture(5, brdfLUTTexture);
-                    cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
                     cmd->SetComputeShaderResourceBuffer(7, tilePoolBufferForBinding);
 
                     cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_MegaLightsReservoirBuffer.get());
@@ -496,12 +500,12 @@ namespace Kurenai::Passes
                     // 【読むのは前フレームが書いた側】今フレームが書くのはもう片方なので、
                     // 同じバッファへの読み書きが同一フレーム内で起きない(WARが生じない)。
                     // RenderGraphはWARの辺を張らないので、これは構造で守るしかない
-                    .BufferReads = { m_Engine.m_LightBuffer.get(), m_Engine.m_MegaLightsReservoirBuffer.get(),
+                    .BufferReads = { lightBuffer, m_Engine.m_MegaLightsReservoirBuffer.get(),
                                      m_Engine.m_MegaLightsReservoirHistory[historyReadIndex].get(),
                                      m_Engine.m_MegaLightsHistoryGuide[historyReadIndex].get() },
                     .BufferWrites = { m_Engine.m_MegaLightsReservoirHistory[historyWriteIndex].get(),
                                       m_Engine.m_MegaLightsHistoryGuide[historyWriteIndex].get() },
-                    .Execute = [this, brdfLUTTexture, historyReadIndex, historyWriteIndex, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                    .Execute = [this, lightBuffer, raytracingScene, brdfLUTTexture, historyReadIndex, historyWriteIndex, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
                         // 定数はInitial側で更新済み(中身はフレーム内で不変)
                         cmd->SetComputePipelineState(m_Engine.m_MegaLightsTemporalPipelineState.get());
@@ -513,13 +517,13 @@ namespace Kurenai::Passes
                         // 時間検証レイを撃つのでTLASが要る。
                         // 【使わないフレームでも必ずバインドする】DX12は宣言された
                         // リソースが未バインドだと壊れる
-                        cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
+                        cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
                         cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
                         cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
                         cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                         cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
                         cmd->SetComputeTexture(5, brdfLUTTexture);
-                        cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
+                        cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
                         cmd->SetComputeShaderResourceBuffer(7, m_Engine.m_MegaLightsReservoirBuffer.get());
                         cmd->SetComputeShaderResourceBuffer(
                             8, m_Engine.m_MegaLightsReservoirHistory[historyReadIndex].get());
@@ -560,10 +564,10 @@ namespace Kurenai::Passes
                     },
                     // 入力は「時間再利用を挟んだならその出力、挟まないならInitialの出力」。
                     // 初期リザーバ(今フレームの殺しの持ち回り)も自画素の遮蔽の確定情報として読む
-                    .BufferReads = { m_Engine.m_LightBuffer.get(), spatialInput, m_Engine.m_MegaLightsTilePoolBuffer.get(),
+                    .BufferReads = { lightBuffer, spatialInput, m_Engine.m_MegaLightsTilePoolBuffer.get(),
                                      m_Engine.m_MegaLightsReservoirBuffer.get(), m_Engine.m_MegaLightsBlockedLightBuffer.get() },
                     .BufferWrites = { spatialOutput },
-                    .Execute = [this, brdfLUTTexture, spatialInput, spatialOutput, spatialConstants, spatialIteration, buildStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                    .Execute = [this, lightBuffer, raytracingScene, brdfLUTTexture, spatialInput, spatialOutput, spatialConstants, spatialIteration, buildStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
                         // 【この定数だけは自分で更新する】反復番号が反復ごとに違うため、
                         // Initial が更新する共有分は使えない。UpdateBuffer と
@@ -580,13 +584,13 @@ namespace Kurenai::Passes
                         // 不偏化の分母(Z)の判定にバイアス補正レイを撃つのでTLASが要る。
                         // 【使わないフレームでも必ずバインドする】DX12は宣言された
                         // リソースが未バインドだと壊れる
-                        cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
+                        cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
                         cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
                         cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
                         cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                         cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
                         cmd->SetComputeTexture(5, brdfLUTTexture);
-                        cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
+                        cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
                         cmd->SetComputeShaderResourceBuffer(7, spatialInput);
                         // MIS重みが「その灯が隣のタイルへ届くか」を判定するのに、
                         // 候補プールのヘッダ(タイルの深度スラブ)を読む
@@ -622,9 +626,9 @@ namespace Kurenai::Passes
                         m_Engine.m_RenderTargets.GBufferDepth.get(), brdfLUTTexture,
                     },
                     .Writes = { m_Engine.m_MegaLightsTexture.get() },
-                    .BufferReads = { m_Engine.m_LightBuffer.get(), m_Engine.m_MegaLightsReservoirBuffer.get() },
+                    .BufferReads = { lightBuffer, m_Engine.m_MegaLightsReservoirBuffer.get() },
                     .BufferWrites = { guideWriteBuffer },
-                    .Execute = [this, brdfLUTTexture, guideWriteBuffer, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                    .Execute = [this, lightBuffer, brdfLUTTexture, guideWriteBuffer, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
                         // 定数はInitial側で更新済み。ここでバインドし直すのは、DX12が
                         // SetPipelineStateのたびにルート引数を無効化するため
@@ -640,7 +644,7 @@ namespace Kurenai::Passes
                         cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                         cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
                         cmd->SetComputeTexture(5, brdfLUTTexture);
-                        cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
+                        cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
                         cmd->SetComputeShaderResourceBuffer(7, m_Engine.m_MegaLightsReservoirBuffer.get());
 
                         cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_MegaLightsTexture.get());
@@ -659,8 +663,8 @@ namespace Kurenai::Passes
                     brdfLUTTexture,
                 },
                 .Writes = { m_Engine.m_MegaLightsTexture.get() },
-                .BufferReads = { m_Engine.m_LightBuffer.get(), shadeReservoirBuffer },
-                .Execute = [this, brdfLUTTexture, shadeReservoirBuffer, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .BufferReads = { lightBuffer, shadeReservoirBuffer },
+                .Execute = [this, lightBuffer, raytracingScene, brdfLUTTexture, shadeReservoirBuffer, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     // 定数はInitial側で更新済み。ここでバインドし直すのは、DX12が
                     // SetPipelineStateのたびにルート引数を無効化するため
@@ -670,13 +674,13 @@ namespace Kurenai::Passes
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
 
                     // レジスタ割り当てはMegaLightsShade.hlsl側の宣言と一致させること
-                    cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
+                    cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
                     cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
                     cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
                     cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferAlbedo.get());
                     cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferMaterial.get());
                     cmd->SetComputeTexture(5, brdfLUTTexture);
-                    cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_LightBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
                     // 空間再利用を挟んだフレームはその出力を、挟まないフレームはInitialの出力を読む
                     cmd->SetComputeShaderResourceBuffer(7, shadeReservoirBuffer);
 

@@ -560,7 +560,7 @@ namespace Kurenai
         const bool isSameSceneReload = (loaded.SceneIndex == m_CurrentSceneIndex);
 
         m_Scene = std::move(loaded.Scene);
-        m_RaytracingScene = std::move(loaded.RaytracingScene);
+        m_SceneGPUResources.RaytracingScene = std::move(loaded.RaytracingScene);
         m_MeshLightScene = std::move(loaded.MeshLightScene);
         m_CurrentSceneIndex = loaded.SceneIndex;
 
@@ -600,7 +600,7 @@ namespace Kurenai
         // 両組でバッチに入るだけなので、これで足りる。
         // インスタンスが1つも無いシーンではバッファを作らない
         // (BuildInstanceBatchesがnullptrを見て何もしない)
-        m_ModelInstanceBuffer.reset();
+        m_SceneGPUResources.ModelInstanceBuffer.reset();
         if (!m_Scene.Instances.empty())
         {
             RHI::BufferDesc instanceBufferDesc;
@@ -611,7 +611,7 @@ namespace Kurenai
             // 更新はBuildInstanceBatchesの1フレーム1回だけ。DX12のステージングリングは
             // この値×kFrameCount+1段を常時確保するので、必要最小限にしておく
             instanceBufferDesc.MaxUpdatesPerFrame = 1;
-            m_ModelInstanceBuffer = m_Device->CreateBuffer(instanceBufferDesc);
+            m_SceneGPUResources.ModelInstanceBuffer = m_Device->CreateBuffer(instanceBufferDesc);
         }
         m_InstanceBatchesCurrentLOD.clear();
         m_InstanceBatchesCoarsestLOD.clear();

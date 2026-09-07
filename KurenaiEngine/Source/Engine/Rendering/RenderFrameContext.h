@@ -10,6 +10,7 @@
 #include "../Diagnostics/RenderCapabilities.h"
 #include "MeshletLODFrameConstants.h"
 #include "IBLResources.h"
+#include "SceneGPUResources.h"
 #include "SkyResources.h"
 #include "RenderSettingsSnapshot.h"
 
@@ -99,6 +100,10 @@ namespace Kurenai::Rendering
 
         // 空・大気・雲のリソース一式。IBLと同じくエンジンが持ったまま、ポインタだけ載せる
         const SkyResources* Sky = nullptr;
+
+        // GPU側のシーンデータ一式。シーンの読み込みで作り直されるが、
+        // 作り直しは登録が始まるより前(UpdateSceneStreaming)に済んでいる
+        const SceneGPUResources* Scene = nullptr;
 
         // PresentパスがRenderGraphPassDesc::SwapChainTargetへ渡す
         RHI::IRHISwapChain* SwapChain = nullptr;

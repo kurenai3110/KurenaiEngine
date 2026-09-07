@@ -177,6 +177,9 @@ namespace Kurenai::Passes
     void ShadowPasses::RegisterCascades(
         Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
     {
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHIBuffer* const modelInstanceBuffer = frame.Scene->ModelInstanceBuffer.get();
+
         // 【フレームの写しをローカルで受ける】ラムダへ値で渡すため
         const MeshletLODFrameConstants meshletLOD = frame.MeshletLOD;
 
@@ -205,7 +208,7 @@ namespace Kurenai::Passes
                 .Name = "Shadow" + std::to_string(cascade),
                 .DepthTarget = m_Engine.m_RenderTargets.ShadowCascadeArray.get(),
                 .DepthTargetArraySlice = cascade,
-                .Execute = [this, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, shadowSettings, shadowViewport, cascade, cascadeViewProj, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, modelInstanceBuffer, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, shadowSettings, shadowViewport, cascade, cascadeViewProj, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(shadowViewport);
                     // 深度1.0(最遠)にクリアしておく。無効時はこの後の描画をスキップするため、
@@ -362,7 +365,7 @@ namespace Kurenai::Passes
                                 // 全インスタンスがドローンの座標を行列として読んで画面外へ飛ぶ
                                 if (unit.IsBatch())
                                 {
-                                    cmd->SetVertexShaderResourceBuffer(0, m_Engine.m_ModelInstanceBuffer.get());
+                                    cmd->SetVertexShaderResourceBuffer(0, modelInstanceBuffer);
                                 }
 
                                 cmd->SetVertexBuffer(mesh.VertexBuffer.get());
@@ -380,6 +383,9 @@ namespace Kurenai::Passes
     void ShadowPasses::RegisterRaytraced(
         Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
     {
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Assets::RaytracingScene* const raytracingScene = &frame.Scene->RaytracingScene;
+
         // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
         // ここで作り直さない。ラムダへ値で渡すためローカルで受ける
         const bool raytracedShadowRuns = frame.RaytracedShadowRuns;
@@ -404,7 +410,7 @@ namespace Kurenai::Passes
                 .Name = "RTShadow",
                 .Reads = { m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get() },
                 .Writes = { m_Engine.m_RenderTargets.RTShadowTexture.get() },
-                .Execute = [this, shadowSettings, renderWidth, renderHeight, frameConstantBuffer](RHI::IRHICommandList* cmd)
+                .Execute = [this, raytracingScene, shadowSettings, renderWidth, renderHeight, frameConstantBuffer](RHI::IRHICommandList* cmd)
                 {
                     Passes::RTShadowConstants rtShadowConstants{};
                     rtShadowConstants.Params0 =
@@ -422,7 +428,7 @@ namespace Kurenai::Passes
 
                     // レジスタ割り当てはRTShadow.hlsl側の宣言と一致させること。
                     // このシェーダはLoad(整数座標)しか使わないためサンプラーはバインドしない
-                    cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
+                    cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
                     cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
                     cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
 

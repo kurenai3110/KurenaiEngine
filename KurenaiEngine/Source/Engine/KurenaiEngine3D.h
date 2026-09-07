@@ -44,6 +44,7 @@
 #include "Settings/ReflectionSettings.h"
 #include "Rendering/IBLResources.h"
 #include "Rendering/SkyResources.h"
+#include "Rendering/SceneGPUResources.h"
 #include "Rendering/RenderTargets.h"
 #include "Rendering/ShadowConstants.h"
 #include "Rendering/MeshletLODFrameConstants.h"
@@ -905,7 +906,7 @@ namespace Kurenai
         {
             // このバッチが描く段。同じ段を選んだインスタンスだけをまとめる
             const Assets::Model* Model = nullptr;
-            // m_ModelInstanceBuffer の中の先頭位置。頂点シェーダーは
+            // m_SceneGPUResources.ModelInstanceBuffer の中の先頭位置。頂点シェーダーは
             // ModelInstances[InstanceBase + SV_InstanceID] を読む
             uint32_t InstanceBase = 0;
             uint32_t InstanceCount = 0;
@@ -932,11 +933,6 @@ namespace Kurenai
         std::vector<uint8_t> m_InstanceBatchedCoarsestLOD;
         // アップロード用の作業領域(毎フレーム作り直す。確保のやり直しを避けるため持っておく)
         std::vector<GPUModelInstance> m_ModelInstanceRecords;
-        // 上のレコードを載せる StructuredBuffer。**1フレームに1回だけ更新する** ――
-        // パスごとに詰め直す案は、DX12 の StructuredReadOnly が
-        // MaxUpdatesPerFrame x kFrameCount + 1 段の UPLOAD ヒープを常時確保するため、
-        // 反射プローブの6面ぶんを見込むと VRAM が跳ねる(DX12Device::CreateBuffer)
-        std::unique_ptr<RHI::IRHIBuffer> m_ModelInstanceBuffer;
         // 1バッチの上限。上限が無いと「街灯を市街全域に5000個」のようなグループが
         // 1つの巨大AABBになり、どのパスからも一度も間引かれなくなる。
         // グループ内を空間セルでソートしてから刻むので、バッチは局所的にまとまる
@@ -1211,7 +1207,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_DroneBuffer;
         // 1フレームぶんの機体の状態。毎フレームDroneShow::Evaluateが書き、
         // グラフ構築前に1回だけm_DroneBufferへUpdateBufferする
-        // (m_LightBufferと同じ理由: 本描画と平面反射の2パスから読まれるため、
+        // (m_SceneGPUResources.LightBufferと同じ理由: 本描画と平面反射の2パスから読まれるため、
         //  パスの中で更新すると先に走る側が未更新の内容を読む)
         std::vector<GPUDrone> m_DroneInstances;
         // 機体を光源として送るときの、間引いた灯。毎フレームDroneShow::BuildLightSamplesが書き、
@@ -2457,9 +2453,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_FrameConstantBuffer;
         std::unique_ptr<RHI::IRHIBuffer> m_ObjectConstantBuffer;
 
-        // ポイント/スポットライトのリスト(t8、StructuredReadOnly)と、有効ライト数を渡すb1。
-        // 太陽(平行光)はb0のLightDirection/LightColorのまま(詳細はdocs/Architecture.html参照)
-        std::unique_ptr<RHI::IRHIBuffer> m_LightBuffer;
+        // 有効ライト数を渡すb1。ライトのリスト本体は m_SceneGPUResources.LightBuffer
         std::unique_ptr<RHI::IRHIBuffer> m_LightingConstantBuffer;
         // 容量(kMaxLights)超過を検出した最初のフレームだけ警告ログを出すためのフラグ
         bool m_LightOverflowLogged = false;
@@ -2627,14 +2621,9 @@ namespace Kurenai
         // 【読み込み中は空になる】シーン切り替えを開始した時点で旧シーンを手放すため
         // (VRAMの二重常駐を避けるため)、読み込みが終わるまでInstancesが空のまま描画される
         Assets::Scene m_Scene;
-        // m_Sceneに対応するレイトレーシングの高速化構造(BLAS/TLAS)とシーンジオメトリの
-        // 統合バッファ。Loaderスレッドがm_Sceneと一緒に構築し、ApplyLoadedSceneが差し替える。
-        // デバイスがレイトレーシング非対応(DX11、またはDXR Tier 1.1未満のアダプタ)の
-        // 場合は空のまま(IsValid()==false)で、描画側は従来のスクリーンスペース手法を使う。
-        //
-        // 【破棄順】m_Sceneより後に宣言することで、メンバ破棄順(宣言の逆順)により
-        // m_Sceneの頂点/インデックスバッファより先に破棄される
-        Assets::RaytracingScene m_RaytracingScene;
+        // GPU側のシーンデータの持ち主は Rendering/SceneGPUResources.h。
+        // **m_Sceneより後に宣言すること**(理由はそのヘッダの冒頭)
+        Rendering::SceneGPUResources m_SceneGPUResources;
         // メッシュライトの三角形テーブル(段階2)。段階1のプロキシと同じ集合から作られる
         Assets::MeshLightScene m_MeshLightScene;
         // テクスチャの常駐ミップ制御。自前のワーカースレッドを持ち、そこがm_Sceneの

@@ -33,6 +33,10 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHIBuffer* const lightBuffer = frame.Scene->LightBuffer.get();
+        RHI::IRHIBuffer* const modelInstanceBuffer = frame.Scene->ModelInstanceBuffer.get();
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
         RHI::IRHIBuffer* const iblPrefilterConstantBuffer = frame.IBL->PrefilterConstantBuffer.get();
         RHI::IRHITexture* const irradianceTexture = frame.IBL->IrradianceTexture.get();
@@ -72,7 +76,7 @@ namespace Kurenai::Passes
         // プローブ1面ぶんのキャプチャ(フォワード描画 → スクラッチのキューブ面へコピー)。
         // フルベイクと時間分割の両方から呼ぶためラムダへ切り出してある
         const auto captureProbeFace =
-            [this, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
+            [this, lightBuffer, modelInstanceBuffer, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
         {
             const Assets::ReflectionProbe& probe = m_Engine.m_ReflectionProbes[probeIndex];
             const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
@@ -126,7 +130,7 @@ namespace Kurenai::Passes
             // シャドウコピーを持ち寿命がDX11と揃っているため、ここで先にバインドしたものが
             // ループ内の各Drawへ引き継がれる
             cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
-            cmd->SetShaderResourceBuffer(8, m_Engine.m_LightBuffer.get());
+            cmd->SetShaderResourceBuffer(8, lightBuffer);
             cmd->SetTexture(9, irradianceTexture);
             cmd->SetTexture(10, prefilteredEnvTexture);
             cmd->SetTexture(11, brdfLUTTexture);
@@ -172,7 +176,7 @@ namespace Kurenai::Passes
                     // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかない
                     if (unit.IsBatch())
                     {
-                        cmd->SetVertexShaderResourceBuffer(0, m_Engine.m_ModelInstanceBuffer.get());
+                        cmd->SetVertexShaderResourceBuffer(0, modelInstanceBuffer);
                     }
 
                     cmd->SetVertexBuffer(mesh.VertexBuffer.get());

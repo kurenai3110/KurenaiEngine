@@ -29,6 +29,9 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHIBuffer* const modelInstanceBuffer = frame.Scene->ModelInstanceBuffer.get();
+
         // 【フレームの写しをローカルで受ける】ラムダへ値で渡すため
         const MeshletLODFrameConstants meshletLOD = frame.MeshletLOD;
         const DirectX::XMFLOAT4X4 taaPrevViewProj = frame.TAAPrevViewProj;
@@ -497,7 +500,7 @@ namespace Kurenai::Passes
                 .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
                 // 間接描画の引数(直前のModelCullパスが書いたもの)
                 .BufferReads = { m_Engine.m_ModelCullDrawArgsBuffer.get() },
-                .Execute = [this, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &viewProj, modelCullIndirectActive, occlusionCullingActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, modelInstanceBuffer, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &viewProj, modelCullIndirectActive, occlusionCullingActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(gbufferViewport);
                     // Reverse-Zのため遠平面側(NDC z=0.0)。G-Bufferパスの代わりにここでクリアする
@@ -691,7 +694,7 @@ namespace Kurenai::Passes
                             // ドローンショーが同じスロットを使う
                             if (unit.IsBatch())
                             {
-                                cmd->SetVertexShaderResourceBuffer(0, m_Engine.m_ModelInstanceBuffer.get());
+                                cmd->SetVertexShaderResourceBuffer(0, modelInstanceBuffer);
                             }
 
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
@@ -741,7 +744,7 @@ namespace Kurenai::Passes
             .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
             // 間接描画の引数を読む(ModelCullパスが書いたもの)
             .BufferReads = { m_Engine.m_ModelCullDrawArgsBuffer.get() },
-            .Execute = [this, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, geometrySettings, gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive, meshletCullStatsActive, modelCullIndirectActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, modelInstanceBuffer, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, geometrySettings, gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive, meshletCullStatsActive, modelCullIndirectActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
             {
                 // カリング統計のカウンタを0へ戻す。増幅シェーダーは加算しかしないので、
                 // 戻さないとフレームをまたいで積み上がる。
@@ -956,7 +959,7 @@ namespace Kurenai::Passes
                         // ドローンショーが同じスロットを使う
                         if (unit.IsBatch())
                         {
-                            cmd->SetVertexShaderResourceBuffer(0, m_Engine.m_ModelInstanceBuffer.get());
+                            cmd->SetVertexShaderResourceBuffer(0, modelInstanceBuffer);
                         }
 
                         cmd->SetVertexBuffer(mesh.VertexBuffer.get());

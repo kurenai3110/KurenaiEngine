@@ -29,6 +29,10 @@ namespace Kurenai::Passes
         Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHIBuffer* const lightBuffer = frame.Scene->LightBuffer.get();
+        const Assets::RaytracingScene* const raytracingScene = &frame.Scene->RaytracingScene;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHITexture* const cloudDetailNoiseTexture = frame.Sky->CloudDetailNoiseTexture.get();
         RHI::IRHITexture* const cloudShapeNoiseTexture = frame.Sky->CloudShapeNoiseTexture.get();
         RHI::IRHITexture* const cloudWeatherNoiseTexture = frame.Sky->CloudWeatherNoiseTexture.get();
@@ -106,7 +110,7 @@ namespace Kurenai::Passes
                 brdfLUTTexture,
             },
             .RenderTargets = { m_Engine.m_RenderTargets.DirectLightTexture.get() },
-            .Execute = [this, brdfLUTTexture, gbufferViewport, &gpuLights, &lightingConstants, rtShadowTextureForBinding, megaLightsTextureForBinding, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, lightBuffer, brdfLUTTexture, gbufferViewport, &gpuLights, &lightingConstants, rtShadowTextureForBinding, megaLightsTextureForBinding, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
 
@@ -132,7 +136,7 @@ namespace Kurenai::Passes
                 // ライトが1つも無いフレームでもSetShaderResourceBufferは必ず呼ぶ(SetPipelineStateが
                 // 毎回ルート引数を無効化するため、シェーダが宣言しているリソースを未バインドのまま
                 // Drawすることになってしまう)。バッファの中身の更新はグラフ構築前に1回だけ済ませてある
-                cmd->SetShaderResourceBuffer(8, m_Engine.m_LightBuffer.get());
+                cmd->SetShaderResourceBuffer(8, lightBuffer);
                 // タイルライトカリングが書いたライトグリッド。カリング無効時もシェーダが宣言している
                 // リソースは必ずバインドする(上と同じ理由)
                 cmd->SetShaderResourceBuffer(5, m_Engine.m_LightTileBuffer.get());
@@ -162,7 +166,7 @@ namespace Kurenai::Passes
                     // (SSILと同じ理由でDirectLightパスより後に順序付けられる。RTAO.hlsl参照)
                     .Reads = { m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_RenderTargets.DirectLightTexture.get() },
                     .Writes = { aoRawTexture },
-                    .Execute = [this, ambientOcclusionSettings, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                    .Execute = [this, raytracingScene, ambientOcclusionSettings, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                     {
                         Passes::RTAOConstants rtAOConstants{};
                         rtAOConstants.Params0 = {
@@ -184,20 +188,20 @@ namespace Kurenai::Passes
                         cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
                         cmd->SetComputeConstantBuffer(1, m_Engine.m_RTAOConstantBuffer.get());
 
-                        cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
+                        cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
                         cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
                         cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
-                        cmd->SetComputeShaderResourceBuffer(3, m_Engine.m_RaytracingScene.GetVertexAttributeBuffer());
-                        cmd->SetComputeShaderResourceBuffer(4, m_Engine.m_RaytracingScene.GetIndexBuffer());
-                        cmd->SetComputeShaderResourceBuffer(5, m_Engine.m_RaytracingScene.GetMeshInfoBuffer());
-                        cmd->SetComputeShaderResourceBuffer(6, m_Engine.m_RaytracingScene.GetInstanceInfoBuffer());
-                        cmd->SetComputeShaderResourceBuffer(7, m_Engine.m_RaytracingScene.GetMaterialBuffer());
+                        cmd->SetComputeShaderResourceBuffer(3, raytracingScene->GetVertexAttributeBuffer());
+                        cmd->SetComputeShaderResourceBuffer(4, raytracingScene->GetIndexBuffer());
+                        cmd->SetComputeShaderResourceBuffer(5, raytracingScene->GetMeshInfoBuffer());
+                        cmd->SetComputeShaderResourceBuffer(6, raytracingScene->GetInstanceInfoBuffer());
+                        cmd->SetComputeShaderResourceBuffer(7, raytracingScene->GetMaterialBuffer());
                         // メッシュレット表(t9)。RTAO.hlsl自体は引かないが、共有ヘッダーの
                         // RaytracingScene.hlsliが宣言を持つためバインドしておく。
                         // メッシュレットを持つメッシュが1つも無いシーンではバッファ自体が無いので
                         // バインドしない(未バインドのスロットは0を返す。RTMeshInfo::MeshletCountも
                         // 0になっているため、シェーダーがここを引くことはない)
-                        if (RHI::IRHIBuffer* meshletBuffer = m_Engine.m_RaytracingScene.GetMeshletTriangleOffsetBuffer())
+                        if (RHI::IRHIBuffer* meshletBuffer = raytracingScene->GetMeshletTriangleOffsetBuffer())
                         {
                             cmd->SetComputeShaderResourceBuffer(9, meshletBuffer);
                         }
@@ -340,6 +344,9 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHIBuffer* const lightBuffer = frame.Scene->LightBuffer.get();
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHIBuffer* const skyParametersBuffer = frame.Sky->ParametersBuffer.get();
         RHI::IRHITexture* const skyViewLUT = frame.Sky->SkyViewLUT.get();
 
@@ -478,7 +485,7 @@ namespace Kurenai::Passes
             },
             .RenderTargets = { m_Engine.m_RenderTargets.SceneColor.get() },
             .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
-            .Execute = [this, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &gpuLights, &cameraPosition, &viewProj, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, lightBuffer, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &gpuLights, &cameraPosition, &viewProj, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
             {
                 // 半透明メッシュをインスタンス単位でカメラからの距離降順(奥から手前)に並べる。
                 // instance.WorldはHLSL(mul(vec, World))に合わせて転置済みのため、ワールド座標の
@@ -537,7 +544,7 @@ namespace Kurenai::Passes
                 // テクスチャのバインドは上書きするまで維持されるため(IRHICommandList::SetTexture参照)、
                 // メッシュごとのループ内で張り直す必要はない
                 cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
-                cmd->SetShaderResourceBuffer(8, m_Engine.m_LightBuffer.get());
+                cmd->SetShaderResourceBuffer(8, lightBuffer);
                 // IBL(14章)。このパスにはSSRが適用されないため、半透明サーフェスの環境の
                 // 映り込みはこの環境ソースだけが担う
                 cmd->SetTexture(9, irradianceTexture);

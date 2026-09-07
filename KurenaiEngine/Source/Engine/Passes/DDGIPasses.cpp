@@ -33,6 +33,10 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHIBuffer* const lightBuffer = frame.Scene->LightBuffer.get();
+        const Assets::RaytracingScene* const raytracingScene = &frame.Scene->RaytracingScene;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
         RHI::IRHIBuffer* const iblPrefilterConstantBuffer = frame.IBL->PrefilterConstantBuffer.get();
         RHI::IRHITexture* const irradianceTexture = frame.IBL->IrradianceTexture.get();
@@ -81,7 +85,7 @@ namespace Kurenai::Passes
         // RWTexture2DArray<float>なので、キューブ配列だけでなく単体のキューブ(=6要素の2D配列)の
         // 面へもそのまま書ける
         const auto captureDDGIProbeFace =
-            [this, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, suppressEmissiveForGI, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, lightBuffer, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, suppressEmissiveForGI, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
 
@@ -111,7 +115,7 @@ namespace Kurenai::Passes
             cmd->SetSamplerSet(materialSamplers);
 
             cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
-            cmd->SetShaderResourceBuffer(8, m_Engine.m_LightBuffer.get());
+            cmd->SetShaderResourceBuffer(8, lightBuffer);
             cmd->SetTexture(9, irradianceTexture);
             cmd->SetTexture(10, prefilteredEnvTexture);
             cmd->SetTexture(11, brdfLUTTexture);
@@ -253,7 +257,7 @@ namespace Kurenai::Passes
         // RWTexture2DArrayとして張る」メソッドをDX11/DX12の両方へ足す必要がある。
         // ドローとメッシュ走査が消えるのが本題なので、そこは測ってから決める
         const auto traceDDGIProbeFace =
-            [this, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, suppressEmissiveForGI, ddgiSettings, emissiveLightSettings, skyTexture, bakedLightCount, materialSamplers, frameConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, lightBuffer, raytracingScene, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, suppressEmissiveForGI, ddgiSettings, emissiveLightSettings, skyTexture, bakedLightCount, materialSamplers, frameConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
 
@@ -280,8 +284,8 @@ namespace Kurenai::Passes
                     "KurenaiEngine3D",
                     "DDGI(レイトレ)の自発光: Params1.y(強度) " + std::to_string(traceConstants.Params1.y) +
                         " / Params1.w(プロキシ材質の倍率) " + std::to_string(traceConstants.Params1.w) +
-                        " / プロキシ印の付いた材質 " + std::to_string(m_Engine.m_RaytracingScene.GetEmissiveProxyMaterialCount()) +
-                        "件 / 全メッシュ " + std::to_string(m_Engine.m_RaytracingScene.GetMeshCount()) + "件");
+                        " / プロキシ印の付いた材質 " + std::to_string(raytracingScene->GetEmissiveProxyMaterialCount()) +
+                        "件 / 全メッシュ " + std::to_string(raytracingScene->GetMeshCount()) + "件");
             }
 
             cmd->SetComputePipelineState(m_Engine.m_DDGIProbeTracePipelineState.get());
@@ -293,20 +297,20 @@ namespace Kurenai::Passes
             cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
             cmd->SetComputeConstantBuffer(1, m_Engine.m_DDGITraceConstantBuffer.get());
 
-            cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
-            cmd->SetComputeShaderResourceBuffer(1, m_Engine.m_RaytracingScene.GetVertexAttributeBuffer());
-            cmd->SetComputeShaderResourceBuffer(2, m_Engine.m_RaytracingScene.GetIndexBuffer());
-            cmd->SetComputeShaderResourceBuffer(3, m_Engine.m_RaytracingScene.GetMeshInfoBuffer());
-            cmd->SetComputeShaderResourceBuffer(4, m_Engine.m_RaytracingScene.GetInstanceInfoBuffer());
-            cmd->SetComputeShaderResourceBuffer(5, m_Engine.m_RaytracingScene.GetMaterialBuffer());
+            cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
+            cmd->SetComputeShaderResourceBuffer(1, raytracingScene->GetVertexAttributeBuffer());
+            cmd->SetComputeShaderResourceBuffer(2, raytracingScene->GetIndexBuffer());
+            cmd->SetComputeShaderResourceBuffer(3, raytracingScene->GetMeshInfoBuffer());
+            cmd->SetComputeShaderResourceBuffer(4, raytracingScene->GetInstanceInfoBuffer());
+            cmd->SetComputeShaderResourceBuffer(5, raytracingScene->GetMaterialBuffer());
             // メッシュレット表(t6)。このシェーダー自身は引かないが、共有ヘッダーの
             // RaytracingScene.hlsliが宣言を持つためバインドしておく(RTAOと同じ扱い)。
             // メッシュレットを持つメッシュが1つも無いシーンではバッファ自体が無い
-            if (RHI::IRHIBuffer* meshletBuffer = m_Engine.m_RaytracingScene.GetMeshletTriangleOffsetBuffer())
+            if (RHI::IRHIBuffer* meshletBuffer = raytracingScene->GetMeshletTriangleOffsetBuffer())
             {
                 cmd->SetComputeShaderResourceBuffer(6, meshletBuffer);
             }
-            cmd->SetComputeShaderResourceBuffer(7, m_Engine.m_LightBuffer.get());
+            cmd->SetComputeShaderResourceBuffer(7, lightBuffer);
             cmd->SetComputeTexture(8, irradianceTexture);
             cmd->SetComputeTexture(9, prefilteredEnvTexture);
             cmd->SetComputeTexture(10, brdfLUTTexture);

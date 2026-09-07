@@ -1239,7 +1239,7 @@ namespace Kurenai::RHI
 
             // CPUはGPU完了を待たずに次フレームの記録を始める(kFrameCount)ため、直近フレームぶんの
             // 書き込みが同時に生存できるだけのステージングリングを持たせる。
-            // 1フレーム内に同じバッファへ複数回UpdateBufferすることがある(例: m_LightBufferは
+            // 1フレーム内に同じバッファへ複数回UpdateBufferすることがある(例: 3Dエンジンのライトのリストは
             // DirectLightパスとTransparentパスの2回)ため、kFrameCount+1では足りない。
             // 「1フレームあたりの更新回数の上限×kFrameCount」に余裕を足した値にしておく
             // (超過はDX12Buffer::AdvanceUploadRingAndGetWritePtrがログで検出する)。

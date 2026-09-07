@@ -57,10 +57,10 @@ namespace Kurenai
         // その代わり読み込み中はシーンが描かれない(UIとスカイボックスのみになる)
         RetiredAssets retired;
         retired.Scene = std::move(m_Scene);
-        retired.RaytracingScene = std::move(m_RaytracingScene);
+        retired.RaytracingScene = std::move(m_SceneGPUResources.RaytracingScene);
         retired.MeshLightScene = std::move(m_MeshLightScene);
         m_Scene = Assets::Scene{};
-        m_RaytracingScene = Assets::RaytracingScene{};
+        m_SceneGPUResources.RaytracingScene = Assets::RaytracingScene{};
         RetireAssets(std::move(retired));
 
         {
@@ -147,7 +147,7 @@ namespace Kurenai
         m_InstancedBatchCount = 0;
         m_InstancedInstanceCount = 0;
 
-        if (!m_GeometrySettings.InstancingEnabled || m_Scene.Instances.empty() || !m_ModelInstanceBuffer)
+        if (!m_GeometrySettings.InstancingEnabled || m_Scene.Instances.empty() || !m_SceneGPUResources.ModelInstanceBuffer)
         {
             return;
         }
@@ -358,7 +358,7 @@ namespace Kurenai
         // 【1フレームに1回だけ】どのパスもこの1本を読む。バインドは各パスがDraw直前に張り直す
         // (頂点シェーダー用SRVはt0の1本しかなく、ドローンショーが同じスロットを使うため)
         commandList->UpdateBuffer(
-            m_ModelInstanceBuffer.get(), m_ModelInstanceRecords.data(),
+            m_SceneGPUResources.ModelInstanceBuffer.get(), m_ModelInstanceRecords.data(),
             m_ModelInstanceRecords.size() * sizeof(GPUModelInstance));
     }
 
@@ -467,9 +467,9 @@ namespace Kurenai
             }
             if (rebuilt && generation == m_StreamingGeneration)
             {
-                auto retired = std::make_unique<Assets::RaytracingScene>(std::move(m_RaytracingScene));
+                auto retired = std::make_unique<Assets::RaytracingScene>(std::move(m_SceneGPUResources.RaytracingScene));
                 m_RaytracingPendingRelease.push_back({ std::move(retired), kStreamingReleaseDelayFrames });
-                m_RaytracingScene = std::move(*rebuilt);
+                m_SceneGPUResources.RaytracingScene = std::move(*rebuilt);
                 ++m_RaytracingRebuildCount;
             }
         }

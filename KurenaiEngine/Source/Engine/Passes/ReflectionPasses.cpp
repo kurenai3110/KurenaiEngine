@@ -28,6 +28,11 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHIBuffer* const lightBuffer = frame.Scene->LightBuffer.get();
+        RHI::IRHIBuffer* const modelInstanceBuffer = frame.Scene->ModelInstanceBuffer.get();
+        const Assets::RaytracingScene* const raytracingScene = &frame.Scene->RaytracingScene;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHITexture* const cloudDetailNoiseTexture = frame.Sky->CloudDetailNoiseTexture.get();
         RHI::IRHITexture* const cloudShapeNoiseTexture = frame.Sky->CloudShapeNoiseTexture.get();
         RHI::IRHITexture* const cloudWeatherNoiseTexture = frame.Sky->CloudWeatherNoiseTexture.get();
@@ -101,8 +106,8 @@ namespace Kurenai::Passes
                 // 順序付けさせるために挙げる(実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
                 // m_DroneBufferはこのパス末尾でドローンショーの機体を描き足すために読む
                 // (実際のバインドはExecute内)
-                .BufferReads = { m_Engine.m_LightBuffer.get(), skyParametersBuffer, m_Engine.m_DroneBuffer.get() },
-                .Execute = [this, skyParametersBuffer, skyViewLUT, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, planarReflectionViewport, reflectedViewProj, reflectMatrix, waterPlaneY, viewMatrix, jitteredProj, effectiveExposure, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .BufferReads = { lightBuffer, skyParametersBuffer, m_Engine.m_DroneBuffer.get() },
+                .Execute = [this, lightBuffer, modelInstanceBuffer, skyParametersBuffer, skyViewLUT, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, planarReflectionViewport, reflectedViewProj, reflectMatrix, waterPlaneY, viewMatrix, jitteredProj, effectiveExposure, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     // captureProbeFaceとまったく同じ作法(constants.ViewProj/CameraPosition/
                     // PrevViewProj/TAAParams/PlanarReflectionPlaneだけをこのパス用に差し替える)。
@@ -141,7 +146,7 @@ namespace Kurenai::Passes
 
                     // captureProbeFaceと同じ順・同じレジスタでバインドする(PlanarReflection.hlsl参照)
                     cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
-                    cmd->SetShaderResourceBuffer(8, m_Engine.m_LightBuffer.get());
+                    cmd->SetShaderResourceBuffer(8, lightBuffer);
                     cmd->SetTexture(9, irradianceTexture);
                     cmd->SetTexture(10, prefilteredEnvTexture);
                     cmd->SetTexture(11, brdfLUTTexture);
@@ -209,7 +214,7 @@ namespace Kurenai::Passes
                             // 張り直さないと全インスタンスがドローンの座標を行列として読む
                             if (unit.IsBatch())
                             {
-                                cmd->SetVertexShaderResourceBuffer(0, m_Engine.m_ModelInstanceBuffer.get());
+                                cmd->SetVertexShaderResourceBuffer(0, modelInstanceBuffer);
                             }
 
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
@@ -364,7 +369,7 @@ namespace Kurenai::Passes
                     m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_RenderTargets.GBufferBentNormal.get(),
                 },
                 .Writes = { m_Engine.m_RTReflectionTexture.get() },
-                .Execute = [this, brdfLUTTexture, prefilteredEnvTexture, geometrySettings, reflectionSettings, activeAOTexture, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, raytracingScene, brdfLUTTexture, prefilteredEnvTexture, geometrySettings, reflectionSettings, activeAOTexture, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     RTReflectionConstants rtConstants{};
                     rtConstants.Params0 = {
@@ -394,7 +399,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_RTReflectionConstantBuffer.get());
 
-                    cmd->SetComputeAccelerationStructure(0, m_Engine.m_RaytracingScene.GetTopLevelAS());
+                    cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
                     cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.SceneColor.get());
                     cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferNormal.get());
                     cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferMaterial.get());
@@ -405,16 +410,16 @@ namespace Kurenai::Passes
                     cmd->SetComputeTexture(8, prefilteredEnvTexture);
                     cmd->SetComputeTexture(9, m_Engine.m_ProbePrefilteredArray.get());
                     cmd->SetComputeShaderResourceBuffer(10, m_Engine.m_ProbeBuffer.get());
-                    cmd->SetComputeShaderResourceBuffer(11, m_Engine.m_RaytracingScene.GetVertexAttributeBuffer());
-                    cmd->SetComputeShaderResourceBuffer(12, m_Engine.m_RaytracingScene.GetIndexBuffer());
-                    cmd->SetComputeShaderResourceBuffer(13, m_Engine.m_RaytracingScene.GetMeshInfoBuffer());
-                    cmd->SetComputeShaderResourceBuffer(14, m_Engine.m_RaytracingScene.GetInstanceInfoBuffer());
-                    cmd->SetComputeShaderResourceBuffer(15, m_Engine.m_RaytracingScene.GetMaterialBuffer());
+                    cmd->SetComputeShaderResourceBuffer(11, raytracingScene->GetVertexAttributeBuffer());
+                    cmd->SetComputeShaderResourceBuffer(12, raytracingScene->GetIndexBuffer());
+                    cmd->SetComputeShaderResourceBuffer(13, raytracingScene->GetMeshInfoBuffer());
+                    cmd->SetComputeShaderResourceBuffer(14, raytracingScene->GetInstanceInfoBuffer());
+                    cmd->SetComputeShaderResourceBuffer(15, raytracingScene->GetMaterialBuffer());
                     // メッシュレット表(t17)。RTReflection.hlslのKURENAI_RT_MESHLET_REGISTERと
                     // 一致させること。デバッグ表示でヒット面のメッシュレットを引くのに使う。
                     // 無いシーンでバインドしない理由はRTAO側と同じ。
                     // t8はプリフィルタ済み鏡面(上の16行目)が使っており空いていない
-                    if (RHI::IRHIBuffer* meshletBuffer = m_Engine.m_RaytracingScene.GetMeshletTriangleOffsetBuffer())
+                    if (RHI::IRHIBuffer* meshletBuffer = raytracingScene->GetMeshletTriangleOffsetBuffer())
                     {
                         cmd->SetComputeShaderResourceBuffer(17, meshletBuffer);
                     }

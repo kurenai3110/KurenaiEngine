@@ -2130,7 +2130,7 @@ namespace Kurenai
         lightBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
         lightBufferDesc.SizeInBytes = sizeof(GPULight) * kMaxLights;
         lightBufferDesc.StrideInBytes = sizeof(GPULight);
-        m_LightBuffer = m_Device->CreateBuffer(lightBufferDesc);
+        m_SceneGPUResources.LightBuffer = m_Device->CreateBuffer(lightBufferDesc);
 
         RHI::BufferDesc lightingConstantBufferDesc;
         lightingConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
@@ -2200,19 +2200,19 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunRaytracedReflection() const
     {
-        return m_ReflectionSettings.Mode == ReflectionMode::Raytraced && m_RaytracingScene.IsValid() &&
+        return m_ReflectionSettings.Mode == ReflectionMode::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
                m_RTReflectionPipelineState != nullptr && m_RTReflectionTexture != nullptr;
     }
 
     bool KurenaiEngine3D::ShouldRunRaytracedShadow() const
     {
-        return m_ShadowSettings.Mode == ShadowMode::Raytraced && m_RaytracingScene.IsValid() &&
+        return m_ShadowSettings.Mode == ShadowMode::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
                m_ShadowPasses->HasRaytracedPipelineState() && m_RenderTargets.RTShadowTexture != nullptr;
     }
 
     bool KurenaiEngine3D::ShouldRunMegaLights() const
     {
-        if (m_MegaLightsSettings.Mode == MegaLightsMode::Off || !m_RaytracingScene.IsValid() || m_MegaLightsTexture == nullptr)
+        if (m_MegaLightsSettings.Mode == MegaLightsMode::Off || !m_SceneGPUResources.RaytracingScene.IsValid() || m_MegaLightsTexture == nullptr)
         {
             return false;
         }
@@ -2256,7 +2256,7 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunRaytracedAO() const
     {
-        return m_AmbientOcclusionSettings.Technique == AOTechnique::Raytraced && m_RaytracingScene.IsValid() &&
+        return m_AmbientOcclusionSettings.Technique == AOTechnique::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
                m_RTAOPipelineState != nullptr && m_RTAORawTexture != nullptr && m_RTAOTexture != nullptr;
     }
 
@@ -2947,7 +2947,7 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunRaytracedDDGITrace() const
     {
-        return m_DDGISettings.RayMode == DDGIRayMode::Raytraced && m_RaytracingScene.IsValid() &&
+        return m_DDGISettings.RayMode == DDGIRayMode::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
                m_DDGIProbeTracePipelineState != nullptr && m_DDGITraceConstantBuffer != nullptr;
     }
 
@@ -6282,7 +6282,7 @@ namespace Kurenai
         // 0灯のフレームでは更新自体を省略してよい(シェーダはライト数までしかループしないため)
         if (!gpuLights.empty())
         {
-            commandList->UpdateBuffer(m_LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
+            commandList->UpdateBuffer(m_SceneGPUResources.LightBuffer.get(), gpuLights.data(), gpuLights.size() * sizeof(GPULight));
         }
 
         // --- ドローンショーの機体をGPUへ送る ---
@@ -6388,6 +6388,7 @@ namespace Kurenai
         frameContext.SkyTexture = skyTexture;
         frameContext.IBL = &m_IBLResources;
         frameContext.Sky = &m_SkyResources;
+        frameContext.Scene = &m_SceneGPUResources;
 
         Rendering::RenderBlackboard blackboard{};
 

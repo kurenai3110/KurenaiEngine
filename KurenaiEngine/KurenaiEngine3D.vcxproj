@@ -104,6 +104,7 @@
     <ClInclude Include="Source\Engine\Rendering\MeshletLODFrameConstants.h" />
     <ClInclude Include="Source\Engine\Rendering\IBLResources.h" />
     <ClInclude Include="Source\Engine\Rendering\SkyResources.h" />
+    <ClInclude Include="Source\Engine\Rendering\SceneGPUResources.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderTargets.h" />
     <ClInclude Include="Source\Engine\Rendering\ShadowConstants.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderBlackboard.h" />
