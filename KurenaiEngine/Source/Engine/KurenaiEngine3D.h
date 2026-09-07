@@ -42,6 +42,7 @@
 #include "Settings/QualitySettings.h"
 #include "Settings/ReflectionProbeSettings.h"
 #include "Settings/ReflectionSettings.h"
+#include "Rendering/DroneShowResources.h"
 #include "Rendering/GIResources.h"
 #include "Rendering/IBLResources.h"
 #include "Rendering/SkyResources.h"
@@ -1198,20 +1199,18 @@ namespace Kurenai
         // 加算合成で描く。編隊の生成と時間補間はDroneShow.h/.cppが持ち、ここは描画だけを担う。
         //
         // 頂点バッファを持たず、Draw(6 * 機体数, 0)とSV_VertexIDでクアッドを展開する
-        // (理由はShaders/3D/DroneShow.hlsl冒頭)。機体データはm_DroneBufferから
+        // (理由はShaders/3D/DroneShow.hlsl冒頭)。機体データはm_DroneShowResources.Bufferから
         // 頂点シェーダーが直接読む(SetVertexShaderResourceBuffer)。
         //
         // 【PSOは1本でよい】平面反射(鏡映カメラ)でもこれをそのまま使う。メッシュ描画のように
         // ワインディングを反転したPSOを別に持つ必要は無い ―― 理由はPSO生成箇所のコメント
         std::unique_ptr<RHI::IRHIShader> m_DroneShowVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_DroneShowPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DroneShowPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_DroneShowConstantBuffer;
-        // 機体データ(StructuredReadOnly)。kMaxDrones分を固定で確保し、実際に描くのは
-        // m_DroneInstances.size()機ぶんだけ
-        std::unique_ptr<RHI::IRHIBuffer> m_DroneBuffer;
+        // PSO・定数バッファ・機体データは本描画と平面反射の2群が同じものを使うため、
+        // 持ち主を Rendering/DroneShowResources.h へ移した
+        Rendering::DroneShowResources m_DroneShowResources;
         // 1フレームぶんの機体の状態。毎フレームDroneShow::Evaluateが書き、
-        // グラフ構築前に1回だけm_DroneBufferへUpdateBufferする
+        // グラフ構築前に1回だけm_DroneShowResources.BufferへUpdateBufferする
         // (m_SceneGPUResources.LightBufferと同じ理由: 本描画と平面反射の2パスから読まれるため、
         //  パスの中で更新すると先に走る側が未更新の内容を読む)
         std::vector<GPUDrone> m_DroneInstances;

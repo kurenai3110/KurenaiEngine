@@ -19,6 +19,11 @@ namespace Kurenai::Passes
         const Rendering::RenderTargets* const targets = frame.Targets;
 
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::DroneShowResources* const droneShow = frame.DroneShow;
+        const float droneBrightness = frame.DroneShowBrightness;
+        const float droneMinScreenRadius = frame.DroneShowMinScreenRadius;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHIBuffer* const skyParametersBuffer = frame.Sky->ParametersBuffer.get();
         RHI::IRHITexture* const skyViewLUT = frame.Sky->SkyViewLUT.get();
 
@@ -107,16 +112,17 @@ namespace Kurenai::Passes
         //
         // 書き込み先をtaaInputColorにしているのは、反射やフォグの有無でHDRシーン色の実体が
         // 移り変わるため。「今のHDRシーン色」を指す変数へ描くことでどの組み合わせでも成立する
-        if (m_Engine.m_DroneShowEnabled && !m_Engine.m_DroneInstances.empty())
+        if (frame.DroneShowRuns)
         {
-            const uint32_t droneCount = static_cast<uint32_t>(m_Engine.m_DroneInstances.size());
+            const uint32_t droneCount = frame.DroneCount;
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "DroneShow",
                 .RenderTargets = { taaInputColor },
                 // 島や地形の後ろに回った機体を隠すために深度テストを行う(書き込みはしない)
                 .DepthTarget = targets->GBufferDepth.get(),
-                .BufferReads = { m_Engine.m_DroneBuffer.get() },
-                .Execute = [this, gbufferViewport, viewMatrix, jitteredProj, effectiveExposure, droneCount](
+                .BufferReads = { droneShow->Buffer.get() },
+                .Execute = [droneShow, gbufferViewport, viewMatrix, jitteredProj, effectiveExposure, droneCount,
+                            droneBrightness, droneMinScreenRadius](
                                RHI::IRHICommandList* cmd)
                 {
                     DirectX::XMFLOAT4X4 projection;
@@ -128,8 +134,8 @@ namespace Kurenai::Passes
                     droneConstants.Params0 = {
                         // 実効プリ露出を掛ける。HDRバッファの中身はすべてプリ露出済みの値なので、
                         // ここで掛けないと機体だけが露出に追従しない浮いた明るさになる
-                        m_Engine.m_DroneShow.Data().Brightness * effectiveExposure,
-                        m_Engine.m_DroneShowMinScreenRadius,
+                        droneBrightness * effectiveExposure,
+                        droneMinScreenRadius,
                         // 射影行列の[0][0]。シェーダ側で最小画面サイズを世界半径へ逆算するのに使う
                         projection._11,
                         0.0f,
@@ -137,14 +143,14 @@ namespace Kurenai::Passes
                     droneConstants.ClipPlane = { 0.0f, 1.0f, 0.0f, 0.0f };
                     // メイン描画ではクリップしない(平面反射パスだけが使う)
                     droneConstants.Params1 = { 0.0f, 0.0f, 0.0f, 0.0f };
-                    cmd->UpdateBuffer(m_Engine.m_DroneShowConstantBuffer.get(), &droneConstants, sizeof(droneConstants));
+                    cmd->UpdateBuffer(droneShow->ConstantBuffer.get(), &droneConstants, sizeof(droneConstants));
 
                     cmd->SetViewport(gbufferViewport);
-                    cmd->SetPipelineState(m_Engine.m_DroneShowPipelineState.get());
-                    cmd->SetConstantBuffer(1, m_Engine.m_DroneShowConstantBuffer.get());
+                    cmd->SetPipelineState(droneShow->PipelineState.get());
+                    cmd->SetConstantBuffer(1, droneShow->ConstantBuffer.get());
                     // 機体データは頂点シェーダーが読む。通常のSetShaderResourceBufferが使う
                     // SRVテーブルはピクセルシェーダーからしか見えないため専用の経路を使う
-                    cmd->SetVertexShaderResourceBuffer(0, m_Engine.m_DroneBuffer.get());
+                    cmd->SetVertexShaderResourceBuffer(0, droneShow->Buffer.get());
                     // 1機につき2三角形。頂点バッファもインデックスバッファも要らない
                     cmd->Draw(droneCount * 6u, 0);
                 },

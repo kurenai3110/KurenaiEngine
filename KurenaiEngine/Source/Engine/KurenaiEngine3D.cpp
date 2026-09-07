@@ -912,18 +912,18 @@ namespace Kurenai
         // という作り方をしている(DroneShow.hlslのVSMain)。四隅のオフセットは鏡映行列を
         // 一度も通らないので、Viewが鏡映を含んでいてもクアッド自身の巻きは変わらない。
         // 反転したPSOで描くと1機残らず裏面として捨てられ、水面に何も映らなくなる
-        m_DroneShowPipelineState = m_Device->CreatePipelineState(droneShowPipelineDesc);
+        m_DroneShowResources.PipelineState = m_Device->CreatePipelineState(droneShowPipelineDesc);
 
         RHI::BufferDesc droneShowConstantBufferDesc;
         droneShowConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         droneShowConstantBufferDesc.SizeInBytes = sizeof(Passes::DroneShowConstants);
-        m_DroneShowConstantBuffer = m_Device->CreateBuffer(droneShowConstantBufferDesc);
+        m_DroneShowResources.ConstantBuffer = m_Device->CreateBuffer(droneShowConstantBufferDesc);
 
         RHI::BufferDesc droneBufferDesc;
         droneBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
         droneBufferDesc.SizeInBytes = sizeof(GPUDrone) * kMaxDrones;
         droneBufferDesc.StrideInBytes = sizeof(GPUDrone);
-        m_DroneBuffer = m_Device->CreateBuffer(droneBufferDesc);
+        m_DroneShowResources.Buffer = m_Device->CreateBuffer(droneBufferDesc);
 
         // Hi-Zミップチェーン構築パス(コンピュートシェーダー)。CSCopyでG-Buffer深度をミップ0へコピーし、
         // CSDownsampleをミップ数-1回ディスパッチして1x1まで縮小する
@@ -5260,7 +5260,7 @@ namespace Kurenai
         if (m_DroneShowEnabled)
         {
             m_DroneShow.Evaluate(m_DroneShowTime, m_DroneShowCenter, m_DroneShowScale, m_DroneInstances);
-            // 【バッファの容量を超える機体は描かない】m_DroneBufferはkMaxDrones分を固定確保して
+            // 【バッファの容量を超える機体は描かない】m_DroneShowResources.BufferはkMaxDrones分を固定確保して
             // いるので、それを超えた分をUpdateBufferへ渡すと書き込みが範囲外になる。
             // .kshowの機体数はエディタ側で上限を掛けているが、外から来たファイルでも
             // 壊れないよう、ここで切り詰める(光源を作るのも切り詰めた後の配列から)
@@ -6226,7 +6226,7 @@ namespace Kurenai
         if (m_DroneShowEnabled && !m_DroneInstances.empty())
         {
             commandList->UpdateBuffer(
-                m_DroneBuffer.get(), m_DroneInstances.data(), m_DroneInstances.size() * sizeof(GPUDrone));
+                m_DroneShowResources.Buffer.get(), m_DroneInstances.data(), m_DroneInstances.size() * sizeof(GPUDrone));
         }
 
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
@@ -6323,6 +6323,12 @@ namespace Kurenai
         frameContext.Scene = &m_SceneGPUResources;
         frameContext.Targets = &m_RenderTargets;
         frameContext.GI = &m_GIResources;
+        frameContext.DroneShow = &m_DroneShowResources;
+        // 【述語をここで1回だけ決める】本描画と平面反射の2群が同じ判定を見る必要がある
+        frameContext.DroneShowRuns = m_DroneShowEnabled && !m_DroneInstances.empty();
+        frameContext.DroneCount = static_cast<uint32_t>(m_DroneInstances.size());
+        frameContext.DroneShowBrightness = m_DroneShow.Data().Brightness;
+        frameContext.DroneShowMinScreenRadius = m_DroneShowMinScreenRadius;
 
         Rendering::RenderBlackboard blackboard{};
 

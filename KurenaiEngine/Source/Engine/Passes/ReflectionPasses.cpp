@@ -34,6 +34,13 @@ namespace Kurenai::Passes
         const Rendering::RenderTargets* const targets = frame.Targets;
 
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::DroneShowResources* const droneShow = frame.DroneShow;
+        const bool droneShowRuns = frame.DroneShowRuns;
+        const uint32_t droneCount = frame.DroneCount;
+        const float droneBrightness = frame.DroneShowBrightness;
+        const float droneMinScreenRadius = frame.DroneShowMinScreenRadius;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHIBuffer* const lightBuffer = frame.Scene->LightBuffer.get();
         RHI::IRHIBuffer* const modelInstanceBuffer = frame.Scene->ModelInstanceBuffer.get();
         const Assets::RaytracingScene* const raytracingScene = &frame.Scene->RaytracingScene;
@@ -110,10 +117,11 @@ namespace Kurenai::Passes
                 .DepthTarget = targets->PlanarReflectionDepth.get(),
                 // 大気遠近。空パラメータ(m_SkyResources.ParametersBuffer)をSkyIntegrateパスの後へ
                 // 順序付けさせるために挙げる(実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
-                // m_DroneBufferはこのパス末尾でドローンショーの機体を描き足すために読む
+                // DroneShowResources::Bufferはこのパス末尾でドローンショーの機体を描き足すために読む
                 // (実際のバインドはExecute内)
-                .BufferReads = { lightBuffer, skyParametersBuffer, m_Engine.m_DroneBuffer.get() },
-                .Execute = [this, gi, targets, lightBuffer, modelInstanceBuffer, skyParametersBuffer, skyViewLUT, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, planarReflectionViewport, reflectedViewProj, reflectMatrix, waterPlaneY, viewMatrix, jitteredProj, effectiveExposure, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .BufferReads = { lightBuffer, skyParametersBuffer, droneShow->Buffer.get() },
+                .Execute = [this, gi, targets, lightBuffer, modelInstanceBuffer, skyParametersBuffer, skyViewLUT, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, planarReflectionViewport, reflectedViewProj, reflectMatrix, waterPlaneY, viewMatrix, jitteredProj, effectiveExposure, objectConstantBuffer, materialSamplers,
+                            droneShow, droneShowRuns, droneCount, droneBrightness, droneMinScreenRadius](RHI::IRHICommandList* cmd)
                 {
                     // captureProbeFaceとまったく同じ作法(constants.ViewProj/CameraPosition/
                     // PrevViewProj/TAAParams/PlanarReflectionPlaneだけをこのパス用に差し替える)。
@@ -239,7 +247,7 @@ namespace Kurenai::Passes
                     // 機体もそのままのワールド座標で、鏡映済みのビュー行列で描き直せばよい。
                     // これを描かないと、空には編隊が出ているのに水面には何も映らない
                     // (SSRパスがm_RenderTargets.PlanarReflectionColorを水面へ合成する)
-                    if (m_Engine.m_DroneShowEnabled && !m_Engine.m_DroneInstances.empty())
+                    if (droneShowRuns)
                     {
                         DirectX::XMFLOAT4X4 projection;
                         DirectX::XMStoreFloat4x4(&projection, jitteredProj);
@@ -251,8 +259,8 @@ namespace Kurenai::Passes
                             &droneConstants.View, DirectX::XMMatrixTranspose(reflectMatrix * viewMatrix));
                         DirectX::XMStoreFloat4x4(&droneConstants.Proj, DirectX::XMMatrixTranspose(jitteredProj));
                         droneConstants.Params0 = {
-                            m_Engine.m_DroneShow.Data().Brightness * effectiveExposure,
-                            m_Engine.m_DroneShowMinScreenRadius,
+                            droneBrightness * effectiveExposure,
+                            droneMinScreenRadius,
                             projection._11,
                             0.0f,
                         };
@@ -260,15 +268,15 @@ namespace Kurenai::Passes
                         // SV_ClipDistance0(FrameConstants.PlanarReflectionPlane)と同じ規約・同じ平面
                         droneConstants.ClipPlane = { 0.0f, 1.0f, 0.0f, -waterPlaneY };
                         droneConstants.Params1 = { 1.0f, 0.0f, 0.0f, 0.0f };
-                        cmd->UpdateBuffer(m_Engine.m_DroneShowConstantBuffer.get(), &droneConstants, sizeof(droneConstants));
+                        cmd->UpdateBuffer(droneShow->ConstantBuffer.get(), &droneConstants, sizeof(droneConstants));
 
                         // メイン描画とまったく同じPSOでよい(ビルボードの四隅はビュー空間で
                         // 足しており鏡映行列を通らないため、巻きが反転しない。
                         // 詳しい理由はPSO生成箇所のコメント)
-                        cmd->SetPipelineState(m_Engine.m_DroneShowPipelineState.get());
-                        cmd->SetConstantBuffer(1, m_Engine.m_DroneShowConstantBuffer.get());
-                        cmd->SetVertexShaderResourceBuffer(0, m_Engine.m_DroneBuffer.get());
-                        cmd->Draw(static_cast<uint32_t>(m_Engine.m_DroneInstances.size()) * 6u, 0);
+                        cmd->SetPipelineState(droneShow->PipelineState.get());
+                        cmd->SetConstantBuffer(1, droneShow->ConstantBuffer.get());
+                        cmd->SetVertexShaderResourceBuffer(0, droneShow->Buffer.get());
+                        cmd->Draw(droneCount * 6u, 0);
                     }
                 },
             });

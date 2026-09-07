@@ -13,6 +13,7 @@
 #include "IBLResources.h"
 #include "RenderTargets.h"
 #include "SceneGPUResources.h"
+#include "DroneShowResources.h"
 #include "SkyResources.h"
 #include "RenderSettingsSnapshot.h"
 
@@ -113,6 +114,20 @@ namespace Kurenai::Rendering
 
         // 間接光(DDGI・反射プローブ)のリソース一式。IBLと同じくポインタだけ載せる
         const GIResources* GI = nullptr;
+
+        // ドローンショーのGPUリソース一式。IBLと同じくエンジンが持ったまま、ポインタだけ載せる
+        const DroneShowResources* DroneShow = nullptr;
+
+        // 今フレーム、ドローンの編隊を描くか。**判定はここが唯一の実装**で、
+        // 本描画(PostProcess)と平面反射(Reflection)の2群が同じ述語を見る必要がある
+        // (片方だけ描くと、空には編隊が出ているのに水面には映らない、の逆が起きる)
+        bool DroneShowRuns = false;
+        // 今フレーム描く機体数。1機につき2三角形なので、ドローは DroneCount * 6 頂点
+        uint32_t DroneCount = 0;
+        // 機体の明るさ(.kshowが持つ値)。実効プリ露出を掛けるのはパス側
+        float DroneShowBrightness = 0.0f;
+        // 遠方の機体が1画素を割ってTAAのジッターでちらつくのを防ぐ、画面上の最小半径(NDC単位)
+        float DroneShowMinScreenRadius = 0.0f;
 
         // PresentパスがRenderGraphPassDesc::SwapChainTargetへ渡す
         RHI::IRHISwapChain* SwapChain = nullptr;
