@@ -85,7 +85,7 @@ namespace Kurenai::ShaderInterop
         // (テクセル。ReflectionProbe.hlsliのProbeDistanceBiasが1テクセル幅の見積もりに使う。
         // ハードコードせずここから渡すのは、kProbeCaptureSizeを変えたときに黙ってずれないため)、
         // w=焼いた時点の実効プリ露出から現在の実効プリ露出への換算倍率(19.14節。
-        // m_ProbeBakedExposureEV100のコメントに理由がある)
+        // ReflectionProbePasses::m_ProbeBakedExposureEV100のコメントに理由がある)
         DirectX::XMFLOAT4 ProbeParams2;
         // TAA用(末尾に追加のため既存シェーダのオフセットは変わらない)。前フレームの
         // ビュー射影行列(TAAのジッターを含んだままのもの)。GBuffer.hlslが頂点をこの行列でも

@@ -59,6 +59,22 @@ namespace Kurenai::Rendering
         std::unique_ptr<RHI::IRHIBuffer> ProbeCaptureConstantBuffer;
         std::unique_ptr<RHI::IRHIPipelineState> ProbeCubeCopyPipelineState;
 
+        // 上のPSOが書く先。**キャプチャPSOと同じ理由でここが持つ** ―― 反射プローブとDDGIが
+        // 同じ経路でキャプチャするため、どちらかの群に持たせるともう片方が経由して取りに行く。
+        //
+        // 1面ぶんのキャプチャ先(6面で使い回す)。HDRのままキューブへ写すためG-Bufferと違いFloat
+        std::unique_ptr<RHI::IRHITexture> ProbeCaptureColor;
+        // 同じキャプチャの2枚目のレンダーターゲット(SV_TARGET1)。プローブ位置から描画点までの
+        // ワールド距離をそのまま書く。深度バッファから逆算せずMRTで直に出しているのは、
+        // 面ごとの逆投影を組む必要がなくキャプチャシェーダーの1行で済むため(19.12節)
+        std::unique_ptr<RHI::IRHITexture> ProbeCaptureDistance;
+        std::unique_ptr<RHI::IRHITexture> ProbeCaptureDepth;
+        // キャプチャした6面を組み上げるスクラッチのキューブマップ(単一キューブ)。畳み込みの入力に
+        // なるためTextureCubeArrayではなくTextureCubeである必要がある(IBLConvolve.hlslのSourceSkyboxは
+        // TextureCube宣言のまま。これによりIBLの畳み込みシェーダーを一切変更せず再利用できる)。
+        // プローブは1つずつ順に焼くため1枚で足りる
+        std::unique_ptr<RHI::IRHITexture> ProbeRadianceCube;
+
         // シーンが持つ反射プローブの一覧。ApplyLoadedSceneがm_Scene.ReflectionProbesから
         // コピーし、以降ImGuiが編集する。Renderスレッド専有のためロックは不要。
         // 焼くのはReflectionProbePassesだけだが、PresentPassのデバッグ表示が

@@ -1891,15 +1891,15 @@ namespace Kurenai
 
         // --- 反射プローブ(19章) ---
         // キャプチャ先(1面ぶんを6面で使い回す)。キューブへ写す前のHDR値を保つためFloatにする
-        m_ProbeCaptureColor = m_Device->CreateRenderTexture(kProbeCaptureSize, kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
+        m_GIResources.ProbeCaptureColor = m_Device->CreateRenderTexture(kProbeCaptureSize, kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
         // 同じキャプチャの2枚目(SV_TARGET1)。プローブからのワールド距離をそのまま入れるため、
         // [0,1]に収まらず精度も必要になる。R32_Floatなら室内スケールでも十分な絶対精度がある
-        m_ProbeCaptureDistance = m_Device->CreateRenderTexture(kProbeCaptureSize, kProbeCaptureSize, RHI::Format::R32_Float);
+        m_GIResources.ProbeCaptureDistance = m_Device->CreateRenderTexture(kProbeCaptureSize, kProbeCaptureSize, RHI::Format::R32_Float);
         // Reverse-Zのため遠平面側(0.0)でクリアする(G-Buffer深度と同じ)
-        m_ProbeCaptureDepth = m_Device->CreateDepthTexture(kProbeCaptureSize, kProbeCaptureSize, 0.0f);
+        m_GIResources.ProbeCaptureDepth = m_Device->CreateDepthTexture(kProbeCaptureSize, kProbeCaptureSize, 0.0f);
         // 畳み込みの入力になるスクラッチのキューブマップ(TextureCubeとして読めること
-        // = 配列ではないことが必須。理由はヘッダのm_ProbeRadianceCubeのコメント参照)
-        m_ProbeRadianceCube = m_Device->CreateUAVTextureCube(kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
+        // = 配列ではないことが必須。理由はGIResources::ProbeRadianceCubeのコメント参照)
+        m_GIResources.ProbeRadianceCube = m_Device->CreateUAVTextureCube(kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
         // 畳み込み結果はプローブごとに保持するためキューブマップ配列で確保する。
         // 反射プローブは鏡面専任なので拡散イラディアンス側の配列は持たない
         // (拡散はDDGIへ一本化。ReflectionProbe.hlsli冒頭のコメント参照)
@@ -2109,6 +2109,14 @@ namespace Kurenai
         return m_SystemSettings.Precision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
                                                                 : RHI::Format::R16G16B16A16_Float;
     }
+
+    // 反射プローブの焼き上がりの状態は Passes::ReflectionProbePasses が持つ。
+    // ここはImGuiのパネルとシーン読み込みのために委譲するだけで、状態そのものは持たない。
+    // **ヘッダではPasses::*を前方宣言しかしていないため、定義はここに置く**
+    bool& KurenaiEngine3D::GetProbeBaked() { return m_ReflectionProbePasses->GetProbeBaked(); }
+    bool& KurenaiEngine3D::GetProbeBakeRequested() { return m_ReflectionProbePasses->GetProbeBakeRequested(); }
+    uint32_t KurenaiEngine3D::GetProbeRealtimeProbeIndex() const { return m_ReflectionProbePasses->GetProbeRealtimeProbeIndex(); }
+    uint32_t KurenaiEngine3D::GetProbeRealtimeFace() const { return m_ReflectionProbePasses->GetProbeRealtimeFace(); }
 
     bool KurenaiEngine3D::ShouldRunRaytracedReflection() const
     {
@@ -5787,20 +5795,21 @@ namespace Kurenai
         // ない。手続き空が同じ理由で焼き直しているのと揃える(閾値は空の0.05段よりずっと粗く
         // 取ってある。フルベイクはプローブ数×6面の描画になるため)。
         // Realtimeは毎フレーム焼き直しているので対象外
-        if (m_ReflectionProbeSettings.UpdateMode != ProbeUpdateMode::Realtime && m_ProbeBaked && !m_GIResources.ReflectionProbes.empty() &&
-            std::abs(m_EffectiveExposureEV100 - m_ProbeBakedExposureEV100) > kProbeRebakeExposureEV)
+        if (m_ReflectionProbeSettings.UpdateMode != ProbeUpdateMode::Realtime && m_ReflectionProbePasses->GetProbeBaked() &&
+            !m_GIResources.ReflectionProbes.empty() &&
+            std::abs(m_EffectiveExposureEV100 - m_ReflectionProbePasses->GetProbeBakedExposureEV100()) > kProbeRebakeExposureEV)
         {
-            m_ProbeBakeRequested = true;
+            m_ReflectionProbePasses->GetProbeBakeRequested() = true;
             // このフレームの後半で今の露出で焼かれるため、換算倍率もここで合わせておく。
             // ここで合わせないと、焼き直したフレームだけ1フレーム古い倍率が掛かって明滅する
-            m_ProbeBakedExposureEV100 = m_EffectiveExposureEV100;
+            m_ReflectionProbePasses->GetProbeBakedExposureEV100() = m_EffectiveExposureEV100;
         }
 
         // 反射プローブの影響範囲をt13のStructuredBufferへ渡す。まだ一度も焼けていない場合
-        // (m_ProbeBaked=false)や機能を無効にしている場合はプローブ数を0にして、シェーダー側の
+        // (まだ焼けていない)や機能を無効にしている場合はプローブ数を0にして、シェーダー側の
         // 選択ループ自体を回さない=中身が未定義のキューブマップを引かせないようにする
         std::vector<GPUReflectionProbe> gpuProbes;
-        if (m_ReflectionProbeSettings.Enabled && m_ProbeBaked)
+        if (m_ReflectionProbeSettings.Enabled && m_ReflectionProbePasses->GetProbeBaked())
         {
             gpuProbes.reserve(m_GIResources.ReflectionProbes.size());
             for (const Assets::ReflectionProbe& probe : m_GIResources.ReflectionProbes)
@@ -5837,12 +5846,12 @@ namespace Kurenai
             m_ReflectionProbeSettings.OcclusionEnabled ? 1.0f : 0.0f,
             static_cast<float>(kProbeCaptureSize),
             // 焼いた時点の実効プリ露出から現在の実効プリ露出への換算倍率
-            // (m_ProbeBakedExposureEV100のコメント参照)。ComputeExposure(ev)=1/(1.2*2^ev)
+            // (ReflectionProbePasses::m_ProbeBakedExposureEV100のコメント参照)。ComputeExposure(ev)=1/(1.2*2^ev)
             // なので、比は 2^(焼いたEV - 現在のEV) になる。
             // フルベイクが走るフレームだけは1フレームぶん古い倍率になるが、それが問題になるのは
             // 「焼き直しと大きな露出変化が同じフレームで起きる」ときだけで、シーン読み込み時は
             // 上のm_EffectiveExposureInitialized=falseで露出が既に確定しているため起きない
-            std::exp2(m_ProbeBakedExposureEV100 - m_EffectiveExposureEV100),
+            std::exp2(m_ReflectionProbePasses->GetProbeBakedExposureEV100() - m_EffectiveExposureEV100),
         };
 
         // モーションベクター用の前フレーム情報。初回フレームは前フレームの行列が未定義なので、
@@ -5860,7 +5869,7 @@ namespace Kurenai
         }
 
         // DDGI(22章)。一度も焼けていない間はアトラスの中身が未定義なので無効にしておく
-        // (反射プローブのm_ProbeBakedと同じ方針)
+        // (反射プローブの「一度でも焼けたか」と同じ方針)
         const bool ddgiActive = m_DDGISettings.Enabled && m_GIResources.HasGIVolume && m_DDGIBaked;
         constants.DDGIParams0 = {
             m_GIResources.GIVolume.Origin[0], m_GIResources.GIVolume.Origin[1], m_GIResources.GIVolume.Origin[2],

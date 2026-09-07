@@ -12,6 +12,7 @@
 #include "Assets/SceneLoader.h"
 #include "Core/Logger.h"
 #include "Core/StringUtil.h"
+#include "../Passes/ReflectionProbePasses.h"
 
 // シーンの探索・読み込み要求・ホットリロード監視と、Loaderスレッドでの読み込み、
 // 読み込み済みシーンのエンジンへの反映。
@@ -859,11 +860,10 @@ namespace Kurenai
 
         m_SelectedProbeIndex = m_GIResources.ReflectionProbes.empty() ? -1 : 0;
         m_ReflectionProbeSettings.DebugIndex = 0;
-        m_ProbeBaked = false;
-        m_ProbeBakeRequested = !m_GIResources.ReflectionProbes.empty();
+        m_ReflectionProbePasses->GetProbeBaked() = false;
+        m_ReflectionProbePasses->GetProbeBakeRequested() = !m_GIResources.ReflectionProbes.empty();
         // Realtimeのラウンドロビンは先頭から仕切り直す(シーンが変わればプローブの数も並びも変わる)
-        m_ProbeRealtimeProbeIndex = 0;
-        m_ProbeRealtimeFace = 0;
+        m_ReflectionProbePasses->ResetRealtimeProgress();
 
         // DDGIボリューム(22章)。現状は先頭の1つだけを使う。複数ボリュームは重なりと優先順位を
         // 決める仕組みがまだ無いため、2つ目以降は警告を出して切り捨てる
@@ -913,7 +913,7 @@ namespace Kurenai
 
         // 露出の追従状態はシーンをまたいで持ち越さない。時刻が入れ替わると実効プリ露出は
         // 最大18段跳ぶため、追従の途中で反射プローブが焼かれると桁違いの明るさで固定される
-        // (m_ProbeBakedExposureEV100・m_AutoExposureResetRequestedのコメント参照)
+        // (ReflectionProbePasses::m_ProbeBakedExposureEV100・m_AutoExposureResetRequestedのコメント参照)
         m_EffectiveExposureInitialized = false;
         m_AutoExposureResetRequested = true;
 

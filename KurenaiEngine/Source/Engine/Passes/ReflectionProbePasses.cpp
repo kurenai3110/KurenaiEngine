@@ -78,7 +78,7 @@ namespace Kurenai::Passes
         // --- 反射プローブの更新(19章・19.10節) ---
         // 更新モードに応じて「フルベイク(全プローブの全面を1フレームで焼く)」か
         // 「時間分割(1フレームに1面だけ焼く)」のどちらかを実行する。両者はスクラッチの
-        // キューブマップ(m_ProbeRadianceCube)を共有するため、同じフレームで両方を走らせてはならない
+        // キューブマップ(GIResources::ProbeRadianceCube)を共有するため、同じフレームで両方を走らせてはならない
 
         // プローブ1面ぶんのキャプチャ(フォワード描画 → スクラッチのキューブ面へコピー)。
         // フルベイクと時間分割の両方から呼ぶためラムダへ切り出してある
@@ -92,7 +92,7 @@ namespace Kurenai::Passes
             probeViewport.Width = static_cast<float>(kProbeCaptureSize);
             probeViewport.Height = static_cast<float>(kProbeCaptureSize);
             // 2枚目は距離(19.12節)。ProbeCapture.hlslのPSOutputと並びを一致させること
-            RHI::IRHITexture* const captureTargets[] = { m_Engine.m_ProbeCaptureColor.get(), m_Engine.m_ProbeCaptureDistance.get() };
+            RHI::IRHITexture* const captureTargets[] = { gi->ProbeCaptureColor.get(), gi->ProbeCaptureDistance.get() };
 
             // 太陽・カスケード・ライト数・IBL設定は共有のFrameConstantsをそのまま使い、
             // 視点に関わる2つだけをプローブのものへ差し替える(ProbeCapture.hlsl冒頭参照)。
@@ -119,7 +119,7 @@ namespace Kurenai::Passes
             captureConstants.MeshletCullStatsParams = { 0.0f, 0.0f, 0.0f, 0.0f };
             cmd->UpdateBuffer(gi->ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
 
-            cmd->SetRenderTargets(captureTargets, 2, m_Engine.m_ProbeCaptureDepth.get());
+            cmd->SetRenderTargets(captureTargets, 2, gi->ProbeCaptureDepth.get());
             cmd->SetViewport(probeViewport);
             // 両方のレンダーターゲットが0でクリアされる。距離側の0は「ジオメトリ無し」を意味しないが、
             // コピー側は深度が書かれたかどうかで判定するためこれで問題ない
@@ -218,10 +218,10 @@ namespace Kurenai::Passes
             // そちらを使わないと、プローブにだけ古いDDSの空が焼き込まれて本編と食い違う
             // (このフレームで使う空はRender冒頭のskyTextureに確定させてある)
             cmd->SetComputeTexture(0, skyTexture);
-            cmd->SetComputeTexture(1, m_Engine.m_ProbeCaptureColor.get());
-            cmd->SetComputeTexture(2, m_Engine.m_ProbeCaptureDepth.get());
-            cmd->SetComputeTexture(3, m_Engine.m_ProbeCaptureDistance.get());
-            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_ProbeRadianceCube.get(), face, 0, 0);
+            cmd->SetComputeTexture(1, gi->ProbeCaptureColor.get());
+            cmd->SetComputeTexture(2, gi->ProbeCaptureDepth.get());
+            cmd->SetComputeTexture(3, gi->ProbeCaptureDistance.get());
+            cmd->SetComputeUnorderedAccessTextureCubeFace(0, gi->ProbeRadianceCube.get(), face, 0, 0);
             // 距離は畳み込まないため、スクラッチのキューブを経由せずプローブのスライスへ直接書く
             cmd->SetComputeUnorderedAccessTextureCubeFace(
                 1, gi->ProbeDistanceArray.get(), face, 0, static_cast<uint32_t>(probeIndex));
@@ -254,10 +254,10 @@ namespace Kurenai::Passes
 
         // 6ミップ×6面ぶん全部を1回で焼く(フルベイク用。Realtimeの時間分割はconvolveProbePrefilterStepを
         // 直接、複数フレームに分けて呼ぶ。下のRealtimeブロック参照)
-        const auto convolveProbePrefilter = [this, convolveProbePrefilterStep, iblPrefilterPipelineState, materialSamplers](RHI::IRHICommandList* cmd, size_t probeIndex)
+        const auto convolveProbePrefilter = [gi, convolveProbePrefilterStep, iblPrefilterPipelineState, materialSamplers](RHI::IRHICommandList* cmd, size_t probeIndex)
         {
             cmd->SetComputePipelineState(iblPrefilterPipelineState);
-            cmd->SetComputeTexture(0, m_Engine.m_ProbeRadianceCube.get());
+            cmd->SetComputeTexture(0, gi->ProbeRadianceCube.get());
             cmd->SetComputeSamplerSet(materialSamplers);
             for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
             {
@@ -276,18 +276,18 @@ namespace Kurenai::Passes
 
         // OnDemandは、焼き上がりに影響する状態(時刻・太陽・ライト)が変わったフレームだけ焼き直す。
         // 一度も焼けていない間はシーン読み込み時の要求が既に立っているのでここでは何もしない
-        if (frame.Settings.ReflectionProbe.UpdateMode == ProbeUpdateMode::OnDemand && probeCount > 0 && m_Engine.m_ProbeBaked &&
-            frame.ProbeBakeSignature != m_Engine.m_ProbeBakeSignature)
+        if (frame.Settings.ReflectionProbe.UpdateMode == ProbeUpdateMode::OnDemand && probeCount > 0 && m_ProbeBaked &&
+            frame.ProbeBakeSignature != m_ProbeBakeSignature)
         {
-            m_Engine.m_ProbeBakeRequested = true;
+            m_ProbeBakeRequested = true;
         }
 
-        if (m_Engine.m_ProbeBakeRequested && probeCount > 0)
+        if (m_ProbeBakeRequested && probeCount > 0)
         {
             // --- フルベイク: 全プローブの6面を1フレームで焼く ---
             // プローブごとに、さらにキャプチャ/プリフィルタ畳み込みで別パスへ分けることで、
             // GPUプロファイラでそれぞれのコストを個別に読める(19.10節の実測)。
-            // 各パスがm_ProbeRadianceCubeを読み書きするため、レンダーグラフのWrite-after-Write /
+            // 各パスがGIResources::ProbeRadianceCubeを読み書きするため、レンダーグラフのWrite-after-Write /
             // Read-after-Write依存で登録順に直列化される(スクラッチを共有しても取り違えは起きない)
             for (size_t probeIndex = 0; probeIndex < probeCount; ++probeIndex)
             {
@@ -295,8 +295,8 @@ namespace Kurenai::Passes
                     .Name = "ProbeBakeCapture" + std::to_string(probeIndex),
                     .Reads = probeCaptureReads,
                     .Writes = {
-                        m_Engine.m_ProbeCaptureColor.get(), m_Engine.m_ProbeCaptureDistance.get(), m_Engine.m_ProbeCaptureDepth.get(),
-                        m_Engine.m_ProbeRadianceCube.get(), gi->ProbeDistanceArray.get(),
+                        gi->ProbeCaptureColor.get(), gi->ProbeCaptureDistance.get(), gi->ProbeCaptureDepth.get(),
+                        gi->ProbeRadianceCube.get(), gi->ProbeDistanceArray.get(),
                     },
                     .Execute = [captureProbeFace, probeIndex](RHI::IRHICommandList* cmd)
                     {
@@ -308,7 +308,7 @@ namespace Kurenai::Passes
                 });
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "ProbeBakeConvolvePrefilter" + std::to_string(probeIndex),
-                    .Reads = { m_Engine.m_ProbeRadianceCube.get() },
+                    .Reads = { gi->ProbeRadianceCube.get() },
                     .Writes = { gi->ProbePrefilteredArray.get() },
                     .Execute = [convolveProbePrefilter, probeIndex](RHI::IRHICommandList* cmd)
                     {
@@ -317,20 +317,20 @@ namespace Kurenai::Passes
                 });
             }
 
-            m_Engine.m_ProbeBakeRequested = false;
+            m_ProbeBakeRequested = false;
             // このフレームの描画時点ではまだ焼き上がっていない(同じコマンドリスト内でこの後の
             // Lightingパスが読むのは問題ないが、gpuProbesは既に確定済み)。次フレームから
             // プローブが有効になるよう、ここでフラグだけ立てる
-            m_Engine.m_ProbeBaked = true;
-            m_Engine.m_ProbeBakeSignature = frame.ProbeBakeSignature;
+            m_ProbeBaked = true;
+            m_ProbeBakeSignature = frame.ProbeBakeSignature;
             // このフレームの実効プリ露出で焼かれるので、読み出し側の換算倍率もここで更新する
-            m_Engine.m_ProbeBakedExposureEV100 = effectiveExposureEV100;
+            m_ProbeBakedExposureEV100 = effectiveExposureEV100;
             // 全プローブが今焼けたので、時間分割は先頭から仕切り直す
-            m_Engine.m_ProbeRealtimeProbeIndex = 0;
-            m_Engine.m_ProbeRealtimeFace = 0;
-            m_Engine.m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
+            m_ProbeRealtimeProbeIndex = 0;
+            m_ProbeRealtimeFace = 0;
+            m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
         }
-        else if (frame.Settings.ReflectionProbe.UpdateMode == ProbeUpdateMode::Realtime && probeCount > 0 && m_Engine.m_ProbeBaked)
+        else if (frame.Settings.ReflectionProbe.UpdateMode == ProbeUpdateMode::Realtime && probeCount > 0 && m_ProbeBaked)
         {
             // --- 時間分割: キャプチャフェーズ(1フレーム1面、6フレーム)→ プリフィルタフェーズ
             //     (1フレームkProbeRealtimePrefilterStepsPerFrame個の(mip,face)、6フレーム)を
@@ -340,34 +340,34 @@ namespace Kurenai::Passes
             // これが「6フレームに1回のスパイク」になる。1フレームあたり数ステップへ分割することで、
             // どのフレームもほぼ均等なコストになる。
             //
-            // プリフィルタフェーズの間はキャプチャを止める(m_ProbeRadianceCubeがそのプローブの
+            // プリフィルタフェーズの間はキャプチャを止める(GIResources::ProbeRadianceCubeがそのプローブの
             // ぶんのまま変わらないことを保証するため)。そのプローブのスライスは、旧キャプチャ→
             // 旧キューブ→新スライスの畳み込みが終わるまで前回の内容のまま表示され続ける
             // (描きかけの中間状態が映り込むことはない)
-            if (m_Engine.m_ProbeRealtimeProbeIndex >= probeCount)
+            if (m_ProbeRealtimeProbeIndex >= probeCount)
             {
-                m_Engine.m_ProbeRealtimeProbeIndex = 0;
-                m_Engine.m_ProbeRealtimeFace = 0;
-                m_Engine.m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
+                m_ProbeRealtimeProbeIndex = 0;
+                m_ProbeRealtimeFace = 0;
+                m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
             }
 
-            if (m_Engine.m_ProbeRealtimePrefilterStep < kProbePrefilterStepCount)
+            if (m_ProbeRealtimePrefilterStep < kProbePrefilterStepCount)
             {
                 // --- プリフィルタフェーズ ---
-                const size_t realtimeProbe = m_Engine.m_ProbeRealtimeProbeIndex;
-                const uint32_t startStep = m_Engine.m_ProbeRealtimePrefilterStep;
+                const size_t realtimeProbe = m_ProbeRealtimeProbeIndex;
+                const uint32_t startStep = m_ProbeRealtimePrefilterStep;
                 const uint32_t stepsThisFrame =
                     std::min(kProbeRealtimePrefilterStepsPerFrame, kProbePrefilterStepCount - startStep);
 
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "ProbeRealtimeConvolvePrefilterStep",
-                    .Reads = { m_Engine.m_ProbeRadianceCube.get() },
+                    .Reads = { gi->ProbeRadianceCube.get() },
                     .Writes = { gi->ProbePrefilteredArray.get() },
-                .Execute = [this, convolveProbePrefilterStep, iblPrefilterPipelineState, realtimeProbe, startStep, stepsThisFrame, materialSamplers](
+                .Execute = [gi, convolveProbePrefilterStep, iblPrefilterPipelineState, realtimeProbe, startStep, stepsThisFrame, materialSamplers](
                         RHI::IRHICommandList* cmd)
                     {
                         cmd->SetComputePipelineState(iblPrefilterPipelineState);
-                        cmd->SetComputeTexture(0, m_Engine.m_ProbeRadianceCube.get());
+                        cmd->SetComputeTexture(0, gi->ProbeRadianceCube.get());
                         cmd->SetComputeSamplerSet(materialSamplers);
                         for (uint32_t s = 0; s < stepsThisFrame; ++s)
                         {
@@ -394,27 +394,27 @@ namespace Kurenai::Passes
                     },
                 });
 
-                m_Engine.m_ProbeRealtimePrefilterStep = startStep + stepsThisFrame;
-                if (m_Engine.m_ProbeRealtimePrefilterStep >= kProbePrefilterStepCount)
+                m_ProbeRealtimePrefilterStep = startStep + stepsThisFrame;
+                if (m_ProbeRealtimePrefilterStep >= kProbePrefilterStepCount)
                 {
                     // このプローブの畳み込みが完了。次のプローブのキャプチャへ進む
-                    m_Engine.m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
-                    m_Engine.m_ProbeRealtimeProbeIndex = static_cast<uint32_t>((realtimeProbe + 1) % probeCount);
-                    m_Engine.m_ProbeRealtimeFace = 0;
+                    m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
+                    m_ProbeRealtimeProbeIndex = static_cast<uint32_t>((realtimeProbe + 1) % probeCount);
+                    m_ProbeRealtimeFace = 0;
                 }
             }
             else
             {
                 // --- キャプチャフェーズ ---
-                const size_t realtimeProbe = m_Engine.m_ProbeRealtimeProbeIndex;
-                const uint32_t realtimeFace = m_Engine.m_ProbeRealtimeFace;
+                const size_t realtimeProbe = m_ProbeRealtimeProbeIndex;
+                const uint32_t realtimeFace = m_ProbeRealtimeFace;
 
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "ProbeRealtimeCapture",
                     .Reads = probeCaptureReads,
                     .Writes = {
-                        m_Engine.m_ProbeCaptureColor.get(), m_Engine.m_ProbeCaptureDistance.get(), m_Engine.m_ProbeCaptureDepth.get(),
-                        m_Engine.m_ProbeRadianceCube.get(), gi->ProbeDistanceArray.get(),
+                        gi->ProbeCaptureColor.get(), gi->ProbeCaptureDistance.get(), gi->ProbeCaptureDepth.get(),
+                        gi->ProbeRadianceCube.get(), gi->ProbeDistanceArray.get(),
                     },
                     .Execute = [captureProbeFace, realtimeProbe, realtimeFace](RHI::IRHICommandList* cmd)
                     {
@@ -422,23 +422,23 @@ namespace Kurenai::Passes
                     },
                 });
 
-                m_Engine.m_ProbeRealtimeFace = realtimeFace + 1;
-                if (m_Engine.m_ProbeRealtimeFace >= kCubeFaceCount)
+                m_ProbeRealtimeFace = realtimeFace + 1;
+                if (m_ProbeRealtimeFace >= kCubeFaceCount)
                 {
                     // 6面揃った。次フレームからこのプローブのプリフィルタフェーズへ入る
                     // (プローブ番号はプリフィルタが完了するまで進めない。上のプリフィルタフェーズ参照)
-                    m_Engine.m_ProbeRealtimeFace = 0;
-                    m_Engine.m_ProbeRealtimePrefilterStep = 0;
+                    m_ProbeRealtimeFace = 0;
+                    m_ProbeRealtimePrefilterStep = 0;
                 }
             }
 
             // 常に焼き直しているのでOnDemandの署名も追随させておく。こうしておかないと
             // Realtimeから切り替えた直後に不要なフルベイクが1回走る
-            m_Engine.m_ProbeBakeSignature = frame.ProbeBakeSignature;
+            m_ProbeBakeSignature = frame.ProbeBakeSignature;
             // 露出の換算倍率も追随させる。1ステップずつ焼くため厳密には面・ミップごとに焼いた
             // 露出が違うが、実効プリ露出の変化は毎秒2倍程度(m_PostProcessSettings.EffectiveExposureAdaptSpeed)なので
             // 1周(最大12フレーム)ぶんのずれは数%にとどまり、常時焼き直している以上すぐ解消する
-            m_Engine.m_ProbeBakedExposureEV100 = effectiveExposureEV100;
+            m_ProbeBakedExposureEV100 = effectiveExposureEV100;
         }
     }
 }

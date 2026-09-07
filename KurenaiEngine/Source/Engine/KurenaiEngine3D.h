@@ -132,7 +132,6 @@ namespace Kurenai
         friend class Passes::LightingPasses;
         friend class Passes::MegaLightsPasses;
         friend class Passes::PostProcessPasses;
-        friend class Passes::ReflectionProbePasses;
 
         // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
         //   実行時に「システム」パネルからも変更できる)。
@@ -491,8 +490,9 @@ namespace Kurenai
         bool& GetDDGIEmissiveSuppressLoggedTrace() { return m_DDGIEmissiveSuppressLoggedTrace; }
         std::vector<Assets::ReflectionProbe>& GetReflectionProbes() { return m_GIResources.ReflectionProbes; }
         int& GetSelectedProbeIndex() { return m_SelectedProbeIndex; }
-        bool& GetProbeBaked() { return m_ProbeBaked; }
-        bool& GetProbeBakeRequested() { return m_ProbeBakeRequested; }
+        // 焼き上がりの状態の持ち主は Passes::ReflectionProbePasses。ここは委譲するだけ
+        bool& GetProbeBaked();
+        bool& GetProbeBakeRequested();
         bool& GetDDGIUpdateSuspended() { return m_DDGIUpdateSuspended; }
         uint32_t& GetDDGIStableCycles() { return m_DDGIStableCycles; }
         Assets::TextureStreamingManager& GetTextureStreaming() { return m_TextureStreaming; }
@@ -508,8 +508,8 @@ namespace Kurenai
         const RenderStats& GetRenderStats() const { return m_RenderStats; }
         RHI::IRHIGPUProfiler* GetGPUProfiler() const { return m_GPUProfiler.get(); }
         const Core::CPUProfiler& GetCPUProfiler() const { return m_CPUProfiler; }
-        uint32_t GetProbeRealtimeProbeIndex() const { return m_ProbeRealtimeProbeIndex; }
-        uint32_t GetProbeRealtimeFace() const { return m_ProbeRealtimeFace; }
+        uint32_t GetProbeRealtimeProbeIndex() const;
+        uint32_t GetProbeRealtimeFace() const;
         const Assets::Scene& GetScene() const { return m_Scene; }
         const RenderCapabilities& GetRenderCapabilities() const { return m_RenderCapabilities; }
         bool GetHasGIVolume() const { return m_GIResources.HasGIVolume; }
@@ -2060,73 +2060,23 @@ namespace Kurenai
         static constexpr uint32_t kProbeCaptureSize = Passes::kProbeCaptureSize;
         std::unique_ptr<RHI::IRHIShader> m_ProbeCaptureVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_ProbeCapturePixelShader;
-        // キャプチャのPSOは持ち主を GIResources::ProbeCapturePipelineState へ移した
-        // 1面ぶんのキャプチャ先(6面で使い回す)。HDRのままキューブへ写すためG-Bufferと違いFloat
-        std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureColor;
-        // 同じキャプチャの2枚目のレンダーターゲット(SV_TARGET1)。プローブ位置から描画点までの
-        // ワールド距離をそのまま書く。深度バッファから逆算せずMRTで直に出しているのは、
-        // 面ごとの逆投影を組む必要がなくキャプチャシェーダーの1行で済むため(19.12節)
-        std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureDistance;
-        std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureDepth;
+        // キャプチャのPSOは持ち主を GIResources::ProbeCapturePipelineState へ移した。
+        // その書き先(ProbeCaptureColor / ProbeCaptureDistance / ProbeCaptureDepth)も同じ理由でGIResourcesにある
         std::unique_ptr<RHI::IRHIShader> m_ProbeCubeCopyComputeShader;
-        // キューブへ写すPSOは持ち主を GIResources::ProbeCubeCopyPipelineState へ移した
-        // キャプチャした6面を組み上げるスクラッチのキューブマップ(単一キューブ)。畳み込みの入力に
-        // なるためTextureCubeArrayではなくTextureCubeである必要がある(IBLConvolve.hlslのSourceSkyboxは
-        // TextureCube宣言のまま。これによりIBLの畳み込みシェーダーを一切変更せず再利用できる)。
-        // プローブは1つずつ順に焼くため1枚で足りる
-        std::unique_ptr<RHI::IRHITexture> m_ProbeRadianceCube;
+        // キューブへ写すPSOは持ち主を GIResources::ProbeCubeCopyPipelineState へ移した。
+        // 写し先のスクラッチキューブマップ(ProbeRadianceCube)も同じくGIResourcesにある
         // 面ごとの定数バッファは持ち主を GIResources::ProbeCaptureConstantBuffer へ移した
         // プローブの一覧は持ち主を GIResources::ReflectionProbes へ移した
         int m_SelectedProbeIndex = -1;
-        // 次のRender()でプローブを焼き直す要求。シーン読み込み時とImGuiのBakeボタンで立てる。
-        // スカイボックス由来のIBLと違いシーンのジオメトリ・ライトに依存するため、
-        // 「一度焼いたら二度と焼かない」ではなく明示的な要求ベースにしている
-        bool m_ProbeBakeRequested = false;
-        // 一度でも焼けたか。焼く前のプローブは中身が未定義なので、それまでは影響を無効にして
-        // グローバルIBLのまま描く(未初期化のキューブマップが映り込むのを防ぐ)
-        bool m_ProbeBaked = false;
+        // 焼き上がりの状態(要求・焼けたか・Realtimeの進行・署名・焼いた時点の露出)は
+        // 持ち主を Passes::ReflectionProbePasses へ移した。書き手がその群だけだったため
         ReflectionProbeSettings m_ReflectionProbeSettings;
-        // Realtimeの進行状態。次に焼くプローブ番号と面番号
-        uint32_t m_ProbeRealtimeProbeIndex = 0;
-        uint32_t m_ProbeRealtimeFace = 0;
-        // プリフィルタ畳み込み(6ミップ×6面=36ディスパッチ)を1フレームへ集中させず、
-        // kProbeRealtimePrefilterStepsPerFrameずつ複数フレームへ分ける(集中させると
-        // 「6フレームに1回のスパイク」になる)。
-        // kProbePrefilterStepCount(36)が「プリフィルタ中でない」を表す番兵値
-        // 出所は Passes/ReflectionProbeConstants.h(移行中の別名)
-        static constexpr uint32_t kProbePrefilterStepCount = Passes::kProbePrefilterStepCount;
-        // 1フレームに進めるステップ数。ステップ番号は「面を外側・ミップを内側」で(face, mip)へ
-        // 割り当てるため(KurenaiEngine3D.cppのRealtimeプリフィルタフェーズのコメント参照)、
-        // ここを kIBLPrefilterMipLevels と一致させると
-        // 「1フレーム = 1面ぶんのミップチェーン全部」となり6フレームすべてが厳密に同じ量になる。
-        // 一致させないとフレームごとにミップ0の面の数が0個/1個/2個とばらつき、
-        // ミップ0が畳み込み全体の75%を占めるためそのままスパイクの高さのばらつきになる。
-        // capture フェーズ(6面=6フレーム)ともデューティ比が対称になる
-        // 出所は Passes/ReflectionProbeConstants.h(移行中の別名)
-        static constexpr uint32_t kProbeRealtimePrefilterStepsPerFrame = Passes::kProbeRealtimePrefilterStepsPerFrame;
-        uint32_t m_ProbeRealtimePrefilterStep = kProbePrefilterStepCount;
-        // OnDemandの変化検出用。最後にフルベイクを発行した時点の状態の署名。
-        // 毎フレームの署名と突き合わせ、変わっていれば焼き直しを要求する
-        uint64_t m_ProbeBakeSignature = 0;
+        // プリフィルタの進行状態・OnDemandの署名は持ち主を Passes::ReflectionProbePasses へ移した。
+        // ステップ数の定数(kProbePrefilterStepCount / kProbeRealtimePrefilterStepsPerFrame)も
+        // 読み手がその群だけになったため、Passes/ReflectionProbeConstants.h を直接使わせている
         // 焼き上がりに影響する状態(時刻・太陽・シャドウ・IBL強度・全ライト)から署名を作る。
         // 影響範囲(形状・半径・ブレンド距離)はキャプチャ内容を変えないため含めない
         uint64_t ComputeProbeBakeSignature() const;
-        // 最後にキャプチャしたときの実効プリ露出(m_EffectiveExposureEV100)。
-        //
-        // 【なぜ記録しておく必要があるか】プローブのキューブマップにはプリ露出済みの放射輝度が
-        // 入っている(21.5節)。その倍率は時刻に連動して最大18段(約26万倍)動くのに対し、
-        // Bakedモードのプローブはシーン読み込み時に一度焼いたきり更新されない。そのため
-        // 焼いた時点と現在とで実効プリ露出が食い違うと、プローブの寄与だけが桁違いの明るさで
-        // 合成される。実測では夜のProbeTestからSponzaへ切り替えたとき、EV100=-2.36で焼かれた
-        // プローブをEV100=15.0のフレームが読み、17.4段(約17万倍)過剰になって画面が
-        // 白飛びしたまま戻らなくなっていた。
-        //
-        // 空(手続き空)は実効プリ露出が0.05段動くたびに焼き直して追従しているが、プローブは
-        // 1回のフルベイクが全プローブ×6面の描画になり同じ頻度では焼き直せない。そこで
-        // 焼き直す代わりに、読み出し時へ 2^(焼いたEV - 現在のEV) を掛けて現在の露出へ
-        // 換算する(FrameConstants.ProbeParams2.w、ReflectionProbe.hlsliのSampleEnvironment)。
-        // キューブマップの中身は触らないのでfp16の値域も変わらない
-        float m_ProbeBakedExposureEV100 = 15.0f;
         // 焼き直しを要求する実効プリ露出の変化量[EV]。1段=明るさ2倍。
         // 手続き空の0.05段よりずっと粗いのは、フルベイクがプローブ数×6面の描画になるため。
         // 1日を通した時刻変化(最大18段)なら十数回のフルベイクに収まる
@@ -2221,7 +2171,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDistanceCube;
 
         // 全プローブが一度でも書かれたか。書かれる前のアトラスは中身が未定義なので、
-        // それまではDDGIを無効にして従来のIBLのまま描く(反射プローブのm_ProbeBakedと同じ方針)
+        // それまではDDGIを無効にして従来のIBLのまま描く(反射プローブの「一度でも焼けたか」と同じ方針)
         bool m_DDGIBaked = false;
         // 初回の一巡が終わっていないか。
         //
