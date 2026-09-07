@@ -44,6 +44,15 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHITexture* const cloudDetailNoiseTexture = frame.Sky->CloudDetailNoiseTexture.get();
+        RHI::IRHITexture* const cloudShapeNoiseTexture = frame.Sky->CloudShapeNoiseTexture.get();
+        RHI::IRHITexture* const cloudWeatherNoiseTexture = frame.Sky->CloudWeatherNoiseTexture.get();
+        RHI::IRHITexture* const multiScatteringLUT = frame.Sky->MultiScatteringLUT.get();
+        RHI::IRHIBuffer* const skyParametersBuffer = frame.Sky->ParametersBuffer.get();
+        RHI::IRHITexture* const skyViewLUT = frame.Sky->SkyViewLUT.get();
+        RHI::IRHITexture* const transmittanceLUT = frame.Sky->TransmittanceLUT.get();
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
         RHI::IRHIBuffer* const iblPrefilterConstantBuffer = frame.IBL->PrefilterConstantBuffer.get();
         RHI::IRHITexture* const irradianceTexture = frame.IBL->IrradianceTexture.get();
@@ -80,7 +89,7 @@ namespace Kurenai::Passes
         //     登録順に1回だけ舐める前方走査で、あるパスのReadsは**自分より前に登録された
         //     書き手**しか見つけられない(RenderGraph::ResolveExecutionOrderのlastWriter)。
         //     つまりグラフはパスを後ろへ遅らせることはできても前へ動かすことはできない。
-        //     この2つをSkyIntegrateより後ろに置くと、SkyIntegrateが.Reads = { m_SkyViewLUT }を
+        //     この2つをSkyIntegrateより後ろに置くと、SkyIntegrateが.Reads = { m_SkyResources.SkyViewLUT }を
         //     宣言していても辺が張られず、**未初期化のLUTを積分してしまう**。
         //     太陽が静止したシーンではSkyIntegrateは起動直後の1回しか走らないため、
         //     壊れた天頂輝度がそのまま最後まで残る(実測: 積分値が5.29ではなく1.58になり、
@@ -106,21 +115,21 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AtmosphereLUTBake",
-                .Writes = { m_Engine.m_TransmittanceLUT.get(), m_Engine.m_MultiScatteringLUT.get() },
-                .Execute = [this, updateAtmosphereConstants, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Writes = { transmittanceLUT, multiScatteringLUT },
+                .Execute = [this, multiScatteringLUT, transmittanceLUT, updateAtmosphereConstants, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_Engine.m_TransmittancePipelineState.get());
                     updateAtmosphereConstants(cmd);
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_TransmittanceLUT.get(), 0);
+                    cmd->SetComputeUnorderedAccessTexture(0, transmittanceLUT, 0);
                     cmd->Dispatch((kTransmittanceLUTWidth + 7) / 8, (kTransmittanceLUTHeight + 7) / 8, 1);
 
                     // UAVはDispatch直後に自動で解除されるため張り直す。
                     // ここでTransmittanceをSRV(t0)として読むので、上のDispatchより後でなければならない
                     cmd->SetComputePipelineState(m_Engine.m_MultiScatteringPipelineState.get());
                     updateAtmosphereConstants(cmd);
-                    cmd->SetComputeTexture(0, m_Engine.m_TransmittanceLUT.get());
+                    cmd->SetComputeTexture(0, transmittanceLUT);
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_MultiScatteringLUT.get(), 0);
+                    cmd->SetComputeUnorderedAccessTexture(0, multiScatteringLUT, 0);
                     const uint32_t groups = (kMultiScatteringLUTSize + 7) / 8;
                     cmd->Dispatch(groups, groups, 1);
                 },
@@ -150,28 +159,28 @@ namespace Kurenai::Passes
             m_Engine.m_SkyViewBakedTurbidity = frame.Settings.Sky.Turbidity;
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyViewBake",
-                .Reads = { m_Engine.m_TransmittanceLUT.get(), m_Engine.m_MultiScatteringLUT.get() },
-                .Writes = { m_Engine.m_SkyViewLUT.get() },
-                .Execute = [this, updateAtmosphereConstants, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Reads = { transmittanceLUT, multiScatteringLUT },
+                .Writes = { skyViewLUT },
+                .Execute = [this, multiScatteringLUT, skyViewLUT, transmittanceLUT, updateAtmosphereConstants, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_Engine.m_SkyViewPipelineState.get());
                     updateAtmosphereConstants(cmd);
-                    cmd->SetComputeTexture(0, m_Engine.m_TransmittanceLUT.get());
-                    cmd->SetComputeTexture(1, m_Engine.m_MultiScatteringLUT.get());
+                    cmd->SetComputeTexture(0, transmittanceLUT);
+                    cmd->SetComputeTexture(1, multiScatteringLUT);
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_SkyViewLUT.get(), 0);
+                    cmd->SetComputeUnorderedAccessTexture(0, skyViewLUT, 0);
                     cmd->Dispatch((kSkyViewLUTWidth + 7) / 8, (kSkyViewLUTHeight + 7) / 8, 1);
                 },
             });
         }
 
         // --- 空パラメータの積分パス: 色味の決定とθ64×φ256=16,384サンプルの照度正規化積分を
-        //     GPUで行い、結果(ティント4本+正規化済みの天頂輝度)をm_SkyParametersBufferへ書く。
+        //     GPUで行い、結果(ティント4本+正規化済みの天頂輝度)をm_SkyResources.ParametersBufferへ書く。
         //     **CPU側で計算してはいけない**(Sky.hlsli側の式と二重実装になる)。
         //     このバッファをSkyGenerate/DeferredLighting/SSRの3者が読むため、下のSkyGenerateパスより
         //     必ず先に実行する必要がある。実行条件はbakeSkyThisFrameではなくskyIntegrateThisFrame
         //     (手続き空が無効なシーンでも初回の1回だけは走らせ、未初期化状態を解消する。
-        //     理由はm_SkyParametersBuffer作成箇所とskyIntegrateThisFrame宣言のコメント参照) ---
+        //     理由はm_SkyResources.ParametersBuffer作成箇所とskyIntegrateThisFrame宣言のコメント参照) ---
         if (skyIntegrateThisFrame)
         {
             // 第2段(P18: 雲込みの空の照度)へ渡す値。**FrameConstants(constants)から
@@ -206,8 +215,8 @@ namespace Kurenai::Passes
             // 「雲が無い」と積分される。結果CloudSkyLightは(1,1,1)になり、大気遠近は
             // P18より前とまったく同じ振る舞いへ戻る。作成失敗そのものはInitialize側で
             // 既にエラーを出しているので、ここでは1度だけ「P18が効いていない」ことを残す
-            const bool cloudNoiseReady = m_Engine.m_CloudShapeNoiseTexture && m_Engine.m_CloudDetailNoiseTexture
-                                         && m_Engine.m_CloudWeatherNoiseTexture;
+            const bool cloudNoiseReady = cloudShapeNoiseTexture && cloudDetailNoiseTexture
+                                         && cloudWeatherNoiseTexture;
             if (!cloudNoiseReady && !m_Engine.m_SkyIntegrateCloudMissingLogged)
             {
                 Core::Logger::Error("KurenaiEngine3D",
@@ -216,12 +225,12 @@ namespace Kurenai::Passes
                 m_Engine.m_SkyIntegrateCloudMissingLogged = true;
             }
 
-            std::vector<RHI::IRHITexture*> integrateReads = { m_Engine.m_SkyViewLUT.get() };
+            std::vector<RHI::IRHITexture*> integrateReads = { skyViewLUT };
             if (cloudNoiseReady)
             {
-                integrateReads.push_back(m_Engine.m_CloudShapeNoiseTexture.get());
-                integrateReads.push_back(m_Engine.m_CloudDetailNoiseTexture.get());
-                integrateReads.push_back(m_Engine.m_CloudWeatherNoiseTexture.get());
+                integrateReads.push_back(cloudShapeNoiseTexture);
+                integrateReads.push_back(cloudDetailNoiseTexture);
+                integrateReads.push_back(cloudWeatherNoiseTexture);
             }
 
             graph.AddPass(Core::RenderGraphPassDesc{
@@ -230,8 +239,8 @@ namespace Kurenai::Passes
                 // これによりレンダーグラフがSkyViewBakeより後へ自動で並べてくれる。
                 // 雲の3枚(P18)も同じ仕組みでCloudNoiseBakeより後へ並ぶ
                 .Reads = integrateReads,
-                .BufferWrites = { m_Engine.m_SkyParametersBuffer.get() },
-                .Execute = [this, integrateConstants, cloudNoiseReady, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .BufferWrites = { skyParametersBuffer },
+                .Execute = [this, cloudDetailNoiseTexture, cloudShapeNoiseTexture, cloudWeatherNoiseTexture, skyParametersBuffer, skyViewLUT, integrateConstants, cloudNoiseReady, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->UpdateBuffer(m_Engine.m_SkyIntegrateConstantBuffer.get(), &integrateConstants, sizeof(integrateConstants));
 
@@ -239,19 +248,19 @@ namespace Kurenai::Passes
                     cmd->SetComputeConstantBuffer(0, m_Engine.m_SkyIntegrateConstantBuffer.get());
                     // SkyView LUT(t0)とサンプラー(s1 ColorSampler)。日中の空はこのLUTから
                     // 引くため、積分側も同じLUTを読む必要がある
-                    cmd->SetComputeTexture(0, m_Engine.m_SkyViewLUT.get());
+                    cmd->SetComputeTexture(0, skyViewLUT);
                     if (cloudNoiseReady)
                     {
                         // 雲(P18)。形状t1・ディテールt2・ウェザーマップt3。SkyIntegrate.hlslの
                         // KURENAI_CLOUD_*_REGISTERと**同じ番号**であること
-                        cmd->SetComputeTexture(1, m_Engine.m_CloudShapeNoiseTexture.get());
-                        cmd->SetComputeTexture(2, m_Engine.m_CloudDetailNoiseTexture.get());
-                        cmd->SetComputeTexture(3, m_Engine.m_CloudWeatherNoiseTexture.get());
+                        cmd->SetComputeTexture(1, cloudShapeNoiseTexture);
+                        cmd->SetComputeTexture(2, cloudDetailNoiseTexture);
+                        cmd->SetComputeTexture(3, cloudWeatherNoiseTexture);
                     }
                     // s3 VolumeSamplerがLinear+Wrapで入っている(Samplers.hlsliの役割表参照)。
                     // 雲の3Dノイズとウェザーマップはこれで引く
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
-                    cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_SkyParametersBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, skyParametersBuffer);
                     // 1グループ×256スレッド固定(SkyIntegrate.hlsl参照)
                     cmd->Dispatch(1, 1, 1);
                 },
@@ -264,22 +273,22 @@ namespace Kurenai::Passes
         //     (詳細はSkyGenerate.hlsl冒頭)。焼き直しの要否・雲の平均透過率のキャッシュ・
         //     m_SkyBakeDirty等のフラグ更新はすべて上のbakeSkyThisFrameブロックで済ませてあるため、
         //     ここではそのキャッシュ(m_ActiveCloudTransmittance)と、直前のSkyIntegrateパスが
-        //     書いたm_SkyParametersBufferを使ってパスを登録するだけでよい ---
+        //     書いたm_SkyResources.ParametersBufferを使ってパスを登録するだけでよい ---
         if (bakeSkyThisFrame)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "SkyGenerate",
                 // IBLキューブへ焼く空もSkyView LUT経由なので読み手に加わる
-                .Reads = { m_Engine.m_SkyViewLUT.get() },
+                .Reads = { skyViewLUT },
                 .Writes = { m_Engine.m_ProceduralSkyTexture.get() },
-                .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
-                .Execute = [this, &sunLighting, materialSamplers](RHI::IRHICommandList* cmd)
+                .BufferReads = { skyParametersBuffer },
+                .Execute = [this, skyParametersBuffer, skyViewLUT, &sunLighting, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_Engine.m_SkyGeneratePipelineState.get());
-                    cmd->SetComputeShaderResourceBuffer(0, m_Engine.m_SkyParametersBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(0, skyParametersBuffer);
                     // SkyView LUT(t1)とサンプラー(s1 ColorSampler)。**サンプラーのバインドを
                     // 外してはいけない** ―― LUTを線形補間で引くため、このパスにもサンプラーが要る
-                    cmd->SetComputeTexture(1, m_Engine.m_SkyViewLUT.get());
+                    cmd->SetComputeTexture(1, skyViewLUT);
                     cmd->SetComputeSamplerSet(materialSamplers);
                     for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                     {
@@ -342,23 +351,23 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "CloudNoiseBake",
-                .Writes = { m_Engine.m_CloudShapeNoiseTexture.get(), m_Engine.m_CloudDetailNoiseTexture.get(),
-                            m_Engine.m_CloudWeatherNoiseTexture.get() },
-                .Execute = [this](RHI::IRHICommandList* cmd)
+                .Writes = { cloudShapeNoiseTexture, cloudDetailNoiseTexture,
+                            cloudWeatherNoiseTexture },
+                .Execute = [this, cloudDetailNoiseTexture, cloudShapeNoiseTexture, cloudWeatherNoiseTexture](RHI::IRHICommandList* cmd)
                 {
                     // スレッドグループは4x4x4。3次元なのでグループあたり64スレッドで、
                     // 2次元パスの8x8(=64)と同じ粒度になる
                     constexpr uint32_t kGroupSize = 4;
 
                     cmd->SetComputePipelineState(m_Engine.m_CloudShapeNoisePipelineState.get());
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_CloudShapeNoiseTexture.get(), 0);
+                    cmd->SetComputeUnorderedAccessTexture(0, cloudShapeNoiseTexture, 0);
                     const uint32_t shapeGroups = (kCloudShapeNoiseSize + kGroupSize - 1) / kGroupSize;
                     cmd->Dispatch(shapeGroups, shapeGroups, shapeGroups);
 
                     // UAVはDispatch直後に自動で解除されるため張り直す
                     // (IRHICommandList.hのバインド寿命の説明を参照)
                     cmd->SetComputePipelineState(m_Engine.m_CloudDetailNoisePipelineState.get());
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_CloudDetailNoiseTexture.get(), 0);
+                    cmd->SetComputeUnorderedAccessTexture(0, cloudDetailNoiseTexture, 0);
                     const uint32_t detailGroups = (kCloudDetailNoiseSize + kGroupSize - 1) / kGroupSize;
                     cmd->Dispatch(detailGroups, detailGroups, detailGroups);
 
@@ -366,7 +375,7 @@ namespace Kurenai::Passes
                     // 4096^2 = 1,678万テクセルを一度だけ焼く
                     constexpr uint32_t kWeatherGroupSize = 8;
                     cmd->SetComputePipelineState(m_Engine.m_CloudWeatherNoisePipelineState.get());
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_CloudWeatherNoiseTexture.get(), 0);
+                    cmd->SetComputeUnorderedAccessTexture(0, cloudWeatherNoiseTexture, 0);
                     const uint32_t weatherGroups =
                         (kCloudWeatherNoiseSize + kWeatherGroupSize - 1) / kWeatherGroupSize;
                     cmd->Dispatch(weatherGroups, weatherGroups, 1);

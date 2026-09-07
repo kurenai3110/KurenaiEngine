@@ -43,6 +43,7 @@
 #include "Settings/ReflectionProbeSettings.h"
 #include "Settings/ReflectionSettings.h"
 #include "Rendering/IBLResources.h"
+#include "Rendering/SkyResources.h"
 #include "Rendering/RenderTargets.h"
 #include "Rendering/ShadowConstants.h"
 #include "Rendering/MeshletLODFrameConstants.h"
@@ -1910,24 +1911,19 @@ namespace Kurenai
         bool m_HasBakedCloudSignature = false;
         // 空パラメータ(ティント4本+照度正規化済みの天頂輝度)をGPU側で計算するコンピュートシェーダー
         // (SkyIntegrate.hlsl)。**CPU側に同じ式のミラーを置いてはいけない**(二重実装になる)。
-        // 結果はm_SkyParametersBuffer(SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む)へ書く
+        // 結果はm_SkyResources.ParametersBuffer(SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む)へ書く
         std::unique_ptr<RHI::IRHIShader> m_SkyIntegrateComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_SkyIntegratePipelineState;
         std::unique_ptr<RHI::IRHIBuffer> m_SkyIntegrateConstantBuffer;
-        // SkyIntegrate.hlslが書き、SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む
-        // 要素数1のStructuredRWバッファ(Sky.hlsliのGPUSkyParametersと一致させること)。
-        // 【なぜ毎フレーム作り直さないのか】ベイク時の値をそのまま使うことで、背景とキューブマップ
-        // (IBL・反射)が常に同一の空パラメータを見る。毎フレーム作り直すと、太陽の角度閾値で
-        // ベイクを間引いている間だけ背景とIBLの空がずれてしまう。加えて積分はθ64×φ256=16,384
-        // サンプルなので、背景評価のためだけに毎フレーム走らせるのは無駄が大きい
-        std::unique_ptr<RHI::IRHIBuffer> m_SkyParametersBuffer;
-        // m_SkyParametersBufferへSkyIntegrateパスが一度でも書き込んだかどうか。手続き空を使わない
+        // 空・大気・雲のリソースの持ち主は Rendering/SkyResources.h
+        Rendering::SkyResources m_SkyResources;
+        // m_SkyResources.ParametersBufferへSkyIntegrateパスが一度でも書き込んだかどうか。手続き空を使わない
         // シーン(.ksceneのDDSスカイボックス使用時)ではbakeSkyThisFrameが常にfalseになりSkyIntegrate
         // パスも通常は走らないため、このフラグがfalseの間だけRender()がskyIntegrateThisFrameを
         // trueにして1回だけ強制的に走らせ、未初期化のまま読まれることを防ぐ。
         // 【なぜCPU側からのUpdateBufferでゼロ埋めしないのか】DX12のStructuredRWバッファは
         // GPU専用(UAV/SRV)のDEFAULTヒープに確保しておりCPUから書き込む経路を持たないため、
-        // UpdateBufferを呼ぶとクラッシュする(m_SkyParametersBuffer作成箇所のコメント参照)
+        // UpdateBufferを呼ぶとクラッシュする(m_SkyResources.ParametersBuffer作成箇所のコメント参照)
         bool m_SkyParametersBufferInitialized = false;
         // 雲のノイズテクスチャが無くP18(雲込みの空の照度)を積めなかったことを1度だけログへ出す。
         // 毎ベイクで出すとログが埋まるため(m_PlanarReflectionMultipleWaterLoggedと同じ扱い)
@@ -1953,22 +1949,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_BRDFLUTCombineComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_BRDFLUTCombinePipelineState;
 
-        // --- ボリュメトリック雲の3Dノイズ ---
-        //
-        // 雲の形状ノイズ。カメラにも太陽にも空の状態にも一切依存しない純粋な手続き生成なので、
-        // BRDF積分LUTとまったく同じ理由で起動後に一度だけ焼き、二度と焼き直さない
-        // (m_CloudNoiseBaked)。生成の中身はShaders/3D/CloudNoiseGenerate.hlsl。
-        //
-        // 【なぜ2枚に分けるか】Shapeは雲の大まかな塊、Detailはその縁を削る高周波成分で、
-        // 必要な解像度が2桁違う。1枚にまとめると細かい側に合わせた巨大なテクスチャが要る
-        //
-        // 【3枚目: ウェザーマップ(H3)】雲がどこに立つかを決める2Dの場。上の2枚と同じく
-        // 純粋な手続き生成なので同じパスで一度だけ焼く。**これはレイマーチの高速化が目的**で、
-        // 実測ではマーチの1歩あたりコストの91%がこの2Dのfbmだった(根拠と解像度の実測は
-        // Shaders/3D/Sky.hlsli のウェザーマップの節)
-        std::unique_ptr<RHI::IRHITexture> m_CloudShapeNoiseTexture;
-        std::unique_ptr<RHI::IRHITexture> m_CloudDetailNoiseTexture;
-        std::unique_ptr<RHI::IRHITexture> m_CloudWeatherNoiseTexture;
         std::unique_ptr<RHI::IRHIShader> m_CloudShapeNoiseComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_CloudShapeNoisePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_CloudDetailNoiseComputeShader;
@@ -1977,25 +1957,6 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIPipelineState> m_CloudWeatherNoisePipelineState;
         bool m_CloudNoiseBaked = false;
 
-        // --- 大気散乱のLUT(Hillaire 2020) ---
-        //
-        // TransmittanceとMultiScatteringは大気パラメータ(AtmosphereLUT.hlsl冒頭の定数と、
-        // 実行時に動かせる濁り)だけで決まり、カメラにも太陽にも時刻にも依存しない。
-        // そのためBRDF積分LUT・雲の3Dノイズとほぼ同じ「一度だけ焼く」作法に乗せ、
-        // 濁りが変わったときだけ焼き直す(m_AtmosphereLUTBakedTurbidity)。
-        //
-        // SkyViewは空そのもので太陽の位置に依存するため、太陽か濁りが動いたときに焼き直す
-        // (m_SkyViewBakedSunPosition)。
-        // 【毎フレーム焼いていた頃の実測】192x108=20,736テクセルと小さいので「負荷は実質的に無い」と
-        // 書いていたが、Intel UHD Graphics 620 / DX11 / Release の実測では1.15〜1.53msあった。
-        // 1テクセルあたり視線32段+天頂32段の計64段のレイマーチで、各段が
-        // Transmittance LUTとMultiScattering LUTのサンプルを伴うため、テクセル数の割に高い。
-        // **このLUTを読むパス(SkyIntegrate/SkyGenerate/Lighting/SSR/AerialPerspective/
-        // PlanarReflection)より前に実行される必要がある**が、順序はレンダーグラフが
-        // Reads/Writesの依存から自動で決めるので、パスの登録順に依存しない
-        std::unique_ptr<RHI::IRHITexture> m_TransmittanceLUT;
-        std::unique_ptr<RHI::IRHITexture> m_MultiScatteringLUT;
-        std::unique_ptr<RHI::IRHITexture> m_SkyViewLUT;
         std::unique_ptr<RHI::IRHIBuffer> m_AtmosphereConstantBuffer;
         std::unique_ptr<RHI::IRHIShader> m_TransmittanceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_TransmittancePipelineState;
@@ -2468,7 +2429,7 @@ namespace Kurenai
         DirectX::XMFLOAT2 m_CloudScrollOffset{ 0.0f, 0.0f };
         // 判断B(被覆率による平均透過率をIBLキューブのベイク時にだけ掛ける)のキャッシュ。
         // bakeSkyThisFrameブロックで確定させ、ベイクとFrameConstantsが同じタイミングの
-        // 値を見るようにする(GPU側のm_SkyParametersBufferと同じ更新タイミング)。
+        // 値を見るようにする(GPU側のm_SkyResources.ParametersBufferと同じ更新タイミング)。
         // 巻雲(m_CloudSettings.CirrusCoverage)も加味した2層の積になる
         // (ComputeCloudAverageTransmittance参照)
         float m_ActiveCloudTransmittance = 1.0f;

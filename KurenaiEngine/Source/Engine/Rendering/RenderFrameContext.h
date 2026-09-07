@@ -10,6 +10,7 @@
 #include "../Diagnostics/RenderCapabilities.h"
 #include "MeshletLODFrameConstants.h"
 #include "IBLResources.h"
+#include "SkyResources.h"
 #include "RenderSettingsSnapshot.h"
 
 // フレームの先頭で確定し、グラフ登録の間ずっと変わらない値をまとめたスナップショット(段階6)。
@@ -95,6 +96,9 @@ namespace Kurenai::Rendering
         // IBLの畳み込み結果一式。**エンジンが持ったままで、ここにはポインタだけ載せる**。
         // 中身はフレーム先頭で確定し、登録中は変わらない
         const IBLResources* IBL = nullptr;
+
+        // 空・大気・雲のリソース一式。IBLと同じくエンジンが持ったまま、ポインタだけ載せる
+        const SkyResources* Sky = nullptr;
 
         // PresentパスがRenderGraphPassDesc::SwapChainTargetへ渡す
         RHI::IRHISwapChain* SwapChain = nullptr;

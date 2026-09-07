@@ -172,7 +172,7 @@ namespace Kurenai
         // --- 手続き空(SkyGenerate.hlsl)の色味・照度正規化はGPU側(SkyIntegrate.hlsl)に
         //     一本化してある。**ここへCPUミラーを置いてはいけない**(Sky.hlsliの同じ式と
         //     二重実装になり、「片方を直したら必ずもう片方も直す」規約でしか整合が保てない)。
-        //     GPUSkyParameters/m_SkyParametersBufferの定義とコメントは
+        //     GPUSkyParameters/m_SkyResources.ParametersBufferの定義とコメントは
         //     このファイル内の該当箇所(GPU用構造体の宣言、Render()のbakeSkyThisFrameブロック)を
         //     参照。式の実体はShaders/3D/Sky.hlsliのComputeSkyTintSet/PerezRelativeLuminance/
         //     SkyTintFromSetと、それを呼ぶShaders/3D/SkyIntegrate.hlslにある ---
@@ -1713,15 +1713,10 @@ namespace Kurenai
         // ボリュメトリック雲の3Dノイズ。カメラにも太陽にも空の状態にも依存しない
         // 純粋な手続き生成なので、BRDF積分LUTと同じく起動後に一度だけ焼く(m_CloudNoiseBaked)。
         // ここではリソースとパイプラインの作成だけを行う
-        m_CloudShapeNoiseTexture = m_Device->CreateUAVTexture3D(
-            kCloudShapeNoiseSize, kCloudShapeNoiseSize, kCloudShapeNoiseSize, RHI::Format::R8G8B8A8_UNorm);
-        m_CloudDetailNoiseTexture = m_Device->CreateUAVTexture3D(
-            kCloudDetailNoiseSize, kCloudDetailNoiseSize, kCloudDetailNoiseSize, RHI::Format::R8G8B8A8_UNorm);
-        // ウェザーマップ(H3)。2Dなので CreateUAVTexture。8bitで足りることは実測済み
-        // (同じ解像度なら16bitとの誤差の差は0.0002。効くのは空間の刻みだけ)
-        m_CloudWeatherNoiseTexture = m_Device->CreateUAVTexture(
-            kCloudWeatherNoiseSize, kCloudWeatherNoiseSize, RHI::Format::R8G8B8A8_UNorm);
-        if (!m_CloudShapeNoiseTexture || !m_CloudDetailNoiseTexture || !m_CloudWeatherNoiseTexture)
+        m_SkyResources.CreateCloudNoise(
+            *m_Device, kCloudShapeNoiseSize, kCloudDetailNoiseSize, kCloudWeatherNoiseSize);
+        if (!m_SkyResources.CloudShapeNoiseTexture || !m_SkyResources.CloudDetailNoiseTexture ||
+            !m_SkyResources.CloudWeatherNoiseTexture)
         {
             Core::Logger::Error("KurenaiEngine3D",
                 "雲のノイズテクスチャの作成に失敗しました(ボリュメトリック雲が正しく描画されません)");
@@ -1773,14 +1768,11 @@ namespace Kurenai
         // 依存せず、大気パラメータ(濁りを含む)だけの関数なので、濁りが変わらない限り焼き直さない
         // (m_AtmosphereLUTBakedTurbidity)。SkyViewは太陽の位置と濁りで変わるため、
         // そのどちらかが動いたときに焼き直す(m_SkyViewBakedSunPosition)。
-        // HDRの放射輝度を格納するためR16G16B16A16_Float
-        m_TransmittanceLUT = m_Device->CreateUAVTexture(
-            kTransmittanceLUTWidth, kTransmittanceLUTHeight, RHI::Format::R16G16B16A16_Float);
-        m_MultiScatteringLUT = m_Device->CreateUAVTexture(
-            kMultiScatteringLUTSize, kMultiScatteringLUTSize, RHI::Format::R16G16B16A16_Float);
-        m_SkyViewLUT = m_Device->CreateUAVTexture(
-            kSkyViewLUTWidth, kSkyViewLUTHeight, RHI::Format::R16G16B16A16_Float);
-        if (!m_TransmittanceLUT || !m_MultiScatteringLUT || !m_SkyViewLUT)
+        m_SkyResources.CreateAtmosphereLUTs(
+            *m_Device, kTransmittanceLUTWidth, kTransmittanceLUTHeight, kMultiScatteringLUTSize,
+            kSkyViewLUTWidth, kSkyViewLUTHeight);
+        if (!m_SkyResources.TransmittanceLUT || !m_SkyResources.MultiScatteringLUT ||
+            !m_SkyResources.SkyViewLUT)
         {
             Core::Logger::Error("KurenaiEngine3D",
                 "大気散乱のLUTテクスチャの作成に失敗しました(日中の空が黒くなります)");
@@ -1917,7 +1909,7 @@ namespace Kurenai
         m_SkyBakeConstantBuffer = m_Device->CreateBuffer(skyBakeConstantBufferDesc);
 
         // 空パラメータ(ティント4本+照度正規化済みの天頂輝度)の積分をGPUで行うコンピュートシェーダー
-        // 。SkyGenerateより前に実行し、結果をm_SkyParametersBufferへ書く
+        // 。SkyGenerateより前に実行し、結果をm_SkyResources.ParametersBufferへ書く
         RHI::ShaderDesc skyIntegrateCsDesc;
         skyIntegrateCsDesc.Stage = RHI::ShaderStage::Compute;
         skyIntegrateCsDesc.FilePath = shaderDirectory + L"SkyIntegrate.kshader";
@@ -1942,11 +1934,7 @@ namespace Kurenai
         // 「SkyIntegrateパスをまだ一度も実行していないフレームでは、手続き空が無効でも1回だけ
         // 実行する」という形でGPU側から埋める(Render()のskyIntegrateThisFrame・
         // m_SkyParametersBufferInitialized参照)
-        RHI::BufferDesc skyParametersBufferDesc;
-        skyParametersBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
-        skyParametersBufferDesc.SizeInBytes = sizeof(GPUSkyParameters);
-        skyParametersBufferDesc.StrideInBytes = sizeof(GPUSkyParameters);
-        m_SkyParametersBuffer = m_Device->CreateBuffer(skyParametersBufferDesc);
+        m_SkyResources.CreateParametersBuffer(*m_Device, sizeof(GPUSkyParameters));
 
         m_IBLResources.CreatePrefilterConstantBuffer(*m_Device, sizeof(Passes::IBLFaceConstants));
 
@@ -5719,13 +5707,13 @@ namespace Kurenai
         // 両方をこのフラグで判定する
         const bool bakeSkyThisFrame = usingProceduralSky && m_SkyBakeDirty;
 
-        // このフレームでSkyIntegrateパス(m_SkyParametersBufferへ書く)を実行するかどうか。
-        // 通常はbakeSkyThisFrameと同じタイミングだが、m_SkyParametersBufferが一度も書かれていない
+        // このフレームでSkyIntegrateパス(m_SkyResources.ParametersBufferへ書く)を実行するかどうか。
+        // 通常はbakeSkyThisFrameと同じタイミングだが、m_SkyResources.ParametersBufferが一度も書かれていない
         // 場合はusingProceduralSkyがfalse(.ksceneのDDSスカイボックス使用時)でも1回だけ実行する。
         //
         // 【なぜCPU側からのゼロ初期化ではなくこの形にしたのか】DX12のStructuredRWバッファは
         // UAV/SRVでのGPUアクセス専用にDEFAULTヒープへ作成されており、CPUから書き込むための
-        // マップ済みポインタ・ステージングリングを一切持たない(m_SkyParametersBuffer作成箇所の
+        // マップ済みポインタ・ステージングリングを一切持たない(m_SkyResources.ParametersBuffer作成箇所の
         // コメント参照)。そのためUpdateBufferでのゼロ埋めはDX12でクラッシュする。GPU側のパスを
         // 1回だけ走らせれば、DX11/DX12のどちらでも安全に(積分結果自体は使われないが)未初期化状態を
         // 解消できる。太陽方向・目標照度はusingProceduralSkyに関わらず既に計算済みのsunLightingを
@@ -5734,7 +5722,7 @@ namespace Kurenai
 
         // --- 空パラメータ(tintと天頂輝度)の確定はGPU側(SkyIntegrate.hlsl)で行う ---
         // 【なぜベイクと同じタイミングか】背景の解析評価(DeferredLighting.hlsl)は、下のFrameConstants
-        // (SkySunDirection)とm_SkyParametersBuffer(SkyIntegrate.hlslの出力)を組み合わせて使う。
+        // (SkySunDirection)とm_SkyResources.ParametersBuffer(SkyIntegrate.hlslの出力)を組み合わせて使う。
         // ベイクと同じタイミングでSkyIntegrateパスを実行することで、背景とキューブマップ
         // (IBL・反射)が常に同一の空パラメータを見る。毎フレーム走らせると、太陽の角度閾値で
         // ベイクを間引いている間だけ背景とIBLの空がずれてしまう。実際のディスパッチとcbuffer更新は
@@ -5742,7 +5730,7 @@ namespace Kurenai
         if (bakeSkyThisFrame)
         {
             // 雲(判断B)による平均透過率をベイクと同じタイミングで確定させ、メンバへキャッシュする。
-            // **この値はm_SkyParametersBuffer側の天頂輝度には掛けない**——キューブへ焼く
+            // **この値はm_SkyResources.ParametersBuffer側の天頂輝度には掛けない**——キューブへ焼く
             // Passes::SkyBakeConstants::CloudTransmittance(下のSkyGenerateパス参照)にだけ掛ける。
             // SkyParametersBufferの天頂輝度を減光すると、雲の隙間から見える青空まで暗くなり、
             // Sky.hlsli側のSkyColorがそこへさらに雲を重ねることで二重に暗くなってしまう
@@ -5911,7 +5899,7 @@ namespace Kurenai
             0.0f };
 
         // 空の解析評価用。DeferredLighting.hlslが背景画素でSky.hlsliのSkyColorを画面解像度で
-        // 評価するために使う。ティントと天頂輝度はm_SkyParametersBuffer(直近の手続き空ベイクで
+        // 評価するために使う。ティントと天頂輝度はm_SkyResources.ParametersBuffer(直近の手続き空ベイクで
         // SkyIntegrate.hlslが書いた値。上のbakeSkyThisFrameブロック参照)にあり、DeferredLighting.hlsl/
         // SSR.hlslがStructuredBufferとして直接読むため、ここでFrameConstantsへは詰めない。
         // SunDirectionはここで毎フレーム最新のsunLightingから渡す
@@ -6399,6 +6387,7 @@ namespace Kurenai
         frameContext.Constants = &constants;
         frameContext.SkyTexture = skyTexture;
         frameContext.IBL = &m_IBLResources;
+        frameContext.Sky = &m_SkyResources;
 
         Rendering::RenderBlackboard blackboard{};
 

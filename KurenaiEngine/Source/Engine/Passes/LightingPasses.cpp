@@ -29,6 +29,13 @@ namespace Kurenai::Passes
         Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHITexture* const cloudDetailNoiseTexture = frame.Sky->CloudDetailNoiseTexture.get();
+        RHI::IRHITexture* const cloudShapeNoiseTexture = frame.Sky->CloudShapeNoiseTexture.get();
+        RHI::IRHITexture* const cloudWeatherNoiseTexture = frame.Sky->CloudWeatherNoiseTexture.get();
+        RHI::IRHIBuffer* const skyParametersBuffer = frame.Sky->ParametersBuffer.get();
+        RHI::IRHITexture* const skyViewLUT = frame.Sky->SkyViewLUT.get();
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
 
         // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
@@ -301,26 +308,26 @@ namespace Kurenai::Passes
                 // SkyViewBakeより後に順序付けさせる(SkyCloudLayers自体はLUTを引かないが、
                 // Sky.hlsliの宣言上バインドが必要で、パスの前後関係も揃えておく)
                 .Reads = {
-                    m_Engine.m_SkyViewLUT.get(), m_Engine.m_CloudShapeNoiseTexture.get(), m_Engine.m_CloudDetailNoiseTexture.get(),
+                    skyViewLUT, cloudShapeNoiseTexture, cloudDetailNoiseTexture,
                     // 焼いたウェザーマップ(H3)。レイマーチの1歩を約8倍安くするためのもので、
                     // ボリューム経路を持つこのパスだけが引く
-                    m_Engine.m_CloudWeatherNoiseTexture.get(),
+                    cloudWeatherNoiseTexture,
                 },
                 // 2枚出す。0=散乱光rgb+透過率a、1=fogInFront(P18b。SkyCloud.hlslのPSOutput参照)
                 .RenderTargets = { m_Engine.m_SkyCloudTexture.get(), m_Engine.m_SkyCloudFogTexture.get() },
                 // 空パラメータ。SkyIntegrateパスより後に順序付けさせる
-                .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
-                .Execute = [this, skyCloudViewport, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .BufferReads = { skyParametersBuffer },
+                .Execute = [this, cloudDetailNoiseTexture, cloudShapeNoiseTexture, cloudWeatherNoiseTexture, skyParametersBuffer, skyViewLUT, skyCloudViewport, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(skyCloudViewport);
                     cmd->SetPipelineState(m_Engine.m_SkyCloudPipelineState.get());
                     cmd->SetConstantBuffer(0, frameConstantBuffer);
                     cmd->SetSamplerSet(screenSpaceSamplers);
-                    cmd->SetTexture(0, m_Engine.m_SkyViewLUT.get());
-                    cmd->SetTexture(1, m_Engine.m_CloudShapeNoiseTexture.get());
-                    cmd->SetTexture(2, m_Engine.m_CloudDetailNoiseTexture.get());
-                    cmd->SetShaderResourceBuffer(3, m_Engine.m_SkyParametersBuffer.get());
-                    cmd->SetTexture(4, m_Engine.m_CloudWeatherNoiseTexture.get());
+                    cmd->SetTexture(0, skyViewLUT);
+                    cmd->SetTexture(1, cloudShapeNoiseTexture);
+                    cmd->SetTexture(2, cloudDetailNoiseTexture);
+                    cmd->SetShaderResourceBuffer(3, skyParametersBuffer);
+                    cmd->SetTexture(4, cloudWeatherNoiseTexture);
                     cmd->Draw(3, 0);
                 },
             });
@@ -332,6 +339,10 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHIBuffer* const skyParametersBuffer = frame.Sky->ParametersBuffer.get();
+        RHI::IRHITexture* const skyViewLUT = frame.Sky->SkyViewLUT.get();
+
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
         RHI::IRHITexture* const irradianceTexture = frame.IBL->IrradianceTexture.get();
@@ -381,7 +392,7 @@ namespace Kurenai::Passes
                 m_Engine.m_DDGIIrradianceAtlas.get(), m_Engine.m_DDGIDistanceAtlas.get(),
                 // 大気散乱のSkyView LUT。背景の空をここから引くため、
                 // SkyViewBakeパスより後に順序付けさせる
-                m_Engine.m_SkyViewLUT.get(),
+                skyViewLUT,
                 // 低解像度で評価済みの雲。SkyCloudパスより後に順序付けさせるために挙げる
                 // (パスが登録されないフレームでは書き手が居ないので依存も張られない)
                 m_Engine.m_SkyCloudTexture.get(), m_Engine.m_SkyCloudFogTexture.get(),
@@ -391,8 +402,8 @@ namespace Kurenai::Passes
             .RenderTargets = { m_Engine.m_RenderTargets.SceneColor.get() },
             // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
             // (実際のバインドはExecute内)
-            .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
-            .Execute = [this, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, gbufferViewport, activeAOTexture, skyTexture, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+            .BufferReads = { skyParametersBuffer },
+            .Execute = [this, skyParametersBuffer, skyViewLUT, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, gbufferViewport, activeAOTexture, skyTexture, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 cmd->SetViewport(gbufferViewport);
                 // 深度テストに失敗した(=何も描かれていない)ピクセル用の背景色。discardされた箇所に前フレームのデータが
@@ -424,7 +435,7 @@ namespace Kurenai::Passes
                 cmd->SetTexture(15, m_Engine.m_DDGIIrradianceAtlas.get());
                 cmd->SetTexture(16, m_Engine.m_DDGIDistanceAtlas.get());
                 // 空パラメータ。t11に置く(t17はbent normalが使う)
-                cmd->SetShaderResourceBuffer(11, m_Engine.m_SkyParametersBuffer.get());
+                cmd->SetShaderResourceBuffer(11, skyParametersBuffer);
                 // bent normal(34章)
                 cmd->SetTexture(17, m_Engine.m_RenderTargets.GBufferBentNormal.get());
                 // 低解像度で評価済みの雲(rgb=事前乗算済みの散乱光、a=透過率)。
@@ -444,7 +455,7 @@ namespace Kurenai::Passes
                 // 低解像度の深度(41.24節)。UpsampleDDGIがGatherRed 1回で4テクセルぶんを取る
                 cmd->SetTexture(21, m_Engine.m_DDGIResolveDepthTexture.get());
                 // 大気散乱のSkyView LUT。日中の空の色はここから引く
-                cmd->SetTexture(20, m_Engine.m_SkyViewLUT.get());
+                cmd->SetTexture(20, skyViewLUT);
                 cmd->Draw(3, 0);
             },
         });

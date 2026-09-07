@@ -15,6 +15,10 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHIBuffer* const skyParametersBuffer = frame.Sky->ParametersBuffer.get();
+        RHI::IRHITexture* const skyViewLUT = frame.Sky->SkyViewLUT.get();
+
         // 【フレームの写しをローカルで受ける】ラムダへ値で渡すため
         const float effectiveExposureEV100 = frame.EffectiveExposureEV100;
         const DirectX::XMFLOAT2 taaPrevJitterUv = frame.TAAPrevJitterUv;
@@ -56,12 +60,12 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AerialPerspective",
-                .Reads = { reflectionOutput, m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_SkyViewLUT.get() },
+                .Reads = { reflectionOutput, m_Engine.m_RenderTargets.GBufferDepth.get(), skyViewLUT },
                 .RenderTargets = { m_Engine.m_AerialPerspectiveTexture.get() },
                 // 空パラメータ。SkyIntegrateパスの後へ順序付けさせるために挙げる
                 // (実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
-                .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
-                .Execute = [this, gbufferViewport, reflectionOutput, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .BufferReads = { skyParametersBuffer },
+                .Execute = [this, skyParametersBuffer, skyViewLUT, gbufferViewport, reflectionOutput, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(gbufferViewport);
                     cmd->SetPipelineState(m_Engine.m_AerialPerspectivePipelineState.get());
@@ -69,10 +73,10 @@ namespace Kurenai::Passes
                     cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, reflectionOutput);
                     cmd->SetTexture(1, m_Engine.m_RenderTargets.GBufferDepth.get());
-                    cmd->SetShaderResourceBuffer(2, m_Engine.m_SkyParametersBuffer.get());
+                    cmd->SetShaderResourceBuffer(2, skyParametersBuffer);
                     // 大気散乱のSkyView LUT。in-scatter項に背景と同じ空の色を
                     // 使うのがこのパスの要点なので、当然同じLUTを読む
-                    cmd->SetTexture(3, m_Engine.m_SkyViewLUT.get());
+                    cmd->SetTexture(3, skyViewLUT);
                     cmd->Draw(3, 0);
                 },
             });

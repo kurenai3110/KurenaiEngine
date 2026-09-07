@@ -165,7 +165,7 @@ namespace Kurenai::ShaderInterop
         // 空の解析評価用(さらに末尾に追加)。DeferredLighting.hlslが背景画素で
         // Sky.hlsliのSkyColorを画面解像度で評価するために使う。太陽方向以外の値
         // (ティント4本・天頂輝度)は手続き空のベイクと同じタイミングでSkyIntegrate.hlslが
-        // m_SkyParametersBufferへ書き、両者が同じ空を描くことを保証する。
+        // m_SkyResources.ParametersBufferへ書き、両者が同じ空を描くことを保証する。
         // SkySunDirection: xyz=太陽が「ある」向き、w=未使用。
         //   【正規化はシェーダ側で行う】sunLighting.SunPositionは解析的にはほぼ単位長だが、
         //   SkyGenerate.hlsl側の慣習(呼び出し側=SkyParameters組み立て時にnormalizeする)に
@@ -183,7 +183,7 @@ namespace Kurenai::ShaderInterop
         //   yは手続き空が無効(.ksceneのDDSスカイボックス使用時)は常に0にする
         //   (DDSは任意の絵でPerezモデルとは無関係なため、解析評価してはいけない)。
         //   ティント4本(SkyZenithTint/SkyHorizonTint/SkyGroundTint/SkySunGlowTint)は
-        //   m_SkyParametersBuffer(GPUSkyParameters、SkyIntegrate.hlslが書く)にあり、
+        //   m_SkyResources.ParametersBuffer(GPUSkyParameters、SkyIntegrate.hlslが書く)にあり、
         //   このFrameConstantsには持たない)。
         DirectX::XMFLOAT4 SkyParams;
         // 雲(さらに末尾に追加)。背景と水面反射が同じ雲を描くための値

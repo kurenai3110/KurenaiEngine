@@ -53,6 +53,13 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHITexture* const cloudDetailNoiseTexture = frame.Sky->CloudDetailNoiseTexture.get();
+        RHI::IRHITexture* const cloudShapeNoiseTexture = frame.Sky->CloudShapeNoiseTexture.get();
+        RHI::IRHITexture* const multiScatteringLUT = frame.Sky->MultiScatteringLUT.get();
+        RHI::IRHITexture* const skyViewLUT = frame.Sky->SkyViewLUT.get();
+        RHI::IRHITexture* const transmittanceLUT = frame.Sky->TransmittanceLUT.get();
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
         RHI::IRHITexture* const irradianceTexture = frame.IBL->IrradianceTexture.get();
         RHI::IRHITexture* const prefilteredEnvTexture = frame.IBL->PrefilteredEnvTexture.get();
@@ -83,7 +90,7 @@ namespace Kurenai::Passes
         RHI::IRHITexture* presentDebugCubeArrayTexture = m_Engine.m_ProbePrefilteredArray.get();
         // Mode 18(雲の3Dノイズ)専用。Texture3Dはここまでのどの型とも別なのでさらに
         // 別スロット(t5)が要る。他と同じく常に有効なテクスチャをバインドしておく
-        RHI::IRHITexture* presentDebugVolumeTexture = m_Engine.m_CloudShapeNoiseTexture.get();
+        RHI::IRHITexture* presentDebugVolumeTexture = cloudShapeNoiseTexture;
         int32_t presentMode = 0;
         uint32_t presentSourceWidth = renderWidth;
         uint32_t presentSourceHeight = renderHeight;
@@ -334,19 +341,19 @@ namespace Kurenai::Passes
             // 表示輝度の倍率と併用する
             if (frame.Settings.Sky.AtmosphereLUTDebugIndex == 1)
             {
-                presentSourceTexture = m_Engine.m_MultiScatteringLUT.get();
+                presentSourceTexture = multiScatteringLUT;
                 presentSourceWidth = kMultiScatteringLUTSize;
                 presentSourceHeight = kMultiScatteringLUTSize;
             }
             else if (frame.Settings.Sky.AtmosphereLUTDebugIndex == 2)
             {
-                presentSourceTexture = m_Engine.m_SkyViewLUT.get();
+                presentSourceTexture = skyViewLUT;
                 presentSourceWidth = kSkyViewLUTWidth;
                 presentSourceHeight = kSkyViewLUTHeight;
             }
             else
             {
-                presentSourceTexture = m_Engine.m_TransmittanceLUT.get();
+                presentSourceTexture = transmittanceLUT;
                 presentSourceWidth = kTransmittanceLUTWidth;
                 presentSourceHeight = kTransmittanceLUTHeight;
             }
@@ -388,7 +395,7 @@ namespace Kurenai::Passes
             // 正方形のテクスチャなので表示も正方形にする(レターボックスの計算に渡す)
             const bool showDetail = frame.Settings.Cloud.NoiseDebugShowDetail;
             presentDebugVolumeTexture =
-                showDetail ? m_Engine.m_CloudDetailNoiseTexture.get() : m_Engine.m_CloudShapeNoiseTexture.get();
+                showDetail ? cloudDetailNoiseTexture : cloudShapeNoiseTexture;
             presentMode = 18;
             const uint32_t size = showDetail ? kCloudDetailNoiseSize : kCloudShapeNoiseSize;
             presentSourceWidth = size;

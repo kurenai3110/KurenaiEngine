@@ -28,6 +28,13 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        RHI::IRHITexture* const cloudDetailNoiseTexture = frame.Sky->CloudDetailNoiseTexture.get();
+        RHI::IRHITexture* const cloudShapeNoiseTexture = frame.Sky->CloudShapeNoiseTexture.get();
+        RHI::IRHITexture* const cloudWeatherNoiseTexture = frame.Sky->CloudWeatherNoiseTexture.get();
+        RHI::IRHIBuffer* const skyParametersBuffer = frame.Sky->ParametersBuffer.get();
+        RHI::IRHITexture* const skyViewLUT = frame.Sky->SkyViewLUT.get();
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHITexture* const brdfLUTTexture = frame.IBL->BRDFLUTTexture.get();
         RHI::IRHITexture* const irradianceTexture = frame.IBL->IrradianceTexture.get();
         RHI::IRHITexture* const prefilteredEnvTexture = frame.IBL->PrefilteredEnvTexture.get();
@@ -86,16 +93,16 @@ namespace Kurenai::Passes
                 .Reads = {
                     m_Engine.m_RenderTargets.ShadowCascadeArray.get(), irradianceTexture, prefilteredEnvTexture,
                     brdfLUTTexture, m_Engine.m_DDGIIrradianceAtlas.get(), m_Engine.m_DDGIDistanceAtlas.get(),
-                    m_Engine.m_SkyViewLUT.get(),
+                    skyViewLUT,
                 },
                 .RenderTargets = { m_Engine.m_PlanarReflectionColor.get() },
                 .DepthTarget = m_Engine.m_PlanarReflectionDepth.get(),
-                // 大気遠近。空パラメータ(m_SkyParametersBuffer)をSkyIntegrateパスの後へ
+                // 大気遠近。空パラメータ(m_SkyResources.ParametersBuffer)をSkyIntegrateパスの後へ
                 // 順序付けさせるために挙げる(実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
                 // m_DroneBufferはこのパス末尾でドローンショーの機体を描き足すために読む
                 // (実際のバインドはExecute内)
-                .BufferReads = { m_Engine.m_LightBuffer.get(), m_Engine.m_SkyParametersBuffer.get(), m_Engine.m_DroneBuffer.get() },
-                .Execute = [this, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, planarReflectionViewport, reflectedViewProj, reflectMatrix, waterPlaneY, viewMatrix, jitteredProj, effectiveExposure, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .BufferReads = { m_Engine.m_LightBuffer.get(), skyParametersBuffer, m_Engine.m_DroneBuffer.get() },
+                .Execute = [this, skyParametersBuffer, skyViewLUT, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, planarReflectionViewport, reflectedViewProj, reflectMatrix, waterPlaneY, viewMatrix, jitteredProj, effectiveExposure, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     // captureProbeFaceとまったく同じ作法(constants.ViewProj/CameraPosition/
                     // PrevViewProj/TAAParams/PlanarReflectionPlaneだけをこのパス用に差し替える)。
@@ -141,9 +148,9 @@ namespace Kurenai::Passes
                     cmd->SetTexture(12, m_Engine.m_DDGIIrradianceAtlas.get());
                     cmd->SetTexture(13, m_Engine.m_DDGIDistanceAtlas.get());
                     // 大気遠近のin-scatter項が読む空パラメータ(PlanarReflection.hlsl参照)
-                    cmd->SetShaderResourceBuffer(14, m_Engine.m_SkyParametersBuffer.get());
+                    cmd->SetShaderResourceBuffer(14, skyParametersBuffer);
                     // 大気散乱のSkyView LUT。in-scatter項の空の色はここから引く
-                    cmd->SetTexture(15, m_Engine.m_SkyViewLUT.get());
+                    cmd->SetTexture(15, skyViewLUT);
 
                     // 鏡映カメラで描くとワインディングが全反転するため、PSOの切り替えは
                     // instance.IsMirroredの否定で行う(このファイル冒頭のPSO生成箇所のコメント参照)
@@ -276,15 +283,15 @@ namespace Kurenai::Passes
                     // (今フレームのWriterが無いため単に依存辺が張られないだけ)
                     m_Engine.m_PlanarReflectionColor.get(),
                     // 大気散乱のSkyView LUT。水面に映る空をここから引く
-                    m_Engine.m_SkyViewLUT.get(),
+                    skyViewLUT,
                     // bent normal(34章)。スペキュラ遮蔽をLightingパスと同じ規則で求めるために読む
                     m_Engine.m_RenderTargets.GBufferBentNormal.get(),
                 },
                 .RenderTargets = { m_Engine.m_RenderTargets.SSRTexture.get() },
                 // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
                 // (実際のバインドはExecute内)
-                .BufferReads = { m_Engine.m_SkyParametersBuffer.get() },
-                .Execute = [this, brdfLUTTexture, prefilteredEnvTexture, reflectionSettings, waterSettings, gbufferViewport, activeAOTexture, usingProceduralSky, planarReflectionPassRuns, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .BufferReads = { skyParametersBuffer },
+                .Execute = [this, cloudDetailNoiseTexture, cloudShapeNoiseTexture, cloudWeatherNoiseTexture, skyParametersBuffer, skyViewLUT, brdfLUTTexture, prefilteredEnvTexture, reflectionSettings, waterSettings, gbufferViewport, activeAOTexture, usingProceduralSky, planarReflectionPassRuns, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     // 水面の解析空フォールバック。手続き空が無効(.ksceneがDDSスカイボックスを
                     // 明示するシーン)なときは、m_WaterSettings.AnalyticSkyReflectionの値に関わらず必ず0にする
@@ -325,17 +332,17 @@ namespace Kurenai::Passes
                     // (反射プローブ・DDGIと同じ理由)
                     cmd->SetTexture(11, m_Engine.m_PlanarReflectionColor.get());
                     // 空パラメータ。SSR.hlsl側はt12(t0〜t11が既に使用済み)
-                    cmd->SetShaderResourceBuffer(12, m_Engine.m_SkyParametersBuffer.get());
+                    cmd->SetShaderResourceBuffer(12, skyParametersBuffer);
                     // ボリュメトリック積雲の3Dノイズ。水面に映る雲も背景とまったく同じ
                     // 立体にならなければ「空の雲と水面の雲が別物」になるため、ここにも同じものを渡す
-                    cmd->SetTexture(13, m_Engine.m_CloudShapeNoiseTexture.get());
-                    cmd->SetTexture(14, m_Engine.m_CloudDetailNoiseTexture.get());
+                    cmd->SetTexture(13, cloudShapeNoiseTexture);
+                    cmd->SetTexture(14, cloudDetailNoiseTexture);
                     // 大気散乱のSkyView LUT。雲と同じ理由で、水面に映る空も
                     // 背景とまったく同じものでなければならない
-                    cmd->SetTexture(15, m_Engine.m_SkyViewLUT.get());
+                    cmd->SetTexture(15, skyViewLUT);
                     // 焼いたウェザーマップ(H3)。**Lightingパスと同じものを渡さないと、
                     // 水面に映る雲と空の雲が別の場所に立つ**
-                    cmd->SetTexture(17, m_Engine.m_CloudWeatherNoiseTexture.get());
+                    cmd->SetTexture(17, cloudWeatherNoiseTexture);
                     // bent normal(34章)。Lightingパスとまったく同じものを読まないと、
                     // SSRが適用される領域とされない領域の境界に段差が出る。
                     // **t11は平面反射が使っているためt16へ移した**

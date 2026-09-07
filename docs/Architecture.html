@@ -3649,7 +3649,7 @@ HLSLの<code>InterlockedAdd</code>はSM6.6未満では整数専用でfloatを加
 </p>
 <p>
 結果(ティント4本+正規化済みの天頂輝度)は要素数1の構造化バッファ
-(<code>GPUSkyParameters</code>、C++側 <code>m_SkyParametersBuffer</code>)へ書く。
+(<code>GPUSkyParameters</code>、C++側 <code>m_SkyResources.ParametersBuffer</code>)へ書く。
 <code>SkyGenerate.hlsl</code>(IBL用キューブマップのベイク)・<code>DeferredLighting.hlsl</code>
 (背景の解析評価)・<code>SSR.hlsl</code>(水面の解析空フォールバック)の3者はこのバッファを
 <code>Sky.hlsli</code>の<code>ApplySkyParametersFromBuffer</code>で読むだけである

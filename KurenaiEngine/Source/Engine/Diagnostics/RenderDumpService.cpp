@@ -71,9 +71,9 @@ namespace Kurenai
             { "SkyCloudTexture", m_SkyCloudTexture.get() },
             { "SkyCloudFogTexture", m_SkyCloudFogTexture.get() },
             { "AerialPerspectiveTexture", m_AerialPerspectiveTexture.get() },
-            { "TransmittanceLUT", m_TransmittanceLUT.get() },
-            { "MultiScatteringLUT", m_MultiScatteringLUT.get() },
-            { "SkyViewLUT", m_SkyViewLUT.get() },
+            { "TransmittanceLUT", m_SkyResources.TransmittanceLUT.get() },
+            { "MultiScatteringLUT", m_SkyResources.MultiScatteringLUT.get() },
+            { "SkyViewLUT", m_SkyResources.SkyViewLUT.get() },
             // DDGI
             { "DDGIIrradianceAtlas", m_DDGIIrradianceAtlas.get() },
             { "DDGIDistanceAtlas", m_DDGIDistanceAtlas.get() },
