@@ -6362,6 +6362,7 @@ namespace Kurenai
         frameContext.ActiveAOTexture = GetActiveAOTexture();
         frameContext.ActiveAORawTexture = GetActiveAORawTexture();
         frameContext.ActiveReflectionOutput = GetActiveReflectionOutput();
+        frameContext.UpscaleAvailable = IsUpscaleActive();
         frameContext.SwapChain = m_SwapChain.get();
         // 【遅延生成のためだけに渡す】使ってよいのはMegaLightsの読み戻しバッファだけ
         frameContext.Device = m_Device.get();

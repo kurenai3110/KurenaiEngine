@@ -81,6 +81,11 @@ namespace Kurenai::Rendering
         // AOと同じく設定と実行可否から決まる派生値で、どのパスも書かない
         RHI::IRHITexture* ActiveReflectionOutput = nullptr;
 
+        // 超解像を走らせられる状態か(設定が有効で、出力テクスチャも確保できている)。
+        // **実際に走らせたかはこれではない** ―― デバッグ表示中は等倍で見たいので
+        // 走らせず、その判断は Blackboard の UpscaleActive が持つ
+        bool UpscaleAvailable = false;
+
         // PresentパスがRenderGraphPassDesc::SwapChainTargetへ渡す
         RHI::IRHISwapChain* SwapChain = nullptr;
 

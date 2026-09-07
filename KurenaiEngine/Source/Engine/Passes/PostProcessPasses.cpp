@@ -389,7 +389,7 @@ namespace Kurenai::Passes
 
         // このフレームで超解像パスを走らせるか。デバッグ表示中は内部解像度の中間バッファを
         // そのまま等倍で見たいので走らせない(拡大するとバッファの実際の解像度が分からなくなる)
-        const bool upscaleActive = m_Engine.IsUpscaleActive() && debugViewSettings.View == DebugView::Final;
+        const bool upscaleActive = frame.UpscaleAvailable && debugViewSettings.View == DebugView::Final;
         bb.UpscaleActive = upscaleActive;
 
         graph.AddPass(Core::RenderGraphPassDesc{
