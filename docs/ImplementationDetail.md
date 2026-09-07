@@ -897,7 +897,7 @@ L = 1一様なら両経路とも`E(N)/π = 1`になるため、14.10.1の導出�
 (ローカル反射プローブ等)ではプローブ1個あたり約9,750万サンプル
 — 3つの畳み込みのうち最も重い、プリフィルタ済み鏡面の約3倍 — を丸ごと省ける。
 
-**将来SRVスロットが逼迫した場合**にのみ、完全削除(`m_IrradianceTexture` /
+**将来SRVスロットが逼迫した場合**にのみ、完全削除(`IBLResources::IrradianceTexture` /
 `CSIrradiance` / `m_IrradiancePipelineState` / デバッグ表示
 `IBLIrradiance`の削除)を検討する。削除すればDeferredはt8が空き、半透明は
 `kTextureSlotCount`が12→11になる(DX12の半透明パスは`DrawIndexed`ごとに

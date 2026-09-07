@@ -1685,7 +1685,7 @@ t10(BRDFLUT)を使う。DX12は全パイプラインステートで共有する�
 (14.9節のエネルギー補正で<code>Ess = brdf.x + brdf.y</code>が必要なため)。このパスは
 t0〜t3がG-Buffer、t4がシャドウマップ配列(<code>Texture2DArray</code>。4.1節)、
 <b>t8がライトリストの<code>StructuredBuffer</code></b>で埋まっているため、LUTは<code>t9</code>にある。
-RenderGraphの<code>.Reads</code>へ<code>m_BRDFLUTTexture</code>を挙げることで、
+RenderGraphの<code>.Reads</code>へ<code>IBLResources::BRDFLUTTexture</code>を挙げることで、
 このLUTのWriterであるIBLBakeパスより後に自動的に順序付けられる。
 </p>
 <p>
@@ -1869,7 +1869,7 @@ Kulla-Contyの補正式は「乗算先が単一散乱の方向アルベドであ
 <p>
 <b>既定の描画経路はプリフィルタ済み鏡面の最終ミップで、
 専用イラディアンスマップは既定経路から外れている</b>。ただし
-<code>CSIrradiance</code>・<code>m_IrradianceTexture</code>・
+<code>CSIrradiance</code>・<code>IBLResources::IrradianceTexture</code>・
 <code>m_IrradiancePipelineState</code>・デバッグ表示はいずれも<b>削除せずそのまま残してある</b>
 (いつでも両経路を突き合わせて検証できる状態を保つため)。
 <code>FrameConstants</code>末尾へ<code>IBLParams</code>を追加し(末尾追加なので既存シェーダの
