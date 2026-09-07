@@ -134,7 +134,6 @@ namespace Kurenai
         friend class Passes::PostProcessPasses;
         friend class Passes::ReflectionPasses;
         friend class Passes::ReflectionProbePasses;
-        friend class Passes::PresentPass;
 
         // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
         //   実行時に「システム」パネルからも変更できる)。
@@ -1481,6 +1480,17 @@ namespace Kurenai
         // **毎フレーム焼かない** —— 43本のSetNameを60回/秒で呼ぶ意味がない
         bool m_DebugNamesDirty = true;
 
+    public:
+        // 旗が立っていれば上を呼んで下ろす。
+        //
+        // 【publicにしてある】呼ぶのはPasses::PresentPassだけだが、名前を焼く対象は
+        // エンジン全体のテクスチャ表(BuildDumpableTextureTable)なので、この機能を
+        // Present群へ降ろすことはできない。**旗の判定と下ろしをここへ閉じておく**と、
+        // 群がエンジンのメンバ変数を触る必要が無くなり、friend を外せる
+        void ApplyDebugNamesIfDirty();
+
+    private:
+
         // 連番ダンプの受け皿1枚ぶん。
         //
         // 【なぜ1枚では足りないのか】コピーを積んでから読めるようになるまで
@@ -1562,7 +1572,13 @@ namespace Kurenai
 
         // ダンプの発行(コピーを積む)と、読み戻し・ファイル書き出し。Render()から呼ぶ
         void ApplyScheduledRecreations();
+
+    public:
+        // 【publicにしてある】積む位置がPresentより前と決まっているためPasses::PresentPassが
+        // 呼ぶ。書き出す対象はエンジン全体のテクスチャ表なので、群へは降ろせない
         void IssueTextureDumps(Core::RenderGraph& graph);
+
+    private:
         void ResolveTextureDumps();
         // 1件ぶんをファイルへ書く。書けたらtrue
         bool WriteTextureDumpFile(
@@ -1736,11 +1752,7 @@ namespace Kurenai
 
         // 垂直同期・固定FPSモードはm_SystemSettingsへ移した
 
-        // Presentパス(選択中のレンダーターゲットをアスペクト比を保ってバックバッファへ拡大縮小表示)
-        std::unique_ptr<RHI::IRHIShader> m_PresentVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_PresentPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_PresentPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_PresentConstantBuffer;
+        // Presentパスのシェーダー・PSO・定数バッファはPasses/PresentPassへ移した
 
         // デバッグ表示用: Presentパスで最終的に表示するレンダーターゲットの種類(DebugView enum)と
         // その表示パラメータはm_DebugViewSettingsへ移した(Settings/DebugViewSettings.h)。

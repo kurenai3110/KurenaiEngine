@@ -1632,28 +1632,9 @@ namespace Kurenai
         bloomConstantBufferDesc.SizeInBytes = sizeof(Passes::BloomConstants);
         m_BloomConstantBuffer = m_Device->CreateBuffer(bloomConstantBufferDesc);
 
-        // Presentパス(頂点バッファなしのフルスクリーン三角形。SceneColorをバックバッファへ拡大縮小表示)
-        RHI::ShaderDesc presentVsDesc;
-        presentVsDesc.Stage = RHI::ShaderStage::Vertex;
-        presentVsDesc.FilePath = shaderDirectory + L"Present.kshader";
-        presentVsDesc.EntryPoint = "VSMain";
-        m_PresentVertexShader = m_Device->CreateShader(presentVsDesc);
-
-        RHI::ShaderDesc presentPsDesc;
-        presentPsDesc.Stage = RHI::ShaderStage::Pixel;
-        presentPsDesc.FilePath = shaderDirectory + L"Present.kshader";
-        presentPsDesc.EntryPoint = "PSMain";
-        m_PresentPixelShader = m_Device->CreateShader(presentPsDesc);
-
-        RHI::PipelineStateDesc presentPipelineDesc;
-        presentPipelineDesc.VertexShader = m_PresentVertexShader.get();
-        presentPipelineDesc.PixelShader = m_PresentPixelShader.get();
-        presentPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        presentPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
-        // スワップチェインへ描くパスは深度テストこそ使わないが、SetRenderTarget(swapChain)が
-        // スワップチェインのDSVをバインドするため、DSVフォーマットの申告だけは必要になる
-        presentPipelineDesc.DepthTargetAttached = true;
-        m_PresentPipelineState = m_Device->CreatePipelineState(presentPipelineDesc);
+        // 【元の行位置のまま呼ぶ】DX12はディスクリプタ枠を生成順に割り当てるため、
+        // 所有権をPresentPassへ移しても生成の順序はここから動かさない
+        m_PresentPass->CreatePipelineState(*m_Device, shaderDirectory);
 
         m_ShadowPasses->CreateCascadePipelineStates(*m_Device, shaderDirectory);
 
@@ -2137,10 +2118,8 @@ namespace Kurenai
         lightingConstantBufferDesc.SizeInBytes = sizeof(Passes::LightingConstants);
         m_LightingConstantBuffer = m_Device->CreateBuffer(lightingConstantBufferDesc);
 
-        RHI::BufferDesc presentConstantBufferDesc;
-        presentConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        presentConstantBufferDesc.SizeInBytes = sizeof(Passes::PresentConstants);
-        m_PresentConstantBuffer = m_Device->CreateBuffer(presentConstantBufferDesc);
+        // 【元の行位置のまま呼ぶ】上のCreatePipelineStateと同じ理由
+        m_PresentPass->CreateConstantBuffer(*m_Device);
 
         // レンダーターゲットを先に作る。CreateRenderTargetsはHDRフォーマットの作成に失敗した場合に
         // m_SystemSettings.PrecisionをLegacy8bitへ落とすフォールバックを持つため、PSOはその結果が

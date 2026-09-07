@@ -2,8 +2,12 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <string>
 
 #include <DirectXMath.h>
+
+#include "RHI/IRHIDevice.h"
 
 namespace Kurenai::Core
 {
@@ -27,12 +31,11 @@ namespace Kurenai::Rendering
 // デバッグ表示(Render Targets UI)の切り替えもここに含まれる ―― 表示するのは
 // 各パス群が書いた出力そのものなので、切り替えの表はどうしても横断的になる。
 //
-// 【エンジンへの参照を持つ理由】段階6は「登録順を1つも変えない」ことを唯一の
-// 決め手として進めており、その担保はパスマニフェストの完全一致である。
-// 状態の引っ越しと登録位置の移動を同時にやると、マニフェストが食い違ったときに
-// どちらが原因か分けられない。**まず登録コードだけを機械的に移し**、
-// リソースの所有権は後から群へ移す。それまでの間、群はエンジンの private を
-// m_Engine 越しに触る(KurenaiEngine3D が friend 宣言している)。
+// 【エンジンへの参照を持つ理由】この群のリソース(PSO・シェーダー・定数バッファ)は
+// 下の private が持っており、エンジンの private はもう触らない(friend は外れている)。
+// 残る m_Engine は、デバッグ名の焼き付けとテクスチャダンプという**エンジンが持ち主の
+// 診断機能**を呼ぶためだけにある。どちらもエンジン全体のテクスチャ表を対象にするので
+// この群へは降ろせず、public メソッドとして呼ぶ。
 namespace Kurenai
 {
     class KurenaiEngine3D;
@@ -90,8 +93,22 @@ namespace Kurenai
                 const Rendering::RenderFrameContext& frame,
                 const Rendering::RenderBlackboard& bb);
 
+            // 【エンジン側の元の行位置から呼ぶこと】DX12はディスクリプタ枠を生成順に
+            // 割り当てるため、生成の呼び出しを寄せ集めると他のリソースとの前後関係が崩れ、
+            // パスマニフェストの採取が一斉に不一致になる。所有権だけをこの群へ移し、
+            // 呼び出しは CreateSceneResources() の元あった場所に残してある
+            void CreatePipelineState(RHI::IRHIDevice& device, const std::wstring& shaderDirectory);
+            void CreateConstantBuffer(RHI::IRHIDevice& device);
+
         private:
             KurenaiEngine3D& m_Engine;
+
+            // Presentパス(頂点バッファなしのフルスクリーン三角形。
+            // 選択中のレンダーターゲットをアスペクト比を保ってバックバッファへ拡大縮小表示)
+            std::unique_ptr<RHI::IRHIShader> m_PresentVertexShader;
+            std::unique_ptr<RHI::IRHIShader> m_PresentPixelShader;
+            std::unique_ptr<RHI::IRHIPipelineState> m_PresentPipelineState;
+            std::unique_ptr<RHI::IRHIBuffer> m_PresentConstantBuffer;
         };
     }
 }

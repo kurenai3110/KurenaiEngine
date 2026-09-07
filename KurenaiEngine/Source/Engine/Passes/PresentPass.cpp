@@ -46,6 +46,40 @@ namespace Kurenai::Passes
         }
     }
 
+    void PresentPass::CreatePipelineState(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        // Presentパス(頂点バッファなしのフルスクリーン三角形。SceneColorをバックバッファへ拡大縮小表示)
+        RHI::ShaderDesc presentVsDesc;
+        presentVsDesc.Stage = RHI::ShaderStage::Vertex;
+        presentVsDesc.FilePath = shaderDirectory + L"Present.kshader";
+        presentVsDesc.EntryPoint = "VSMain";
+        m_PresentVertexShader = device.CreateShader(presentVsDesc);
+
+        RHI::ShaderDesc presentPsDesc;
+        presentPsDesc.Stage = RHI::ShaderStage::Pixel;
+        presentPsDesc.FilePath = shaderDirectory + L"Present.kshader";
+        presentPsDesc.EntryPoint = "PSMain";
+        m_PresentPixelShader = device.CreateShader(presentPsDesc);
+
+        RHI::PipelineStateDesc presentPipelineDesc;
+        presentPipelineDesc.VertexShader = m_PresentVertexShader.get();
+        presentPipelineDesc.PixelShader = m_PresentPixelShader.get();
+        presentPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        presentPipelineDesc.RenderTargetFormats = { RHI::Format::R8G8B8A8_UNorm };
+        // スワップチェインへ描くパスは深度テストこそ使わないが、SetRenderTarget(swapChain)が
+        // スワップチェインのDSVをバインドするため、DSVフォーマットの申告だけは必要になる
+        presentPipelineDesc.DepthTargetAttached = true;
+        m_PresentPipelineState = device.CreatePipelineState(presentPipelineDesc);
+    }
+
+    void PresentPass::CreateConstantBuffer(RHI::IRHIDevice& device)
+    {
+        RHI::BufferDesc presentConstantBufferDesc;
+        presentConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        presentConstantBufferDesc.SizeInBytes = sizeof(PresentConstants);
+        m_PresentConstantBuffer = device.CreateBuffer(presentConstantBufferDesc);
+    }
+
     void PresentPass::Register(
         Core::RenderGraph& graph,
         RHI::IRHICommandList* commandList,
@@ -507,7 +541,7 @@ namespace Kurenai::Passes
         {
             presentConstants.Gain = (frame.Settings.DebugView.View == DebugView::Final) ? 1.0f : frame.Settings.DebugView.Gain;
         }
-        commandList->UpdateBuffer(m_Engine.m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
+        commandList->UpdateBuffer(m_PresentConstantBuffer.get(), &presentConstants, sizeof(presentConstants));
 
         // レターボックス/ピラーボックスの余白もクリア色のまま残るよう、絞ったビューポートで描画する
         const RHI::Viewport letterboxViewport = ComputeLetterboxViewport(
@@ -515,12 +549,9 @@ namespace Kurenai::Passes
 
         // グラフィックスデバッガ向けの名前を焼く。**フレームの記録とは独立**なので
         // レンダーグラフへは積まず、ここで直接呼ぶ(ID3D12Object::SetNameはコマンドではない)。
-        // 立っているのは起動直後とレンダーターゲットを作り直した直後だけ
-        if (m_Engine.m_DebugNamesDirty)
-        {
-            m_Engine.ApplyDebugNames();
-            m_Engine.m_DebugNamesDirty = false;
-        }
+        // 立っているのは起動直後とレンダーターゲットを作り直した直後だけで、
+        // その判定と旗の下ろしはエンジン側(名前の持ち主)に閉じている
+        m_Engine.ApplyDebugNamesIfDirty();
 
         // 【Presentより前に積む】書き出す対象は中間バッファなので、Presentの後ろに置く理由が無い。
         // Readsで書き手より後に順序付くので、この位置に積めば「そのフレームの最終的な中身」が取れる
@@ -541,9 +572,9 @@ namespace Kurenai::Passes
                 cmd->ClearDepth(1.0f);
                 cmd->SetViewport(letterboxViewport);
 
-                cmd->SetPipelineState(m_Engine.m_PresentPipelineState.get());
+                cmd->SetPipelineState(m_PresentPipelineState.get());
                 cmd->SetConstantBuffer(0, frameConstantBuffer);
-                cmd->SetConstantBuffer(1, m_Engine.m_PresentConstantBuffer.get());
+                cmd->SetConstantBuffer(1, m_PresentConstantBuffer.get());
                 cmd->SetSamplerSet(screenSpaceSamplers);
                 cmd->SetTexture(0, presentSourceTexture);
                 cmd->SetTexture(1, presentDebugCubeTexture);

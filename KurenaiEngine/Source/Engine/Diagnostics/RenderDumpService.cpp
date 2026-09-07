@@ -115,6 +115,16 @@ namespace Kurenai
             "グラフィックスデバッガ向けの名前を付けました: " + std::to_string(named) + "本");
     }
 
+    void KurenaiEngine3D::ApplyDebugNamesIfDirty()
+    {
+        if (!m_DebugNamesDirty)
+        {
+            return;
+        }
+        ApplyDebugNames();
+        m_DebugNamesDirty = false;
+    }
+
     std::vector<std::string> KurenaiEngine3D::GetDumpableTextureNames() const
     {
         std::vector<std::string> names;
