@@ -2,6 +2,9 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
+
+#include <DirectXMath.h>
 
 #include "RHI/IRHIDevice.h"
 
@@ -82,6 +85,18 @@ namespace Kurenai::Rendering
         uint32_t PlanarReflectionWidth = 0;
         uint32_t PlanarReflectionHeight = 0;
 
+        // ブルームのピラミッド。第0段が半解像度で、以降1段ごとに半分になる。
+        // ピラミッドをミップチェーン1枚ではなくレベルごとの独立テクスチャで持っているのは、
+        // 同一リソースのSRV/UAV同時バインドを避けるため(理由の詳細はBloom.hlsl冒頭)。
+        // BloomDownがダウンサンプル結果、BloomUpがアップサンプルの累積で、
+        // 最終的にBloomUp[0](半解像度)をTonemapパスが読む。
+        // 【なぜここが持つか】書くのはPostProcessPassesだけだが、PresentPassのデバッグ表示が
+        // BloomUp[0]とBloomLevelSizes[0]を読む
+        std::vector<std::unique_ptr<RHI::IRHITexture>> BloomDownTextures;
+        std::vector<std::unique_ptr<RHI::IRHITexture>> BloomUpTextures;
+        // 各段の解像度。内部解像度から決まる
+        std::vector<DirectX::XMUINT2> BloomLevelSizes;
+
         // G-Buffer の生成は元の位置ごとに3つへ分ける。間に他のテクスチャ生成があるため、
         // 順序を変えるとDX12のディスクリプタ枠の割り当て順が変わり、意味の無い差分になる。
         // 呼び出し元のtry内から呼ぶこと。確保失敗時のHDR→Legacy8bitフォールバックは
@@ -103,5 +118,8 @@ namespace Kurenai::Rendering
         // 失敗を送出したまま返すので、確保に失敗したら実寸は前の値のまま残る。
         // 呼び出し元(KurenaiEngine3D::CreatePlanarReflectionTargets)のtry内から呼ぶこと
         void CreatePlanarReflection(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+        // ブルームのピラミッドをlevelCount段ぶん作り直す。段の解像度は半解像度から1段ごとに半分。
+        // 呼び出し元のtry内から呼ぶこと(確保失敗時のフォールバックはCreateRenderTargetsが持つ)
+        void CreateBloomPyramid(RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t levelCount);
     };
 }

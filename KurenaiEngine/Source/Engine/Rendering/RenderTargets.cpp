@@ -1,5 +1,7 @@
 #include "Rendering/RenderTargets.h"
 
+#include <algorithm>
+
 namespace Kurenai::Rendering
 {
     void RenderTargets::CreateGBufferCore(
@@ -95,6 +97,30 @@ namespace Kurenai::Rendering
         // デバッグ表示のレターボックス計算が、存在しない解像度を使わないようにするため
         PlanarReflectionWidth = width;
         PlanarReflectionHeight = height;
+    }
+
+    void RenderTargets::CreateBloomPyramid(
+        RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t levelCount)
+    {
+        BloomLevelSizes.clear();
+        BloomDownTextures.clear();
+        BloomUpTextures.clear();
+        uint32_t bloomWidth = std::max(1u, width / 2);
+        uint32_t bloomHeight = std::max(1u, height / 2);
+        for (uint32_t level = 0; level < levelCount; ++level)
+        {
+            BloomLevelSizes.push_back({ bloomWidth, bloomHeight });
+            // アルファを使わないHDRバッファなのでR11G11B10_Floatで足りる。
+            // Legacy8bit構成でもブルームはHDR値を扱う必要があるためここは常にHDRのままにする
+            // (8bitにすると1.0でクリップされ、ブルームの意味が失われる)
+            BloomDownTextures.push_back(
+                device.CreateUAVTexture(bloomWidth, bloomHeight, RHI::Format::R16G16B16A16_Float));
+            BloomUpTextures.push_back(
+                device.CreateUAVTexture(bloomWidth, bloomHeight, RHI::Format::R16G16B16A16_Float));
+
+            bloomWidth = std::max(1u, bloomWidth / 2);
+            bloomHeight = std::max(1u, bloomHeight / 2);
+        }
     }
 
     void RenderTargets::ResetSoftwareRasterOutputs()

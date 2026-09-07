@@ -238,12 +238,12 @@ namespace Kurenai::Passes
             break;
         case DebugView::Bloom:
             // ピラミッド最上段(半解像度、HDR)。Mode 4でトーンマッピングしてから表示する
-            if (!m_Engine.m_BloomUpTextures.empty())
+            if (!targets->BloomUpTextures.empty())
             {
-                presentSourceTexture = m_Engine.m_BloomUpTextures[0].get();
+                presentSourceTexture = targets->BloomUpTextures[0].get();
                 presentMode = 4;
-                presentSourceWidth = m_Engine.m_BloomLevelSizes[0].x;
-                presentSourceHeight = m_Engine.m_BloomLevelSizes[0].y;
+                presentSourceWidth = targets->BloomLevelSizes[0].x;
+                presentSourceHeight = targets->BloomLevelSizes[0].y;
             }
             break;
         case DebugView::LightTiles:

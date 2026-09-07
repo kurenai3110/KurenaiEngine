@@ -301,16 +301,16 @@ namespace Kurenai::Passes
         }
 
         // --- ブルームパス: SceneColorから半解像度のピラミッドを作り、段階的にダウンサンプル→
-        //     3x3テントでアップサンプルしながら加算する。最終段(m_BloomUpTextures[0])をTonemapが読む ---
-        if (frame.Settings.PostProcess.BloomEnabled && !m_Engine.m_BloomDownTextures.empty())
+        //     3x3テントでアップサンプルしながら加算する。最終段(BloomUpTextures[0])をTonemapが読む ---
+        if (frame.Settings.PostProcess.BloomEnabled && !targets->BloomDownTextures.empty())
         {
             std::vector<RHI::IRHITexture*> bloomWrites;
-            bloomWrites.reserve(m_Engine.m_BloomDownTextures.size() + m_Engine.m_BloomUpTextures.size());
-            for (const auto& texture : m_Engine.m_BloomDownTextures)
+            bloomWrites.reserve(targets->BloomDownTextures.size() + targets->BloomUpTextures.size());
+            for (const auto& texture : targets->BloomDownTextures)
             {
                 bloomWrites.push_back(texture.get());
             }
-            for (const auto& texture : m_Engine.m_BloomUpTextures)
+            for (const auto& texture : targets->BloomUpTextures)
             {
                 bloomWrites.push_back(texture.get());
             }
@@ -319,9 +319,9 @@ namespace Kurenai::Passes
                 .Name = "Bloom",
                 .Reads = { hdrSceneColor, m_Engine.m_ExposureTexture.get() },
                 .Writes = std::move(bloomWrites),
-                .Execute = [this, effectiveExposureEV100, postProcessSettings, hdrSceneColor, manualExposureScale, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, effectiveExposureEV100, postProcessSettings, hdrSceneColor, manualExposureScale, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
-                    const uint32_t levelCount = static_cast<uint32_t>(m_Engine.m_BloomDownTextures.size());
+                    const uint32_t levelCount = static_cast<uint32_t>(targets->BloomDownTextures.size());
 
                     BloomConstants bloomConstants{};
                     bloomConstants.Threshold = postProcessSettings.BloomThreshold;
@@ -339,11 +339,11 @@ namespace Kurenai::Passes
                     for (uint32_t level = 0; level < levelCount; ++level)
                     {
                         const bool isFirst = (level == 0);
-                        RHI::IRHITexture* source = isFirst ? hdrSceneColor : m_Engine.m_BloomDownTextures[level - 1].get();
+                        RHI::IRHITexture* source = isFirst ? hdrSceneColor : targets->BloomDownTextures[level - 1].get();
                         const DirectX::XMUINT2 srcSize = isFirst
                             ? DirectX::XMUINT2{ renderWidth, renderHeight }
-                            : m_Engine.m_BloomLevelSizes[level - 1];
-                        const DirectX::XMUINT2 dstSize = m_Engine.m_BloomLevelSizes[level];
+                            : targets->BloomLevelSizes[level - 1];
+                        const DirectX::XMUINT2 dstSize = targets->BloomLevelSizes[level];
 
                         bloomConstants.SrcSize = srcSize;
                         bloomConstants.DstSize = dstSize;
@@ -355,7 +355,7 @@ namespace Kurenai::Passes
                         cmd->SetComputeTexture(0, source);
                         cmd->SetComputeTexture(2, m_Engine.m_ExposureTexture.get());
                         // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
-                        cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_BloomDownTextures[level].get());
+                        cmd->SetComputeUnorderedAccessTexture(0, targets->BloomDownTextures[level].get());
                         cmd->Dispatch((dstSize.x + 7) / 8, (dstSize.y + 7) / 8, 1);
                     }
 
@@ -367,11 +367,11 @@ namespace Kurenai::Passes
                         // 最下段の1つ上だけは、まだup[]が書かれていないのでdown[]の最下段を読む
                         const bool readsDownChain = (level == static_cast<int32_t>(levelCount) - 2);
                         RHI::IRHITexture* lower = readsDownChain
-                            ? m_Engine.m_BloomDownTextures[level + 1].get()
-                            : m_Engine.m_BloomUpTextures[level + 1].get();
+                            ? targets->BloomDownTextures[level + 1].get()
+                            : targets->BloomUpTextures[level + 1].get();
 
-                        const DirectX::XMUINT2 srcSize = m_Engine.m_BloomLevelSizes[level + 1];
-                        const DirectX::XMUINT2 dstSize = m_Engine.m_BloomLevelSizes[level];
+                        const DirectX::XMUINT2 srcSize = targets->BloomLevelSizes[level + 1];
+                        const DirectX::XMUINT2 dstSize = targets->BloomLevelSizes[level];
 
                         bloomConstants.SrcSize = srcSize;
                         bloomConstants.DstSize = dstSize;
@@ -379,9 +379,9 @@ namespace Kurenai::Passes
                         cmd->UpdateBuffer(m_Engine.m_BloomConstantBuffer.get(), &bloomConstants, sizeof(bloomConstants));
 
                         cmd->SetComputeConstantBuffer(1, m_Engine.m_BloomConstantBuffer.get());
-                        cmd->SetComputeTexture(0, m_Engine.m_BloomDownTextures[level].get());
+                        cmd->SetComputeTexture(0, targets->BloomDownTextures[level].get());
                         cmd->SetComputeTexture(1, lower);
-                        cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_BloomUpTextures[level].get());
+                        cmd->SetComputeUnorderedAccessTexture(0, targets->BloomUpTextures[level].get());
                         cmd->Dispatch((dstSize.x + 7) / 8, (dstSize.y + 7) / 8, 1);
                     }
                 },
@@ -392,7 +392,7 @@ namespace Kurenai::Passes
         // 必要があるため、その場合はピラミッド最上段(内容は前フレームのまま)を渡し、
         // BloomStrength=0で寄与しないようにする
         RHI::IRHITexture* bloomResultTexture =
-            m_Engine.m_BloomUpTextures.empty() ? hdrSceneColor : m_Engine.m_BloomUpTextures[0].get();
+            targets->BloomUpTextures.empty() ? hdrSceneColor : targets->BloomUpTextures[0].get();
 
         // このフレームで超解像パスを走らせるか。デバッグ表示中は内部解像度の中間バッファを
         // そのまま等倍で見たいので走らせない(拡大するとバッファの実際の解像度が分からなくなる)
@@ -403,7 +403,7 @@ namespace Kurenai::Passes
             .Name = "Tonemap",
             .Reads = { hdrSceneColor, m_Engine.m_ExposureTexture.get(), bloomResultTexture },
             .RenderTargets = { targets->TonemapTexture.get() },
-            .Execute = [this, effectiveExposureEV100, postProcessSettings, gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale, keyReferenceEV100, upscaleActive, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, targets, effectiveExposureEV100, postProcessSettings, gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale, keyReferenceEV100, upscaleActive, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 TonemapConstants tonemapConstants{};
                 tonemapConstants.Curve = static_cast<int32_t>(postProcessSettings.Curve);
@@ -414,7 +414,7 @@ namespace Kurenai::Passes
                 tonemapConstants.UseAutoExposure = postProcessSettings.AutoExposureEnabled ? 1.0f : 0.0f;
                 tonemapConstants.PreExposureEV100 = effectiveExposureEV100;
                 tonemapConstants.BloomStrength =
-                    (postProcessSettings.BloomEnabled && !m_Engine.m_BloomUpTextures.empty()) ? postProcessSettings.BloomStrength : 0.0f;
+                    (postProcessSettings.BloomEnabled && !targets->BloomUpTextures.empty()) ? postProcessSettings.BloomStrength : 0.0f;
                 tonemapConstants.MesopicStrength = postProcessSettings.MesopicStrength;
                 // 目の順応は画面の構図ではなくシーンの明るさで決まるので、
                 // 自動露出の測光値ではなくキー照度から求めた基準EVを使う

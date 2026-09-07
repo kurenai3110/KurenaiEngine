@@ -3629,25 +3629,7 @@ namespace Kurenai
             // 1x1まで落とさず段数を固定しているのは、これ以上小さくしても裾の広がりが
             // 見た目に寄与しないため(解像度が低いと逆にアップサンプル時のちらつき源になる)。
             // レベルごとに独立したテクスチャにしている理由はBloom.hlsl冒頭を参照
-            m_BloomLevelSizes.clear();
-            m_BloomDownTextures.clear();
-            m_BloomUpTextures.clear();
-            uint32_t bloomWidth = std::max(1u, width / 2);
-            uint32_t bloomHeight = std::max(1u, height / 2);
-            for (uint32_t level = 0; level < kBloomLevelCount; ++level)
-            {
-                m_BloomLevelSizes.push_back({ bloomWidth, bloomHeight });
-                // アルファを使わないHDRバッファなのでR11G11B10_Floatで足りる。
-                // Legacy8bit構成でもブルームはHDR値を扱う必要があるためここは常にHDRのままにする
-                // (8bitにすると1.0でクリップされ、ブルームの意味が失われる)
-                m_BloomDownTextures.push_back(
-                    m_Device->CreateUAVTexture(bloomWidth, bloomHeight, RHI::Format::R16G16B16A16_Float));
-                m_BloomUpTextures.push_back(
-                    m_Device->CreateUAVTexture(bloomWidth, bloomHeight, RHI::Format::R16G16B16A16_Float));
-
-                bloomWidth = std::max(1u, bloomWidth / 2);
-                bloomHeight = std::max(1u, bloomHeight / 2);
-            }
+            m_RenderTargets.CreateBloomPyramid(*m_Device, width, height, kBloomLevelCount);
 
             // 自前ソフトウェアラスタライザ(46章)の解像度依存リソース。
             //

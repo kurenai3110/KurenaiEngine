@@ -1733,19 +1733,15 @@ namespace Kurenai
         //
         // ピラミッドをミップチェーン1枚ではなくレベルごとの独立テクスチャで持っているのは、
         // 同一リソースのSRV/UAV同時バインドを避けるため(理由の詳細はBloom.hlsl冒頭)。
-        // m_BloomDownTexturesがダウンサンプル結果、m_BloomUpTexturesがアップサンプルの累積で、
-        // 最終的にm_BloomUpTextures[0](半解像度)をTonemapパスが読む
+        // ピラミッド本体(RenderTargets::BloomDownTextures / BloomUpTextures / BloomLevelSizes)は
+        // PresentPassのデバッグ表示も読むため、持ち主をRenderTargetsへ移した
         std::unique_ptr<RHI::IRHIShader> m_BloomDownsampleComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_BloomDownsamplePipelineState;
         std::unique_ptr<RHI::IRHIShader> m_BloomUpsampleComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_BloomUpsamplePipelineState;
         std::unique_ptr<RHI::IRHIBuffer> m_BloomConstantBuffer;
-        std::vector<std::unique_ptr<RHI::IRHITexture>> m_BloomDownTextures;
-        std::vector<std::unique_ptr<RHI::IRHITexture>> m_BloomUpTextures;
         // ピラミッドの段数。半解像度を第0段として、これ以上小さくしても見た目が変わらない範囲で選ぶ
         static constexpr uint32_t kBloomLevelCount = 6;
-        // 各段の解像度(CreateRenderTargetsで内部解像度から決まる)
-        std::vector<DirectX::XMUINT2> m_BloomLevelSizes;
 
 
         // 垂直同期・固定FPSモードはm_SystemSettingsへ移した
