@@ -6344,6 +6344,14 @@ namespace Kurenai
         frameContext.RaytracedDDGITraceRuns = ShouldRunRaytracedDDGITrace();
         frameContext.SuppressEmissiveForGI = ShouldSuppressEmissiveForGI();
         frameContext.MegaLightsSamplesPerPixel = MegaLightsSamplesPerPixel();
+        frameContext.MeshletLOD = m_MeshletLODFrame;
+        frameContext.EffectiveExposureEV100 = m_EffectiveExposureEV100;
+        // 【ここで有効性を解決する】無効なフレームに何を配るかを1箇所で決めておく。
+        // 群ごとに判定を書くと、片方だけ条件を変えたときに静かに食い違う
+        frameContext.TAAPrevViewProj =
+            m_TAAPrevViewProjValid ? m_TAAPrevViewProj : DirectX::XMFLOAT4X4{};
+        frameContext.TAAPrevJitterUv = m_TAAPrevJitterUv;
+        frameContext.TAAPrevEffectiveExposureEV100 = m_TAAPrevEffectiveExposureEV100;
         frameContext.RenderWidth = m_RenderWidth;
         frameContext.RenderHeight = m_RenderHeight;
         frameContext.FrameConstantBuffer = m_FrameConstantBuffer.get();

@@ -32,6 +32,10 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】ラムダへ値で渡すため
+        const float effectiveExposureEV100 = frame.EffectiveExposureEV100;
+        const MeshletLODFrameConstants meshletLOD = frame.MeshletLOD;
+
         // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
         // ここで作り直さない。ラムダへ値で渡すためローカルで受ける
         const bool raytracedDDGITraceRuns = frame.RaytracedDDGITraceRuns;
@@ -71,7 +75,7 @@ namespace Kurenai::Passes
         // RWTexture2DArray<float>なので、キューブ配列だけでなく単体のキューブ(=6要素の2D配列)の
         // 面へもそのまま書ける
         const auto captureDDGIProbeFace =
-            [this, suppressEmissiveForGI, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, meshletLOD, suppressEmissiveForGI, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
 
@@ -180,7 +184,7 @@ namespace Kurenai::Passes
                     {
                         ++ddgiLODMismatchMeshes;
                     }
-                    const ObjectConstants objectConstants = MakeObjectConstants(instance, coarsestModel, mesh, ddgiEmissiveIntensity, ambientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
+                    const ObjectConstants objectConstants = MakeObjectConstants(instance, coarsestModel, mesh, ddgiEmissiveIntensity, ambientOcclusionSettings.OcclusionMapEnabled, meshletLOD);
                     cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, objectConstantBuffer);
 
@@ -410,13 +414,13 @@ namespace Kurenai::Passes
             {
                 if (!m_Engine.m_DDGILastExposureValid)
                 {
-                    m_Engine.m_DDGILastExposureEV100 = m_Engine.m_EffectiveExposureEV100;
+                    m_Engine.m_DDGILastExposureEV100 = effectiveExposureEV100;
                     m_Engine.m_DDGILastExposureValid = true;
                 }
-                else if (std::abs(m_Engine.m_EffectiveExposureEV100 - m_Engine.m_DDGILastExposureEV100) > kDDGIExposureRewarmEV)
+                else if (std::abs(effectiveExposureEV100 - m_Engine.m_DDGILastExposureEV100) > kDDGIExposureRewarmEV)
                 {
                     m_Engine.m_DDGIOverwriteRemaining = m_Engine.m_DDGIProbeCount;
-                    m_Engine.m_DDGILastExposureEV100 = m_Engine.m_EffectiveExposureEV100;
+                    m_Engine.m_DDGILastExposureEV100 = effectiveExposureEV100;
                 }
             }
             // このフレームで上書きするぶんを先に確定させる(ラムダへ値で渡すため)
@@ -604,7 +608,7 @@ namespace Kurenai::Passes
                 // 同時にサンプリング側(DDGIParams0.w)を有効にする
                 m_Engine.m_DDGIWarmingUp = false;
                 m_Engine.m_DDGIBaked = true;
-                m_Engine.m_DDGILastExposureEV100 = m_Engine.m_EffectiveExposureEV100;
+                m_Engine.m_DDGILastExposureEV100 = effectiveExposureEV100;
                 m_Engine.m_DDGILastExposureValid = true;
                 Core::Logger::Info(
                     "KurenaiEngine3D",

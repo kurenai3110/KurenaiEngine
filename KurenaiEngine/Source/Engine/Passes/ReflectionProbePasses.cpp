@@ -32,6 +32,10 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】ラムダへ値で渡すため
+        const float effectiveExposureEV100 = frame.EffectiveExposureEV100;
+        const MeshletLODFrameConstants meshletLOD = frame.MeshletLOD;
+
         // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
         // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
         const AmbientOcclusionSettings ambientOcclusionSettings = frame.Settings.AmbientOcclusion;
@@ -62,7 +66,7 @@ namespace Kurenai::Passes
         // プローブ1面ぶんのキャプチャ(フォワード描画 → スクラッチのキューブ面へコピー)。
         // フルベイクと時間分割の両方から呼ぶためラムダへ切り出してある
         const auto captureProbeFace =
-            [this, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
+            [this, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
         {
             const Assets::ReflectionProbe& probe = m_Engine.m_ReflectionProbes[probeIndex];
             const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
@@ -153,7 +157,7 @@ namespace Kurenai::Passes
                 {
                     const Assets::ModelInstance& instance = *unit.Instance;
 
-                    ObjectConstants objectConstants = MakeObjectConstants(instance, coarsestModel, mesh, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
+                    ObjectConstants objectConstants = MakeObjectConstants(instance, coarsestModel, mesh, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled, meshletLOD);
                     objectConstants.InstanceBase = unit.InstanceBase;
                     objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                     cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
@@ -303,7 +307,7 @@ namespace Kurenai::Passes
             m_Engine.m_ProbeBaked = true;
             m_Engine.m_ProbeBakeSignature = m_Engine.ComputeProbeBakeSignature();
             // このフレームの実効プリ露出で焼かれるので、読み出し側の換算倍率もここで更新する
-            m_Engine.m_ProbeBakedExposureEV100 = m_Engine.m_EffectiveExposureEV100;
+            m_Engine.m_ProbeBakedExposureEV100 = effectiveExposureEV100;
             // 全プローブが今焼けたので、時間分割は先頭から仕切り直す
             m_Engine.m_ProbeRealtimeProbeIndex = 0;
             m_Engine.m_ProbeRealtimeFace = 0;
@@ -417,7 +421,7 @@ namespace Kurenai::Passes
             // 露出の換算倍率も追随させる。1ステップずつ焼くため厳密には面・ミップごとに焼いた
             // 露出が違うが、実効プリ露出の変化は毎秒2倍程度(m_PostProcessSettings.EffectiveExposureAdaptSpeed)なので
             // 1周(最大12フレーム)ぶんのずれは数%にとどまり、常時焼き直している以上すぐ解消する
-            m_Engine.m_ProbeBakedExposureEV100 = m_Engine.m_EffectiveExposureEV100;
+            m_Engine.m_ProbeBakedExposureEV100 = effectiveExposureEV100;
         }
     }
 }

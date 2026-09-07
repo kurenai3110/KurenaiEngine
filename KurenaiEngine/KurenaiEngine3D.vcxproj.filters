@@ -33,6 +33,9 @@
     <ClInclude Include="Source\Engine\Rendering\RenderSettingsSnapshot.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\MeshletLODFrameConstants.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
     <ClInclude Include="Source\Engine\Rendering\RenderTargets.h">
       <Filter>Source\Engine</Filter>
     </ClInclude>

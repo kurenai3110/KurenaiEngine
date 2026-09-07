@@ -15,6 +15,12 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】ラムダへ値で渡すため
+        const float effectiveExposureEV100 = frame.EffectiveExposureEV100;
+        const DirectX::XMFLOAT2 taaPrevJitterUv = frame.TAAPrevJitterUv;
+        const float taaPrevEffectiveExposureEV100 = frame.TAAPrevEffectiveExposureEV100;
+        const DirectX::XMFLOAT4X4 taaPrevViewProj = frame.TAAPrevViewProj;
+
         // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
         // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
         const DebugViewSettings debugViewSettings = frame.Settings.DebugView;
@@ -151,12 +157,12 @@ namespace Kurenai::Passes
                 // 実際にバインドするテクスチャはReadsにも宣言しておくというRenderGraphの規約に従う
                 .Reads = { taaInputColor, historyTexture, m_Engine.m_RenderTargets.GBufferVelocity.get(), m_Engine.m_RenderTargets.GBufferDepth.get() },
                 .RenderTargets = { m_Engine.m_RenderTargets.TAAHistory[historyWriteIndex].get() },
-                .Execute = [this, postProcessSettings, gbufferViewport, taaInputColor, historyTexture, invViewProj, jitterUv, effectiveExposure, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, taaPrevEffectiveExposureEV100, taaPrevJitterUv, taaPrevViewProj, postProcessSettings, gbufferViewport, taaInputColor, historyTexture, invViewProj, jitterUv, effectiveExposure, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     TAAConstants taaConstants{};
                     DirectX::XMStoreFloat4x4(&taaConstants.InvViewProj, DirectX::XMMatrixTranspose(invViewProj));
-                    taaConstants.PrevViewProj = m_Engine.m_TAAPrevViewProjValid ? m_Engine.m_TAAPrevViewProj : DirectX::XMFLOAT4X4{};
-                    taaConstants.JitterUv = { jitterUv.x, jitterUv.y, m_Engine.m_TAAPrevJitterUv.x, m_Engine.m_TAAPrevJitterUv.y };
+                    taaConstants.PrevViewProj = taaPrevViewProj;
+                    taaConstants.JitterUv = { jitterUv.x, jitterUv.y, taaPrevJitterUv.x, taaPrevJitterUv.y };
                     taaConstants.ScreenParams = {
                         static_cast<float>(renderWidth),
                         static_cast<float>(renderHeight),
@@ -171,7 +177,7 @@ namespace Kurenai::Passes
                     // プリ露出はm_EffectiveExposureEV100の時間順応で毎フレーム変わる。履歴は前フレームの
                     // 露出で焼かれた明るさのままなので、比率を掛けて今の露出へ揃える。
                     // 揃えないと露出が動いている間ずっと明るさの尾を引く
-                    const float previousExposure = ComputeExposure(m_Engine.m_TAAPrevEffectiveExposureEV100);
+                    const float previousExposure = ComputeExposure(taaPrevEffectiveExposureEV100);
                     const float exposureRescale =
                         (historyValid && previousExposure > 0.0f) ? (effectiveExposure / previousExposure) : 1.0f;
 
@@ -224,7 +230,7 @@ namespace Kurenai::Passes
                 .Name = "AutoExposure",
                 .Reads = { hdrSceneColor, m_Engine.m_RenderTargets.GBufferDepth.get() },
                 .Writes = { m_Engine.m_ExposureTexture.get() },
-                .Execute = [this, postProcessSettings, hdrSceneColor, keyReferenceEV100, usingProceduralSky, resetAdaptation, renderWidth, renderHeight](
+                .Execute = [this, effectiveExposureEV100, postProcessSettings, hdrSceneColor, keyReferenceEV100, usingProceduralSky, resetAdaptation, renderWidth, renderHeight](
                     RHI::IRHICommandList* cmd)
                 {
                     AutoExposureConstants autoExposureConstants{};
@@ -232,7 +238,7 @@ namespace Kurenai::Passes
                     // Min>Maxのような不正な範囲だとヒストグラムのビン割りが破綻するため順序を保証する
                     autoExposureConstants.MinEV100 = std::min(postProcessSettings.AutoExposureMinEV100, postProcessSettings.AutoExposureMaxEV100);
                     autoExposureConstants.MaxEV100 = std::max(postProcessSettings.AutoExposureMinEV100, postProcessSettings.AutoExposureMaxEV100);
-                    autoExposureConstants.PreExposureEV100 = m_Engine.m_EffectiveExposureEV100;
+                    autoExposureConstants.PreExposureEV100 = effectiveExposureEV100;
                     // 一時停止やシーン読み込み直後の巨大なdtで順応が飛ばないよう上限を設ける
                     autoExposureConstants.DeltaTime = std::clamp(m_Engine.m_RenderDeltaTime, 0.0f, 0.1f);
                     autoExposureConstants.AdaptationSpeedUp = postProcessSettings.AutoExposureSpeedUp;
@@ -306,7 +312,7 @@ namespace Kurenai::Passes
                 .Name = "Bloom",
                 .Reads = { hdrSceneColor, m_Engine.m_ExposureTexture.get() },
                 .Writes = std::move(bloomWrites),
-                .Execute = [this, postProcessSettings, hdrSceneColor, manualExposureScale, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, effectiveExposureEV100, postProcessSettings, hdrSceneColor, manualExposureScale, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     const uint32_t levelCount = static_cast<uint32_t>(m_Engine.m_BloomDownTextures.size());
 
@@ -317,7 +323,7 @@ namespace Kurenai::Passes
                     // ピラミッドの入力段で露出を反映する(Bloom.hlsl ExposureScale()参照)。
                     // Tonemapと同じ倍率でなければ、ブルームだけ露出がずれて合成比が狂う
                     bloomConstants.UseAutoExposure = postProcessSettings.AutoExposureEnabled ? 1.0f : 0.0f;
-                    bloomConstants.PreExposureEV100 = m_Engine.m_EffectiveExposureEV100;
+                    bloomConstants.PreExposureEV100 = effectiveExposureEV100;
                     bloomConstants.ExposureScale = manualExposureScale;
 
                     // --- ダウンサンプル: SceneColor -> down[0] -> down[1] -> ... ---
@@ -390,7 +396,7 @@ namespace Kurenai::Passes
             .Name = "Tonemap",
             .Reads = { hdrSceneColor, m_Engine.m_ExposureTexture.get(), bloomResultTexture },
             .RenderTargets = { m_Engine.m_RenderTargets.TonemapTexture.get() },
-            .Execute = [this, postProcessSettings, gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale, keyReferenceEV100, upscaleActive, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, effectiveExposureEV100, postProcessSettings, gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale, keyReferenceEV100, upscaleActive, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 TonemapConstants tonemapConstants{};
                 tonemapConstants.Curve = static_cast<int32_t>(postProcessSettings.Curve);
@@ -399,7 +405,7 @@ namespace Kurenai::Passes
                 tonemapConstants.ExposureScale = manualExposureScale;
                 tonemapConstants.DitherStrength = postProcessSettings.DitherEnabled ? 1.0f : 0.0f;
                 tonemapConstants.UseAutoExposure = postProcessSettings.AutoExposureEnabled ? 1.0f : 0.0f;
-                tonemapConstants.PreExposureEV100 = m_Engine.m_EffectiveExposureEV100;
+                tonemapConstants.PreExposureEV100 = effectiveExposureEV100;
                 tonemapConstants.BloomStrength =
                     (postProcessSettings.BloomEnabled && !m_Engine.m_BloomUpTextures.empty()) ? postProcessSettings.BloomStrength : 0.0f;
                 tonemapConstants.MesopicStrength = postProcessSettings.MesopicStrength;

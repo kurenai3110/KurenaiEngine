@@ -7,6 +7,7 @@
 #include <DirectXMath.h>
 
 #include "RHI/IRHICommandList.h"
+#include "MeshletLODFrameConstants.h"
 #include "RenderSettingsSnapshot.h"
 
 // フレームの先頭で確定し、グラフ登録の間ずっと変わらない値をまとめたスナップショット(段階6)。
@@ -153,6 +154,21 @@ namespace Kurenai::Rendering
         bool SuppressEmissiveForGI = false;
         // MegaLightsが1画素あたり何標本取るか(手法3以外は必ず1)
         int32_t MegaLightsSamplesPerPixel = 1;
+
+        // メッシュレットLODの段を選ぶ値。**主カメラのものを全パスへ同じだけ配る**
+        MeshletLODFrameConstants MeshletLOD;
+
+        // 自動露出が追従した結果のEV100。露出を焼き込む側(DDGI・反射プローブ)が読む。
+        // 上の EffectiveExposure は線形の倍率で、これとは別物
+        float EffectiveExposureEV100 = 0.0f;
+
+        // 前フレームのViewProjとジッタ。TAAと、Hi-Zオクルージョンの視差の見積もりが読む。
+        // **有効でないフレームは零行列に解決済み**にしてある。以前は群の側が
+        // 「有効か」を見て同じ三項演算子を別々に書いていた
+        DirectX::XMFLOAT4X4 TAAPrevViewProj{};
+        DirectX::XMFLOAT2 TAAPrevJitterUv{};
+        // 前フレームの露出。TAAが履歴の明るさを今フレームへ合わせ直すのに使う
+        float TAAPrevEffectiveExposureEV100 = 0.0f;
 
         // ジオメトリの経路で、このフレームに何が有効かを配る一式
         bool DepthPrepassRuns = false;

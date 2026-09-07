@@ -177,6 +177,9 @@ namespace Kurenai::Passes
     void ShadowPasses::RegisterCascades(
         Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
     {
+        // 【フレームの写しをローカルで受ける】ラムダへ値で渡すため
+        const MeshletLODFrameConstants meshletLOD = frame.MeshletLOD;
+
         // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
         // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
         const AmbientOcclusionSettings ambientOcclusionSettings = frame.Settings.AmbientOcclusion;
@@ -202,7 +205,7 @@ namespace Kurenai::Passes
                 .Name = "Shadow" + std::to_string(cascade),
                 .DepthTarget = m_Engine.m_RenderTargets.ShadowCascadeArray.get(),
                 .DepthTargetArraySlice = cascade,
-                .Execute = [this, ambientOcclusionSettings, emissiveLightSettings, shadowSettings, shadowViewport, cascade, cascadeViewProj, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, shadowSettings, shadowViewport, cascade, cascadeViewProj, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(shadowViewport);
                     // 深度1.0(最遠)にクリアしておく。無効時はこの後の描画をスキップするため、
@@ -302,7 +305,7 @@ namespace Kurenai::Passes
 
                                     const ObjectConstants objectConstants = MakeModelObjectConstants(
                                         instance, coarsestModel, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled, rejectMask,
-                                        requireMask, m_Engine.m_MeshletLODFrame);
+                                        requireMask, meshletLOD);
                                     cmd->UpdateBuffer(
                                         objectConstantBuffer, &objectConstants, sizeof(objectConstants));
                                     cmd->SetConstantBuffer(1, objectConstantBuffer);
@@ -343,7 +346,7 @@ namespace Kurenai::Passes
                                 // シャドウパスはWorld以外を使わないが、GBufferパスと同じルートシグネチャ/
                                 // 定数バッファ(b1)を共有しているため必ずバインドする必要がある
                                 ObjectConstants objectConstants =
-                                    MakeObjectConstants(instance, coarsestModel, mesh, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
+                                    MakeObjectConstants(instance, coarsestModel, mesh, emissiveLightSettings.Intensity, ambientOcclusionSettings.OcclusionMapEnabled, meshletLOD);
                                 objectConstants.InstanceBase = unit.InstanceBase;
                                 objectConstants.InstancingEnabled = unit.IsBatch() ? 1u : 0u;
                                 cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));

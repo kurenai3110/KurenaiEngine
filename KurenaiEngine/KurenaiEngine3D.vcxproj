@@ -101,6 +101,7 @@
     <ClInclude Include="Source\Engine\Rendering\GeometryDrawLoop.h" />
     <ClInclude Include="Source\Engine\Rendering\GeometryDrawTypes.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderSettingsSnapshot.h" />
+    <ClInclude Include="Source\Engine\Rendering\MeshletLODFrameConstants.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderTargets.h" />
     <ClInclude Include="Source\Engine\Rendering\ShadowConstants.h" />
     <ClInclude Include="Source\Engine\Rendering\RenderBlackboard.h" />

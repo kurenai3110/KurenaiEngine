@@ -336,6 +336,9 @@ namespace Kurenai::Passes
         const Rendering::RenderFrameContext& frame,
         const Rendering::RenderBlackboard& bb)
     {
+        // 【フレームの写しをローカルで受ける】ラムダへ値で渡すため
+        const MeshletLODFrameConstants meshletLOD = frame.MeshletLOD;
+
         // 【ラムダへ値で渡すためローカルへ受け直す】frame そのものは捕捉しない作法
         // (Rendering/RenderFrameContext.h の冒頭)。設定は POD なので写しは安い
         const AmbientOcclusionSettings ambientOcclusionSettings = frame.Settings.AmbientOcclusion;
@@ -463,7 +466,7 @@ namespace Kurenai::Passes
             },
             .RenderTargets = { m_Engine.m_RenderTargets.SceneColor.get() },
             .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
-            .Execute = [this, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &gpuLights, &cameraPosition, &viewProj, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &gpuLights, &cameraPosition, &viewProj, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
             {
                 // 半透明メッシュをインスタンス単位でカメラからの距離降順(奥から手前)に並べる。
                 // instance.WorldはHLSL(mul(vec, World))に合わせて転置済みのため、ワールド座標の
@@ -568,7 +571,7 @@ namespace Kurenai::Passes
                     const ObjectConstants objectConstants =
                         MakeObjectConstants(
                             *draw.Instance, *draw.Model, *draw.Mesh, emissiveLightSettings.Intensity,
-                            ambientOcclusionSettings.OcclusionMapEnabled, m_Engine.m_MeshletLODFrame);
+                            ambientOcclusionSettings.OcclusionMapEnabled, meshletLOD);
                     cmd->UpdateBuffer(objectConstantBuffer, &objectConstants, sizeof(objectConstants));
                     cmd->SetConstantBuffer(1, objectConstantBuffer);
 
