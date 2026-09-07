@@ -9078,7 +9078,7 @@ D3D11/D3D12 のどちらでも合法**なので、この置き換えも同じ表
 3つある。
 
 1. **`DebugView` は「表示モード」でテクスチャと1対1でない。** `Depth` と `DepthRaw` は
-   同じ `m_GBufferDepth` を指し、`LightTiles` はテクスチャではなくバッファを読む
+   同じ `RenderTargets::GBufferDepth` を指し、`LightTiles` はテクスチャではなくバッファを読む
 2. **半分も覆っていない。** 切り分けで見たい `SSILRawTexture` / `TransmittanceLUT` /
    `TAAHistory` / `ExposureTexture` は `DebugView` に無く、足すには `Present.hlsl` の
    表示モードを増やすことになる(目視表示のためのコードを、ダンプのために書く羽目になる)

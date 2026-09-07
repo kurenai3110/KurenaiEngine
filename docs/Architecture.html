@@ -1390,7 +1390,7 @@ ImGuiウィジェットへアドレスで直接渡すため、<code>KurenaiEngin
 <code>m_SceneMutex</code>の保護対象は、UIの描画がRenderスレッドから、<code>LoadScene</code>が
 Updateスレッドから同じメンバを触るという関係で決まる。またfriendは全privateメンバを
 見せてしまうため、<strong>「UIから触ってよいのはパラメータ用メンバだけで、RHIリソース
-(<code>m_GBufferAlbedo</code>等)には触らない」</strong>という規約は各パネルの実装側で守る必要がある。
+(<code>RenderTargets::GBufferAlbedo</code>等)には触らない」</strong>という規約は各パネルの実装側で守る必要がある。
 </p>
 <p>
 ウィンドウ名は<code>"日本語表示###ASCII_ID"</code>形式にしている。<code>ImHashStr</code>は文字列中に
@@ -2541,7 +2541,7 @@ UAVバインドの直前に同一リソースのSRVスロットを明示的に�
 </p>
 <h3>18.11 RenderGraphにバッファ依存を足した理由</h3>
 <p>
-カリングパスと直接光パスは<strong>どちらも<code>m_GBufferDepth</code>をReadsするだけの「読み手同士」</strong>に
+カリングパスと直接光パスは<strong>どちらも<code>RenderTargets::GBufferDepth</code>をReadsするだけの「読み手同士」</strong>に
 なるため、テクスチャの依存だけでは両者の間に辺が張られない。トポロジカルソートは依存が同点なら
 登録順を優先するのでたまたま正しく動くが、本当の依存関係(カリングが書いたライトグリッドを
 直接光が読む)がグラフ上に現れない状態になる。
@@ -3876,7 +3876,7 @@ TEXCOORD0はレンガや石畳をタイリングして貼るためのUVであり
 </p>
 <h3>23.2 速度(モーションベクター)の定義</h3>
 <p>
-<code>m_GBufferVelocity</code>(<code>R16G16_Float</code>、G-Bufferの5枚目)に、
+<code>RenderTargets::GBufferVelocity</code>(<code>R16G16_Float</code>、G-Bufferの5枚目)に、
 <strong>UV単位・デジッター済み・カメラ由来のみ</strong>の2Dベクトルとして書く。
 定義は「この画素に映っているものが、前フレームでは画面のどこにいたか」からの変位である。
 </p>
@@ -5874,7 +5874,7 @@ GBufferパスとは異なり、<strong><code>instance.IsMirrored</code>の否定
 <p>
 パスの<code>.Reads</code>にシャドウマップ・IBL・DDGIのアトラスを挙げることで、これらを書く
 パスより後ろへ順序付ける。<code>SSR.hlsl</code>側の<code>.Reads</code>に
-<code>m_PlanarReflectionColor</code>を追加することで、SSRパスより前に順序付く。
+<code>RenderTargets::PlanarReflectionColor</code>を追加することで、SSRパスより前に順序付く。
 <code>SSR.hlsl</code>は<code>Texture2D PlanarReflectionTexture : register(t11)</code>
 (t0〜t10は既存の宣言ですべて埋まっている)として受け取り、36.1節のとおり
 <code>input.UV + N.xz * Params1.y</code>でそのままサンプルする(<code>Params1.y</code>は
@@ -6079,7 +6079,7 @@ float  transmittance = exp(-max(tau, 0.0f));</code></pre>
 </p>
 <h3>37.6 平面反射の鏡像にも同じフォグを掛ける</h3>
 <p>
-<a href="#planarreflection">36章</a>の平面反射パスの出力(<code>m_PlanarReflectionColor</code>)は
+<a href="#planarreflection">36章</a>の平面反射パスの出力(<code>RenderTargets::PlanarReflectionColor</code>)は
 <code>AerialPerspective.hlsl</code>の対象範囲(反射パスの出力)には含まれない――
 平面反射の結果はSSR側が<code>input.UV</code>でそのままサンプルして<code>SceneColor</code>へ
 合成されるため、SSRパスの出力(=大気遠近パスの入力)には既に「鏡像込みの水面反射色」が
