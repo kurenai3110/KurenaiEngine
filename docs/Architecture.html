@@ -2250,7 +2250,7 @@ DX11はイミディエイト実行のためこの制約がないが、両バッ�
 フレーム単位の書き込み回数を数え、上限を超えたらログを出す(バッファごとに1回だけ)。
 読み取り専用構造化バッファのステージングリングは
 「1フレームあたりの更新回数の上限×<code>kFrameCount</code>+1」で確保する
-(<code>m_LightBuffer</code>はDirectLightパスとTransparentパスで1フレームに2回更新されるため、
+(<code>SceneGPUResources::LightBuffer</code>はDirectLightパスとTransparentパスで1フレームに2回更新されるため、
 <code>kFrameCount + 1</code>では足りない)。</p>
 <h3>16.6 その他のDX11/DX12差の是正</h3>
 <table>
@@ -5425,7 +5425,7 @@ DX11/DX12の切り替えは、<code>m_Device</code>だけを差し替えるの�
 <p>
 デバイスだけを差し替えてはいけない。<code>KurenaiEngine3D</code>はデバイス由来の
 <code>unique_ptr</code>を150個以上(テクスチャ・シェーダー・PSO・バッファ)と<code>m_Scene</code> /
-<code>m_RaytracingScene</code>を抱えているため、<code>ReleaseDeviceResources()</code>のような
+<code>SceneGPUResources::RaytracingScene</code>を抱えているため、<code>ReleaseDeviceResources()</code>のような
 解放関数を手書きすると、以後メンバを1つ足すたびにそこへ追記することになり、
 <strong>忘れても何もエラーが出ないまま壊れる</strong>二重管理になる。
 </p>
