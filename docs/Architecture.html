@@ -5480,7 +5480,7 @@ LightCullのタイル・Hi-Zのミップ連鎖・Bloomのピラミッド・SkyCl
 いずれも2の冪で割っていくため。
 </p>
 <p>
-出力解像度のテクスチャ(<code>m_UpscaleTexture</code> / <code>m_UpscaleSharpTexture</code>)は
+出力解像度のテクスチャ(<code>RenderTargets::UpscaleTexture</code> / <code>RenderTargets::UpscaleSharpTexture</code>)は
 <code>CreateRenderTargets()</code>ではなく<code>CreateUpscaleTargets()</code>が持つ。
 内部解像度用とは作り直す契機が違う(出力解像度が変わらない限り作り直す必要がない)ためだが、
 GPUがそれらを参照していない状態で作り直す必要があるのは同じなので、

@@ -2842,7 +2842,7 @@ V ≒ 10km(晴れているが遠景がわずかに霞む日)に相当する。
 | `HoverAmplitude` | 0.6 m | 0にすると全機が数学的に完全な位置で静止し、模型のように見える |
 | `Seed` | 20260804 | 固定値。揺れと出発タイミングのばらつきを毎回同じにするため(A/B比較の再現性) |
 
-`DroneCount` の上限4096は、GPU側の構造化バッファ `m_DroneBuffer` の固定容量
+`DroneCount` の上限4096は、GPU側の構造化バッファ `DroneShowResources::Buffer` の固定容量
 (`KurenaiEngine3D.cpp` の `kMaxDrones`)。エディタのスライダーもここで頭打ちにしてある。
 外から来たファイルが超えていても壊れないよう、GPUへ渡す直前でも切り詰める。
 
