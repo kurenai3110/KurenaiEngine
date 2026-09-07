@@ -558,7 +558,7 @@ namespace Kurenai
         // (理由はRHI/IRHISamplerSet.h)
         void CreateSamplerSets();
         void CreateRenderTargets(uint32_t width, uint32_t height);
-        // 平面反射専用のレンダーターゲット2枚(m_PlanarReflectionColor/Depth)を、
+        // 平面反射専用のレンダーターゲット2枚(m_RenderTargets.PlanarReflectionColor/Depth)を、
         // 反射解像度(レンダー解像度 × m_ReflectionSettings.PlanarResolutionScale)で作り直す。
         // メインのCreateRenderTargetsとは独立に呼べる(Legacy8bitフォールバックの対象外。
         // このバッファは常にHDR固定フォーマットのため)。呼び出し箇所はCreateRenderTargetsと
@@ -2371,9 +2371,9 @@ namespace Kurenai
         // --- 平面反射 ---
         // 水面に不透明ジオメトリの鏡像を映す専用フォワードパス。設計判断の詳細は
         // Shaders/3D/PlanarReflection.hlsl冒頭のコメントを参照。反射解像度はレンダー解像度に
-        // m_ReflectionSettings.PlanarResolutionScaleを掛けた値で、実際の作成はCreatePlanarReflectionTargetsが行う
-        std::unique_ptr<RHI::IRHITexture> m_PlanarReflectionColor;
-        std::unique_ptr<RHI::IRHITexture> m_PlanarReflectionDepth;
+        // m_ReflectionSettings.PlanarResolutionScaleを掛けた値で、実際の作成はCreatePlanarReflectionTargetsが行う。
+        // レンダーターゲット2枚と実寸は、PresentPassのデバッグ表示も読むため
+        // 持ち主をRenderTargets(m_RenderTargets.PlanarReflection*)へ移した
         std::unique_ptr<RHI::IRHIShader> m_PlanarReflectionVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_PlanarReflectionPixelShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_PlanarReflectionPipelineState;
@@ -2390,10 +2390,6 @@ namespace Kurenai
         // 即座には破棄できないため)
         float m_PendingPlanarReflectionResolutionScale = Defaults::PlanarReflectionResolutionScale;
         bool m_PlanarReflectionResolutionDirty = false;
-        // CreatePlanarReflectionTargetsが確保した反射解像度の実値(幅・高さ)。デバッグ表示
-        // (Present.hlslのレターボックス計算)が実寸を必要とするため保持しておく
-        uint32_t m_PlanarReflectionWidth = 0;
-        uint32_t m_PlanarReflectionHeight = 0;
         // 複数の水面インスタンスが異なる高さで見つかったことを検出した最初のフレームだけ
         // 警告ログを出すためのフラグ(m_LightTileOverflowLoggedと同じ作法)。平面反射は
         // 「水面は単一の水平な平面である」という前提に立っており、複数ある場合は最初のものだけを使う

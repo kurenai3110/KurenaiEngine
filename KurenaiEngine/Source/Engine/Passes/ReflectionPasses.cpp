@@ -94,8 +94,8 @@ namespace Kurenai::Passes
         if (planarReflectionPassRuns)
         {
             RHI::Viewport planarReflectionViewport;
-            planarReflectionViewport.Width = static_cast<float>(m_Engine.m_PlanarReflectionWidth);
-            planarReflectionViewport.Height = static_cast<float>(m_Engine.m_PlanarReflectionHeight);
+            planarReflectionViewport.Width = static_cast<float>(targets->PlanarReflectionWidth);
+            planarReflectionViewport.Height = static_cast<float>(targets->PlanarReflectionHeight);
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "PlanarReflection",
@@ -106,8 +106,8 @@ namespace Kurenai::Passes
                     brdfLUTTexture, gi->DDGIIrradianceAtlas.get(), gi->DDGIDistanceAtlas.get(),
                     skyViewLUT,
                 },
-                .RenderTargets = { m_Engine.m_PlanarReflectionColor.get() },
-                .DepthTarget = m_Engine.m_PlanarReflectionDepth.get(),
+                .RenderTargets = { targets->PlanarReflectionColor.get() },
+                .DepthTarget = targets->PlanarReflectionDepth.get(),
                 // 大気遠近。空パラメータ(m_SkyResources.ParametersBuffer)をSkyIntegrateパスの後へ
                 // 順序付けさせるために挙げる(実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
                 // m_DroneBufferはこのパス末尾でドローンショーの機体を描き足すために読む
@@ -238,7 +238,7 @@ namespace Kurenai::Passes
                     // 平面反射は「カメラを鏡映しただけで世界は動かしていない」ので、
                     // 機体もそのままのワールド座標で、鏡映済みのビュー行列で描き直せばよい。
                     // これを描かないと、空には編隊が出ているのに水面には何も映らない
-                    // (SSRパスがm_PlanarReflectionColorを水面へ合成する)
+                    // (SSRパスがm_RenderTargets.PlanarReflectionColorを水面へ合成する)
                     if (m_Engine.m_DroneShowEnabled && !m_Engine.m_DroneInstances.empty())
                     {
                         DirectX::XMFLOAT4X4 projection;
@@ -292,7 +292,7 @@ namespace Kurenai::Passes
                     gi->ProbePrefilteredArray.get(), gi->ProbeDistanceArray.get(),
                     // 平面反射。パスが登録されなかったフレームでもこのReadsは無害
                     // (今フレームのWriterが無いため単に依存辺が張られないだけ)
-                    m_Engine.m_PlanarReflectionColor.get(),
+                    targets->PlanarReflectionColor.get(),
                     // 大気散乱のSkyView LUT。水面に映る空をここから引く
                     skyViewLUT,
                     // bent normal(34章)。スペキュラ遮蔽をLightingパスと同じ規則で求めるために読む
@@ -312,7 +312,7 @@ namespace Kurenai::Passes
                     const float waterAnalyticSkyFlag =
                         (waterSettings.AnalyticSkyReflection && usingProceduralSky) ? 1.0f : 0.0f;
                     // 平面反射。このフレームでPlanarReflectionパスを実際に実行したときだけ
-                    // 有効にする(登録されなかったフレームにm_PlanarReflectionColorの中身は
+                    // 有効にする(登録されなかったフレームにm_RenderTargets.PlanarReflectionColorの中身は
                     // 前フレーム/未定義の残骸なので、フラグをそのままSSR.hlsl側へ渡してはいけない)
                     const float planarReflectionFlag = planarReflectionPassRuns ? 1.0f : 0.0f;
 
@@ -341,7 +341,7 @@ namespace Kurenai::Passes
                     // 平面反射。DX12はディスクリプタテーブルに未初期化のスロットが残ると
                     // 動作が未定義になるため、パスが無効なフレームでも常にバインドする
                     // (反射プローブ・DDGIと同じ理由)
-                    cmd->SetTexture(11, m_Engine.m_PlanarReflectionColor.get());
+                    cmd->SetTexture(11, targets->PlanarReflectionColor.get());
                     // 空パラメータ。SSR.hlsl側はt12(t0〜t11が既に使用済み)
                     cmd->SetShaderResourceBuffer(12, skyParametersBuffer);
                     // ボリュメトリック積雲の3Dノイズ。水面に映る雲も背景とまったく同じ

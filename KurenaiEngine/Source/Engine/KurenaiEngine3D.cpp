@@ -885,7 +885,7 @@ namespace Kurenai
         droneShowPipelineDesc.VertexShader = m_DroneShowVertexShader.get();
         droneShowPipelineDesc.PixelShader = m_DroneShowPixelShader.get();
         droneShowPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        // SceneColorと平面反射(m_PlanarReflectionColor)はどちらもR16G16B16A16_Floatなので、
+        // SceneColorと平面反射(m_RenderTargets.PlanarReflectionColor)はどちらもR16G16B16A16_Floatなので、
         // 同じPSOを両方のパスで使える
         droneShowPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
         // 島や地形の後ろに回った機体を隠すため深度テストは行うが、
@@ -896,7 +896,7 @@ namespace Kurenai
         // 【Additiveではなくこちらを使う理由 ― アルファ(カバレッジ)を書かないため】
         // Additiveは SrcBlendAlpha=ONE / DestBlendAlpha=ONE なので、機体を描くたびに
         // レンダーターゲットのアルファへ1.0が積まれる。SceneColorではアルファを誰も読まないので
-        // 実害が無いが、平面反射(m_PlanarReflectionColor)ではアルファが
+        // 実害が無いが、平面反射(m_RenderTargets.PlanarReflectionColor)ではアルファが
         // 「そのテクセルにジオメトリが描かれたか」のカバレッジとして使われており
         // (SSR.hlslのApplyPlanarReflection)、機体のクアッド全域でカバレッジが1になってしまう。
         // すると水面はクアッドの円の内側で解析空の映り込みを失い、裾(glowがほぼ0の外周)が
@@ -3653,7 +3653,7 @@ namespace Kurenai
             //
             // 【内側で捕まえる】ここが落ちてもエンジン全体を止める理由が無い比較用の機能なので、
             // 外側のLegacy8bitフォールバックへ持ち出さず、この機能だけ無効化して続行する
-            // (フォールバックしたところでVRAM不足は解決しない。m_PlanarReflectionColorと同じ判断)
+            // (フォールバックしたところでVRAM不足は解決しない。m_RenderTargets.PlanarReflectionColorと同じ判断)
             if (m_RenderCapabilities.SoftwareRasterAvailable)
             {
                 try
@@ -3737,11 +3737,7 @@ namespace Kurenai
 
         try
         {
-            // SceneColorと同じHDR形式(R16G16B16A16_Float)。水面はラフネスが低く反射がそのまま
-            // 見えるため、CreateRenderTargetsのLegacy8bitフォールバックの対象外にして常にHDR固定にする
-            m_PlanarReflectionColor = m_Device->CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
-            // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする(G-Buffer/ProbeCapture深度と同じ)
-            m_PlanarReflectionDepth = m_Device->CreateDepthTexture(width, height, 0.0f);
+            m_RenderTargets.CreatePlanarReflection(*m_Device, width, height);
         }
         catch (const std::exception& e)
         {
@@ -3752,8 +3748,6 @@ namespace Kurenai
             throw;
         }
 
-        m_PlanarReflectionWidth = width;
-        m_PlanarReflectionHeight = height;
         // ポインタが作り直されたので、グラフィックスデバッガ向けの名前を焼き直す
         m_DebugNamesDirty = true;
 
@@ -5778,7 +5772,7 @@ namespace Kurenai
             }
         }
         // このフレームで平面反射パスを実行するか。
-        // 【反射の手法がSSRのときだけ実行する】このパスの出力(m_PlanarReflectionColor)を読むのは
+        // 【反射の手法がSSRのときだけ実行する】このパスの出力(m_RenderTargets.PlanarReflectionColor)を読むのは
         // SSR.hlslだけである。手法がRaytracedやOffのときに走らせても、不透明メッシュ全体を
         // もう1回フォワードで描いた結果を誰も読まないまま捨てることになる
         // (DXR対応環境ではDefaultReflectionModeがRaytracedを返すため、この条件が無いと

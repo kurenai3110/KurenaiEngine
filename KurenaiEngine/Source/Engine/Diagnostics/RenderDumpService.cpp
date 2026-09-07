@@ -59,8 +59,8 @@ namespace Kurenai
             // 反射
             { "SSRTexture", m_RenderTargets.SSRTexture.get() },
             { "RTReflectionTexture", m_RTReflectionTexture.get() },
-            { "PlanarReflectionColor", m_PlanarReflectionColor.get() },
-            { "PlanarReflectionDepth", m_PlanarReflectionDepth.get() },
+            { "PlanarReflectionColor", m_RenderTargets.PlanarReflectionColor.get() },
+            { "PlanarReflectionDepth", m_RenderTargets.PlanarReflectionDepth.get() },
             // MegaLights
             { "MegaLightsTexture", m_MegaLightsTexture.get() },
             { "MegaLightsDenoisedTexture", m_MegaLightsDenoisedTexture.get() },

@@ -42,7 +42,7 @@ namespace Kurenai
                             // 1.5より大きいと長さ(=aoB)をグレースケール表示。
                             // データを持たないマテリアルはマゼンタで塗る
         WaterMask,          // G-BufferのMaterial.a(水面のマテリアルID)をグレースケール表示
-        PlanarReflection,   // 平面反射パスの出力(m_PlanarReflectionColor)をトーンマッピングして表示
+        PlanarReflection,   // 平面反射パスの出力(m_RenderTargets.PlanarReflectionColor)をトーンマッピングして表示
         CloudNoiseSlice,    // 雲の3Dノイズの任意スライス。m_CloudSettings.NoiseDebugSlice/Detailで選ぶ
         AtmosphereLUT,      // 大気散乱のLUT。m_AtmosphereLUTDebugMultiで2枚を切り替える
         DDGIProbeBackface,  // DDGIのプローブ裏面率(イラディアンスアトラスのα、22章)。

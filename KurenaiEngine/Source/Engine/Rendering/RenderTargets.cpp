@@ -83,6 +83,20 @@ namespace Kurenai::Rendering
         SoftwareRasterNormal = device.CreateUAVTexture(width, height, RHI::Format::R16G16_Float);
     }
 
+    void RenderTargets::CreatePlanarReflection(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        // SceneColorと同じHDR形式(R16G16B16A16_Float)。水面はラフネスが低く反射がそのまま
+        // 見えるため、CreateRenderTargetsのLegacy8bitフォールバックの対象外にして常にHDR固定にする
+        PlanarReflectionColor = device.CreateRenderTexture(width, height, RHI::Format::R16G16B16A16_Float);
+        // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする(G-Buffer/ProbeCapture深度と同じ)
+        PlanarReflectionDepth = device.CreateDepthTexture(width, height, 0.0f);
+
+        // 【2枚とも作れてから記録する】上で送出したら実寸は前の値のまま残る。
+        // デバッグ表示のレターボックス計算が、存在しない解像度を使わないようにするため
+        PlanarReflectionWidth = width;
+        PlanarReflectionHeight = height;
+    }
+
     void RenderTargets::ResetSoftwareRasterOutputs()
     {
         SoftwareRasterColor.reset();

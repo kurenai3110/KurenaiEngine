@@ -329,16 +329,16 @@ namespace Kurenai::Passes
             break;
         case DebugView::PlanarReflection:
             // 平面反射パスの出力。パスが今フレーム実行されていない(無効化・水面なし)場合、
-            // m_PlanarReflectionColorの中身は前フレーム/未定義の残骸なので最終結果のまま何も
+            // m_RenderTargets.PlanarReflectionColorの中身は前フレーム/未定義の残骸なので最終結果のまま何も
             // 切り替えない(RTShadowデバッグ表示と同じ方針)
             if (frame.PlanarReflectionPassRuns)
             {
                 // HDRのためMode 4でReinhardトーンマッピング+ガンマ補正して表示する
                 // (DirectLight/Bloomと同じ扱い)。専用のMode追加は不要でPresent.hlslは無変更のまま使える
-                presentSourceTexture = m_Engine.m_PlanarReflectionColor.get();
+                presentSourceTexture = targets->PlanarReflectionColor.get();
                 presentMode = 4;
-                presentSourceWidth = m_Engine.m_PlanarReflectionWidth;
-                presentSourceHeight = m_Engine.m_PlanarReflectionHeight;
+                presentSourceWidth = targets->PlanarReflectionWidth;
+                presentSourceHeight = targets->PlanarReflectionHeight;
             }
             break;
         case DebugView::AtmosphereLUT:
