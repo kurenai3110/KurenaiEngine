@@ -2608,7 +2608,7 @@ RHIには<strong>キューブマップの面ごとのRTV</strong>が無い。こ
 組み立てている。
 </p>
 <ol>
-<li>プローブ位置から1面ぶんを、通常の2Dレンダーターゲット(<code>m_ProbeCaptureColor</code>、
+<li>プローブ位置から1面ぶんを、通常の2Dレンダーターゲット(<code>GIResources::ProbeCaptureColor</code>、
 HDR 128&times;128)へフォワード描画する(<code>ProbeCapture.hlsl</code>)</li>
 <li>コンピュートシェーダー(<code>IBLConvolve.hlsl</code>の<code>CSCopyCaptureToCubeFace</code>)が
 その結果をキューブマップの該当面のUAVへ書き写す</li>
@@ -2638,7 +2638,7 @@ RHIへの追加(<code>CreateMippedUAVTextureCubeArray</code>、
 一方で<strong>畳み込みの入力</strong>だけは<code>TextureCube</code>(配列ではない)でなければならない。
 <code>IBLConvolve.hlsl</code>の<code>SourceSkybox</code>が<code>TextureCube</code>宣言のままだからである。
 プローブは1つずつ順に焼くため、キャプチャした6面を組み上げるスクラッチのキューブマップ
-(<code>m_ProbeRadianceCube</code>)は<strong>1枚だけ</strong>確保して使い回している。
+(<code>GIResources::ProbeRadianceCube</code>)は<strong>1枚だけ</strong>確保して使い回している。
 これにより畳み込みシェーダーを変更せずに済んでいる。
 </p>
 <h3>19.4 キャプチャ時のライティングと定数バッファの与え方</h3>
@@ -3142,7 +3142,7 @@ SHのような低次項への圧縮が効かない。反射プローブの畳み
 (1フレームへ集中させるとそこだけスパイクになる)。
 キャプチャフェーズ(6フレーム)→プリフィルタフェーズ(6フレーム)を交互に繰り返す
 対称なデューティ比で、プリフィルタ中は次のプローブのキャプチャを止める
-(同じ<code>m_ProbeRadianceCube</code>を読み続ける必要があるため)。
+(同じ<code>GIResources::ProbeRadianceCube</code>を読み続ける必要があるため)。
 1プローブの一巡は12フレームになる。
 </p>
 <p>
