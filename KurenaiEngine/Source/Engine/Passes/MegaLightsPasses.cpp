@@ -928,6 +928,10 @@ namespace Kurenai::Passes
             ++m_Engine.m_MegaLightsAccumFrames;
         }
 
+        // 【この位置で publish すること】上の if の中で増えたぶんを含めた値を、
+        // 後続の PresentPass が Mode 22 の除数として読む。増える前に配ると1つ古くなる
+        bb.MegaLightsAccumFrames = m_Engine.m_MegaLightsAccumFrames;
+
         // --- 蓄積し終えた平均を生データで書き出す(計測専用) ---
         // 画面キャプチャは8bit・トーンマップ後で、丸めだけでRMSEに0.29階調の下限が生まれる。
         // 「平均が真値へ 1/√N で寄るか」はその下限に隠れて読めないので、線形のまま取り出す

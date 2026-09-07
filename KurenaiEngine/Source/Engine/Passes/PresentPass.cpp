@@ -255,7 +255,7 @@ namespace Kurenai::Passes
             break;
         case DebugView::MegaLightsAverage:
             // 蓄積した平均。1フレームも足していないうちは中身が未定義なので切り替えない
-            if (m_Engine.m_MegaLightsAccumFrames > 0u && targets->MegaLightsAccumBuffer)
+            if (bb.MegaLightsAccumFrames > 0u && targets->MegaLightsAccumBuffer)
             {
                 presentSourceTexture = targets->TonemapTexture.get();
                 presentMode = 22;
@@ -444,7 +444,7 @@ namespace Kurenai::Passes
         // Mode 22(蓄積平均)が割る数。0で割らないよう下限1
         presentConstants.AccumParams =
         {
-            static_cast<float>(std::max(1u, m_Engine.m_MegaLightsAccumFrames)),
+            static_cast<float>(std::max(1u, bb.MegaLightsAccumFrames)),
             0.0f,
             0.0f,
             0.0f,

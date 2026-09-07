@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace Kurenai::RHI
 {
     class IRHITexture;
@@ -44,5 +46,12 @@ namespace Kurenai::Rendering
         // モデル単位GPUカリングの候補が今フレーム揃っていたか。
         // graph.Execute() の後で走るカウンタの読み戻しが読む
         bool ModelCullReady = false;
+
+        // MegaLightsの蓄積バッファへこれまでに足したフレーム数(今フレームぶんを含む)。
+        // Present のデバッグ表示(Mode 22)がこれで割る。
+        // 【FrameContext ではなくここに置く理由】MegaLights の登録中に増えるため、
+        // 登録が始まる前に確定している値ではない。フレーム先頭の写しを配ると
+        // 1フレーム古い数で割ることになる
+        uint32_t MegaLightsAccumFrames = 0;
     };
 }
