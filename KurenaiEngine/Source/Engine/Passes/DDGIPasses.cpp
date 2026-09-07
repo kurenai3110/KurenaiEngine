@@ -33,6 +33,9 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::RenderTargets* const targets = frame.Targets;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHIBuffer* const lightBuffer = frame.Scene->LightBuffer.get();
         const Assets::RaytracingScene* const raytracingScene = &frame.Scene->RaytracingScene;
 
@@ -85,7 +88,7 @@ namespace Kurenai::Passes
         // RWTexture2DArray<float>なので、キューブ配列だけでなく単体のキューブ(=6要素の2D配列)の
         // 面へもそのまま書ける
         const auto captureDDGIProbeFace =
-            [this, lightBuffer, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, suppressEmissiveForGI, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
+            [this, targets, lightBuffer, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, suppressEmissiveForGI, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
             const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
 
@@ -114,7 +117,7 @@ namespace Kurenai::Passes
             cmd->SetConstantBuffer(0, m_Engine.m_ProbeCaptureConstantBuffer.get());
             cmd->SetSamplerSet(materialSamplers);
 
-            cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
+            cmd->SetTexture(4, targets->ShadowCascadeArray.get());
             cmd->SetShaderResourceBuffer(8, lightBuffer);
             cmd->SetTexture(9, irradianceTexture);
             cmd->SetTexture(10, prefilteredEnvTexture);
@@ -631,6 +634,9 @@ namespace Kurenai::Passes
     void DDGIPasses::RegisterResolve(
         Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
     {
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::RenderTargets* const targets = frame.Targets;
+
         RHI::IRHIBuffer* const frameConstantBuffer = frame.FrameConstantBuffer;
         RHI::IRHISamplerSet* const screenSpaceSamplers = frame.ScreenSpaceSamplers;
 
@@ -655,12 +661,12 @@ namespace Kurenai::Passes
                 // 深度と法線はG-Bufferパスより後
                 .Reads = {
                     m_Engine.m_DDGIIrradianceAtlas.get(), m_Engine.m_DDGIDistanceAtlas.get(),
-                    m_Engine.m_RenderTargets.GBufferDepth.get(), m_Engine.m_RenderTargets.GBufferNormal.get(),
+                    targets->GBufferDepth.get(), targets->GBufferNormal.get(),
                 },
                 // 2枚目は合成側のGatherRed用の低解像度深度(41.24節)。
                 // 並びはDDGIResolve.hlslのPSOutputおよびPSOのRenderTargetFormatsと一致させること
                 .RenderTargets = { m_Engine.m_DDGIResolveTexture.get(), m_Engine.m_DDGIResolveDepthTexture.get() },
-                .Execute = [this, ddgiResolveViewport, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, ddgiResolveViewport, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(ddgiResolveViewport);
                     cmd->SetPipelineState(m_Engine.m_DDGIResolvePipelineState.get());
@@ -668,8 +674,8 @@ namespace Kurenai::Passes
                     cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, m_Engine.m_DDGIIrradianceAtlas.get());
                     cmd->SetTexture(1, m_Engine.m_DDGIDistanceAtlas.get());
-                    cmd->SetTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
-                    cmd->SetTexture(3, m_Engine.m_RenderTargets.GBufferNormal.get());
+                    cmd->SetTexture(2, targets->GBufferDepth.get());
+                    cmd->SetTexture(3, targets->GBufferNormal.get());
                     cmd->Draw(3, 0);
                 },
             });

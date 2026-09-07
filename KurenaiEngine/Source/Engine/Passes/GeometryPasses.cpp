@@ -30,6 +30,9 @@ namespace Kurenai::Passes
         Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::RenderTargets* const targets = frame.Targets;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHIBuffer* const modelInstanceBuffer = frame.Scene->ModelInstanceBuffer.get();
 
         // 【フレームの写しをローカルで受ける】ラムダへ値で渡すため
@@ -322,9 +325,9 @@ namespace Kurenai::Passes
                 .Name = std::move(passName),
                 // Hi-Zを読む。前フレームのものを読む側では、それより前に書き手がいないので
                 // 辺は張られない(RenderGraphのReadsは登録順で解決する)
-                .Reads = { m_Engine.m_RenderTargets.HiZTexture.get() },
+                .Reads = { targets->HiZTexture.get() },
                 .BufferWrites = { m_Engine.m_ModelCullCounterBuffer.get(), m_Engine.m_ModelCullDrawArgsBuffer.get() },
-                .Execute = [this, meshletLOD, taaPrevViewProj, ambientOcclusionSettings, emissiveLightSettings, beginIndex, count, initializeBuffers, useCurrentFrameHiZ, occlusionEnabled, regionStride, statsBeginIndex, cameraMoveDistance, modelCullIndirectActive, &viewProj, &modelCullDraws, renderWidth, renderHeight, objectConstantBuffer](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, meshletLOD, taaPrevViewProj, ambientOcclusionSettings, emissiveLightSettings, beginIndex, count, initializeBuffers, useCurrentFrameHiZ, occlusionEnabled, regionStride, statsBeginIndex, cameraMoveDistance, modelCullIndirectActive, &viewProj, &modelCullDraws, renderWidth, renderHeight, objectConstantBuffer](RHI::IRHICommandList* cmd)
                 {
                     if (initializeBuffers)
                     {
@@ -422,7 +425,7 @@ namespace Kurenai::Passes
                     cmd->SetComputePipelineState(m_Engine.m_ModelCullPipelineState.get());
                     cmd->SetComputeConstantBuffer(0, m_Engine.m_ModelCullConstantBuffer.get());
                     cmd->SetComputeShaderResourceBuffer(0, m_Engine.m_ModelCullInstanceBuffer.get());
-                    cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.HiZTexture.get());
+                    cmd->SetComputeTexture(1, targets->HiZTexture.get());
                     cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_ModelCullCounterBuffer.get());
                     cmd->SetComputeUnorderedAccessBuffer(1, m_Engine.m_ModelCullDrawArgsBuffer.get());
 
@@ -440,9 +443,9 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "HiZ",
-                .Reads = { m_Engine.m_RenderTargets.GBufferDepth.get() },
-                .Writes = { m_Engine.m_RenderTargets.HiZTexture.get() },
-                .Execute = [this, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
+                .Reads = { targets->GBufferDepth.get() },
+                .Writes = { targets->HiZTexture.get() },
+                .Execute = [this, targets, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     HiZConstants hizConstants{};
                     hizConstants.SrcSize = { renderWidth, renderHeight };
@@ -451,8 +454,8 @@ namespace Kurenai::Passes
 
                     cmd->SetComputePipelineState(m_Engine.m_HiZCopyPipelineState.get());
                     cmd->SetComputeConstantBuffer(0, m_Engine.m_HiZConstantBuffer.get());
-                    cmd->SetComputeTexture(0, m_Engine.m_RenderTargets.GBufferDepth.get());
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RenderTargets.HiZTexture.get(), 0);
+                    cmd->SetComputeTexture(0, targets->GBufferDepth.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, targets->HiZTexture.get(), 0);
                     cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
 
                     cmd->SetComputePipelineState(m_Engine.m_HiZDownsamplePipelineState.get());
@@ -467,8 +470,8 @@ namespace Kurenai::Passes
                         hizConstants.DstSize = { hizDstWidth, hizDstHeight };
                         cmd->UpdateBuffer(m_Engine.m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
                         cmd->SetComputeConstantBuffer(0, m_Engine.m_HiZConstantBuffer.get());
-                        cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RenderTargets.HiZTexture.get(), mip - 1);
-                        cmd->SetComputeUnorderedAccessTexture(1, m_Engine.m_RenderTargets.HiZTexture.get(), mip);
+                        cmd->SetComputeUnorderedAccessTexture(0, targets->HiZTexture.get(), mip - 1);
+                        cmd->SetComputeUnorderedAccessTexture(1, targets->HiZTexture.get(), mip);
                         cmd->Dispatch((hizDstWidth + 7) / 8, (hizDstHeight + 7) / 8, 1);
 
                         hizSrcWidth = hizDstWidth;
@@ -495,12 +498,12 @@ namespace Kurenai::Passes
                 .Name = "DepthPrepass",
                 // 増幅シェーダーのHi-Zオクルージョンカリングが読む
                 // (G-Bufferパスと同じ理由で循環にはならない)
-                .Reads = { m_Engine.m_RenderTargets.HiZTexture.get() },
+                .Reads = { targets->HiZTexture.get() },
                 // レンダーターゲットは持たない(深度だけを書く)
-                .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
+                .DepthTarget = targets->GBufferDepth.get(),
                 // 間接描画の引数(直前のModelCullパスが書いたもの)
                 .BufferReads = { m_Engine.m_ModelCullDrawArgsBuffer.get() },
-                .Execute = [this, modelInstanceBuffer, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &viewProj, modelCullIndirectActive, occlusionCullingActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, modelInstanceBuffer, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &viewProj, modelCullIndirectActive, occlusionCullingActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(gbufferViewport);
                     // Reverse-Zのため遠平面側(NDC z=0.0)。G-Bufferパスの代わりにここでクリアする
@@ -516,7 +519,7 @@ namespace Kurenai::Passes
                     // プリパスだけが描いた面は「深度はあるのに色が無い」穴になる
                     if (occlusionCullingActive)
                     {
-                        cmd->SetTextureAllStages(8, m_Engine.m_RenderTargets.HiZTexture.get());
+                        cmd->SetTextureAllStages(8, targets->HiZTexture.get());
                     }
 
                     RHI::IRHIPipelineState* currentPipelineState = nullptr;
@@ -733,18 +736,18 @@ namespace Kurenai::Passes
             // 書き手」がいるときにだけ辺を張る規則で、Hi-Zパスの登録はこのパスより後なので
             // 辺は張られない(RenderGraph::ResolveExecutionOrder)。実行順も登録順のまま、
             // 読むのは前フレームに書かれた内容になる ―― それがこの判定の前提そのもの
-            .Reads = { m_Engine.m_RenderTargets.HiZTexture.get() },
+            .Reads = { targets->HiZTexture.get() },
             // 深度プリパス(直前に登録される)を通したときは、ここへ来る時点で深度が埋まっており、
             // PSOのDepthAllowEqual(GREATER_EQUAL)によって最前面の断片だけがテストを通る。
             //
             // 6枚目のbent normalまで含め、並びはGBuffer.hlslのPSOutputおよび
             // CreatePrecisionDependentPipelineStatesのRenderTargetFormatsと一致させること
-            .RenderTargets = { m_Engine.m_RenderTargets.GBufferAlbedo.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(),
-                               m_Engine.m_RenderTargets.GBufferEmissive.get(), m_Engine.m_RenderTargets.GBufferVelocity.get(), m_Engine.m_RenderTargets.GBufferBentNormal.get() },
-            .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
+            .RenderTargets = { targets->GBufferAlbedo.get(), targets->GBufferNormal.get(), targets->GBufferMaterial.get(),
+                               targets->GBufferEmissive.get(), targets->GBufferVelocity.get(), targets->GBufferBentNormal.get() },
+            .DepthTarget = targets->GBufferDepth.get(),
             // 間接描画の引数を読む(ModelCullパスが書いたもの)
             .BufferReads = { m_Engine.m_ModelCullDrawArgsBuffer.get() },
-            .Execute = [this, modelInstanceBuffer, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, geometrySettings, gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive, meshletCullStatsActive, modelCullIndirectActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, targets, modelInstanceBuffer, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, geometrySettings, gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive, meshletCullStatsActive, modelCullIndirectActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
             {
                 // カリング統計のカウンタを0へ戻す。増幅シェーダーは加算しかしないので、
                 // 戻さないとフレームをまたいで積み上がる。
@@ -790,7 +793,7 @@ namespace Kurenai::Passes
                 // 「バインドされていないのに間引き率が出た」という取り違えを起こせなくする
                 if (occlusionCullingActive)
                 {
-                    cmd->SetTextureAllStages(8, m_Engine.m_RenderTargets.HiZTexture.get());
+                    cmd->SetTextureAllStages(8, targets->HiZTexture.get());
                 }
 
                 // ミラーリング(Worldの行列式が負)されたインスタンス・水面(ModelInstance::IsWater)

@@ -178,6 +178,9 @@ namespace Kurenai::Passes
         Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::RenderTargets* const targets = frame.Targets;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHIBuffer* const modelInstanceBuffer = frame.Scene->ModelInstanceBuffer.get();
 
         // 【フレームの写しをローカルで受ける】ラムダへ値で渡すため
@@ -206,7 +209,7 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "Shadow" + std::to_string(cascade),
-                .DepthTarget = m_Engine.m_RenderTargets.ShadowCascadeArray.get(),
+                .DepthTarget = targets->ShadowCascadeArray.get(),
                 .DepthTargetArraySlice = cascade,
                 .Execute = [this, modelInstanceBuffer, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, shadowSettings, shadowViewport, cascade, cascadeViewProj, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
@@ -384,6 +387,9 @@ namespace Kurenai::Passes
         Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::RenderTargets* const targets = frame.Targets;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         const Assets::RaytracingScene* const raytracingScene = &frame.Scene->RaytracingScene;
 
         // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
@@ -408,9 +414,9 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "RTShadow",
-                .Reads = { m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferDepth.get() },
-                .Writes = { m_Engine.m_RenderTargets.RTShadowTexture.get() },
-                .Execute = [this, raytracingScene, shadowSettings, renderWidth, renderHeight, frameConstantBuffer](RHI::IRHICommandList* cmd)
+                .Reads = { targets->GBufferNormal.get(), targets->GBufferDepth.get() },
+                .Writes = { targets->RTShadowTexture.get() },
+                .Execute = [this, targets, raytracingScene, shadowSettings, renderWidth, renderHeight, frameConstantBuffer](RHI::IRHICommandList* cmd)
                 {
                     Passes::RTShadowConstants rtShadowConstants{};
                     rtShadowConstants.Params0 =
@@ -429,11 +435,11 @@ namespace Kurenai::Passes
                     // レジスタ割り当てはRTShadow.hlsl側の宣言と一致させること。
                     // このシェーダはLoad(整数座標)しか使わないためサンプラーはバインドしない
                     cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
-                    cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
-                    cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferDepth.get());
+                    cmd->SetComputeTexture(1, targets->GBufferNormal.get());
+                    cmd->SetComputeTexture(2, targets->GBufferDepth.get());
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RenderTargets.RTShadowTexture.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, targets->RTShadowTexture.get());
                     cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });

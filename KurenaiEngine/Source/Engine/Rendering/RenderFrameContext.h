@@ -10,6 +10,7 @@
 #include "../Diagnostics/RenderCapabilities.h"
 #include "MeshletLODFrameConstants.h"
 #include "IBLResources.h"
+#include "RenderTargets.h"
 #include "SceneGPUResources.h"
 #include "SkyResources.h"
 #include "RenderSettingsSnapshot.h"
@@ -104,6 +105,10 @@ namespace Kurenai::Rendering
         // GPU側のシーンデータ一式。シーンの読み込みで作り直されるが、
         // 作り直しは登録が始まるより前(UpdateSceneStreaming)に済んでいる
         const SceneGPUResources* Scene = nullptr;
+
+        // 共有レンダーターゲット一式。**複数の群が読み書きするのでここが唯一の持ち主**
+        // (Rendering/RenderTargets.h)。作り直しはフレーム先頭で済んでいる
+        const RenderTargets* Targets = nullptr;
 
         // PresentパスがRenderGraphPassDesc::SwapChainTargetへ渡す
         RHI::IRHISwapChain* SwapChain = nullptr;

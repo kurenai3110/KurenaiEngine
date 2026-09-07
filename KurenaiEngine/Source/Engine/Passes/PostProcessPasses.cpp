@@ -16,6 +16,9 @@ namespace Kurenai::Passes
         Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::RenderTargets* const targets = frame.Targets;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHIBuffer* const skyParametersBuffer = frame.Sky->ParametersBuffer.get();
         RHI::IRHITexture* const skyViewLUT = frame.Sky->SkyViewLUT.get();
 
@@ -60,19 +63,19 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AerialPerspective",
-                .Reads = { reflectionOutput, m_Engine.m_RenderTargets.GBufferDepth.get(), skyViewLUT },
+                .Reads = { reflectionOutput, targets->GBufferDepth.get(), skyViewLUT },
                 .RenderTargets = { m_Engine.m_AerialPerspectiveTexture.get() },
                 // 空パラメータ。SkyIntegrateパスの後へ順序付けさせるために挙げる
                 // (実際のバインドはExecute内。SSRパスの同じ宣言と同じ理由)
                 .BufferReads = { skyParametersBuffer },
-                .Execute = [this, skyParametersBuffer, skyViewLUT, gbufferViewport, reflectionOutput, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, skyParametersBuffer, skyViewLUT, gbufferViewport, reflectionOutput, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(gbufferViewport);
                     cmd->SetPipelineState(m_Engine.m_AerialPerspectivePipelineState.get());
                     cmd->SetConstantBuffer(0, frameConstantBuffer);
                     cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, reflectionOutput);
-                    cmd->SetTexture(1, m_Engine.m_RenderTargets.GBufferDepth.get());
+                    cmd->SetTexture(1, targets->GBufferDepth.get());
                     cmd->SetShaderResourceBuffer(2, skyParametersBuffer);
                     // 大気散乱のSkyView LUT。in-scatter項に背景と同じ空の色を
                     // 使うのがこのパスの要点なので、当然同じLUTを読む
@@ -111,7 +114,7 @@ namespace Kurenai::Passes
                 .Name = "DroneShow",
                 .RenderTargets = { taaInputColor },
                 // 島や地形の後ろに回った機体を隠すために深度テストを行う(書き込みはしない)
-                .DepthTarget = m_Engine.m_RenderTargets.GBufferDepth.get(),
+                .DepthTarget = targets->GBufferDepth.get(),
                 .BufferReads = { m_Engine.m_DroneBuffer.get() },
                 .Execute = [this, gbufferViewport, viewMatrix, jitteredProj, effectiveExposure, droneCount](
                                RHI::IRHICommandList* cmd)
@@ -153,15 +156,15 @@ namespace Kurenai::Passes
             // 今フレームの書き込み先と、前フレームの結果(履歴)。Render()の末尾で役割が入れ替わる
             const uint32_t historyWriteIndex = m_Engine.m_TAAHistoryIndex;
             const uint32_t historyReadIndex = 1u - historyWriteIndex;
-            RHI::IRHITexture* const historyTexture = m_Engine.m_RenderTargets.TAAHistory[historyReadIndex].get();
+            RHI::IRHITexture* const historyTexture = targets->TAAHistory[historyReadIndex].get();
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "TAA",
                 // 履歴(historyTexture)は今フレーム誰も書かないので依存の辺は張られないが、
                 // 実際にバインドするテクスチャはReadsにも宣言しておくというRenderGraphの規約に従う
-                .Reads = { taaInputColor, historyTexture, m_Engine.m_RenderTargets.GBufferVelocity.get(), m_Engine.m_RenderTargets.GBufferDepth.get() },
-                .RenderTargets = { m_Engine.m_RenderTargets.TAAHistory[historyWriteIndex].get() },
-                .Execute = [this, taaPrevEffectiveExposureEV100, taaPrevJitterUv, taaPrevViewProj, postProcessSettings, gbufferViewport, taaInputColor, historyTexture, invViewProj, jitterUv, effectiveExposure, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Reads = { taaInputColor, historyTexture, targets->GBufferVelocity.get(), targets->GBufferDepth.get() },
+                .RenderTargets = { targets->TAAHistory[historyWriteIndex].get() },
+                .Execute = [this, targets, taaPrevEffectiveExposureEV100, taaPrevJitterUv, taaPrevViewProj, postProcessSettings, gbufferViewport, taaInputColor, historyTexture, invViewProj, jitterUv, effectiveExposure, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     TAAConstants taaConstants{};
                     DirectX::XMStoreFloat4x4(&taaConstants.InvViewProj, DirectX::XMMatrixTranspose(invViewProj));
@@ -204,8 +207,8 @@ namespace Kurenai::Passes
                     // 省くと直前のパスが張ったテクスチャを読んでしまう
                     cmd->SetTexture(0, taaInputColor);
                     cmd->SetTexture(1, historyTexture);
-                    cmd->SetTexture(2, m_Engine.m_RenderTargets.GBufferVelocity.get());
-                    cmd->SetTexture(3, m_Engine.m_RenderTargets.GBufferDepth.get());
+                    cmd->SetTexture(2, targets->GBufferVelocity.get());
+                    cmd->SetTexture(3, targets->GBufferDepth.get());
                     cmd->Draw(3, 0);
                 },
             });
@@ -216,7 +219,7 @@ namespace Kurenai::Passes
         //     常に実行する ---
         // この行はTAAパスのAddPassより後に置くこと。ラムダは値キャプチャなので、先に差し替えると
         // TAAが自分の出力を入力として読む形になる(RenderGraphが循環を検出して例外を投げる)
-        RHI::IRHITexture* hdrSceneColor = frame.Settings.PostProcess.TAAEnabled ? m_Engine.m_RenderTargets.TAAHistory[m_Engine.m_TAAHistoryIndex].get() : taaInputColor;
+        RHI::IRHITexture* hdrSceneColor = frame.Settings.PostProcess.TAAEnabled ? targets->TAAHistory[m_Engine.m_TAAHistoryIndex].get() : taaInputColor;
         // 【TAAパスの登録より後で確定させること】上のコメントの理由がそのまま効くため、
         // ブラックボードへ載せるのもこの位置にする
         bb.HdrSceneColor = hdrSceneColor;
@@ -232,9 +235,9 @@ namespace Kurenai::Passes
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AutoExposure",
-                .Reads = { hdrSceneColor, m_Engine.m_RenderTargets.GBufferDepth.get() },
+                .Reads = { hdrSceneColor, targets->GBufferDepth.get() },
                 .Writes = { m_Engine.m_ExposureTexture.get() },
-                .Execute = [this, effectiveExposureEV100, postProcessSettings, hdrSceneColor, keyReferenceEV100, usingProceduralSky, resetAdaptation, renderWidth, renderHeight](
+                .Execute = [this, targets, effectiveExposureEV100, postProcessSettings, hdrSceneColor, keyReferenceEV100, usingProceduralSky, resetAdaptation, renderWidth, renderHeight](
                     RHI::IRHICommandList* cmd)
                 {
                     AutoExposureConstants autoExposureConstants{};
@@ -283,7 +286,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_AutoExposureConstantBuffer.get());
                     cmd->SetComputeTexture(0, hdrSceneColor);
                     // 空(背景)を測光から外すために深度を読む(AutoExposure.hlsl参照)
-                    cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.GBufferDepth.get());
+                    cmd->SetComputeTexture(1, targets->GBufferDepth.get());
                     cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_ExposureHistogramBuffer.get());
                     cmd->Dispatch((renderWidth + 15) / 16, (renderHeight + 15) / 16, 1);
 
@@ -399,7 +402,7 @@ namespace Kurenai::Passes
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Tonemap",
             .Reads = { hdrSceneColor, m_Engine.m_ExposureTexture.get(), bloomResultTexture },
-            .RenderTargets = { m_Engine.m_RenderTargets.TonemapTexture.get() },
+            .RenderTargets = { targets->TonemapTexture.get() },
             .Execute = [this, effectiveExposureEV100, postProcessSettings, gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale, keyReferenceEV100, upscaleActive, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 TonemapConstants tonemapConstants{};
@@ -463,16 +466,16 @@ namespace Kurenai::Passes
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "UpscaleEASU",
-                .Reads = { m_Engine.m_RenderTargets.TonemapTexture.get() },
+                .Reads = { targets->TonemapTexture.get() },
                 .Writes = { m_Engine.m_UpscaleTexture.get() },
-                .Execute = [this, upscaleConstants, upscaleOutputWidth, upscaleOutputHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, upscaleConstants, upscaleOutputWidth, upscaleOutputHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_Engine.m_UpscaleEASUPipelineState.get());
                     // Gather4のアドレスモードがClampであることがEASUの前提(Upscale.hlslのコメント参照)
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
                     cmd->UpdateBuffer(m_Engine.m_UpscaleConstantBuffer.get(), &upscaleConstants, sizeof(upscaleConstants));
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_UpscaleConstantBuffer.get());
-                    cmd->SetComputeTexture(0, m_Engine.m_RenderTargets.TonemapTexture.get());
+                    cmd->SetComputeTexture(0, targets->TonemapTexture.get());
                     // UAVはDispatch直後に解除されるため毎回バインドし直す
                     cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_UpscaleTexture.get());
                     cmd->Dispatch((upscaleOutputWidth + 7) / 8, (upscaleOutputHeight + 7) / 8, 1);

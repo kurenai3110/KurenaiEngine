@@ -28,6 +28,9 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::RenderTargets* const targets = frame.Targets;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHIBuffer* const lightBuffer = frame.Scene->LightBuffer.get();
         RHI::IRHIBuffer* const modelInstanceBuffer = frame.Scene->ModelInstanceBuffer.get();
         const Assets::RaytracingScene* const raytracingScene = &frame.Scene->RaytracingScene;
@@ -96,7 +99,7 @@ namespace Kurenai::Passes
                 // ProbeCapture/captureProbeFaceと同じ理由でシャドウ・IBL・DDGIを挙げ、
                 // これらを書くパスより後ろへ順序付ける(実際のバインドはExecute内)
                 .Reads = {
-                    m_Engine.m_RenderTargets.ShadowCascadeArray.get(), irradianceTexture, prefilteredEnvTexture,
+                    targets->ShadowCascadeArray.get(), irradianceTexture, prefilteredEnvTexture,
                     brdfLUTTexture, m_Engine.m_DDGIIrradianceAtlas.get(), m_Engine.m_DDGIDistanceAtlas.get(),
                     skyViewLUT,
                 },
@@ -107,7 +110,7 @@ namespace Kurenai::Passes
                 // m_DroneBufferはこのパス末尾でドローンショーの機体を描き足すために読む
                 // (実際のバインドはExecute内)
                 .BufferReads = { lightBuffer, skyParametersBuffer, m_Engine.m_DroneBuffer.get() },
-                .Execute = [this, lightBuffer, modelInstanceBuffer, skyParametersBuffer, skyViewLUT, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, planarReflectionViewport, reflectedViewProj, reflectMatrix, waterPlaneY, viewMatrix, jitteredProj, effectiveExposure, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, lightBuffer, modelInstanceBuffer, skyParametersBuffer, skyViewLUT, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, planarReflectionViewport, reflectedViewProj, reflectMatrix, waterPlaneY, viewMatrix, jitteredProj, effectiveExposure, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     // captureProbeFaceとまったく同じ作法(constants.ViewProj/CameraPosition/
                     // PrevViewProj/TAAParams/PlanarReflectionPlaneだけをこのパス用に差し替える)。
@@ -145,7 +148,7 @@ namespace Kurenai::Passes
                     cmd->SetSamplerSet(materialSamplers);
 
                     // captureProbeFaceと同じ順・同じレジスタでバインドする(PlanarReflection.hlsl参照)
-                    cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
+                    cmd->SetTexture(4, targets->ShadowCascadeArray.get());
                     cmd->SetShaderResourceBuffer(8, lightBuffer);
                     cmd->SetTexture(9, irradianceTexture);
                     cmd->SetTexture(10, prefilteredEnvTexture);
@@ -281,8 +284,8 @@ namespace Kurenai::Passes
                 // 手続き空はIBLResources::PrefilteredEnvTextureの焼き込み経由で入ってくるため、
                 // 空のキューブマップをここで直接バインドする必要はない
                 .Reads = {
-                    m_Engine.m_RenderTargets.SceneColor.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
-                    m_Engine.m_RenderTargets.GBufferAlbedo.get(), activeAOTexture, brdfLUTTexture, prefilteredEnvTexture,
+                    targets->SceneColor.get(), targets->GBufferNormal.get(), targets->GBufferMaterial.get(), targets->GBufferDepth.get(),
+                    targets->GBufferAlbedo.get(), activeAOTexture, brdfLUTTexture, prefilteredEnvTexture,
                     m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_ProbeDistanceArray.get(),
                     // 平面反射。パスが登録されなかったフレームでもこのReadsは無害
                     // (今フレームのWriterが無いため単に依存辺が張られないだけ)
@@ -290,13 +293,13 @@ namespace Kurenai::Passes
                     // 大気散乱のSkyView LUT。水面に映る空をここから引く
                     skyViewLUT,
                     // bent normal(34章)。スペキュラ遮蔽をLightingパスと同じ規則で求めるために読む
-                    m_Engine.m_RenderTargets.GBufferBentNormal.get(),
+                    targets->GBufferBentNormal.get(),
                 },
-                .RenderTargets = { m_Engine.m_RenderTargets.SSRTexture.get() },
+                .RenderTargets = { targets->SSRTexture.get() },
                 // 空パラメータ。SkyIntegrateパスより後に順序付けさせるために挙げる
                 // (実際のバインドはExecute内)
                 .BufferReads = { skyParametersBuffer },
-                .Execute = [this, cloudDetailNoiseTexture, cloudShapeNoiseTexture, cloudWeatherNoiseTexture, skyParametersBuffer, skyViewLUT, brdfLUTTexture, prefilteredEnvTexture, reflectionSettings, waterSettings, gbufferViewport, activeAOTexture, usingProceduralSky, planarReflectionPassRuns, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, cloudDetailNoiseTexture, cloudShapeNoiseTexture, cloudWeatherNoiseTexture, skyParametersBuffer, skyViewLUT, brdfLUTTexture, prefilteredEnvTexture, reflectionSettings, waterSettings, gbufferViewport, activeAOTexture, usingProceduralSky, planarReflectionPassRuns, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     // 水面の解析空フォールバック。手続き空が無効(.ksceneがDDSスカイボックスを
                     // 明示するシーン)なときは、m_WaterSettings.AnalyticSkyReflectionの値に関わらず必ず0にする
@@ -321,11 +324,11 @@ namespace Kurenai::Passes
                     cmd->SetConstantBuffer(0, frameConstantBuffer);
                     cmd->SetConstantBuffer(1, m_Engine.m_SSRConstantBuffer.get());
                     cmd->SetSamplerSet(screenSpaceSamplers);
-                    cmd->SetTexture(0, m_Engine.m_RenderTargets.SceneColor.get());
-                    cmd->SetTexture(1, m_Engine.m_RenderTargets.GBufferNormal.get());
-                    cmd->SetTexture(2, m_Engine.m_RenderTargets.GBufferMaterial.get());
-                    cmd->SetTexture(3, m_Engine.m_RenderTargets.GBufferDepth.get());
-                    cmd->SetTexture(4, m_Engine.m_RenderTargets.GBufferAlbedo.get());
+                    cmd->SetTexture(0, targets->SceneColor.get());
+                    cmd->SetTexture(1, targets->GBufferNormal.get());
+                    cmd->SetTexture(2, targets->GBufferMaterial.get());
+                    cmd->SetTexture(3, targets->GBufferDepth.get());
+                    cmd->SetTexture(4, targets->GBufferAlbedo.get());
                     cmd->SetTexture(5, activeAOTexture);
                     cmd->SetTexture(6, brdfLUTTexture);
                     cmd->SetTexture(7, prefilteredEnvTexture);
@@ -351,7 +354,7 @@ namespace Kurenai::Passes
                     // bent normal(34章)。Lightingパスとまったく同じものを読まないと、
                     // SSRが適用される領域とされない領域の境界に段差が出る。
                     // **t11は平面反射が使っているためt16へ移した**
-                    cmd->SetTexture(16, m_Engine.m_RenderTargets.GBufferBentNormal.get());
+                    cmd->SetTexture(16, targets->GBufferBentNormal.get());
                     cmd->Draw(3, 0);
                 },
             });
@@ -364,12 +367,12 @@ namespace Kurenai::Passes
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "RTReflection",
                 .Reads = {
-                    m_Engine.m_RenderTargets.SceneColor.get(), m_Engine.m_RenderTargets.GBufferNormal.get(), m_Engine.m_RenderTargets.GBufferMaterial.get(), m_Engine.m_RenderTargets.GBufferDepth.get(),
-                    m_Engine.m_RenderTargets.GBufferAlbedo.get(), activeAOTexture, brdfLUTTexture, prefilteredEnvTexture,
-                    m_Engine.m_ProbePrefilteredArray.get(), m_Engine.m_RenderTargets.GBufferBentNormal.get(),
+                    targets->SceneColor.get(), targets->GBufferNormal.get(), targets->GBufferMaterial.get(), targets->GBufferDepth.get(),
+                    targets->GBufferAlbedo.get(), activeAOTexture, brdfLUTTexture, prefilteredEnvTexture,
+                    m_Engine.m_ProbePrefilteredArray.get(), targets->GBufferBentNormal.get(),
                 },
                 .Writes = { m_Engine.m_RTReflectionTexture.get() },
-                .Execute = [this, raytracingScene, brdfLUTTexture, prefilteredEnvTexture, geometrySettings, reflectionSettings, activeAOTexture, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, raytracingScene, brdfLUTTexture, prefilteredEnvTexture, geometrySettings, reflectionSettings, activeAOTexture, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     RTReflectionConstants rtConstants{};
                     rtConstants.Params0 = {
@@ -400,11 +403,11 @@ namespace Kurenai::Passes
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_RTReflectionConstantBuffer.get());
 
                     cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
-                    cmd->SetComputeTexture(1, m_Engine.m_RenderTargets.SceneColor.get());
-                    cmd->SetComputeTexture(2, m_Engine.m_RenderTargets.GBufferNormal.get());
-                    cmd->SetComputeTexture(3, m_Engine.m_RenderTargets.GBufferMaterial.get());
-                    cmd->SetComputeTexture(4, m_Engine.m_RenderTargets.GBufferDepth.get());
-                    cmd->SetComputeTexture(5, m_Engine.m_RenderTargets.GBufferAlbedo.get());
+                    cmd->SetComputeTexture(1, targets->SceneColor.get());
+                    cmd->SetComputeTexture(2, targets->GBufferNormal.get());
+                    cmd->SetComputeTexture(3, targets->GBufferMaterial.get());
+                    cmd->SetComputeTexture(4, targets->GBufferDepth.get());
+                    cmd->SetComputeTexture(5, targets->GBufferAlbedo.get());
                     cmd->SetComputeTexture(6, activeAOTexture);
                     cmd->SetComputeTexture(7, brdfLUTTexture);
                     cmd->SetComputeTexture(8, prefilteredEnvTexture);
@@ -425,7 +428,7 @@ namespace Kurenai::Passes
                     }
                     // bent normal(34章)。t0〜t15が埋まっているためt16。
                     // SSR.hlslと同じくスペキュラ遮蔽の方向依存を再現するために要る
-                    cmd->SetComputeTexture(16, m_Engine.m_RenderTargets.GBufferBentNormal.get());
+                    cmd->SetComputeTexture(16, targets->GBufferBentNormal.get());
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
                     cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RTReflectionTexture.get());

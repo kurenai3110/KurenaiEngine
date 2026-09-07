@@ -33,6 +33,9 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::RenderTargets* const targets = frame.Targets;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHIBuffer* const lightBuffer = frame.Scene->LightBuffer.get();
         RHI::IRHIBuffer* const modelInstanceBuffer = frame.Scene->ModelInstanceBuffer.get();
 
@@ -76,7 +79,7 @@ namespace Kurenai::Passes
         // プローブ1面ぶんのキャプチャ(フォワード描画 → スクラッチのキューブ面へコピー)。
         // フルベイクと時間分割の両方から呼ぶためラムダへ切り出してある
         const auto captureProbeFace =
-            [this, lightBuffer, modelInstanceBuffer, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
+            [this, targets, lightBuffer, modelInstanceBuffer, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
         {
             const Assets::ReflectionProbe& probe = m_Engine.m_ReflectionProbes[probeIndex];
             const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
@@ -129,7 +132,7 @@ namespace Kurenai::Passes
             // 上書きするまで維持される(IRHICommandList::SetTexture参照)。DX12もバインド状態の
             // シャドウコピーを持ち寿命がDX11と揃っているため、ここで先にバインドしたものが
             // ループ内の各Drawへ引き継がれる
-            cmd->SetTexture(4, m_Engine.m_RenderTargets.ShadowCascadeArray.get());
+            cmd->SetTexture(4, targets->ShadowCascadeArray.get());
             cmd->SetShaderResourceBuffer(8, lightBuffer);
             cmd->SetTexture(9, irradianceTexture);
             cmd->SetTexture(10, prefilteredEnvTexture);

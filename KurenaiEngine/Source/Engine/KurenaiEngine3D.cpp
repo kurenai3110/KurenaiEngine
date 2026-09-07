@@ -6389,6 +6389,7 @@ namespace Kurenai
         frameContext.IBL = &m_IBLResources;
         frameContext.Sky = &m_SkyResources;
         frameContext.Scene = &m_SceneGPUResources;
+        frameContext.Targets = &m_RenderTargets;
 
         Rendering::RenderBlackboard blackboard{};
 

@@ -53,6 +53,9 @@ namespace Kurenai::Passes
         const Rendering::RenderBlackboard& bb)
     {
         // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
+        const Rendering::RenderTargets* const targets = frame.Targets;
+
+        // 【フレームの写しをローカルで受ける】frame自体はラムダへ捕捉しない
         RHI::IRHITexture* const cloudDetailNoiseTexture = frame.Sky->CloudDetailNoiseTexture.get();
         RHI::IRHITexture* const cloudShapeNoiseTexture = frame.Sky->CloudShapeNoiseTexture.get();
         RHI::IRHITexture* const multiScatteringLUT = frame.Sky->MultiScatteringLUT.get();
@@ -77,13 +80,13 @@ namespace Kurenai::Passes
         // --- Presentパス: 選択中のレンダーターゲットを、アスペクト比を保ってバックバッファへ出力 ---
         // デバッグ表示(Render Targets UI)で選択されたバッファに応じて表示ソースを切り替える。
         // 深度バッファ(GBuffer深度・シャドウマップ)はPresent.hlsl側でグレースケール化するためMode=1を渡す
-        RHI::IRHITexture* presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
+        RHI::IRHITexture* presentSourceTexture = targets->TonemapTexture.get();
         // Mode 9(IBL Irradiance/Prefilterのキューブマップ表示)専用。他のModeでは使われないが、
         // t1には常に何らかの有効なTextureCubeをバインドしておく必要があるため既定値を持たせる
         RHI::IRHITexture* presentDebugCubeTexture = frame.SkyTexture;
         // Mode 10(シャドウマップのカスケード表示)専用。t1と同じ理由で、t2にも常に有効な
         // Texture2DArrayをバインドしておく必要があるためシャドウマップ配列自身を既定値にする
-        RHI::IRHITexture* presentDebugArrayTexture = m_Engine.m_RenderTargets.ShadowCascadeArray.get();
+        RHI::IRHITexture* presentDebugArrayTexture = targets->ShadowCascadeArray.get();
         // Mode 12(反射プローブのキューブマップ配列)専用。TextureCube(t1)ともTexture2DArray(t2)とも
         // 型が違うためさらに別スロット(t4)が要る。こちらも常に有効なテクスチャをバインドしておく
         // (反射プローブは鏡面専任なので、既定値はプリフィルタ済み鏡面の配列にしてある)
@@ -109,32 +112,32 @@ namespace Kurenai::Passes
             }
             else
             {
-                presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
+                presentSourceTexture = targets->TonemapTexture.get();
             }
             break;
         case DebugView::Albedo:
-            presentSourceTexture = m_Engine.m_RenderTargets.GBufferAlbedo.get();
+            presentSourceTexture = targets->GBufferAlbedo.get();
             break;
         case DebugView::Normal:
-            presentSourceTexture = m_Engine.m_RenderTargets.GBufferNormal.get();
+            presentSourceTexture = targets->GBufferNormal.get();
             presentMode = 7; // オクタヘドラルエンコードをデコードして[0,1]へ再マップして表示
             break;
         case DebugView::Material:
-            presentSourceTexture = m_Engine.m_RenderTargets.GBufferMaterial.get();
+            presentSourceTexture = targets->GBufferMaterial.get();
             break;
         case DebugView::Emissive:
-            presentSourceTexture = m_Engine.m_RenderTargets.GBufferEmissive.get();
+            presentSourceTexture = targets->GBufferEmissive.get();
             break;
         case DebugView::Depth:
-            presentSourceTexture = m_Engine.m_RenderTargets.GBufferDepth.get();
+            presentSourceTexture = targets->GBufferDepth.get();
             presentMode = 2;
             break;
         case DebugView::DepthRaw:
-            presentSourceTexture = m_Engine.m_RenderTargets.GBufferDepth.get();
+            presentSourceTexture = targets->GBufferDepth.get();
             presentMode = 5; // 生の深度値(0〜1)を加工せずそのまま表示(reverse-z等の生値確認用)
             break;
         case DebugView::DirectLight:
-            presentSourceTexture = m_Engine.m_RenderTargets.DirectLightTexture.get();
+            presentSourceTexture = targets->DirectLightTexture.get();
             presentMode = 4; // HDRのためトーンマッピング(Reinhard)+ガンマ補正して表示
             break;
         case DebugView::MegaLights:
@@ -169,7 +172,7 @@ namespace Kurenai::Passes
             // Texture2DArrayはSourceTexture(t0、Texture2D)へバインドできないため、専用の
             // DebugArrayTexture(t2)を表示スライス指定付きでサンプルする(IBLキューブマップの
             // Mode 9と同じ方式。Present.hlsl参照)
-            presentDebugArrayTexture = m_Engine.m_RenderTargets.ShadowCascadeArray.get();
+            presentDebugArrayTexture = targets->ShadowCascadeArray.get();
             presentMode = 10;
             presentSourceWidth = Rendering::kShadowMapSize;
             presentSourceHeight = Rendering::kShadowMapSize;
@@ -180,17 +183,17 @@ namespace Kurenai::Passes
             // 最終結果のまま何も切り替えない
             if (raytracedShadowRuns)
             {
-                presentSourceTexture = m_Engine.m_RenderTargets.RTShadowTexture.get();
+                presentSourceTexture = targets->RTShadowTexture.get();
                 presentMode = 5;
             }
             break;
         case DebugView::SSR:
             // 反射がOffのときは反射パスをスキップしているため、Tonemapパスの入力もSceneColorになり
             // 結果的にFinalと同一表示になる(SSR / RT反射のどちらでも同じ扱い)
-            presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
+            presentSourceTexture = targets->TonemapTexture.get();
             break;
         case DebugView::HiZ:
-            presentSourceTexture = m_Engine.m_RenderTargets.HiZTexture.get();
+            presentSourceTexture = targets->HiZTexture.get();
             presentMode = 6; // 指定ミップをSampleLevelで読みグレースケール表示
             presentSourceWidth = std::max(1u, renderWidth >> frame.Settings.DebugView.HiZDebugMipLevel);
             presentSourceHeight = std::max(1u, renderHeight >> frame.Settings.DebugView.HiZDebugMipLevel);
@@ -216,7 +219,7 @@ namespace Kurenai::Passes
         case DebugView::ProbeInfluence:
             // 塗り分けはDeferredLighting.hlsl側(FrameConstants.ProbeParams.y)で行うため、
             // Presentは通常どおり最終結果を表示するだけでよい
-            presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
+            presentSourceTexture = targets->TonemapTexture.get();
             break;
         case DebugView::ProbeDistance:
             // 距離キューブ(19.12節)。格納値はワールド距離なので専用のMode 13でGain倍して
@@ -244,14 +247,14 @@ namespace Kurenai::Passes
             // ライトグリッドは構造化バッファなのでSourceTexture(t0)では受け取れず、専用のt3から読む
             // (Present.hlsl Mode 11)。t0には何かをバインドしておく必要があるため、
             // 解像度だけ合わせてRenderTargets::TonemapTextureをそのまま渡す(Mode 11では読まれない)
-            presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
+            presentSourceTexture = targets->TonemapTexture.get();
             presentMode = 11;
             break;
         case DebugView::MegaLightsAverage:
             // 蓄積した平均。1フレームも足していないうちは中身が未定義なので切り替えない
             if (m_Engine.m_MegaLightsAccumFrames > 0u && m_Engine.m_MegaLightsAccumBuffer)
             {
-                presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
+                presentSourceTexture = targets->TonemapTexture.get();
                 presentMode = 22;
             }
             break;
@@ -261,7 +264,7 @@ namespace Kurenai::Passes
             // 最終結果のまま何も切り替えない(他のMegaLights系の表示と同じ方針)
             if (megaLightsRuns && m_Engine.m_MegaLightsTilePoolBuffer)
             {
-                presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
+                presentSourceTexture = targets->TonemapTexture.get();
                 presentMode = 21;
             }
             break;
@@ -271,14 +274,14 @@ namespace Kurenai::Passes
             // 【15ではなく19】15はDDGIのイラディアンスアトラスが使っている。Present.hlslの
             // PSMainではそちらの分岐が先にreturnするため、15を割り当てるとbent normalの
             // 表示へ到達できない(Present.hlsl冒頭のMode一覧を参照)
-            presentSourceTexture = m_Engine.m_RenderTargets.GBufferBentNormal.get();
+            presentSourceTexture = targets->GBufferBentNormal.get();
             presentMode = 19;
             break;
         case DebugView::MotionVector:
             // 速度バッファ。格納値はUV単位(1画素ぶんの移動で1/解像度、1920幅なら約0.0005)と
             // 極端に小さく、そのまま色として出しても真っ黒にしか見えない。専用のMode 14で
             // ピクセル単位へ換算してから中間灰色を原点に色付けする
-            presentSourceTexture = m_Engine.m_RenderTargets.GBufferVelocity.get();
+            presentSourceTexture = targets->GBufferVelocity.get();
             presentMode = 14;
             break;
         case DebugView::SceneColorRaw:
@@ -318,7 +321,7 @@ namespace Kurenai::Passes
         case DebugView::WaterMask:
             // G-BufferのMaterial.a(水面のマテリアルID)をそのままグレースケール表示する。
             // 0/1の二値なのでMode 3(Gain倍する遮蔽率表示)ではなく専用のMode 17を使う
-            presentSourceTexture = m_Engine.m_RenderTargets.GBufferMaterial.get();
+            presentSourceTexture = targets->GBufferMaterial.get();
             presentMode = 17;
             break;
         case DebugView::PlanarReflection:
