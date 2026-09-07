@@ -51,6 +51,11 @@ namespace Kurenai::Rendering
         TonemapTexture = device.CreateRenderTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
     }
 
+    void RenderTargets::CreateRTReflection(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        RTReflectionTexture = device.CreateUAVTexture(width, height, RHI::Format::R16G16B16A16_Float);
+    }
+
     void RenderTargets::CreateRTShadow(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
     {
         RTShadowTexture = device.CreateUAVTexture(width, height, RHI::Format::R32_Float);

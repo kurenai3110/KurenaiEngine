@@ -132,7 +132,6 @@ namespace Kurenai
         friend class Passes::LightingPasses;
         friend class Passes::MegaLightsPasses;
         friend class Passes::PostProcessPasses;
-        friend class Passes::ReflectionPasses;
         friend class Passes::ReflectionProbePasses;
 
         // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
@@ -1279,22 +1278,9 @@ namespace Kurenai
         // ここを取り違えると「既定へ戻したらシーンが要求した反射が消える」ことになる
         ReflectionMode m_SceneDefaultReflectionMode = ReflectionSettings::DefaultReflectionMode(false);
 
-        // SSR(Screen Space Reflections)パス: LightingパスのSceneColorを反射先の環境色として
-        // 再利用し、G-Buffer(Normal/Material/Depth)からワールド空間でレイマーチングして
-        // 鏡面反射を加算する。無効時はこのパスをスキップし、Presentが直接RenderTargets::SceneColorを参照する
-        std::unique_ptr<RHI::IRHIShader> m_SSRVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_SSRPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_SSRPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_SSRConstantBuffer;
-
-        // RT反射パス: TLASへ鏡面レイを撃ち、ヒット面を陰影計算して反射色を求めるコンピュートパス。
-        // 出力はSSRと同じ「SceneColor + 反射の差し替え」なので、後段(Tonemap)から見ると
-        // RenderTargets::SSRTextureと完全に等価な入れ替え可能なバッファになる。
-        // シェーダーとパイプラインステートはm_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る
-        std::unique_ptr<RHI::IRHIShader> m_RTReflectionComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_RTReflectionPipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_RTReflectionTexture;
-        std::unique_ptr<RHI::IRHIBuffer> m_RTReflectionConstantBuffer;
+        // SSRとRT反射のシェーダー・PSO・定数バッファはPasses/ReflectionPassesへ移した。
+        // RT反射の出力テクスチャだけは、レンダー解像度に追従して作り直すものなので
+        // 持ち主をRenderTargets(RTReflectionTexture)にしてある
 
         MegaLightsSettings m_MegaLightsSettings;
         // シェーダーとパイプラインステートはm_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る
@@ -2367,17 +2353,8 @@ namespace Kurenai
         // Shaders/3D/PlanarReflection.hlsl冒頭のコメントを参照。反射解像度はレンダー解像度に
         // m_ReflectionSettings.PlanarResolutionScaleを掛けた値で、実際の作成はCreatePlanarReflectionTargetsが行う。
         // レンダーターゲット2枚と実寸は、PresentPassのデバッグ表示も読むため
-        // 持ち主をRenderTargets(m_RenderTargets.PlanarReflection*)へ移した
-        std::unique_ptr<RHI::IRHIShader> m_PlanarReflectionVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_PlanarReflectionPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_PlanarReflectionPipelineState;
-        // 鏡映カメラで描くとワインディングが全反転するため、m_GBufferPipelineStateMirroredと同じ
-        // 仕組み(FrontCounterClockwiseの反転)で吸収する。ただし選択条件はinstance.IsMirroredの
-        // 否定になる(Render()側のExecute内のbindPipelineStateラムダ参照)
-        std::unique_ptr<RHI::IRHIPipelineState> m_PlanarReflectionPipelineStateMirrored;
-        // captureProbeFaceと同じ役割の専用FrameConstants(共有のm_FrameConstantBufferとは別インスタンス)。
-        // ViewProj/CameraPosition/PlanarReflectionPlaneだけをこのパス用に差し替える
-        std::unique_ptr<RHI::IRHIBuffer> m_PlanarReflectionConstantBuffer;
+        // 持ち主をRenderTargets(m_RenderTargets.PlanarReflection*)へ移した。
+        // シェーダー・PSO・定数バッファはPasses/ReflectionPassesへ移した
         // 「システム」パネルのm_PendingRenderWidth/Height・m_RenderResolutionDirtyとまったく同じ方式
         // (要求を記録するだけにしてRender()の先頭でまとめて反映する。理由はCreateRenderTargets/
         // RequestRenderResolutionのコメント参照。GPUがまだ参照しているテクスチャを

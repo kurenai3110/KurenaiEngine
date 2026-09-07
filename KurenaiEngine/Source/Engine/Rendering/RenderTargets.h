@@ -34,6 +34,11 @@ namespace Kurenai::Rendering
         // RTシャドウの可視率(0〜1のスカラー)。RWTexture2D<float>として書くため単チャンネルの
         // R32_Floatにする(型付きUAVの読み書きが保証されているのはR32系のみ。AutoExposure.hlsl参照)
         std::unique_ptr<RHI::IRHITexture> RTShadowTexture;
+        // RT反射の出力。コンピュートシェーダーがUAVで書くためレンダーターゲットではなく
+        // UAVテクスチャで作る。後段(Tonemap)から見るとSSRTextureと入れ替え可能なバッファで、
+        // どちらを渡すかはKurenaiEngine3D::GetActiveReflectionOutputが決める。
+        // RTShadowTextureと同じくDXR対応環境でだけ確保される
+        std::unique_ptr<RHI::IRHITexture> RTReflectionTexture;
 
         // 全カスケードの深度を1つのTexture2DArray(スライス番号=カスケード番号)として保持する。
         // 書き込みはスライスごとの個別DSV(RenderGraphPassDesc::DepthTargetArraySlice)で行い、
@@ -142,6 +147,7 @@ namespace Kurenai::Rendering
         void CreateGBufferBentNormal(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         void CreateLightingChain(RHI::IRHIDevice& device, uint32_t width, uint32_t height, RHI::Format aoFormat);
         void CreateTonemap(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+        void CreateRTReflection(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         void CreateRTShadow(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         void CreateTAAHistory(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         void CreateHiZ(RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t mipLevels);

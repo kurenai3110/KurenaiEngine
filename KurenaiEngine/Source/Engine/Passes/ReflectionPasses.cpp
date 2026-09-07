@@ -22,6 +22,94 @@ namespace Kurenai::Passes
         using ShaderInterop::FrameConstants;
     }
 
+    void ReflectionPasses::CreateSSRPipelineState(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        // SSRパス(頂点バッファなしのフルスクリーン三角形。SceneColorとG-Bufferから鏡面反射を計算し加算する)
+        RHI::ShaderDesc ssrVsDesc;
+        ssrVsDesc.Stage = RHI::ShaderStage::Vertex;
+        ssrVsDesc.FilePath = shaderDirectory + L"SSR.kshader";
+        ssrVsDesc.EntryPoint = "VSMain";
+        m_SSRVertexShader = device.CreateShader(ssrVsDesc);
+
+        RHI::ShaderDesc ssrPsDesc;
+        ssrPsDesc.Stage = RHI::ShaderStage::Pixel;
+        ssrPsDesc.FilePath = shaderDirectory + L"SSR.kshader";
+        ssrPsDesc.EntryPoint = "PSMain";
+        m_SSRPixelShader = device.CreateShader(ssrPsDesc);
+
+        RHI::PipelineStateDesc ssrPipelineDesc;
+        ssrPipelineDesc.VertexShader = m_SSRVertexShader.get();
+        ssrPipelineDesc.PixelShader = m_SSRPixelShader.get();
+        ssrPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        ssrPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        m_SSRPipelineState = device.CreatePipelineState(ssrPipelineDesc);
+
+        RHI::BufferDesc ssrConstantBufferDesc;
+        ssrConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        ssrConstantBufferDesc.SizeInBytes = sizeof(SSRConstants);
+        m_SSRConstantBuffer = device.CreateBuffer(ssrConstantBufferDesc);
+    }
+
+    void ReflectionPasses::CreateRaytracedResources(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        RHI::ShaderDesc rtReflectionCsDesc;
+        rtReflectionCsDesc.Stage = RHI::ShaderStage::Compute;
+        rtReflectionCsDesc.FilePath = shaderDirectory + L"RTReflection.kshader";
+        rtReflectionCsDesc.EntryPoint = "CSMain";
+        m_RTReflectionComputeShader = device.CreateShader(rtReflectionCsDesc);
+        m_RTReflectionPipelineState = device.CreateComputePipelineState({ m_RTReflectionComputeShader.get() });
+
+        RHI::BufferDesc rtReflectionConstantBufferDesc;
+        rtReflectionConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        rtReflectionConstantBufferDesc.SizeInBytes = sizeof(RTReflectionConstants);
+        m_RTReflectionConstantBuffer = device.CreateBuffer(rtReflectionConstantBufferDesc);
+    }
+
+    void ReflectionPasses::CreatePlanarPipelineStates(
+        RHI::IRHIDevice& device, const std::wstring& shaderDirectory,
+        const std::vector<RHI::InputElementDesc>& modelInputLayout)
+    {
+        // 水面に不透明ジオメトリの鏡像を映す専用フォワードパス。設計判断はPlanarReflection.hlsl
+        // 冒頭のコメントを参照。反射先のテクスチャはレンダー解像度に依存するため、実際の確保は
+        // CreatePlanarReflectionTargets(CreateRenderTargetsと同じ呼び出し箇所)が行う。
+        // ここではProbeCaptureと同様、解像度に依存しないシェーダー・PSO・定数バッファのみ作る
+        RHI::ShaderDesc planarReflectionVsDesc;
+        planarReflectionVsDesc.Stage = RHI::ShaderStage::Vertex;
+        planarReflectionVsDesc.FilePath = shaderDirectory + L"PlanarReflection.kshader";
+        planarReflectionVsDesc.EntryPoint = "VSMain";
+        m_PlanarReflectionVertexShader = device.CreateShader(planarReflectionVsDesc);
+
+        RHI::ShaderDesc planarReflectionPsDesc;
+        planarReflectionPsDesc.Stage = RHI::ShaderStage::Pixel;
+        planarReflectionPsDesc.FilePath = shaderDirectory + L"PlanarReflection.kshader";
+        planarReflectionPsDesc.EntryPoint = "PSMain";
+        m_PlanarReflectionPixelShader = device.CreateShader(planarReflectionPsDesc);
+
+        RHI::PipelineStateDesc planarReflectionPipelineDesc;
+        planarReflectionPipelineDesc.InputLayout = modelInputLayout;
+        planarReflectionPipelineDesc.VertexShader = m_PlanarReflectionVertexShader.get();
+        planarReflectionPipelineDesc.PixelShader = m_PlanarReflectionPixelShader.get();
+        planarReflectionPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        // レンダーターゲットは1枚(放射輝度のみ。ProbeCaptureと違い視差補正用の距離は要らない。
+        // PlanarReflection.hlsl冒頭参照)。バッファ精度(Legacy8bit)の対象外にしてあり常にHDR固定
+        planarReflectionPipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float };
+        planarReflectionPipelineDesc.HasDepthStencil = true;
+        planarReflectionPipelineDesc.ReverseZ = true;
+        m_PlanarReflectionPipelineState = device.CreatePipelineState(planarReflectionPipelineDesc);
+
+        // 鏡映カメラで描くとワインディングが全反転するため、m_GBufferPipelineStateMirroredと
+        // 同じ仕組み(FrontCounterClockwiseの反転)で吸収する。選択条件はinstance.IsMirroredの
+        // 否定になる点がGBufferパスと異なる(Register内のExecute参照)
+        planarReflectionPipelineDesc.FrontCounterClockwise = true;
+        m_PlanarReflectionPipelineStateMirrored = device.CreatePipelineState(planarReflectionPipelineDesc);
+
+        // captureProbeFaceと同じ役割の専用FrameConstants
+        RHI::BufferDesc planarReflectionConstantBufferDesc;
+        planarReflectionConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        planarReflectionConstantBufferDesc.SizeInBytes = sizeof(FrameConstants);
+        m_PlanarReflectionConstantBuffer = device.CreateBuffer(planarReflectionConstantBufferDesc);
+    }
+
     void ReflectionPasses::Register(
         Core::RenderGraph& graph,
         const Rendering::RenderFrameContext& frame,
@@ -143,7 +231,7 @@ namespace Kurenai::Passes
                     // 統計も止める(captureProbeFaceと同じ理由)
                     reflectionConstants.MeshletCullStatsParams = { 0.0f, 0.0f, 0.0f, 0.0f };
                     reflectionConstants.PlanarReflectionPlane = { 0.0f, 1.0f, 0.0f, -waterPlaneY };
-                    cmd->UpdateBuffer(m_Engine.m_PlanarReflectionConstantBuffer.get(), &reflectionConstants, sizeof(reflectionConstants));
+                    cmd->UpdateBuffer(m_PlanarReflectionConstantBuffer.get(), &reflectionConstants, sizeof(reflectionConstants));
 
                     // RenderTargets/DepthTargetはパス宣言(.RenderTargets/.DepthTarget)により
                     // RenderGraphが自動的にバインド済みのため、ここではビューポート設定と
@@ -154,8 +242,8 @@ namespace Kurenai::Passes
                     // Reverse-Zのため遠平面側(NDC z=0.0)にクリアする
                     cmd->ClearDepth(0.0f);
 
-                    cmd->SetPipelineState(m_Engine.m_PlanarReflectionPipelineState.get());
-                    cmd->SetConstantBuffer(0, m_Engine.m_PlanarReflectionConstantBuffer.get());
+                    cmd->SetPipelineState(m_PlanarReflectionPipelineState.get());
+                    cmd->SetConstantBuffer(0, m_PlanarReflectionConstantBuffer.get());
                     cmd->SetSamplerSet(materialSamplers);
 
                     // captureProbeFaceと同じ順・同じレジスタでバインドする(PlanarReflection.hlsl参照)
@@ -173,17 +261,17 @@ namespace Kurenai::Passes
 
                     // 鏡映カメラで描くとワインディングが全反転するため、PSOの切り替えは
                     // instance.IsMirroredの否定で行う(このファイル冒頭のPSO生成箇所のコメント参照)
-                    RHI::IRHIPipelineState* currentPipelineState = m_Engine.m_PlanarReflectionPipelineState.get();
+                    RHI::IRHIPipelineState* currentPipelineState = m_PlanarReflectionPipelineState.get();
                     const auto bindPipelineState = [&](bool mirrored)
                     {
                         RHI::IRHIPipelineState* const wanted =
-                            mirrored ? m_Engine.m_PlanarReflectionPipelineStateMirrored.get() : m_Engine.m_PlanarReflectionPipelineState.get();
+                            mirrored ? m_PlanarReflectionPipelineStateMirrored.get() : m_PlanarReflectionPipelineState.get();
                         if (wanted == currentPipelineState)
                         {
                             return;
                         }
                         cmd->SetPipelineState(wanted);
-                        cmd->SetConstantBuffer(0, m_Engine.m_PlanarReflectionConstantBuffer.get());
+                        cmd->SetConstantBuffer(0, m_PlanarReflectionConstantBuffer.get());
                         cmd->SetSamplerSet(materialSamplers);
                         currentPipelineState = wanted;
                     };
@@ -328,12 +416,12 @@ namespace Kurenai::Passes
                     ssrConstants.Params0 =
                         { reflectionSettings.SSRMaxDistance, reflectionSettings.SSRThickness, reflectionSettings.SSRRoughnessCutoff, waterAnalyticSkyFlag };
                     ssrConstants.Params1 = { planarReflectionFlag, reflectionSettings.PlanarDistortion, 0.0f, 0.0f };
-                    cmd->UpdateBuffer(m_Engine.m_SSRConstantBuffer.get(), &ssrConstants, sizeof(ssrConstants));
+                    cmd->UpdateBuffer(m_SSRConstantBuffer.get(), &ssrConstants, sizeof(ssrConstants));
 
                     cmd->SetViewport(gbufferViewport);
-                    cmd->SetPipelineState(m_Engine.m_SSRPipelineState.get());
+                    cmd->SetPipelineState(m_SSRPipelineState.get());
                     cmd->SetConstantBuffer(0, frameConstantBuffer);
-                    cmd->SetConstantBuffer(1, m_Engine.m_SSRConstantBuffer.get());
+                    cmd->SetConstantBuffer(1, m_SSRConstantBuffer.get());
                     cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, targets->SceneColor.get());
                     cmd->SetTexture(1, targets->GBufferNormal.get());
@@ -382,7 +470,7 @@ namespace Kurenai::Passes
                     targets->GBufferAlbedo.get(), activeAOTexture, brdfLUTTexture, prefilteredEnvTexture,
                     gi->ProbePrefilteredArray.get(), targets->GBufferBentNormal.get(),
                 },
-                .Writes = { m_Engine.m_RTReflectionTexture.get() },
+                .Writes = { targets->RTReflectionTexture.get() },
                 .Execute = [this, gi, targets, raytracingScene, brdfLUTTexture, prefilteredEnvTexture, geometrySettings, reflectionSettings, activeAOTexture, renderWidth, renderHeight, frameConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     RTReflectionConstants rtConstants{};
@@ -399,9 +487,9 @@ namespace Kurenai::Passes
                         0.0f,
                         0.0f,
                     };
-                    cmd->UpdateBuffer(m_Engine.m_RTReflectionConstantBuffer.get(), &rtConstants, sizeof(rtConstants));
+                    cmd->UpdateBuffer(m_RTReflectionConstantBuffer.get(), &rtConstants, sizeof(rtConstants));
 
-                    cmd->SetComputePipelineState(m_Engine.m_RTReflectionPipelineState.get());
+                    cmd->SetComputePipelineState(m_RTReflectionPipelineState.get());
                     // 【スクリーン空間用ではなくマテリアル用のセット】ヒット面のマテリアル
                     // テクスチャをbindlessで引くようになったため、s0にWrapのサンプラーが要る。
                     // モデルのUVはタイリング前提で[0,1]の外へ出るので、Clampで引くと
@@ -411,7 +499,7 @@ namespace Kurenai::Passes
                     // 面をまたぐフィルタに使われないため無関係)なので、切り替えの影響はここだけ
                     cmd->SetComputeSamplerSet(materialSamplers);
                     cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
-                    cmd->SetComputeConstantBuffer(1, m_Engine.m_RTReflectionConstantBuffer.get());
+                    cmd->SetComputeConstantBuffer(1, m_RTReflectionConstantBuffer.get());
 
                     cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
                     cmd->SetComputeTexture(1, targets->SceneColor.get());
@@ -442,7 +530,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeTexture(16, targets->GBufferBentNormal.get());
 
                     // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_RTReflectionTexture.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, targets->RTReflectionTexture.get());
                     cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
