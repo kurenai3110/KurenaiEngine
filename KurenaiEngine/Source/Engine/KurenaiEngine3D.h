@@ -827,9 +827,6 @@ namespace Kurenai
         // 出力解像度用テクスチャの作り直し要求。m_RenderResolutionDirtyとまったく同じ扱いで、
         // Render()の先頭のWaitForGPUIdle()を挟んだ位置で処理する
         bool m_UpscaleTargetsDirty = false;
-        // 実際に確保済みの出力解像度用テクスチャのサイズ。0なら未確保(超解像が無効)
-        uint32_t m_UpscaleTargetWidth = 0;
-        uint32_t m_UpscaleTargetHeight = 0;
 
         // 品質モードの倍率(1.3 / 1.5 / 1.7 / 2.0)
         static float GetUpscaleRatio(UpscaleQualityMode mode);
@@ -1682,15 +1679,13 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIBuffer> m_TonemapConstantBuffer;
 
         // 超解像パス(Upscale.hlsl): Tonemapが出したLDR画像を、EASUで出力解像度へ再構成し、
-        // RCASでシャープ化してからPresentへ渡す。2つのテクスチャはどちらも出力解像度で、
-        // 内部解像度用のRenderTargets::TonemapTextureとは作り直す契機が違うためCreateRenderTargets()の外にある。
-        // 分けているのはRCASがEASUの結果を読むためで、同一リソースのSRV/UAV同時バインドを避ける
+        // RCASでシャープ化してからPresentへ渡す。出力2枚と実寸(RenderTargets::UpscaleTexture /
+        // UpscaleSharpTexture / UpscaleTargetWidth / Height)はPresentPassも読むため
+        // 持ち主をRenderTargetsへ移した。作り直しはCreateRenderTargets()とは別の契機で走る
         std::unique_ptr<RHI::IRHIShader> m_UpscaleEASUComputeShader;
         std::unique_ptr<RHI::IRHIShader> m_UpscaleRCASComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_UpscaleEASUPipelineState;
         std::unique_ptr<RHI::IRHIPipelineState> m_UpscaleRCASPipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_UpscaleTexture;      // EASUの出力
-        std::unique_ptr<RHI::IRHITexture> m_UpscaleSharpTexture; // RCASの出力(Presentが読む)
         std::unique_ptr<RHI::IRHIBuffer> m_UpscaleConstantBuffer;
 
 

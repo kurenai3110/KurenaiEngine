@@ -97,6 +97,17 @@ namespace Kurenai::Rendering
         // 各段の解像度。内部解像度から決まる
         std::vector<DirectX::XMUINT2> BloomLevelSizes;
 
+        // 超解像(Upscale.hlsl)の出力2枚。どちらも**出力解像度**で、内部レンダー解像度で作る
+        // TonemapTextureとは作り直す契機が違う。分けているのはRCASがEASUの結果を読むためで、
+        // 同一リソースのSRV/UAV同時バインドを避ける。
+        // 【なぜここが持つか】書くのはPostProcessPassesだけだが、RCASの出力と実寸を
+        // PresentPassが読む(超解像が有効なフレームは、これがそのまま最終画になる)
+        std::unique_ptr<RHI::IRHITexture> UpscaleTexture;      // EASUの出力
+        std::unique_ptr<RHI::IRHITexture> UpscaleSharpTexture; // RCASの出力(Presentが読む)
+        // 実際に確保済みの出力解像度用テクスチャのサイズ。0なら未確保(超解像が無効)
+        uint32_t UpscaleTargetWidth = 0;
+        uint32_t UpscaleTargetHeight = 0;
+
         // G-Buffer の生成は元の位置ごとに3つへ分ける。間に他のテクスチャ生成があるため、
         // 順序を変えるとDX12のディスクリプタ枠の割り当て順が変わり、意味の無い差分になる。
         // 呼び出し元のtry内から呼ぶこと。確保失敗時のHDR→Legacy8bitフォールバックは
@@ -121,5 +132,9 @@ namespace Kurenai::Rendering
         // ブルームのピラミッドをlevelCount段ぶん作り直す。段の解像度は半解像度から1段ごとに半分。
         // 呼び出し元のtry内から呼ぶこと(確保失敗時のフォールバックはCreateRenderTargetsが持つ)
         void CreateBloomPyramid(RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t levelCount);
+        // 超解像の出力2枚を出力解像度で作り、実寸を記録する
+        void CreateUpscale(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+        // 上を解放し、実寸を0(未確保)に戻す
+        void ResetUpscale();
     };
 }

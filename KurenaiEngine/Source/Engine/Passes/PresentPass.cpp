@@ -109,9 +109,9 @@ namespace Kurenai::Passes
             // (ここを内部解像度のままにすると、拡大済みの絵をさらに拡大してしまう)
             if (bb.UpscaleActive)
             {
-                presentSourceTexture = m_Engine.m_UpscaleSharpTexture.get();
-                presentSourceWidth = m_Engine.m_UpscaleTargetWidth;
-                presentSourceHeight = m_Engine.m_UpscaleTargetHeight;
+                presentSourceTexture = targets->UpscaleSharpTexture.get();
+                presentSourceWidth = targets->UpscaleTargetWidth;
+                presentSourceHeight = targets->UpscaleTargetHeight;
             }
             else
             {

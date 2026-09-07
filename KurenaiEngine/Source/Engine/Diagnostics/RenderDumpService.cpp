@@ -83,8 +83,8 @@ namespace Kurenai
             { "BRDFLUTTexture", m_IBLResources.BRDFLUTTexture.get() },
             // ポストプロセスと最終段
             { "TonemapTexture", m_RenderTargets.TonemapTexture.get() },
-            { "UpscaleTexture", m_UpscaleTexture.get() },
-            { "UpscaleSharpTexture", m_UpscaleSharpTexture.get() },
+            { "UpscaleTexture", m_RenderTargets.UpscaleTexture.get() },
+            { "UpscaleSharpTexture", m_RenderTargets.UpscaleSharpTexture.get() },
             { "ExposureTexture", m_ExposureTexture.get() },
             // TAAの履歴。今フレームの書き込み先が m_TAAHistoryIndex なので、
             // 「前フレームの履歴」を見たいときは Prev のほうを指定する

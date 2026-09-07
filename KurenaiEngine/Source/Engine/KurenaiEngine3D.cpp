@@ -4045,7 +4045,7 @@ namespace Kurenai
             ComputeUpscaleRenderResolution(outputWidth, outputHeight, mode, renderWidth, renderHeight);
             RequestRenderResolution(renderWidth, renderHeight);
             // 出力解像度用のテクスチャがまだ無い、またはサイズが変わったときだけ作り直す
-            if (m_UpscaleTargetWidth != outputWidth || m_UpscaleTargetHeight != outputHeight)
+            if (m_RenderTargets.UpscaleTargetWidth != outputWidth || m_RenderTargets.UpscaleTargetHeight != outputHeight)
             {
                 m_UpscaleTargetsDirty = true;
             }
@@ -4056,7 +4056,7 @@ namespace Kurenai
             // 「超解像を切ったのに低解像度のまま」という状態が残る
             RequestRenderResolution(outputWidth, outputHeight);
             // 使わなくなったテクスチャは解放する(1080pで約8MBが2枚)
-            if (m_UpscaleTargetWidth != 0 || m_UpscaleTargetHeight != 0)
+            if (m_RenderTargets.UpscaleTargetWidth != 0 || m_RenderTargets.UpscaleTargetHeight != 0)
             {
                 m_UpscaleTargetsDirty = true;
             }
@@ -4068,32 +4068,19 @@ namespace Kurenai
         // 無効化された場合は解放だけして戻る
         if (!m_PostProcessSettings.UpscaleEnabled)
         {
-            m_UpscaleTexture.reset();
-            m_UpscaleSharpTexture.reset();
-            m_UpscaleTargetWidth = 0;
-            m_UpscaleTargetHeight = 0;
+            m_RenderTargets.ResetUpscale();
             return;
         }
 
-        // Tonemapの出力と同じR8G8B8A8_UNorm。EASU/RCASはどちらも表示レンジの値を前提にしており、
-        // ここをHDRフォーマットにしても情報は増えない(入力が既にLDRのため)。
-        //
-        // 【型付きUAVのフォーマット制約には当たらない】このエンジンが各所で注記している
-        // 「R32系しか保証されていない」という制約は型付きUAVからの"読み出し"のもので、
-        // EASU/RCASはUAVへ書くだけである(RCASがEASUの結果を読むのはSRV経由)。
-        // Bloomが同じくR16G16B16A16_FloatのUAVへ書けているのと同じ理屈
-        m_UpscaleTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_UpscaleSharpTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
-        m_UpscaleTargetWidth = width;
-        m_UpscaleTargetHeight = height;
+        m_RenderTargets.CreateUpscale(*m_Device, width, height);
     }
 
     bool KurenaiEngine3D::IsUpscaleActive() const
     {
         // テクスチャの確保に失敗している場合にパスを登録すると、バインドするリソースが無いまま
         // Dispatchすることになるため、確保済みであることまで条件に入れる
-        return m_PostProcessSettings.UpscaleEnabled && m_UpscaleTexture && m_UpscaleSharpTexture &&
-               m_UpscaleTargetWidth > 0 && m_UpscaleTargetHeight > 0;
+        return m_PostProcessSettings.UpscaleEnabled && m_RenderTargets.UpscaleTexture && m_RenderTargets.UpscaleSharpTexture &&
+               m_RenderTargets.UpscaleTargetWidth > 0 && m_RenderTargets.UpscaleTargetHeight > 0;
     }
 
     void KurenaiEngine3D::RequestPlanarReflectionResolutionScale(float scale)
@@ -5025,10 +5012,7 @@ namespace Kurenai
                             std::to_string(m_PostProcessSettings.UpscaleOutputHeight) +
                             "のテクスチャ作成に失敗したため、超解像を無効にします: " + e.what());
                     m_PostProcessSettings.UpscaleEnabled = false;
-                    m_UpscaleTexture.reset();
-                    m_UpscaleSharpTexture.reset();
-                    m_UpscaleTargetWidth = 0;
-                    m_UpscaleTargetHeight = 0;
+                    m_RenderTargets.ResetUpscale();
                 }
             }
 

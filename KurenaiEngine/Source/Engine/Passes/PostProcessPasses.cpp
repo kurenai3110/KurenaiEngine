@@ -455,8 +455,8 @@ namespace Kurenai::Passes
         // ImGuiはRenderGraphの外でバックバッファへ直接描かれるため、この拡大の影響を受けない
         if (upscaleActive)
         {
-            const uint32_t upscaleOutputWidth = m_Engine.m_UpscaleTargetWidth;
-            const uint32_t upscaleOutputHeight = m_Engine.m_UpscaleTargetHeight;
+            const uint32_t upscaleOutputWidth = targets->UpscaleTargetWidth;
+            const uint32_t upscaleOutputHeight = targets->UpscaleTargetHeight;
 
             UpscaleConstants upscaleConstants{};
             ComputeEasuConstants(
@@ -467,7 +467,7 @@ namespace Kurenai::Passes
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "UpscaleEASU",
                 .Reads = { targets->TonemapTexture.get() },
-                .Writes = { m_Engine.m_UpscaleTexture.get() },
+                .Writes = { targets->UpscaleTexture.get() },
                 .Execute = [this, targets, upscaleConstants, upscaleOutputWidth, upscaleOutputHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_Engine.m_UpscaleEASUPipelineState.get());
@@ -477,16 +477,16 @@ namespace Kurenai::Passes
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_UpscaleConstantBuffer.get());
                     cmd->SetComputeTexture(0, targets->TonemapTexture.get());
                     // UAVはDispatch直後に解除されるため毎回バインドし直す
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_UpscaleTexture.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, targets->UpscaleTexture.get());
                     cmd->Dispatch((upscaleOutputWidth + 7) / 8, (upscaleOutputHeight + 7) / 8, 1);
                 },
             });
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "UpscaleRCAS",
-                .Reads = { m_Engine.m_UpscaleTexture.get() },
-                .Writes = { m_Engine.m_UpscaleSharpTexture.get() },
-                .Execute = [this, upscaleConstants, upscaleOutputWidth, upscaleOutputHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Reads = { targets->UpscaleTexture.get() },
+                .Writes = { targets->UpscaleSharpTexture.get() },
+                .Execute = [this, targets, upscaleConstants, upscaleOutputWidth, upscaleOutputHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetComputePipelineState(m_Engine.m_UpscaleRCASPipelineState.get());
                     // RCASはLoadで整数座標を引くのでサンプラーは使わないが、シェーダーが
@@ -494,8 +494,8 @@ namespace Kurenai::Passes
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
                     cmd->UpdateBuffer(m_Engine.m_UpscaleConstantBuffer.get(), &upscaleConstants, sizeof(upscaleConstants));
                     cmd->SetComputeConstantBuffer(1, m_Engine.m_UpscaleConstantBuffer.get());
-                    cmd->SetComputeTexture(0, m_Engine.m_UpscaleTexture.get());
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_UpscaleSharpTexture.get());
+                    cmd->SetComputeTexture(0, targets->UpscaleTexture.get());
+                    cmd->SetComputeUnorderedAccessTexture(0, targets->UpscaleSharpTexture.get());
                     cmd->Dispatch((upscaleOutputWidth + 7) / 8, (upscaleOutputHeight + 7) / 8, 1);
                 },
             });

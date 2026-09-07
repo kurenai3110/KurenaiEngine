@@ -123,6 +123,29 @@ namespace Kurenai::Rendering
         }
     }
 
+    void RenderTargets::CreateUpscale(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        // Tonemapの出力と同じR8G8B8A8_UNorm。EASU/RCASはどちらも表示レンジの値を前提にしており、
+        // ここをHDRフォーマットにしても情報は増えない(入力が既にLDRのため)。
+        //
+        // 【型付きUAVのフォーマット制約には当たらない】このエンジンが各所で注記している
+        // 「R32系しか保証されていない」という制約は型付きUAVからの"読み出し"のもので、
+        // EASU/RCASはUAVへ書くだけである(RCASがEASUの結果を読むのはSRV経由)。
+        // Bloomが同じくR16G16B16A16_FloatのUAVへ書けているのと同じ理屈
+        UpscaleTexture = device.CreateUAVTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        UpscaleSharpTexture = device.CreateUAVTexture(width, height, RHI::Format::R8G8B8A8_UNorm);
+        UpscaleTargetWidth = width;
+        UpscaleTargetHeight = height;
+    }
+
+    void RenderTargets::ResetUpscale()
+    {
+        UpscaleTexture.reset();
+        UpscaleSharpTexture.reset();
+        UpscaleTargetWidth = 0;
+        UpscaleTargetHeight = 0;
+    }
+
     void RenderTargets::ResetSoftwareRasterOutputs()
     {
         SoftwareRasterColor.reset();
