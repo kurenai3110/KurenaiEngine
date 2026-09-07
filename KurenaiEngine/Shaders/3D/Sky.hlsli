@@ -35,7 +35,7 @@
 // (二重実装にすると「片方を直したら必ずもう片方も直す」という規約でしか整合が保てない)。
 // SkyIntegrate.hlslがこのファイルのComputeSkyTintSet/PerezRelativeLuminance/SkyTintFromSetを
 // 直接呼んで積分し、結果(ティント4本+正規化済みの天頂輝度)をGPUSkyParametersとして
-// 構造化バッファ(KurenaiEngine3D側 m_SkyParametersBuffer)へ書く。SkyGenerate.hlsl/
+// 構造化バッファ(KurenaiEngine3D側 m_SkyResources.ParametersBuffer)へ書く。SkyGenerate.hlsl/
 // DeferredLighting.hlsl/SSR.hlslはこのバッファをApplySkyParametersFromBufferで読むだけになり、
 // CPU側に式のコピーは存在しない。
 //
