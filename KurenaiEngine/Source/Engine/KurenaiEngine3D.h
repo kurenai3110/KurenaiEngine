@@ -133,7 +133,6 @@ namespace Kurenai
         friend class Passes::PostProcessPasses;
         friend class Passes::ReflectionPasses;
         friend class Passes::ReflectionProbePasses;
-        friend class Passes::ShadowPasses;
         friend class Passes::PresentPass;
 
         // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
@@ -604,11 +603,17 @@ namespace Kurenai
         // ずれると即座に破綻するため、判定を1か所に集約する。
         // isWaterがtrueのメッシュは常にfalse(理由は実装のコメント参照)
         bool ShouldUseMeshletPath(const Assets::Model& model, const Assets::Mesh& mesh, bool isWater) const;
+    public:
         // このインスタンスを「1回のDispatchMeshでモデル全体」の経路で描けるか。
         // 描けない場合は従来どおりメッシュ単位のループで描く
         // modelは「このパスが描く段」。モデルLODが入ったのでinstance.Model(最も詳細な段)とは
         // 限らず、シャドウは最も粗い段、G-Buffer/プリパスは選ばれた段を渡す
+        //
+        // 【publicにしてある】ForEachGeometryDrawと対で使う述語で、Passes/*の各群が
+        // コールバックの中から呼ぶ。状態を持たない判定なので公開しても持ち主は変わらない
         bool ShouldUseModelMeshletPath(const Assets::ModelInstance& instance, const Assets::Model& model) const;
+
+    private:
         // モデル単位のGPUカリングが使うバッファを、候補数に足りる大きさで用意する。
         // シーン切り替えとストリーミングでインスタンス数が変わるため、足りなくなったときだけ作り直す
         void EnsureModelCullCapacity(uint32_t candidateCount);
