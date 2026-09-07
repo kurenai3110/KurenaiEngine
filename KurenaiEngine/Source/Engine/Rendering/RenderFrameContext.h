@@ -86,6 +86,11 @@ namespace Kurenai::Rendering
         // 走らせず、その判断は Blackboard の UpscaleActive が持つ
         bool UpscaleAvailable = false;
 
+        // このフレームで空として使うキューブマップ(手続き空か .kscene の DDS か)。
+        // **Reads 宣言と実際のバインドの両方でこれを使うこと。**
+        // ActiveSkyTexture() を都度呼ぶと両者が食い違って依存解決が壊れる
+        RHI::IRHITexture* SkyTexture = nullptr;
+
         // PresentパスがRenderGraphPassDesc::SwapChainTargetへ渡す
         RHI::IRHISwapChain* SwapChain = nullptr;
 

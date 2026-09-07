@@ -6401,9 +6401,9 @@ namespace Kurenai
         frameContext.SkyIntegrateThisFrame = skyIntegrateThisFrame;
         frameContext.Sun = &sunLighting;
         frameContext.Constants = &constants;
+        frameContext.SkyTexture = skyTexture;
 
         Rendering::RenderBlackboard blackboard{};
-        blackboard.SkyTexture = skyTexture;
 
         Core::RenderGraph graph(commandList, m_GPUProfiler.get(), &m_CPUProfiler);
 

@@ -54,7 +54,7 @@ namespace Kurenai::Passes
         const RHI::Viewport gbufferViewport = frame.GBufferViewport;
         const bool usingProceduralSky = frame.UsingProceduralSky;
         const bool megaLightsDenoiseRuns = bb.MegaLightsDenoiseRuns;
-        RHI::IRHITexture* const skyTexture = bb.SkyTexture;
+        RHI::IRHITexture* const skyTexture = frame.SkyTexture;
 
         // 直接光パスがt6へバインドする可視率テクスチャ。DirectLighting.hlslは
         // LightCount.zがRaytracedのときしか読まないが、DX12はSetPipelineStateのたびに
@@ -355,7 +355,7 @@ namespace Kurenai::Passes
         const DirectX::XMMATRIX& viewProj = frame.ViewProj;
         const RHI::Viewport gbufferViewport = frame.GBufferViewport;
         const bool usingProceduralSky = frame.UsingProceduralSky;
-        RHI::IRHITexture* const skyTexture = bb.SkyTexture;
+        RHI::IRHITexture* const skyTexture = frame.SkyTexture;
         RHI::IRHITexture* const activeAOTexture = frame.ActiveAOTexture;
 
         // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---

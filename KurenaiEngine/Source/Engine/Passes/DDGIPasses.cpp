@@ -58,7 +58,7 @@ namespace Kurenai::Passes
         // 束縛先はその実体である(graph.Execute()が終わるまで生きている)。
         // 一方、Registerのローカルであるラムダ(captureDDGIProbeFace 等)は**値で捕捉する**こと
         const FrameConstants& constants = *frame.Constants;
-        RHI::IRHITexture* const skyTexture = bb.SkyTexture;
+        RHI::IRHITexture* const skyTexture = frame.SkyTexture;
         const std::vector<RHI::IRHITexture*>& probeCaptureReads = *frame.ProbeCaptureReads;
         const DirectX::XMMATRIX probeFaceProjection = frame.ProbeFaceProjection;
         const size_t bakedLightCount = frame.BakedLightCount;

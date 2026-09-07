@@ -57,7 +57,7 @@ namespace Kurenai::Passes
         // graph.Execute() が終わるまで生きている。ここでの参照はその実体を指す
         const SunLighting& sunLighting = *frame.Sun;
         const ShaderInterop::FrameConstants& constants = *frame.Constants;
-        RHI::IRHITexture* const skyTexture = bb.SkyTexture;
+        RHI::IRHITexture* const skyTexture = frame.SkyTexture;
         const float effectiveExposure = frame.EffectiveExposure;
         const bool bakeSkyThisFrame = frame.BakeSkyThisFrame;
         const bool skyIntegrateThisFrame = frame.SkyIntegrateThisFrame;

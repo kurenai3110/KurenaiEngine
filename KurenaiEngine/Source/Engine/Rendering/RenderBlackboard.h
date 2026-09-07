@@ -25,11 +25,6 @@ namespace Kurenai::Rendering
 {
     struct RenderBlackboard
     {
-        // このフレームで空として使うキューブマップ(手続き空か .kscene の DDS か)。
-        // **Reads 宣言と実際のバインドの両方でこれを使うこと。**
-        // ActiveSkyTexture() を都度呼ぶと両者が食い違って依存解決が壊れる
-        RHI::IRHITexture* SkyTexture = nullptr;
-
         // Tonemap が読む HDR のシーンカラー。TAA 有効時はその蓄積結果を指す。
         // **TAA パスを登録した後に確定させること**(上の値捕捉の義務を参照)
         RHI::IRHITexture* HdrSceneColor = nullptr;

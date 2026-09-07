@@ -68,7 +68,7 @@ namespace Kurenai::Passes
         RHI::IRHITexture* presentSourceTexture = m_Engine.m_RenderTargets.TonemapTexture.get();
         // Mode 9(IBL Irradiance/Prefilterのキューブマップ表示)専用。他のModeでは使われないが、
         // t1には常に何らかの有効なTextureCubeをバインドしておく必要があるため既定値を持たせる
-        RHI::IRHITexture* presentDebugCubeTexture = bb.SkyTexture;
+        RHI::IRHITexture* presentDebugCubeTexture = frame.SkyTexture;
         // Mode 10(シャドウマップのカスケード表示)専用。t1と同じ理由で、t2にも常に有効な
         // Texture2DArrayをバインドしておく必要があるためシャドウマップ配列自身を既定値にする
         RHI::IRHITexture* presentDebugArrayTexture = m_Engine.m_RenderTargets.ShadowCascadeArray.get();
