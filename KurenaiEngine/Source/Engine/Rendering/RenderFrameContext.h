@@ -69,6 +69,13 @@ namespace Kurenai::Rendering
         // デバイスの能力の写し。起動時とリソースの作り直しでしか変わらない
         RenderCapabilities Capabilities;
 
+        // AOの「このフレームの有効な出力」。ブラー後(表示・合成用)と
+        // ブラー前(デバッグ表示用)。設定と実行可否から決まる派生値で、
+        // **どのパスも書かない**のでBlackboardではなくここに置く。
+        // 【1フレームに1回だけ評価する】書いた先と読む先が食い違うと依存解決が壊れる
+        RHI::IRHITexture* ActiveAOTexture = nullptr;
+        RHI::IRHITexture* ActiveAORawTexture = nullptr;
+
         // PresentパスがRenderGraphPassDesc::SwapChainTargetへ渡す
         RHI::IRHISwapChain* SwapChain = nullptr;
 

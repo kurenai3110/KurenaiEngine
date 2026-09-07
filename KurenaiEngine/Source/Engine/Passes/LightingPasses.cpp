@@ -138,8 +138,8 @@ namespace Kurenai::Passes
         //     ブラーで均す(常に指定した内部解像度)。出力フォーマットはどれもrgb=間接拡散光, a=遮蔽率で共通 ---
         if (frame.Settings.AmbientOcclusion.Enabled)
         {
-            RHI::IRHITexture* const aoRawTexture = m_Engine.GetActiveAORawTexture();
-            RHI::IRHITexture* const aoBlurredTexture = m_Engine.GetActiveAOTexture();
+            RHI::IRHITexture* const aoRawTexture = frame.ActiveAORawTexture;
+            RHI::IRHITexture* const aoBlurredTexture = frame.ActiveAOTexture;
             const bool useSSIL = !raytracedAORuns && frame.Settings.AmbientOcclusion.Technique == AOTechnique::SSILVisibilityBitmask;
 
             if (raytracedAORuns)
@@ -275,13 +275,6 @@ namespace Kurenai::Passes
             });
         }
 
-        // デバッグ表示(ブラー前確認用)のため、ブラー前の生バッファへの参照も別途保持しておく。
-        // 上のパスが書いた先と必ず一致させるため、どちらも同じアクセサから取る
-        RHI::IRHITexture* const activeAOTexture = m_Engine.GetActiveAOTexture();
-        RHI::IRHITexture* const activeAORawTexture = m_Engine.GetActiveAORawTexture();
-        bb.ActiveAOTexture = activeAOTexture;
-        bb.ActiveAORawTexture = activeAORawTexture;
-
         // --- 雲パス: 積雲と巻雲だけを1/2解像度で評価し、透過率と事前乗算済みの散乱光を書く ---
         //
         // 【なぜ分離したか】雲の評価は背景1画素あたり値ノイズを数十回踏むため極端に重く、
@@ -363,7 +356,7 @@ namespace Kurenai::Passes
         const RHI::Viewport gbufferViewport = frame.GBufferViewport;
         const bool usingProceduralSky = frame.UsingProceduralSky;
         RHI::IRHITexture* const skyTexture = bb.SkyTexture;
-        RHI::IRHITexture* const activeAOTexture = bb.ActiveAOTexture;
+        RHI::IRHITexture* const activeAOTexture = frame.ActiveAOTexture;
 
         // --- ライティングパス: G-Bufferを読み、SceneColorへ出力(常に指定した内部解像度) ---
         graph.AddPass(Core::RenderGraphPassDesc{

@@ -30,11 +30,6 @@ namespace Kurenai::Rendering
         // ActiveSkyTexture() を都度呼ぶと両者が食い違って依存解決が壊れる
         RHI::IRHITexture* SkyTexture = nullptr;
 
-        // AO/GI パスが書いた先。ブラー後(表示・合成用)とブラー前(デバッグ表示用)。
-        // どちらも同じアクセサから取ることで、書いた先と読む先が必ず一致する
-        RHI::IRHITexture* ActiveAOTexture = nullptr;
-        RHI::IRHITexture* ActiveAORawTexture = nullptr;
-
         // Tonemap が読む HDR のシーンカラー。TAA 有効時はその蓄積結果を指す。
         // **TAA パスを登録した後に確定させること**(上の値捕捉の義務を参照)
         RHI::IRHITexture* HdrSceneColor = nullptr;

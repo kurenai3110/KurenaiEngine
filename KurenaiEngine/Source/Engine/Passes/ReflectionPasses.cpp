@@ -64,7 +64,7 @@ namespace Kurenai::Passes
         const float waterPlaneY = frame.WaterPlaneY;
         const bool usingProceduralSky = frame.UsingProceduralSky;
         const bool planarReflectionPassRuns = frame.PlanarReflectionPassRuns;
-        RHI::IRHITexture* const activeAOTexture = bb.ActiveAOTexture;
+        RHI::IRHITexture* const activeAOTexture = frame.ActiveAOTexture;
 
         // --- 平面反射パス: 水面に不透明ジオメトリの鏡像を映すフォワードパス ---
         // 水面が無いシーン・無効化時はパスを登録しない(SSR側のフラグも0になる。下のSSRパス参照)

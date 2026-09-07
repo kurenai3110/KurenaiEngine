@@ -6359,6 +6359,8 @@ namespace Kurenai
         frameContext.WindowWidth = m_Window->GetWidth();
         frameContext.WindowHeight = m_Window->GetHeight();
         frameContext.Capabilities = m_RenderCapabilities;
+        frameContext.ActiveAOTexture = GetActiveAOTexture();
+        frameContext.ActiveAORawTexture = GetActiveAORawTexture();
         frameContext.SwapChain = m_SwapChain.get();
         // 【遅延生成のためだけに渡す】使ってよいのはMegaLightsの読み戻しバッファだけ
         frameContext.Device = m_Device.get();

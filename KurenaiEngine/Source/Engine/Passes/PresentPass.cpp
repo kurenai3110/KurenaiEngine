@@ -138,19 +138,19 @@ namespace Kurenai::Passes
             }
             break;
         case DebugView::AOIndirectLight:
-            presentSourceTexture = bb.ActiveAOTexture;
+            presentSourceTexture = frame.ActiveAOTexture;
             presentMode = 0; // rgb(間接拡散光)をそのまま表示。SSAOはrgbが常に0のため常に黒になる
             break;
         case DebugView::AOIndirectLightRaw:
-            presentSourceTexture = bb.ActiveAORawTexture;
+            presentSourceTexture = frame.ActiveAORawTexture;
             presentMode = 0; // ブラー前の生値(タイル状ノイズが乗った状態)
             break;
         case DebugView::AOOcclusion:
-            presentSourceTexture = bb.ActiveAOTexture;
+            presentSourceTexture = frame.ActiveAOTexture;
             presentMode = 3; // a(遮蔽率)をグレースケール表示
             break;
         case DebugView::AOOcclusionRaw:
-            presentSourceTexture = bb.ActiveAORawTexture;
+            presentSourceTexture = frame.ActiveAORawTexture;
             presentMode = 3; // ブラー前の生値(タイル状ノイズが乗った状態)
             break;
         case DebugView::ShadowMap:
