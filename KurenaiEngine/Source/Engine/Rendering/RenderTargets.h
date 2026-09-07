@@ -119,6 +119,20 @@ namespace Kurenai::Rendering
         // 要素数だけが違う。非対応環境ではパス自体が走らないので確保しない(nullptrのまま)
         std::unique_ptr<RHI::IRHIBuffer> MegaLightsTilePoolBuffer;
 
+        // MegaLightsの生出力。R32G32B32A32_Floatで確保する ―― 物差し自体が系統的に
+        // 暗い側へ寄っていると、確率的サンプリングのバイアス検査が汚染されるため
+        // (fp16との実測差はKurenaiEngine3D::CreateRenderTargetsの当該箇所を参照)。
+        // 【なぜここが持つか】書くのはMegaLightsPassesだが、直接光パスがt7で読み、
+        // PresentPassのデバッグ表示も読む
+        std::unique_ptr<RHI::IRHITexture> MegaLightsTexture;
+        // 復調を戻したデノイズ後の最終出力。DirectLightingはこれをt7で読む
+        std::unique_ptr<RHI::IRHITexture> MegaLightsDenoisedTexture;
+        // 蓄積バッファ(計測専用)。1画素につきfloat4。
+        // 非対応環境でも、Presentがt6へ張るための1要素のダミーとして必ず作る
+        // (DX12はSetPipelineStateのたびにルート引数が無効化されるため、シェーダが
+        // 宣言しているリソースを未バインドのままDrawできない)
+        std::unique_ptr<RHI::IRHIBuffer> MegaLightsAccumBuffer;
+
         // G-Buffer の生成は元の位置ごとに3つへ分ける。間に他のテクスチャ生成があるため、
         // 順序を変えるとDX12のディスクリプタ枠の割り当て順が変わり、意味の無い差分になる。
         // 呼び出し元のtry内から呼ぶこと。確保失敗時のHDR→Legacy8bitフォールバックは
@@ -156,5 +170,11 @@ namespace Kurenai::Rendering
         // ジッター有効時は右端・下端のタイル座標が1つ増える。トグル変更でGPUを待って
         // 再確保しなくて済むよう、無効時も常に+1ぶんを確保しておく
         void CreateMegaLightsTilePool(RHI::IRHIDevice& device, uint32_t stride);
+        // MegaLightsの生出力。呼び出し元のtry内から、元の行位置で呼ぶこと
+        void CreateMegaLightsOutput(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+        // デノイズ後の最終出力。デノイザ用の履歴を作る位置で呼ぶ
+        void CreateMegaLightsDenoised(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+        // 蓄積バッファ。elementCountは対応環境なら width*height、非対応なら1(ダミー)
+        void CreateMegaLightsAccum(RHI::IRHIDevice& device, uint32_t elementCount);
     };
 }

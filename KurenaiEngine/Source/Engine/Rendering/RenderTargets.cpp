@@ -172,6 +172,25 @@ namespace Kurenai::Rendering
         MegaLightsTilePoolBuffer = device.CreateBuffer(tilePoolBufferDesc);
     }
 
+    void RenderTargets::CreateMegaLightsOutput(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        MegaLightsTexture = device.CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+    }
+
+    void RenderTargets::CreateMegaLightsDenoised(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        MegaLightsDenoisedTexture = device.CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+    }
+
+    void RenderTargets::CreateMegaLightsAccum(RHI::IRHIDevice& device, uint32_t elementCount)
+    {
+        RHI::BufferDesc accumBufferDesc;
+        accumBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+        accumBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(float) * 4) * elementCount;
+        accumBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(float) * 4);
+        MegaLightsAccumBuffer = device.CreateBuffer(accumBufferDesc);
+    }
+
     void RenderTargets::ResetSoftwareRasterOutputs()
     {
         SoftwareRasterColor.reset();

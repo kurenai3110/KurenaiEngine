@@ -2212,7 +2212,7 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunMegaLights() const
     {
-        if (m_MegaLightsSettings.Mode == MegaLightsMode::Off || !m_SceneGPUResources.RaytracingScene.IsValid() || m_MegaLightsTexture == nullptr)
+        if (m_MegaLightsSettings.Mode == MegaLightsMode::Off || !m_SceneGPUResources.RaytracingScene.IsValid() || m_RenderTargets.MegaLightsTexture == nullptr)
         {
             return false;
         }
@@ -3482,7 +3482,7 @@ namespace Kurenai
                 // 物差し自体が系統的に暗い側へ寄っていると、確率的サンプリングの
                 // バイアス検査(N枚平均が真値へ寄るか)がそのぶん汚染される。
                 // 帯域が問題になったら、参照実装とは別の出力先を用意して測ってから決めること
-                m_MegaLightsTexture = m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+                m_RenderTargets.CreateMegaLightsOutput(*m_Device, width, height);
             }
             m_RenderTargets.CreateTonemap(*m_Device, width, height);
 
@@ -3580,8 +3580,7 @@ namespace Kurenai
                     m_MegaLightsDenoiseMomentPing[denoiseIndex] =
                         m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
                 }
-                m_MegaLightsDenoisedTexture =
-                    m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+                m_RenderTargets.CreateMegaLightsDenoised(*m_Device, width, height);
                 // 解像度が変わると履歴の添字の意味が変わる。バッファのクリアが無いRHIなので、
                 // シェーダ側へ「履歴を読むな」と伝える
                 m_MegaLightsDenoiseHistoryValid = false;
@@ -3593,11 +3592,7 @@ namespace Kurenai
             // 宣言しているリソースを未バインドのままDrawできない)
             {
                 const uint32_t accumElements = m_RenderCapabilities.RaytracingAvailable ? (width * height) : 1u;
-                RHI::BufferDesc accumBufferDesc;
-                accumBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
-                accumBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(float) * 4) * accumElements;
-                accumBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(float) * 4);
-                m_MegaLightsAccumBuffer = m_Device->CreateBuffer(accumBufferDesc);
+                m_RenderTargets.CreateMegaLightsAccum(*m_Device, accumElements);
             }
             // 解像度が変わると添字の意味が変わるので、蓄積も書き出しも必ず取り直す。
             // 【書き出し済みフラグも戻すこと】起動直後は既定解像度から実際のウィンドウサイズへ
@@ -6658,7 +6653,7 @@ namespace Kurenai
                                     (m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic ||
                                      m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared) &&
                                     m_MegaLightsSettings.DenoiseEnabled && m_MegaLightsDenoiseTemporalPSO &&
-                                    m_MegaLightsDenoisedTexture != nullptr;
+                                    m_RenderTargets.MegaLightsDenoisedTexture != nullptr;
             if (denoiseRan)
             {
                 m_MegaLightsDenoiseHistoryIndex ^= 1u;

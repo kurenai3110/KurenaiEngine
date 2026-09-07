@@ -1302,7 +1302,7 @@ namespace Kurenai
         // シェーダーとパイプラインステートはm_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsReferenceComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsReferencePipelineState;
-        std::unique_ptr<RHI::IRHITexture> m_MegaLightsTexture;
+        // 生出力は直接光とPresentも読むため、持ち主をRenderTargets::MegaLightsTextureへ移した
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsConstantBuffer;
         // MegaLightsの候補プール(MegaLightsTilePool.hlsl)。タイルごとに「届くライト」を走査し、
         // 寄与に比例した確率でK灯を重みつきで抽出する。読み手は Initial(RISの提案分布)と
@@ -1322,7 +1322,7 @@ namespace Kurenai
         //
         // 【なぜ分けるのか】時間・空間の再利用は「どの灯を選んだか」を持ち回って現フレームで
         // 評価し直す形でしか書けない。選択とシェードが1パスに混ざっていると再利用の段を
-        // 差し込む場所が無い。出力先は参照実装と同じm_MegaLightsTexture
+        // 差し込む場所が無い。出力先は参照実装と同じRenderTargets::MegaLightsTexture
         // (同じ表示経路・同じ後段のままA/Bが撮れるようにするため)
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsInitialComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsInitialPipelineState;
@@ -1374,8 +1374,7 @@ namespace Kurenai
         // à-trous のping-pong用。段ごとに入れ替える
         std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoisePing[2];
         std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoiseMomentPing[2];
-        // 復調を戻した最終出力。DirectLightingはこれをt7で読む
-        std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoisedTexture;
+        // 復調を戻した最終出力は、持ち主をRenderTargets::MegaLightsDenoisedTextureへ移した
         uint32_t m_MegaLightsDenoiseHistoryIndex = 0u;
         bool m_MegaLightsDenoiseHistoryValid = false;
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsTemporalComputeShader;
@@ -1415,10 +1414,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_MegaLightsAccumComputeShader;
         std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsAccumPipelineState;
         std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsAccumConstantBuffer;
-        // 1画素につきfloat4。レイトレーシング非対応の環境では、Presentがt6へ張るための
-        // 1要素だけのダミーになる(DX12はPSO切替でルート引数が無効化されるため、
-        // シェーダが宣言しているリソースは必ず何かをバインドする必要がある)
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsAccumBuffer;
+        // 蓄積バッファは、持ち主をRenderTargets::MegaLightsAccumBufferへ移した
         // これまでに足したフレーム数。表示側はこれで割る
         uint32_t m_MegaLightsAccumFrames = 0;
         // レンダーターゲットを作り直してから何フレーム経ったか。

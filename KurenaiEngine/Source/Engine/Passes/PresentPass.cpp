@@ -151,7 +151,7 @@ namespace Kurenai::Passes
             // 表示側の処理まで一致させる
             if (megaLightsRuns)
             {
-                presentSourceTexture = m_Engine.m_MegaLightsTexture.get();
+                presentSourceTexture = targets->MegaLightsTexture.get();
                 presentMode = 4;
             }
             break;
@@ -255,7 +255,7 @@ namespace Kurenai::Passes
             break;
         case DebugView::MegaLightsAverage:
             // 蓄積した平均。1フレームも足していないうちは中身が未定義なので切り替えない
-            if (m_Engine.m_MegaLightsAccumFrames > 0u && m_Engine.m_MegaLightsAccumBuffer)
+            if (m_Engine.m_MegaLightsAccumFrames > 0u && targets->MegaLightsAccumBuffer)
             {
                 presentSourceTexture = targets->TonemapTexture.get();
                 presentMode = 22;
@@ -533,9 +533,9 @@ namespace Kurenai::Passes
             // DebugView::LightTilesでライトグリッドを、DebugView::MegaLightsTilePoolで候補プールを
             // 読むため、それぞれの書き手より後に順序付ける(表示していないフレームでも
             // 同じポインタになるだけで無害)
-            .BufferReads = { targets->LightTileBuffer.get(), presentTileBuffer, m_Engine.m_MegaLightsAccumBuffer.get() },
+            .BufferReads = { targets->LightTileBuffer.get(), presentTileBuffer, targets->MegaLightsAccumBuffer.get() },
             .SwapChainTarget = frame.SwapChain,
-            .Execute = [this, letterboxViewport, presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture, presentDebugCubeArrayTexture, presentDebugVolumeTexture, presentTileBuffer, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, targets, letterboxViewport, presentSourceTexture, presentDebugCubeTexture, presentDebugArrayTexture, presentDebugCubeArrayTexture, presentDebugVolumeTexture, presentTileBuffer, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 cmd->ClearRenderTarget({ 0.05f, 0.05f, 0.08f, 1.0f });
                 cmd->ClearDepth(1.0f);
@@ -552,7 +552,7 @@ namespace Kurenai::Passes
                 // リソースは必ずバインドする(SetPipelineStateが毎回ルート引数を無効化するため)
                 cmd->SetShaderResourceBuffer(3, presentTileBuffer);
                 // Mode 22(蓄積平均)専用。読まれないModeでも必ずバインドする(上と同じ理由)
-                cmd->SetShaderResourceBuffer(6, m_Engine.m_MegaLightsAccumBuffer.get());
+                cmd->SetShaderResourceBuffer(6, targets->MegaLightsAccumBuffer.get());
                 cmd->SetTexture(4, presentDebugCubeArrayTexture);
                 cmd->SetTexture(5, presentDebugVolumeTexture);
                 cmd->Draw(3, 0);

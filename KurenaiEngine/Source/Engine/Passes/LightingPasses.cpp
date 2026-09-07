@@ -86,10 +86,10 @@ namespace Kurenai::Passes
         // デノイズを通したフレームはその出力を、通さないフレームは生出力を読む。
         // **DirectLighting.hlsl 側は変わらない**(同じ t7)ので、非MegaLights経路には影響しない
         RHI::IRHITexture* megaLightsTextureForBinding =
-            m_Engine.m_MegaLightsTexture ? m_Engine.m_MegaLightsTexture.get() : targets->GBufferDepth.get();
-        if (megaLightsDenoiseRuns && m_Engine.m_MegaLightsDenoisedTexture)
+            targets->MegaLightsTexture ? targets->MegaLightsTexture.get() : targets->GBufferDepth.get();
+        if (megaLightsDenoiseRuns && targets->MegaLightsDenoisedTexture)
         {
-            megaLightsTextureForBinding = m_Engine.m_MegaLightsDenoisedTexture.get();
+            megaLightsTextureForBinding = targets->MegaLightsDenoisedTexture.get();
         }
 
         // --- 直接光パス: G-Buffer+シャドウマップ(またはRTシャドウの可視率)からPBRの直接光

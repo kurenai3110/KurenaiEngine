@@ -62,8 +62,8 @@ namespace Kurenai
             { "PlanarReflectionColor", m_RenderTargets.PlanarReflectionColor.get() },
             { "PlanarReflectionDepth", m_RenderTargets.PlanarReflectionDepth.get() },
             // MegaLights
-            { "MegaLightsTexture", m_MegaLightsTexture.get() },
-            { "MegaLightsDenoisedTexture", m_MegaLightsDenoisedTexture.get() },
+            { "MegaLightsTexture", m_RenderTargets.MegaLightsTexture.get() },
+            { "MegaLightsDenoisedTexture", m_RenderTargets.MegaLightsDenoisedTexture.get() },
             // 影・Hi-Z
             { "ShadowCascadeArray", m_RenderTargets.ShadowCascadeArray.get() },
             { "HiZTexture", m_RenderTargets.HiZTexture.get() },
