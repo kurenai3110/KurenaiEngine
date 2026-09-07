@@ -200,7 +200,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         // 【メッシュライトが有効なフレームは段階1のプロキシ(型3)を数えない】
         // 同じ発光体を下の三角形ループが面積分するので、両方積むと真値が二重に数える。
-        // プロキシ自体は m_LightBuffer に残す ―― DDGI・反射プローブ・半透明・平面反射は
+        // プロキシ自体は m_SceneGPUResources.LightBuffer に残す ―― DDGI・反射プローブ・半透明・平面反射は
         // 面光源を扱えないのでプロキシが要る(消すとそれらから発光体の照明だけが消え、
         // しかもそれらしく見える)
         if (meshLightsActive && (uint)light.PositionType.w == 3u)
