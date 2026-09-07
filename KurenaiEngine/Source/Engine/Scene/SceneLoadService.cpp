@@ -832,14 +832,14 @@ namespace Kurenai
         // 反射プローブもライトと同じ方針でユーザー編集用のコピーへ複製する。
         // プローブの中身(キューブマップ)はシーンのジオメトリ・ライトに依存するため、
         // シーンを読み込んだら必ず焼き直す必要がある
-        m_ReflectionProbes = m_Scene.ReflectionProbes;
-        if (m_ReflectionProbes.size() > kMaxReflectionProbes)
+        m_GIResources.ReflectionProbes = m_Scene.ReflectionProbes;
+        if (m_GIResources.ReflectionProbes.size() > kMaxReflectionProbes)
         {
             Core::Logger::Warning(
                 "KurenaiEngine3D",
                 "反射プローブ数が上限(" + std::to_string(kMaxReflectionProbes) + ")を超えたため、先頭から" +
-                    std::to_string(kMaxReflectionProbes) + "個のみ使用します: " + std::to_string(m_ReflectionProbes.size()) + "個");
-            m_ReflectionProbes.resize(kMaxReflectionProbes);
+                    std::to_string(kMaxReflectionProbes) + "個のみ使用します: " + std::to_string(m_GIResources.ReflectionProbes.size()) + "個");
+            m_GIResources.ReflectionProbes.resize(kMaxReflectionProbes);
         }
         // テクスチャの常駐ミップ制御。既定はoffで、.ksceneが明示したシーンだけが有効になる
         // (未指定のシーンは従来どおり全ミップ常駐のままで、見え方もVRAMも変わらない)
@@ -857,10 +857,10 @@ namespace Kurenai
         });
         m_TextureStreaming.Build(m_Scene, *m_Device);
 
-        m_SelectedProbeIndex = m_ReflectionProbes.empty() ? -1 : 0;
+        m_SelectedProbeIndex = m_GIResources.ReflectionProbes.empty() ? -1 : 0;
         m_ReflectionProbeSettings.DebugIndex = 0;
         m_ProbeBaked = false;
-        m_ProbeBakeRequested = !m_ReflectionProbes.empty();
+        m_ProbeBakeRequested = !m_GIResources.ReflectionProbes.empty();
         // Realtimeのラウンドロビンは先頭から仕切り直す(シーンが変わればプローブの数も並びも変わる)
         m_ProbeRealtimeProbeIndex = 0;
         m_ProbeRealtimeFace = 0;

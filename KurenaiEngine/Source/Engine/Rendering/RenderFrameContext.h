@@ -115,6 +115,11 @@ namespace Kurenai::Rendering
         // 間接光(DDGI・反射プローブ)のリソース一式。IBLと同じくポインタだけ載せる
         const GIResources* GI = nullptr;
 
+        // 焼き上がりに影響する状態(時刻・太陽・シャドウ・IBL強度・全ライト)から作った署名。
+        // 【フレームで1回だけ求める】反射プローブとDDGIの両方が「前に焼いたときから
+        // 変わったか」の判定に使う。登録の途中では入力が動かないので、ここへ載せて配る
+        uint64_t ProbeBakeSignature = 0;
+
         // ドローンショーのGPUリソース一式。IBLと同じくエンジンが持ったまま、ポインタだけ載せる
         const DroneShowResources* DroneShow = nullptr;
 

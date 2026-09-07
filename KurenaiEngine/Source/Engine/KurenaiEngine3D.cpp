@@ -1981,14 +1981,14 @@ namespace Kurenai
         probeCapturePipelineDesc.RenderTargetFormats = { RHI::Format::R16G16B16A16_Float, RHI::Format::R32_Float };
         probeCapturePipelineDesc.HasDepthStencil = true;
         probeCapturePipelineDesc.ReverseZ = true;
-        m_ProbeCapturePipelineState = m_Device->CreatePipelineState(probeCapturePipelineDesc);
+        m_GIResources.ProbeCapturePipelineState = m_Device->CreatePipelineState(probeCapturePipelineDesc);
 
         RHI::ShaderDesc probeCubeCopyCsDesc;
         probeCubeCopyCsDesc.Stage = RHI::ShaderStage::Compute;
         probeCubeCopyCsDesc.FilePath = shaderDirectory + L"IBLConvolve.kshader";
         probeCubeCopyCsDesc.EntryPoint = "CSCopyCaptureToCubeFace";
         m_ProbeCubeCopyComputeShader = m_Device->CreateShader(probeCubeCopyCsDesc);
-        m_ProbeCubeCopyPipelineState = m_Device->CreateComputePipelineState({ m_ProbeCubeCopyComputeShader.get() });
+        m_GIResources.ProbeCubeCopyPipelineState = m_Device->CreateComputePipelineState({ m_ProbeCubeCopyComputeShader.get() });
 
         // プローブの影響範囲(位置・半径)を渡すStructuredBuffer(t13)。ライトリストと同じく
         // ピクセルシェーダからは読み取り専用でよい
@@ -2002,7 +2002,7 @@ namespace Kurenai
         RHI::BufferDesc probeCaptureConstantBufferDesc;
         probeCaptureConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         probeCaptureConstantBufferDesc.SizeInBytes = sizeof(FrameConstants);
-        m_ProbeCaptureConstantBuffer = m_Device->CreateBuffer(probeCaptureConstantBufferDesc);
+        m_GIResources.ProbeCaptureConstantBuffer = m_Device->CreateBuffer(probeCaptureConstantBufferDesc);
 
         // --- 平面反射 ---
         // 水面に不透明ジオメトリの鏡像を映す専用フォワードパス。設計判断はPlanarReflection.hlsl
@@ -2046,7 +2046,7 @@ namespace Kurenai
         m_PlanarReflectionConstantBuffer = m_Device->CreateBuffer(planarReflectionConstantBufferDesc);
 
         // --- DDGI(22章) ---
-        // キャプチャ経路は反射プローブとまったく同じ(ProbeCapture.hlslとm_ProbeCapturePipelineStateを
+        // キャプチャ経路は反射プローブとまったく同じ(ProbeCapture.hlslとm_GIResources.ProbeCapturePipelineStateを
         // そのまま使う)で、解像度だけkDDGICaptureSizeへ落とす。レンダーターゲットのフォーマットは
         // PSOと一致していなければならないため、反射プローブ側と同じ組み合わせにする
         m_DDGICaptureColor = m_Device->CreateRenderTexture(kDDGICaptureSize, kDDGICaptureSize, RHI::Format::R16G16B16A16_Float);
@@ -5875,7 +5875,7 @@ namespace Kurenai
         // ない。手続き空が同じ理由で焼き直しているのと揃える(閾値は空の0.05段よりずっと粗く
         // 取ってある。フルベイクはプローブ数×6面の描画になるため)。
         // Realtimeは毎フレーム焼き直しているので対象外
-        if (m_ReflectionProbeSettings.UpdateMode != ProbeUpdateMode::Realtime && m_ProbeBaked && !m_ReflectionProbes.empty() &&
+        if (m_ReflectionProbeSettings.UpdateMode != ProbeUpdateMode::Realtime && m_ProbeBaked && !m_GIResources.ReflectionProbes.empty() &&
             std::abs(m_EffectiveExposureEV100 - m_ProbeBakedExposureEV100) > kProbeRebakeExposureEV)
         {
             m_ProbeBakeRequested = true;
@@ -5890,8 +5890,8 @@ namespace Kurenai
         std::vector<GPUReflectionProbe> gpuProbes;
         if (m_ReflectionProbeSettings.Enabled && m_ProbeBaked)
         {
-            gpuProbes.reserve(m_ReflectionProbes.size());
-            for (const Assets::ReflectionProbe& probe : m_ReflectionProbes)
+            gpuProbes.reserve(m_GIResources.ReflectionProbes.size());
+            for (const Assets::ReflectionProbe& probe : m_GIResources.ReflectionProbes)
             {
                 // Yawはシェーダー側で毎ピクセル三角関数を回さずに済むよう、ここでsin/cosへ展開しておく
                 const float yawRadians = DirectX::XMConvertToRadians(probe.YawDegrees);
@@ -6323,6 +6323,7 @@ namespace Kurenai
         frameContext.Scene = &m_SceneGPUResources;
         frameContext.Targets = &m_RenderTargets;
         frameContext.GI = &m_GIResources;
+        frameContext.ProbeBakeSignature = ComputeProbeBakeSignature();
         frameContext.DroneShow = &m_DroneShowResources;
         // 【述語をここで1回だけ決める】本描画と平面反射の2群が同じ判定を見る必要がある
         frameContext.DroneShowRuns = m_DroneShowEnabled && !m_DroneInstances.empty();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 #include "Assets/Scene.h"
 #include "RHI/IRHIDevice.h"
@@ -46,5 +47,22 @@ namespace Kurenai::Rendering
         std::unique_ptr<RHI::IRHITexture> ProbeDistanceArray;
         // プローブの影響範囲(位置・半径)をシェーダーへ渡すStructuredBuffer(t13)
         std::unique_ptr<RHI::IRHIBuffer> ProbeBuffer;
+
+        // キューブ面のキャプチャに使うPSOと定数バッファ、および6面をキューブへ写す
+        // コンピュートのPSO。
+        // 【なぜここが持つか】反射プローブとDDGIがまったく同じ経路でキャプチャする
+        // (ProbeCapture.hlslを共有する)。どちらかの群に持たせると、もう片方が
+        // その群を経由して取りに行くことになる
+        std::unique_ptr<RHI::IRHIPipelineState> ProbeCapturePipelineState;
+        // キャプチャの面ごとに値を更新して使い回すFrameConstants(共有のものとは別。
+        // ViewProj/CameraPositionだけをプローブのものへ差し替える。詳細はProbeCapture.hlsl冒頭)
+        std::unique_ptr<RHI::IRHIBuffer> ProbeCaptureConstantBuffer;
+        std::unique_ptr<RHI::IRHIPipelineState> ProbeCubeCopyPipelineState;
+
+        // シーンが持つ反射プローブの一覧。ApplyLoadedSceneがm_Scene.ReflectionProbesから
+        // コピーし、以降ImGuiが編集する。Renderスレッド専有のためロックは不要。
+        // 焼くのはReflectionProbePassesだけだが、PresentPassのデバッグ表示が
+        // 表示対象の番号を範囲内へ丸めるために個数を読む
+        std::vector<Assets::ReflectionProbe> ReflectionProbes;
     };
 }

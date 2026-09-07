@@ -107,7 +107,7 @@ namespace Kurenai::Passes
             // 反射プローブと同じ理由でドローンの灯を外す。こちらは焼き直しではなく
             // ヒステリシスなので固定はされないが、動く光を追いかけ続けて収束しなくなる
             captureConstants.ActiveLightCount.x = static_cast<float>(bakedLightCount);
-            cmd->UpdateBuffer(m_Engine.m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
+            cmd->UpdateBuffer(gi->ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
 
             cmd->SetRenderTargets(captureTargets, 2, m_Engine.m_DDGICaptureDepth.get());
             cmd->SetViewport(ddgiViewport);
@@ -116,8 +116,8 @@ namespace Kurenai::Passes
             cmd->ClearDepth(0.0f);
 
             // PSOは反射プローブと共通(同じシェーダー・同じレンダーターゲットフォーマット)
-            cmd->SetPipelineState(m_Engine.m_ProbeCapturePipelineState.get());
-            cmd->SetConstantBuffer(0, m_Engine.m_ProbeCaptureConstantBuffer.get());
+            cmd->SetPipelineState(gi->ProbeCapturePipelineState.get());
+            cmd->SetConstantBuffer(0, gi->ProbeCaptureConstantBuffer.get());
             cmd->SetSamplerSet(materialSamplers);
 
             cmd->SetTexture(4, targets->ShadowCascadeArray.get());
@@ -242,7 +242,7 @@ namespace Kurenai::Passes
 
             IBLFaceConstants faceConstants{};
             faceConstants.Face = face;
-            cmd->SetComputePipelineState(m_Engine.m_ProbeCubeCopyPipelineState.get());
+            cmd->SetComputePipelineState(gi->ProbeCubeCopyPipelineState.get());
             cmd->UpdateBuffer(iblPrefilterConstantBuffer, &faceConstants, sizeof(faceConstants));
             cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
             cmd->SetComputeSamplerSet(materialSamplers);
@@ -384,7 +384,7 @@ namespace Kurenai::Passes
         // 無効中に時刻を動かして再度有効にしたとき「署名は同じ」と誤判定して止まったままになる
         if (gi->HasGIVolume && m_Engine.m_DDGIProbeCount > 0)
         {
-            const uint64_t bakeSignature = m_Engine.ComputeProbeBakeSignature();
+            const uint64_t bakeSignature = frame.ProbeBakeSignature;
             if (!m_Engine.m_DDGIBakeSignatureValid || bakeSignature != m_Engine.m_DDGIBakeSignature)
             {
                 m_Engine.m_DDGIBakeSignature = bakeSignature;

@@ -84,7 +84,7 @@ namespace Kurenai::Passes
         const auto captureProbeFace =
             [this, gi, targets, lightBuffer, modelInstanceBuffer, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t face)
         {
-            const Assets::ReflectionProbe& probe = m_Engine.m_ReflectionProbes[probeIndex];
+            const Assets::ReflectionProbe& probe = gi->ReflectionProbes[probeIndex];
             const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
 
             RHI::Viewport probeViewport;
@@ -116,7 +116,7 @@ namespace Kurenai::Passes
             // 統計も止める。プローブ視点で数えた分がメインカメラの間引き率に混ざると、
             // 「1フレームあたりの判定数」がプローブを焼いたフレームだけ跳ね上がって読めなくなる
             captureConstants.MeshletCullStatsParams = { 0.0f, 0.0f, 0.0f, 0.0f };
-            cmd->UpdateBuffer(m_Engine.m_ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
+            cmd->UpdateBuffer(gi->ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
 
             cmd->SetRenderTargets(captureTargets, 2, m_Engine.m_ProbeCaptureDepth.get());
             cmd->SetViewport(probeViewport);
@@ -127,8 +127,8 @@ namespace Kurenai::Passes
             // 「何も描かれなかった=スカイ」の判定に使う
             cmd->ClearDepth(0.0f);
 
-            cmd->SetPipelineState(m_Engine.m_ProbeCapturePipelineState.get());
-            cmd->SetConstantBuffer(0, m_Engine.m_ProbeCaptureConstantBuffer.get());
+            cmd->SetPipelineState(gi->ProbeCapturePipelineState.get());
+            cmd->SetConstantBuffer(0, gi->ProbeCaptureConstantBuffer.get());
             cmd->SetSamplerSet(materialSamplers);
 
             // メッシュによらず共通のバインドはループの外で1回だけ行う。テクスチャのバインドは
@@ -209,7 +209,7 @@ namespace Kurenai::Passes
 
             Passes::IBLFaceConstants faceConstants{};
             faceConstants.Face = face;
-            cmd->SetComputePipelineState(m_Engine.m_ProbeCubeCopyPipelineState.get());
+            cmd->SetComputePipelineState(gi->ProbeCubeCopyPipelineState.get());
             cmd->UpdateBuffer(iblPrefilterConstantBuffer, &faceConstants, sizeof(faceConstants));
             cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
             cmd->SetComputeSamplerSet(materialSamplers);
@@ -271,12 +271,12 @@ namespace Kurenai::Passes
         // レンダーグラフがこれらをシャドウパス・IBLBakeパスより後ろへ順序付ける。
         // 空はm_SkyboxTextureではなくこのフレームで実際に使うskyTextureを挙げる。手続き空のときは
         // SkyGenerateパスがそれのWriterなので、これによりベイクが空の焼き直しより後ろへ順序付けられる
-        const size_t probeCount = m_Engine.m_ReflectionProbes.size();
+        const size_t probeCount = gi->ReflectionProbes.size();
 
         // OnDemandは、焼き上がりに影響する状態(時刻・太陽・ライト)が変わったフレームだけ焼き直す。
         // 一度も焼けていない間はシーン読み込み時の要求が既に立っているのでここでは何もしない
         if (frame.Settings.ReflectionProbe.UpdateMode == ProbeUpdateMode::OnDemand && probeCount > 0 && m_Engine.m_ProbeBaked &&
-            m_Engine.ComputeProbeBakeSignature() != m_Engine.m_ProbeBakeSignature)
+            frame.ProbeBakeSignature != m_Engine.m_ProbeBakeSignature)
         {
             m_Engine.m_ProbeBakeRequested = true;
         }
@@ -321,7 +321,7 @@ namespace Kurenai::Passes
             // Lightingパスが読むのは問題ないが、gpuProbesは既に確定済み)。次フレームから
             // プローブが有効になるよう、ここでフラグだけ立てる
             m_Engine.m_ProbeBaked = true;
-            m_Engine.m_ProbeBakeSignature = m_Engine.ComputeProbeBakeSignature();
+            m_Engine.m_ProbeBakeSignature = frame.ProbeBakeSignature;
             // このフレームの実効プリ露出で焼かれるので、読み出し側の換算倍率もここで更新する
             m_Engine.m_ProbeBakedExposureEV100 = effectiveExposureEV100;
             // 全プローブが今焼けたので、時間分割は先頭から仕切り直す
@@ -433,7 +433,7 @@ namespace Kurenai::Passes
 
             // 常に焼き直しているのでOnDemandの署名も追随させておく。こうしておかないと
             // Realtimeから切り替えた直後に不要なフルベイクが1回走る
-            m_Engine.m_ProbeBakeSignature = m_Engine.ComputeProbeBakeSignature();
+            m_Engine.m_ProbeBakeSignature = frame.ProbeBakeSignature;
             // 露出の換算倍率も追随させる。1ステップずつ焼くため厳密には面・ミップごとに焼いた
             // 露出が違うが、実効プリ露出の変化は毎秒2倍程度(m_PostProcessSettings.EffectiveExposureAdaptSpeed)なので
             // 1周(最大12フレーム)ぶんのずれは数%にとどまり、常時焼き直している以上すぐ解消する

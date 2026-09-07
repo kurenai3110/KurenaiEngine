@@ -491,7 +491,7 @@ namespace Kurenai
         bool& GetEmissiveLightsValuesLogged() { return m_EmissiveLightsValuesLogged; }
         bool& GetDDGIEmissiveSuppressLoggedRaster() { return m_DDGIEmissiveSuppressLoggedRaster; }
         bool& GetDDGIEmissiveSuppressLoggedTrace() { return m_DDGIEmissiveSuppressLoggedTrace; }
-        std::vector<Assets::ReflectionProbe>& GetReflectionProbes() { return m_ReflectionProbes; }
+        std::vector<Assets::ReflectionProbe>& GetReflectionProbes() { return m_GIResources.ReflectionProbes; }
         int& GetSelectedProbeIndex() { return m_SelectedProbeIndex; }
         bool& GetProbeBaked() { return m_ProbeBaked; }
         bool& GetProbeBakeRequested() { return m_ProbeBakeRequested; }
@@ -2062,7 +2062,7 @@ namespace Kurenai
         static constexpr uint32_t kProbeCaptureSize = Passes::kProbeCaptureSize;
         std::unique_ptr<RHI::IRHIShader> m_ProbeCaptureVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_ProbeCapturePixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_ProbeCapturePipelineState;
+        // キャプチャのPSOは持ち主を GIResources::ProbeCapturePipelineState へ移した
         // 1面ぶんのキャプチャ先(6面で使い回す)。HDRのままキューブへ写すためG-Bufferと違いFloat
         std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureColor;
         // 同じキャプチャの2枚目のレンダーターゲット(SV_TARGET1)。プローブ位置から描画点までの
@@ -2071,18 +2071,14 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureDistance;
         std::unique_ptr<RHI::IRHITexture> m_ProbeCaptureDepth;
         std::unique_ptr<RHI::IRHIShader> m_ProbeCubeCopyComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_ProbeCubeCopyPipelineState;
+        // キューブへ写すPSOは持ち主を GIResources::ProbeCubeCopyPipelineState へ移した
         // キャプチャした6面を組み上げるスクラッチのキューブマップ(単一キューブ)。畳み込みの入力に
         // なるためTextureCubeArrayではなくTextureCubeである必要がある(IBLConvolve.hlslのSourceSkyboxは
         // TextureCube宣言のまま。これによりIBLの畳み込みシェーダーを一切変更せず再利用できる)。
         // プローブは1つずつ順に焼くため1枚で足りる
         std::unique_ptr<RHI::IRHITexture> m_ProbeRadianceCube;
-        // キャプチャの面ごとに値を更新して使い回すFrameConstants(共有のm_FrameConstantBufferとは別。
-        // ViewProj/CameraPositionだけをプローブのものへ差し替える。詳細はProbeCapture.hlsl冒頭)
-        std::unique_ptr<RHI::IRHIBuffer> m_ProbeCaptureConstantBuffer;
-        // ApplyLoadedSceneがm_Scene.ReflectionProbesからコピーし、以降ImGuiが編集する(m_Lightsと同じ方針)。
-        // どちらもRenderスレッド専有のためロックは不要
-        std::vector<Assets::ReflectionProbe> m_ReflectionProbes;
+        // 面ごとの定数バッファは持ち主を GIResources::ProbeCaptureConstantBuffer へ移した
+        // プローブの一覧は持ち主を GIResources::ReflectionProbes へ移した
         int m_SelectedProbeIndex = -1;
         // 次のRender()でプローブを焼き直す要求。シーン読み込み時とImGuiのBakeボタンで立てる。
         // スカイボックス由来のIBLと違いシーンのジオメトリ・ライトに依存するため、

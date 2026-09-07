@@ -368,7 +368,7 @@ namespace Kurenai
 
         // プローブの位置はキャプチャ地点そのものなので含める(影響範囲は含めない。
         // 形状・半径・ブレンド距離を変えてもどこから撮るかは変わらないため)
-        for (const Assets::ReflectionProbe& probe : m_ReflectionProbes)
+        for (const Assets::ReflectionProbe& probe : m_GIResources.ReflectionProbes)
         {
             for (int i = 0; i < 3; ++i) mixFloat(probe.Position[i]);
         }

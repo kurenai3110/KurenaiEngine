@@ -470,7 +470,7 @@ namespace Kurenai::Passes
         if (frame.Settings.DebugView.View == DebugView::ProbePrefilter || frame.Settings.DebugView.View == DebugView::ProbeDistance)
         {
             presentConstants.ArraySlice = static_cast<float>(
-                std::clamp(frame.Settings.ReflectionProbe.DebugIndex, 0, std::max(0, static_cast<int32_t>(m_Engine.m_ReflectionProbes.size()) - 1)));
+                std::clamp(frame.Settings.ReflectionProbe.DebugIndex, 0, std::max(0, static_cast<int32_t>(gi->ReflectionProbes.size()) - 1)));
         }
         else if (frame.Settings.DebugView.View == DebugView::CloudNoiseSlice)
         {
