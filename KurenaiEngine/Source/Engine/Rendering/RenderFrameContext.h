@@ -76,6 +76,11 @@ namespace Kurenai::Rendering
         RHI::IRHITexture* ActiveAOTexture = nullptr;
         RHI::IRHITexture* ActiveAORawTexture = nullptr;
 
+        // 反射の「このフレームの有効な出力」。SSRならSSRTexture、RT反射ならその出力、
+        // どちらも走らないならLightingの結果(SceneColor)がそのまま後段へ渡る。
+        // AOと同じく設定と実行可否から決まる派生値で、どのパスも書かない
+        RHI::IRHITexture* ActiveReflectionOutput = nullptr;
+
         // PresentパスがRenderGraphPassDesc::SwapChainTargetへ渡す
         RHI::IRHISwapChain* SwapChain = nullptr;
 

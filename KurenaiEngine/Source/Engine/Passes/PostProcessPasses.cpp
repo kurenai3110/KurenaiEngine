@@ -51,7 +51,7 @@ namespace Kurenai::Passes
         //     Lightingパスの中に入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl
         //     冒頭のコメント参照。無効時はパス自体を登録せず、reflectionOutputがそのまま
         //     TAA(またはTonemap)への入力になる ---
-        RHI::IRHITexture* const reflectionOutput = m_Engine.GetActiveReflectionOutput();
+        RHI::IRHITexture* const reflectionOutput = frame.ActiveReflectionOutput;
         if (fogPassRuns)
         {
             graph.AddPass(Core::RenderGraphPassDesc{
