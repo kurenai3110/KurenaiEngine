@@ -10,6 +10,11 @@
 // Passes/*.cpp(namespace Kurenai::Passes)のどちらからも修飾なしで引ける位置にある。
 namespace Kurenai
 {
+    // 直射日光(正午・快晴)の照度[lx]。Lagarde & de Rousiers 2014の照度参照テーブルに
+    // 掲載される代表値。可変プリ露出が「そのフレームのキー照度が昼より何段暗いか」を
+    // 測る基準になるため、KurenaiEngine3D.cpp の無名名前空間から出してここへ置いてある
+    constexpr float kSunIlluminanceLux = 100000.0f;
+
     // 太陽光の向き・色・環境光を時刻(0〜24時)から計算する
     struct SunLighting
     {

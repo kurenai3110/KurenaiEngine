@@ -733,6 +733,30 @@ namespace Kurenai
         void TickFrame();
         void RenderThreadMain();
         void Render(const FrameState& frameState);
+        // --- Render()から切り出したフレームの先頭(段階6.6のAブロック) ---
+        // 【定義はRendering/RenderFrame.cppにある】下のEブロックと同じ作法。
+        // どれも「このフレームのGPUコマンドをまだ1つも積んでいない」ことを前提にしており、
+        // **Render()の先頭から呼ぶ位置を動かさないこと**
+        //
+        // フレーム単位の統計を前フレームぶんへ控えてから0に戻す
+        void ResetFrameCounters();
+        // ウィンドウのリサイズ・予約された作り直し・シーンの切り替え・常駐ミップの差し替えを
+        // 確定させる。どれもGPUコマンドを積む前でなければならない
+        void ApplyPendingRecreations();
+        // ImGuiのフレームを開始し、パネルを描いて、入力を掴んでいるかをUpdateスレッドへ返す
+        void BeginImGuiFrame(const FrameState& frameState);
+        // バッファ精度・内部レンダー解像度・平面反射解像度・超解像の出力を、
+        // 要求が立っていれば作り直す。確保に失敗したら元の解像度へ戻す縮退を持つ
+        void RecreateDirtyRenderTargets();
+        // そのフレームのキー照度[lx]から実効プリ露出(m_EffectiveExposureEV100)を決める
+        void UpdateEffectiveExposure(float keyIlluminanceLux);
+        // 【検証専用】蓄積が始まる瞬間に1回だけ摂動を加える(-perturbmode)
+        void ApplyMegaLightsPerturbationIfDue();
+        // モデルLOD・モデルのストリーミング・インスタンスのバッチ・レイトレーシングの
+        // 作り直し・テクスチャの常駐目標を、レンダーグラフを組む前にこの1回だけ進める
+        void UpdateSceneForFrame(
+            RHI::IRHICommandList* commandList, const DirectX::XMFLOAT3& cameraPosition, const Core::Camera& camera);
+
         // --- Render()から切り出したフレームの締め(段階6.6のEブロック) ---
         // 【定義はRendering/RenderFrame.cppにある】KurenaiEngine3Dのメンバ関数のまま、
         // 翻訳単位だけを分けている(Diagnostics/RenderDumpService.cppと同じ作法)。
