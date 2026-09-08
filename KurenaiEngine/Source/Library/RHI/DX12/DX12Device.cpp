@@ -28,6 +28,7 @@
 #include "DX12Util.h"
 #include "Core/StringUtil.h"
 #include "RHI/DXGIFormatUtil.h"
+#include "RHI/PipelineStateNormalize.h"
 #include "RHI/RHIReadbackFormat.h"
 #include "RHI/RHIShaderPackage.h"
 #include "RHI/TextureImage.h"
@@ -165,54 +166,99 @@ namespace Kurenai::RHI
         constexpr D3D12_ROOT_SIGNATURE_FLAGS kRootSignatureFlagCbvSrvUavHeapDirectlyIndexed =
             static_cast<D3D12_ROOT_SIGNATURE_FLAGS>(0x400);
 
+        // --- 意味値 → D3D12 の型 ---------------------------------------------------------
+        // どう振る舞うかを決めているのは PipelineStateNormalize.{h,cpp} で、ここは型の詰め替えだけ。
+        // 判断がここに入り込むと、DX11側と食い違っても誰も気づけなくなる
+
+        D3D12_BLEND ToD3D12Blend(BlendFactorValue factor)
+        {
+            switch (factor)
+            {
+            case BlendFactorValue::Zero:
+                return D3D12_BLEND_ZERO;
+            case BlendFactorValue::SrcAlpha:
+                return D3D12_BLEND_SRC_ALPHA;
+            case BlendFactorValue::InvSrcAlpha:
+                return D3D12_BLEND_INV_SRC_ALPHA;
+            case BlendFactorValue::DestColor:
+                return D3D12_BLEND_DEST_COLOR;
+            case BlendFactorValue::DestAlpha:
+                return D3D12_BLEND_DEST_ALPHA;
+            case BlendFactorValue::One:
+            default:
+                return D3D12_BLEND_ONE;
+            }
+        }
+
+        D3D12_BLEND_OP ToD3D12BlendOp(BlendOpValue op)
+        {
+            switch (op)
+            {
+            case BlendOpValue::Add:
+            default:
+                return D3D12_BLEND_OP_ADD;
+            }
+        }
+
+        D3D12_COMPARISON_FUNC ToD3D12Comparison(DepthCompareValue compare)
+        {
+            switch (compare)
+            {
+            case DepthCompareValue::LessEqual:
+                return D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            case DepthCompareValue::Greater:
+                return D3D12_COMPARISON_FUNC_GREATER;
+            case DepthCompareValue::GreaterEqual:
+                return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+            case DepthCompareValue::Less:
+            default:
+                return D3D12_COMPARISON_FUNC_LESS;
+            }
+        }
+
+        D3D12_FILTER ToD3D12Filter(SamplerFilterValue filter)
+        {
+            switch (filter)
+            {
+            case SamplerFilterValue::Anisotropic:
+                return D3D12_FILTER_ANISOTROPIC;
+            case SamplerFilterValue::Point:
+                return D3D12_FILTER_MIN_MAG_MIP_POINT;
+            case SamplerFilterValue::Linear:
+            default:
+                return D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+            }
+        }
+
+        D3D12_TEXTURE_ADDRESS_MODE ToD3D12AddressMode(SamplerAddressValue addressMode)
+        {
+            switch (addressMode)
+            {
+            case SamplerAddressValue::Clamp:
+                return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            case SamplerAddressValue::Wrap:
+            default:
+                return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+            }
+        }
+
         // RHIのBlendModeをD3D12のレンダーターゲットブレンド設定へ写す。
         // 通常のグラフィックスPSOとメッシュシェーダーPSOの両方から使う
-        // (2つのPSO作成関数で同じswitchを書き写すと、片方だけ直して静かに挙動がずれる)
+        // (2つのPSO作成関数で同じ詰め替えを書き写すと、片方だけ直して静かに挙動がずれる)
         void ApplyBlendMode(D3D12_RENDER_TARGET_BLEND_DESC& rt, BlendMode blendMode)
         {
-            switch (blendMode)
+            const BlendStateValues blend = NormalizeBlendMode(blendMode);
+            rt.BlendEnable = blend.Enable ? TRUE : FALSE;
+            if (!blend.Enable)
             {
-            case BlendMode::AlphaBlend:
-                rt.BlendEnable = TRUE;
-                rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
-                rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-                rt.BlendOp = D3D12_BLEND_OP_ADD;
-                rt.SrcBlendAlpha = D3D12_BLEND_ONE;
-                rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-                break;
-            case BlendMode::Additive:
-                rt.BlendEnable = TRUE;
-                rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
-                rt.DestBlend = D3D12_BLEND_ONE;
-                rt.BlendOp = D3D12_BLEND_OP_ADD;
-                rt.SrcBlendAlpha = D3D12_BLEND_ONE;
-                rt.DestBlendAlpha = D3D12_BLEND_ONE;
-                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-                break;
-            case BlendMode::Multiply:
-                rt.BlendEnable = TRUE;
-                rt.SrcBlend = D3D12_BLEND_DEST_COLOR;
-                rt.DestBlend = D3D12_BLEND_ZERO;
-                rt.BlendOp = D3D12_BLEND_OP_ADD;
-                rt.SrcBlendAlpha = D3D12_BLEND_DEST_ALPHA;
-                rt.DestBlendAlpha = D3D12_BLEND_ZERO;
-                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-                break;
-            case BlendMode::PremultipliedAlpha:
-                rt.BlendEnable = TRUE;
-                rt.SrcBlend = D3D12_BLEND_ONE;
-                rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-                rt.BlendOp = D3D12_BLEND_OP_ADD;
-                rt.SrcBlendAlpha = D3D12_BLEND_ONE;
-                rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
-                rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-                break;
-            case BlendMode::Opaque:
-            default:
-                rt.BlendEnable = FALSE;
-                break;
+                return;
             }
+            rt.SrcBlend = ToD3D12Blend(blend.SrcColor);
+            rt.DestBlend = ToD3D12Blend(blend.DestColor);
+            rt.BlendOp = ToD3D12BlendOp(blend.ColorOp);
+            rt.SrcBlendAlpha = ToD3D12Blend(blend.SrcAlpha);
+            rt.DestBlendAlpha = ToD3D12Blend(blend.DestAlpha);
+            rt.BlendOpAlpha = ToD3D12BlendOp(blend.AlphaOp);
         }
 
         // 非シェーダー可視のCBV_SRV_UAVヒープ(テクスチャ/構造化バッファ作成時に
@@ -1480,9 +1526,8 @@ namespace Kurenai::RHI
         psoDesc.DepthStencilState.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
         psoDesc.DepthStencilState.DepthWriteMask = desc.DepthWriteEnabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
         // Reverse-Z: 近平面=1.0/遠平面=0.0にマッピングするため、深度テストの向きもGREATERに反転する
-        psoDesc.DepthStencilState.DepthFunc = desc.ReverseZ
-            ? (desc.DepthAllowEqual ? D3D12_COMPARISON_FUNC_GREATER_EQUAL : D3D12_COMPARISON_FUNC_GREATER)
-            : (desc.DepthAllowEqual ? D3D12_COMPARISON_FUNC_LESS_EQUAL : D3D12_COMPARISON_FUNC_LESS);
+        psoDesc.DepthStencilState.DepthFunc =
+            ToD3D12Comparison(NormalizeDepthCompare(desc.ReverseZ, desc.DepthAllowEqual));
         psoDesc.SampleMask = UINT_MAX;
         psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         psoDesc.NumRenderTargets = static_cast<UINT>(desc.RenderTargetFormats.size());
@@ -1545,9 +1590,7 @@ namespace Kurenai::RHI
         CD3DX12_DEPTH_STENCIL_DESC depthStencil(D3D12_DEFAULT);
         depthStencil.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
         depthStencil.DepthWriteMask = desc.DepthWriteEnabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
-        depthStencil.DepthFunc = desc.ReverseZ
-            ? (desc.DepthAllowEqual ? D3D12_COMPARISON_FUNC_GREATER_EQUAL : D3D12_COMPARISON_FUNC_GREATER)
-            : (desc.DepthAllowEqual ? D3D12_COMPARISON_FUNC_LESS_EQUAL : D3D12_COMPARISON_FUNC_LESS);
+        depthStencil.DepthFunc = ToD3D12Comparison(NormalizeDepthCompare(desc.ReverseZ, desc.DepthAllowEqual));
 
         D3D12_RT_FORMAT_ARRAY rtvFormats{};
         rtvFormats.NumRenderTargets = static_cast<UINT>(desc.RenderTargetFormats.size());
@@ -2832,43 +2875,10 @@ namespace Kurenai::RHI
             {
                 const SamplerDesc& desc = descs[slot];
 
-                switch (desc.Filter)
-                {
-                case SamplerFilter::Anisotropic:
-                    samplerDesc.Filter = D3D12_FILTER_ANISOTROPIC;
-                    break;
-                case SamplerFilter::Point:
-                    samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-                    break;
-                case SamplerFilter::Linear:
-                    samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-                    break;
-                default:
-                    Core::Logger::Warning(
-                        "DX12",
-                        "CreateSamplerSet: 未知のSamplerFilter(" + std::to_string(static_cast<int>(desc.Filter)) +
-                            ")が指定されたためLinearで代用します");
-                    samplerDesc.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-                    break;
-                }
+                samplerDesc.Filter = ToD3D12Filter(NormalizeSamplerFilter(desc.Filter, "DX12"));
 
-                D3D12_TEXTURE_ADDRESS_MODE addressMode = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-                switch (desc.AddressMode)
-                {
-                case SamplerAddressMode::Clamp:
-                    addressMode = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-                    break;
-                case SamplerAddressMode::Wrap:
-                    addressMode = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-                    break;
-                default:
-                    Core::Logger::Warning(
-                        "DX12",
-                        "CreateSamplerSet: 未知のSamplerAddressMode(" + std::to_string(static_cast<int>(desc.AddressMode)) +
-                            ")が指定されたためWrapで代用します");
-                    addressMode = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-                    break;
-                }
+                const D3D12_TEXTURE_ADDRESS_MODE addressMode =
+                    ToD3D12AddressMode(NormalizeSamplerAddressMode(desc.AddressMode, "DX12"));
                 samplerDesc.AddressU = addressMode;
                 samplerDesc.AddressV = addressMode;
                 samplerDesc.AddressW = addressMode;
