@@ -839,19 +839,9 @@ namespace Kurenai
         hizConstantBufferDesc.SizeInBytes = sizeof(Passes::HiZConstants);
         m_HiZConstantBuffer = m_Device->CreateBuffer(hizConstantBufferDesc);
 
-        // タイルライトカリングパス(コンピュートシェーダー)。タイルごとに届くライトのインデックスリストを作る。
-        // ライトグリッド本体(m_RenderTargets.LightTileBuffer)は解像度に依存するためCreateRenderTargetsで作る
-        RHI::ShaderDesc lightCullingCsDesc;
-        lightCullingCsDesc.Stage = RHI::ShaderStage::Compute;
-        lightCullingCsDesc.FilePath = shaderDirectory + L"LightCulling.kshader";
-        lightCullingCsDesc.EntryPoint = "CSMain";
-        m_LightCullingComputeShader = m_Device->CreateShader(lightCullingCsDesc);
-        m_LightCullingPipelineState = m_Device->CreateComputePipelineState({ m_LightCullingComputeShader.get() });
-
-        RHI::BufferDesc lightCullingConstantBufferDesc;
-        lightCullingConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        lightCullingConstantBufferDesc.SizeInBytes = sizeof(Passes::LightCullingConstants);
-        m_LightCullingConstantBuffer = m_Device->CreateBuffer(lightCullingConstantBufferDesc);
+        // 【元の行位置のまま呼ぶ】DX12はディスクリプタ枠を生成順に割り当てるため、
+        // 所有権をMegaLightsPassesへ移しても生成の順序はここから動かさない
+        m_MegaLightsPasses->CreateLightCullingPipelineState(*m_Device, shaderDirectory);
 
         // 自前ソフトウェアラスタライザ(46章)。比較用の独立した経路で、既存の描画には寄与しない。
         // 解像度に依存するリソース(visibility buffer・出力テクスチャ)はCreateRenderTargetsで作る。
@@ -1085,140 +1075,8 @@ namespace Kurenai
 
             m_ShadowPasses->CreateRaytracedResources(*m_Device, shaderDirectory);
 
-            // MegaLightsの参照実装(コンピュートシェーダー。ポイント/スポットライトを全灯
-            // 総当たりし、届いた1灯ごとに光源までの影レイを撃つ)。以降の確率的サンプリングを
-            // 評価するときの真値を作るためのパスで、RayQueryを含むためシェーダーモデル6.5が要る
-            RHI::ShaderDesc megaLightsRefCsDesc;
-            megaLightsRefCsDesc.Stage = RHI::ShaderStage::Compute;
-            megaLightsRefCsDesc.FilePath = shaderDirectory + L"MegaLightsReference.kshader";
-            megaLightsRefCsDesc.EntryPoint = "CSMain";
-            m_MegaLightsReferenceComputeShader = m_Device->CreateShader(megaLightsRefCsDesc);
-            m_MegaLightsReferencePipelineState =
-                m_Device->CreateComputePipelineState({ m_MegaLightsReferenceComputeShader.get() });
-
-            RHI::BufferDesc megaLightsConstantBufferDesc;
-            megaLightsConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-            megaLightsConstantBufferDesc.SizeInBytes = sizeof(Passes::MegaLightsConstants);
-            m_MegaLightsConstantBuffer = m_Device->CreateBuffer(megaLightsConstantBufferDesc);
-
-            // MegaLightsの候補プール(コンピュートシェーダー。タイルごとに届くライトを走査して
-            // 重みつきでK灯を抽出する)。レイを撃たないのでRayQueryは要らないが、
-            // MegaLightsと同時にしか使わないためここで一緒に作る
-            RHI::ShaderDesc megaLightsTilePoolCsDesc;
-            megaLightsTilePoolCsDesc.Stage = RHI::ShaderStage::Compute;
-            megaLightsTilePoolCsDesc.FilePath = shaderDirectory + L"MegaLightsTilePool.kshader";
-            megaLightsTilePoolCsDesc.EntryPoint = "CSMain";
-            m_MegaLightsTilePoolComputeShader = m_Device->CreateShader(megaLightsTilePoolCsDesc);
-            m_MegaLightsTilePoolPipelineState =
-                m_Device->CreateComputePipelineState({ m_MegaLightsTilePoolComputeShader.get() });
-
-            RHI::BufferDesc megaLightsTilePoolConstantBufferDesc;
-            megaLightsTilePoolConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-            megaLightsTilePoolConstantBufferDesc.SizeInBytes = sizeof(Passes::MegaLightsTilePoolConstants);
-            m_MegaLightsTilePoolConstantBuffer = m_Device->CreateBuffer(megaLightsTilePoolConstantBufferDesc);
-
-            // MegaLightsの確率的サンプリング本体(2パス)。
-            // 【この4本はすべて RayQuery を含む】Initial は初期可視レイ、Temporal は
-            // 時間検証レイ、Spatial は目標関数の可視性とバイアス補正レイ、Shade は影レイ。
-            // したがってシェーダーモデル6.5が要る(パッカーの kSkipDxbc50Files を参照)。
-            // レイを撃たないのは TilePool / Denoise / Accum / Resolve の4本だけで、
-            // そちらは3バリアントすべてで焼かれる
-            RHI::ShaderDesc megaLightsInitialCsDesc;
-            megaLightsInitialCsDesc.Stage = RHI::ShaderStage::Compute;
-            megaLightsInitialCsDesc.FilePath = shaderDirectory + L"MegaLightsInitialSample.kshader";
-            megaLightsInitialCsDesc.EntryPoint = "CSMain";
-            m_MegaLightsInitialComputeShader = m_Device->CreateShader(megaLightsInitialCsDesc);
-            m_MegaLightsInitialPipelineState =
-                m_Device->CreateComputePipelineState({ m_MegaLightsInitialComputeShader.get() });
-
-            RHI::ShaderDesc megaLightsShadeCsDesc;
-            megaLightsShadeCsDesc.Stage = RHI::ShaderStage::Compute;
-            megaLightsShadeCsDesc.FilePath = shaderDirectory + L"MegaLightsShade.kshader";
-            megaLightsShadeCsDesc.EntryPoint = "CSMain";
-            m_MegaLightsShadeComputeShader = m_Device->CreateShader(megaLightsShadeCsDesc);
-            m_MegaLightsShadePipelineState =
-                m_Device->CreateComputePipelineState({ m_MegaLightsShadeComputeShader.get() });
-
-            // クアッド共有(手法3)の解決パス。2x2の仲間が撃った標本を自分の面で評価し直して
-            // 平均する。**レイを1本も撃たない**ので3バリアントすべてで焼ける
-            // (パッカーの kSkipDxbc50Files には入れない)
-            RHI::ShaderDesc megaLightsResolveCsDesc;
-            megaLightsResolveCsDesc.Stage = RHI::ShaderStage::Compute;
-            megaLightsResolveCsDesc.FilePath = shaderDirectory + L"MegaLightsResolve.kshader";
-            megaLightsResolveCsDesc.EntryPoint = "CSMain";
-            m_MegaLightsResolveComputeShader = m_Device->CreateShader(megaLightsResolveCsDesc);
-            m_MegaLightsResolvePipelineState =
-                m_Device->CreateComputePipelineState({ m_MegaLightsResolveComputeShader.get() });
-
-            // 空間再利用。目標関数に可視性を入れるレイと、不偏化の分母のためのバイアス補正レイを撃つ
-            RHI::ShaderDesc megaLightsSpatialCsDesc;
-            megaLightsSpatialCsDesc.Stage = RHI::ShaderStage::Compute;
-            megaLightsSpatialCsDesc.FilePath = shaderDirectory + L"MegaLightsSpatial.kshader";
-            megaLightsSpatialCsDesc.EntryPoint = "CSMain";
-            m_MegaLightsSpatialComputeShader = m_Device->CreateShader(megaLightsSpatialCsDesc);
-            m_MegaLightsSpatialPipelineState =
-                m_Device->CreateComputePipelineState({ m_MegaLightsSpatialComputeShader.get() });
-
-            // 時間再利用。採用した履歴サンプルが今も見えるかを確かめる時間検証レイを1本撃つ
-            RHI::ShaderDesc megaLightsTemporalCsDesc;
-            megaLightsTemporalCsDesc.Stage = RHI::ShaderStage::Compute;
-            megaLightsTemporalCsDesc.FilePath = shaderDirectory + L"MegaLightsTemporal.kshader";
-            megaLightsTemporalCsDesc.EntryPoint = "CSMain";
-            m_MegaLightsTemporalComputeShader = m_Device->CreateShader(megaLightsTemporalCsDesc);
-            m_MegaLightsTemporalPipelineState =
-                m_Device->CreateComputePipelineState({ m_MegaLightsTemporalComputeShader.get() });
-
-            // デノイザ。3エントリ(時間累積 / à-trous / 復調戻し)を1ファイルに置く。
-            // パッカーは1ファイル内の複数の[numthreads]を自動で見つける
-            {
-                RHI::ShaderDesc denoiseDesc;
-                denoiseDesc.Stage = RHI::ShaderStage::Compute;
-                denoiseDesc.FilePath = shaderDirectory + L"MegaLightsDenoise.kshader";
-                denoiseDesc.EntryPoint = "CSTemporalAccum";
-                m_MegaLightsDenoiseTemporalShader = m_Device->CreateShader(denoiseDesc);
-                m_MegaLightsDenoiseTemporalPSO =
-                    m_Device->CreateComputePipelineState({ m_MegaLightsDenoiseTemporalShader.get() });
-                denoiseDesc.EntryPoint = "CSAtrous";
-                m_MegaLightsDenoiseAtrousShader = m_Device->CreateShader(denoiseDesc);
-                m_MegaLightsDenoiseAtrousPSO =
-                    m_Device->CreateComputePipelineState({ m_MegaLightsDenoiseAtrousShader.get() });
-                denoiseDesc.EntryPoint = "CSRemodulate";
-                m_MegaLightsDenoiseRemodulateShader = m_Device->CreateShader(denoiseDesc);
-                m_MegaLightsDenoiseRemodulatePSO =
-                    m_Device->CreateComputePipelineState({ m_MegaLightsDenoiseRemodulateShader.get() });
-
-                RHI::BufferDesc denoiseCbDesc;
-                denoiseCbDesc.Usage = RHI::BufferUsage::Constant;
-                denoiseCbDesc.SizeInBytes = sizeof(Passes::MegaLightsDenoiseConstants);
-                m_MegaLightsDenoiseConstantBuffer = m_Device->CreateBuffer(denoiseCbDesc);
-            }
-
-            RHI::BufferDesc megaLightsStochasticConstantBufferDesc;
-            megaLightsStochasticConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-            megaLightsStochasticConstantBufferDesc.SizeInBytes = sizeof(MegaLightsStochasticConstants);
-            m_MegaLightsStochasticConstantBuffer =
-                m_Device->CreateBuffer(megaLightsStochasticConstantBufferDesc);
-            // 空間再利用の反復ごとに1本ずつ。中身は共有分と同じで反復番号だけが違う
-            for (uint32_t spatialIteration = 0u; spatialIteration < kMegaLightsMaxSpatialIterations;
-                 ++spatialIteration)
-            {
-                m_MegaLightsSpatialConstantBuffer[spatialIteration] =
-                    m_Device->CreateBuffer(megaLightsStochasticConstantBufferDesc);
-            }
-
-            // 蓄積平均(計測専用)。レイを撃たないがMegaLightsと同時にしか使わないのでここで作る
-            RHI::ShaderDesc megaLightsAccumCsDesc;
-            megaLightsAccumCsDesc.Stage = RHI::ShaderStage::Compute;
-            megaLightsAccumCsDesc.FilePath = shaderDirectory + L"MegaLightsAccum.kshader";
-            megaLightsAccumCsDesc.EntryPoint = "CSMain";
-            m_MegaLightsAccumComputeShader = m_Device->CreateShader(megaLightsAccumCsDesc);
-            m_MegaLightsAccumPipelineState =
-                m_Device->CreateComputePipelineState({ m_MegaLightsAccumComputeShader.get() });
-
-            RHI::BufferDesc megaLightsAccumConstantBufferDesc;
-            megaLightsAccumConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-            megaLightsAccumConstantBufferDesc.SizeInBytes = sizeof(Passes::MegaLightsAccumConstants);
-            m_MegaLightsAccumConstantBuffer = m_Device->CreateBuffer(megaLightsAccumConstantBufferDesc);
+            // 【元の行位置のまま呼ぶ】上と同じ理由。DXR対応環境でだけ作る点も変えない
+            m_MegaLightsPasses->CreateStochasticPipelineStates(*m_Device, shaderDirectory);
 
             m_LightingPasses->CreateRaytracedAOResources(*m_Device, shaderDirectory);
 
@@ -1603,19 +1461,19 @@ namespace Kurenai
         // 候補プールと初期RIS(リザーバ)を共有し、そのあとの段だけが違う
         if (m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic)
         {
-            return m_MegaLightsInitialPipelineState != nullptr && m_MegaLightsShadePipelineState != nullptr &&
-                   m_MegaLightsTilePoolPipelineState != nullptr && m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
+            return m_MegaLightsPasses->HasCommonPipelineStates() && m_MegaLightsPasses->HasShadePipelineState() &&
+                   m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
                    m_MegaLightsReservoirBuffer != nullptr;
         }
         if (m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared)
         {
             // Shade ではなく Resolve が色を書く。時間・空間再利用は使わないので、
             // 履歴バッファや空間再利用のping-pongが無くても走れる
-            return m_MegaLightsInitialPipelineState != nullptr && m_MegaLightsResolvePipelineState != nullptr &&
-                   m_MegaLightsTilePoolPipelineState != nullptr && m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
+            return m_MegaLightsPasses->HasCommonPipelineStates() && m_MegaLightsPasses->HasResolvePipelineState() &&
+                   m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
                    m_MegaLightsReservoirBuffer != nullptr && m_MegaLightsHistoryGuide[0] != nullptr;
         }
-        return m_MegaLightsReferencePipelineState != nullptr;
+        return m_MegaLightsPasses->HasReferencePipelineState();
     }
 
     bool KurenaiEngine3D::ShouldRunLightCulling() const
@@ -5994,7 +5852,7 @@ namespace Kurenai
         // 今フレームの書き込み先が、次フレームでは履歴(読み込み元)になる
         {
             const bool temporalRan = ShouldRunMegaLights() && m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic &&
-                                     m_MegaLightsSettings.TemporalEnabled && m_MegaLightsTemporalPipelineState &&
+                                     m_MegaLightsSettings.TemporalEnabled && m_MegaLightsPasses->HasTemporalPipelineState() &&
                                      m_MegaLightsReservoirHistory[0] && m_MegaLightsHistoryGuide[0];
             // 【手法3もガイドを書くので同じ反転が要る】あちらは時間再利用を持たないが、
             // デノイザが読む「前フレームの幾何」を Resolve が書いている。反転しないと
@@ -6002,7 +5860,7 @@ namespace Kurenai
             // ならない(そのうえ RenderGraph は WAR の辺を張らないので競合する)
             const bool quadGuideRan = ShouldRunMegaLights() &&
                                       m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared &&
-                                      m_MegaLightsResolvePipelineState && m_MegaLightsHistoryGuide[0];
+                                      m_MegaLightsPasses->HasResolvePipelineState() && m_MegaLightsHistoryGuide[0];
             if (temporalRan || quadGuideRan)
             {
                 m_MegaLightsHistoryIndex ^= 1u;
@@ -6025,7 +5883,7 @@ namespace Kurenai
             const bool denoiseRan = ShouldRunMegaLights() &&
                                     (m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic ||
                                      m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared) &&
-                                    m_MegaLightsSettings.DenoiseEnabled && m_MegaLightsDenoiseTemporalPSO &&
+                                    m_MegaLightsSettings.DenoiseEnabled && m_MegaLightsPasses->HasDenoisePipelineStates() &&
                                     m_RenderTargets.MegaLightsDenoisedTexture != nullptr;
             if (denoiseRan)
             {

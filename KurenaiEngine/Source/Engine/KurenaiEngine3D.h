@@ -1248,51 +1248,12 @@ namespace Kurenai
         // RT反射の出力テクスチャだけは、レンダー解像度に追従して作り直すものなので
         // 持ち主をRenderTargets(RTReflectionTexture)にしてある
 
+        // MegaLightsのシェーダー・PSO・定数バッファは Passes/MegaLightsPasses へ移した。
+        // 生出力と候補プール本体は直接光・Presentも読むため RenderTargets が持つ
         MegaLightsSettings m_MegaLightsSettings;
-        // シェーダーとパイプラインステートはm_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る
-        std::unique_ptr<RHI::IRHIShader> m_MegaLightsReferenceComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsReferencePipelineState;
-        // 生出力は直接光とPresentも読むため、持ち主をRenderTargets::MegaLightsTextureへ移した
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsConstantBuffer;
-        // MegaLightsの候補プール(MegaLightsTilePool.hlsl)。タイルごとに「届くライト」を走査し、
-        // 寄与に比例した確率でK灯を重みつきで抽出する。読み手は Initial(RISの提案分布)と
-        // Spatial(不偏化の分母で「その灯が隣のタイルへ届くか」を判定する)。
-        // 参照実装はこれを使わず全灯を回すので、参照実装のときは出力が使われない。
-        // レイを撃たないパスだがMegaLightsと同時にしか使わないので、生成もRT対応時だけにしてある
-        std::unique_ptr<RHI::IRHIShader> m_MegaLightsTilePoolComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTilePoolPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsTilePoolConstantBuffer;
-        // 候補プール本体は、PresentPassのタイル表示も読むため持ち主を
-        // RenderTargets(m_RenderTargets.MegaLightsTilePoolBuffer)へ移した
 
-        // 確率的サンプリング本体。2パスに分かれる。
-        //   Initial (MegaLightsInitialSample.hlsl) … 候補プールからM個引きRISで1灯へ絞り、
-        //                                            結果を**リザーバ**として書く(色は作らない)
-        //   Shade   (MegaLightsShade.hlsl)         … そのリザーバへ影レイを1本撃ちHDRを書く
-        //
-        // 【なぜ分けるのか】時間・空間の再利用は「どの灯を選んだか」を持ち回って現フレームで
-        // 評価し直す形でしか書けない。選択とシェードが1パスに混ざっていると再利用の段を
-        // 差し込む場所が無い。出力先は参照実装と同じRenderTargets::MegaLightsTexture
-        // (同じ表示経路・同じ後段のままA/Bが撮れるようにするため)
-        std::unique_ptr<RHI::IRHIShader> m_MegaLightsInitialComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsInitialPipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_MegaLightsShadeComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsShadePipelineState;
-        // クアッド共有(手法3)の解決パス。Initial が書いた4画素ぶんのリザーバを読み、
-        // **自分の面で評価し直して平均する**。レイを1本も撃たないのでTLASを束縛しない。
-        // Shade と分けてあるのは、あちらが RayQuery を持ちSM6.5でしか焼けないのに対し、
-        // こちらはレイを撃たず3バリアントすべてで焼けるため
-        // (混ぜると使わないTLASを束縛したままレイ経路が残る)
-        std::unique_ptr<RHI::IRHIShader> m_MegaLightsResolveComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsResolvePipelineState;
-        // 2パスで共有する定数バッファ(中身はフレーム内で不変なのでInitial側で1回更新する)
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsStochasticConstantBuffer;
-        // 空間再利用の反復ごとの定数(中身は共有分と同じで、反復番号だけが違う)。
-        // 【1本を使い回してはいけない】UpdateBuffer は同じフレームで2回書くと
-        // 後の値が両方のパスに見えるため、反復の数だけバッファを分ける
         // 出所は Passes/MegaLightsConstants.h(移行中の別名)
         static constexpr uint32_t kMegaLightsMaxSpatialIterations = Passes::kMegaLightsMaxSpatialIterations;
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsSpatialConstantBuffer[kMegaLightsMaxSpatialIterations];
         // 1画素につき1リザーバ(16バイト)。MegaLightsCommon.hlsli の MegaLightsReservoir と
         // 一致させること。解像度に依存するためCreateRenderTargetsで作り直す。
         // 空間再利用は「読みながら同じバッファへ書けない」(近傍を読むので競合する)ため2本持つ
@@ -1310,13 +1271,6 @@ namespace Kurenai
         // --- デノイザ(段階5) ---
         // 【時空間再利用とは別物】あちらはリザーバ(どの灯を選ぶか)を混ぜ、こちらは出た色を
         // 空間・時間へならす。TAAの手前でノイズを落とすためのもの
-        std::unique_ptr<RHI::IRHIShader> m_MegaLightsDenoiseTemporalShader;
-        std::unique_ptr<RHI::IRHIShader> m_MegaLightsDenoiseAtrousShader;
-        std::unique_ptr<RHI::IRHIShader> m_MegaLightsDenoiseRemodulateShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsDenoiseTemporalPSO;
-        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsDenoiseAtrousPSO;
-        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsDenoiseRemodulatePSO;
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsDenoiseConstantBuffer;
         // 時間累積の履歴(rgb=復調済みの色)とモーメント。どちらもping-pong。
         // **RenderGraphがWARの辺を張らない**ので、読む側と書く側を必ず別にする
         std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoiseHistory[2];
@@ -1327,8 +1281,6 @@ namespace Kurenai
         // 復調を戻した最終出力は、持ち主をRenderTargets::MegaLightsDenoisedTextureへ移した
         uint32_t m_MegaLightsDenoiseHistoryIndex = 0u;
         bool m_MegaLightsDenoiseHistoryValid = false;
-        std::unique_ptr<RHI::IRHIShader> m_MegaLightsTemporalComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTemporalPipelineState;
         uint32_t m_MegaLightsHistoryIndex = 0u;
         // 履歴の中身が今の解像度・今のシーンのものとして使えるか。
         // バッファのクリアが無いRHIなので、無効な間はシェーダへ「履歴を読むな」と伝える
@@ -1342,10 +1294,6 @@ namespace Kurenai
         // 摂動を適用済みか(蓄積開始の1回だけ効かせる)
         bool m_MegaLightsPerturbApplied = false;
 
-        // 空間再利用(MegaLightsSpatial.hlsl)。近傍が選んだ灯を借りて自分の面で評価し直す。
-        // レイは1本も増えない ―― 借りるのは「どの灯か」だけ
-        std::unique_ptr<RHI::IRHIShader> m_MegaLightsSpatialComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsSpatialPipelineState;
         // いまリザーババッファを確保したときの標本数。**定数バッファへ渡す値と必ず一致させる**。
         // 食い違うと Initial が確保外へ書くか Resolve が別画素の標本を読み、
         // 例外もログも出ないまま絵だけが壊れる
@@ -1361,9 +1309,6 @@ namespace Kurenai
         // 画面キャプチャで得られるのはトーンマップ後の8bitで、トーンマップは凹関数のため
         // **偏りがゼロでもノイズがあるだけで平均が低く出る**。スクリーンショットをN枚平均しても
         // 検証にならないので、線形空間で足す場所をエンジン側に持つ
-        std::unique_ptr<RHI::IRHIShader> m_MegaLightsAccumComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsAccumPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsAccumConstantBuffer;
         // 蓄積バッファは、持ち主をRenderTargets::MegaLightsAccumBufferへ移した
         // これまでに足したフレーム数。表示側はこれで割る
         uint32_t m_MegaLightsAccumFrames = 0;
@@ -2178,9 +2123,6 @@ namespace Kurenai
         static constexpr int32_t kMegaLightsMaxSamplesPerPixel = 4;
     private:
 
-        std::unique_ptr<RHI::IRHIShader> m_LightCullingComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_LightCullingPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_LightCullingConstantBuffer;
         // ライトグリッド本体とタイル数は、3群(Lighting / MegaLights / Present)が読むため
         // 持ち主をRenderTargets(m_RenderTargets.LightTileBuffer / LightTileCountX / Y)へ移した
         // タイル容量の超過"条件"(シーンのライト数が容量を超えている)を検出した最初のフレームだけ
