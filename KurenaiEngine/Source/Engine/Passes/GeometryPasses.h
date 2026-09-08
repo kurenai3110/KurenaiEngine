@@ -100,6 +100,30 @@ namespace Kurenai
             void CreateSoftwareRasterVisibilityBuffer(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
             void ResetSoftwareRasterVisibilityBuffer();
 
+            // 増幅シェーダーが数え上げるカウンタバッファ。**呼び出し元のtry内から呼ぶこと**
+            // (bindlessへの登録と失敗時のログは KurenaiEngine3D 側が持つ)
+            void CreateMeshletCullStatsBuffer(RHI::IRHIDevice& device);
+            void ResetMeshletCullStatsBuffer() { m_MeshletCullStatsBuffer.reset(); }
+            RHI::IRHIBuffer* GetMeshletCullStatsBuffer() const { return m_MeshletCullStatsBuffer.get(); }
+            bool HasMeshletCullStatsBuffer() const { return m_MeshletCullStatsBuffer != nullptr; }
+
+            // Hi-Zの状態。ミップ段数はテクスチャを作り直すたびにエンジンが渡し、
+            // 「1回でも構築されたか」はHi-Zパスが実行時に立てる
+            void SetHiZMipLevels(uint32_t mipLevels) { m_HiZMipLevels = mipLevels; }
+            uint32_t GetHiZMipLevels() const { return m_HiZMipLevels; }
+            // 解像度変更とシーン読み込みで呼ぶ。次にHi-Zパスが1回走るまで
+            // オクルージョン判定を止める
+            void InvalidateHiZ() { m_HiZValid = false; }
+            bool IsHiZValid() const { return m_HiZValid; }
+            // 直前のフレームがHi-Zを深度プリパスから作った経路だったか(ログ用)
+            bool WasHiZFromDepthPrepassLastFrame() const { return m_HiZFromDepthPrepassLastFrame; }
+
+            // このフレームにCPUが発行したドロー数。エンジンのRender()が毎フレーム
+            // RenderStatsへ移してから0へ戻す
+            uint32_t GetDrawCallsGBuffer() const { return m_DrawCallsGBuffer; }
+            uint32_t GetDrawCallsDepthPrepass() const { return m_DrawCallsDepthPrepass; }
+            void ResetDrawCalls() { m_DrawCallsGBuffer = 0; m_DrawCallsDepthPrepass = 0; }
+
         private:
             KurenaiEngine3D& m_Engine;
 
@@ -198,13 +222,51 @@ namespace Kurenai
             std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletDebugPipelineState;
             std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletDebugPipelineStateMirrored;
 
-            // 階層深度(Hi-Z)。深度をミップチェーンへ落としてオクルージョン判定に使う。
-            // テクスチャ本体は RenderTargets::HiZTexture が持つ
+            // 階層深度(Hi-Z)。G-Buffer深度から、コンピュートシェーダーで1x1まで縮小する
+            // ミップチェーンを構築する。各ミップは2x2ブロックの最小値
+            // (Reverse-Zのため「最も遠い」深度)を保持する。テクスチャ本体は
+            // RenderTargets::HiZTexture が持つ。
+            //
+            // 消費者は2つ: デバッグ表示(Render Targets - Hi-Z)と、増幅シェーダーの
+            // オクルージョンカリング(GeometrySettings::OcclusionCullingEnabled)。
+            // **どちらも要らないフレームでは構築しない** ―― 1280x720で
+            // 「コピー1回 + ミップ段数-1回のディスパッチ」が走り、Intel UHD 620での実測で
+            // 1.19〜1.21ms(GPUフレーム時間30msの約4%)を占めるため
             std::unique_ptr<RHI::IRHIShader> m_HiZCopyComputeShader;
             std::unique_ptr<RHI::IRHIPipelineState> m_HiZCopyPipelineState;
             std::unique_ptr<RHI::IRHIShader> m_HiZDownsampleComputeShader;
             std::unique_ptr<RHI::IRHIPipelineState> m_HiZDownsamplePipelineState;
             std::unique_ptr<RHI::IRHIBuffer> m_HiZConstantBuffer;
+            // RenderTargets::HiZTextureのミップ段数。増幅シェーダーの定数へも配る
+            uint32_t m_HiZMipLevels = 1;
+            // RenderTargets::HiZTextureの中身が「1回でも構築されたHi-Z」になっているか。
+            //
+            // 【オクルージョン判定の門番】作った直後の中身は未定義で、それを深度として
+            // 判定すると視界内のほぼ全部を「隠れている」と誤判定しうる。
+            // 解像度変更・シーン読み込みでfalseへ戻し、Hi-Zパスが1回走ってからtrueにする
+            bool m_HiZValid = false;
+            // Hi-Zを深度プリパスから作った経路だったか。
+            //
+            // 【これが無いと切り替えを確かめられない】カメラが止まっていると新旧どちらの経路でも
+            // 間引き数が一致する(前フレームのHi-Zと今フレームのHi-Zが同じ内容になるため)。
+            // 「差が出ない」を合格と読まないために、経路そのものをログへ出す
+            bool m_HiZFromDepthPrepassLastFrame = false;
+
+            // 増幅シェーダーが数え上げる先。
+            // uint×3 = [判定, 視錐台+コーンで間引き, オクルージョンで間引き]。
+            // 受け皿のリングとbindless番号は KurenaiEngine3D 側が持つ
+            std::unique_ptr<RHI::IRHIBuffer> m_MeshletCullStatsBuffer;
+
+            // パスごとのドローコール数。
+            //
+            // 【パス別に分ける理由】これから何度も測る対象(メッシュレットによる1モデル1ドロー化、
+            // GPU駆動描画)で、「G-Bufferは減ったがシャドウは減っていない」のような片手落ちは
+            // パス別に見ないと気づけない。
+            //
+            // 数えるのはCPUが発行したDrawIndexed/DispatchMeshの回数で、
+            // 増幅シェーダーがカリングした後に実際にラスタライズされた塊の数ではない
+            uint32_t m_DrawCallsGBuffer = 0;
+            uint32_t m_DrawCallsDepthPrepass = 0;
 
             // モデル単位GPUカリングの候補。**この群が持ち主である。**
             // 間接描画のパスを区画ごとに複数登録し、そのExecuteラムダが揃って

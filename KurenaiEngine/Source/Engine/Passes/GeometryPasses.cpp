@@ -390,6 +390,14 @@ namespace Kurenai::Passes
         return true;
     }
 
+    void GeometryPasses::CreateMeshletCullStatsBuffer(RHI::IRHIDevice& device)
+    {
+        RHI::BufferDesc cullStatsDesc;
+        cullStatsDesc.Usage = RHI::BufferUsage::Structured;
+        cullStatsDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * kMeshletCullStatsCount;
+        cullStatsDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+        m_MeshletCullStatsBuffer = device.CreateBuffer(cullStatsDesc);
+    }
     void GeometryPasses::CreateSoftwareRasterResources(
         RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
     {
@@ -761,7 +769,7 @@ namespace Kurenai::Passes
         // 【Hi-Zは前フレームのもの】Hi-Zパスの登録はG-Bufferより後なので、ここが読むのは
         // 前フレームに書かれた内容になる。カメラ移動ぶんAABBを膨らませて視差を吸収する
         const bool modelCullGpuActive = frame.Settings.Geometry.ModelCullGpuEnabled && meshletPathActive
-            && m_ModelCullPipelineState && m_ModelCullCounterBuffer && !m_Engine.m_Scene.Instances.empty();
+            && m_ModelCullPipelineState && m_ModelCullCounterBuffer && !m_Engine.GetScene().Instances.empty();
 
         // hiZFromDepthPrepass = Hi-Zを**深度プリパスの深度から**作るか(宣言は上流にある)。
         // 作れるなら、G-Bufferの判定は今フレームのHi-Zで行える ――
@@ -828,7 +836,7 @@ namespace Kurenai::Passes
         {
             // 突き合わせ相手のCPU側の判定。G-Bufferのループが使うものと同じ錐台
             const FrustumPlanes cullFrustum = ExtractFrustumPlanes(viewProj);
-            modelCullDraws.reserve(m_Engine.m_Scene.Instances.size() * 2);
+            modelCullDraws.reserve(m_Engine.GetScene().Instances.size() * 2);
 
             // モデルLOD。フェード中は2段を重ねる。
             // 【プリパス・G-Bufferと同じ組になる】列挙も段の選択も、あちらと同じ
@@ -952,7 +960,7 @@ namespace Kurenai::Passes
             modelCullReady && frame.Settings.Geometry.ModelCullIndirectEnabled &&
             frame.Capabilities.IndirectDispatchMeshAvailable;
         m_ModelCullIndirectActiveLastFrame = modelCullIndirectActive;
-        m_Engine.m_HiZFromDepthPrepassLastFrame = hiZFromDepthPrepass;
+        m_HiZFromDepthPrepassLastFrame = hiZFromDepthPrepass;
         m_ModelCullDispatchCounts[0] = hiZFromDepthPrepass
             ? m_ModelCullPrepassCandidateCount
             : m_ModelCullCandidateCount;
@@ -1064,7 +1072,7 @@ namespace Kurenai::Passes
                         cullConstants.CullPrevViewProj = taaPrevViewProj;
                     }
                     cullConstants.CullParams = {
-                        count, m_Engine.m_HiZMipLevels, occlusionEnabled ? 1u : 0u, kModelCullArgsBaseOffset
+                        count, m_HiZMipLevels, occlusionEnabled ? 1u : 0u, kModelCullArgsBaseOffset
                     };
                     cullConstants.CullRegionParams = {
                         regionStride, kModelCullRegionCount, beginIndex, statsBeginIndex
@@ -1117,7 +1125,7 @@ namespace Kurenai::Passes
                     cmd->SetComputePipelineState(m_HiZDownsamplePipelineState.get());
                     uint32_t hizSrcWidth = renderWidth;
                     uint32_t hizSrcHeight = renderHeight;
-                    for (uint32_t mip = 1; mip < m_Engine.m_HiZMipLevels; ++mip)
+                    for (uint32_t mip = 1; mip < m_HiZMipLevels; ++mip)
                     {
                         const uint32_t hizDstWidth = std::max(1u, hizSrcWidth / 2);
                         const uint32_t hizDstHeight = std::max(1u, hizSrcHeight / 2);
@@ -1136,7 +1144,7 @@ namespace Kurenai::Passes
 
                     // ここまで来たら全ミップに実データが入った。
                     // 【Executeの中で立てること】パスの登録だけでは実行されたことにならない
-                    m_Engine.m_HiZValid = true;
+                    m_HiZValid = true;
                 },
             });
         };
@@ -1190,25 +1198,25 @@ namespace Kurenai::Passes
                                 cmd, kModelCullRegionPrepassOpaque, m_DepthPrepassMeshletPipelineState.get(),
                                 currentPipelineState, frameConstantBuffer, materialSamplers))
                         {
-                            ++m_Engine.m_DrawCallsDepthPrepass;
+                            ++m_DrawCallsDepthPrepass;
                         }
                         if (IssueModelCullIndirect(
                                 cmd, kModelCullRegionPrepassOpaqueMirrored,
                                 m_DepthPrepassMeshletPipelineStateMirrored.get(), currentPipelineState, frameConstantBuffer, materialSamplers))
                         {
-                            ++m_Engine.m_DrawCallsDepthPrepass;
+                            ++m_DrawCallsDepthPrepass;
                         }
                         if (IssueModelCullIndirect(
                                 cmd, kModelCullRegionPrepassCutout,
                                 m_DepthPrepassMeshletCutoutPipelineState.get(), currentPipelineState, frameConstantBuffer, materialSamplers))
                         {
-                            ++m_Engine.m_DrawCallsDepthPrepass;
+                            ++m_DrawCallsDepthPrepass;
                         }
                         if (IssueModelCullIndirect(
                                 cmd, kModelCullRegionPrepassCutoutMirrored,
                                 m_DepthPrepassMeshletCutoutPipelineStateMirrored.get(), currentPipelineState, frameConstantBuffer, materialSamplers))
                         {
-                            ++m_Engine.m_DrawCallsDepthPrepass;
+                            ++m_DrawCallsDepthPrepass;
                         }
                     }
                     // G-Bufferと同じカメラなので、間引かれるモデルも同じになる
@@ -1293,7 +1301,7 @@ namespace Kurenai::Passes
                                     objectConstantBuffer, &objectConstants, sizeof(objectConstants));
                                 cmd->SetConstantBuffer(1, objectConstantBuffer);
                                 cmd->DispatchMesh(groupCount, 1, 1);
-                                ++m_Engine.m_DrawCallsDepthPrepass;
+                                ++m_DrawCallsDepthPrepass;
                             };
 
                             // 不透明ぶん(ピクセルシェーダー無し)。半透明とカットアウトを落とす
@@ -1359,7 +1367,7 @@ namespace Kurenai::Passes
                             cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                             cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                             cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
-                            ++m_Engine.m_DrawCallsDepthPrepass;
+                            ++m_DrawCallsDepthPrepass;
                             return true;
                         });
                 },
@@ -1413,7 +1421,7 @@ namespace Kurenai::Passes
                 // 別パスに分けるとRenderGraphの登録順への依存が1本増える
                 if (meshletCullStatsActive)
                 {
-                    cmd->ClearUnorderedAccessBufferUint(m_Engine.m_MeshletCullStatsBuffer.get(), 0);
+                    cmd->ClearUnorderedAccessBufferUint(m_MeshletCullStatsBuffer.get(), 0);
                 }
 
                 cmd->SetViewport(gbufferViewport);
@@ -1517,7 +1525,7 @@ namespace Kurenai::Passes
                                          : m_GBufferMeshletPipelineState.get(),
                             currentPipelineState, frameConstantBuffer, materialSamplers))
                     {
-                        ++m_Engine.m_DrawCallsGBuffer;
+                        ++m_DrawCallsGBuffer;
                     }
                     if (IssueModelCullIndirect(
                             cmd, kModelCullRegionGBufferMirrored,
@@ -1525,7 +1533,7 @@ namespace Kurenai::Passes
                                          : m_GBufferMeshletPipelineStateMirrored.get(),
                             currentPipelineState, frameConstantBuffer, materialSamplers))
                     {
-                        ++m_Engine.m_DrawCallsGBuffer;
+                        ++m_DrawCallsGBuffer;
                     }
                 }
 
@@ -1576,7 +1584,7 @@ namespace Kurenai::Passes
                         const uint32_t groupCount = (lodModel.TotalMeshletCount
                             + ShaderInterop::kAmplificationGroupSize - 1) / ShaderInterop::kAmplificationGroupSize;
                         cmd->DispatchMesh(groupCount, 1, 1);
-                        ++m_Engine.m_DrawCallsGBuffer;
+                        ++m_DrawCallsGBuffer;
                         return true;
                     },
                     [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& lodModel,
@@ -1611,7 +1619,7 @@ namespace Kurenai::Passes
                             // Water.hlslのPSMainだけが読むt7。通常のGBuffer PSOはt7を宣言していないため
                             // 水面以外のインスタンスではバインドしない。
                             // 【t6は使えない】t6はbent normal(34章)が使う
-                            cmd->SetTexture(7, m_Engine.m_WaterNormalMapTexture.get());
+                            cmd->SetTexture(7, m_Engine.GetWaterNormalMapTexture());
                         }
 
                         // 【毎回張り直す】頂点シェーダー用SRVはt0の1本しかなく、
@@ -1624,7 +1632,7 @@ namespace Kurenai::Passes
                         cmd->SetVertexBuffer(mesh.VertexBuffer.get());
                         cmd->SetIndexBuffer(mesh.IndexBuffer.get());
                         cmd->DrawIndexed(mesh.IndexCount, 0, 0, unit.InstanceCount);
-                        ++m_Engine.m_DrawCallsGBuffer;
+                        ++m_DrawCallsGBuffer;
                         return true;
                     });
 
@@ -1636,8 +1644,8 @@ namespace Kurenai::Passes
                 if (meshletCullStatsActive)
                 {
                     cmd->CopyBufferToReadback(
-                        m_Engine.m_MeshletCullStatsReadback[m_Engine.m_MeshletCullStatsRingIndex].get(),
-                        m_Engine.m_MeshletCullStatsBuffer.get(),
+                        m_Engine.GetMeshletCullStatsReadbackSlot(),
+                        m_MeshletCullStatsBuffer.get(),
                         static_cast<uint32_t>(sizeof(uint32_t)) * kMeshletCullStatsCount);
                 }
             },
@@ -1662,7 +1670,7 @@ namespace Kurenai::Passes
                 .Execute = [this](RHI::IRHICommandList* cmd)
                 {
                     cmd->CopyBufferToReadback(
-                        m_Engine.m_ModelCullReadback[m_Engine.m_ModelCullRingIndex].get(), m_ModelCullCounterBuffer.get(),
+                        m_Engine.GetModelCullReadbackSlot(), m_ModelCullCounterBuffer.get(),
                         static_cast<uint32_t>(sizeof(uint32_t)) * kModelCullCounterCount);
                 },
             });
@@ -1679,7 +1687,7 @@ namespace Kurenai::Passes
         // 深度は丸め誤差とフィルルールの差を除いて一致するはず。差が面全体に出たら
         // 座標変換の間違いで、シルエットの±1画素ならフィルルールの差(想定内)
         const bool softwareRasterPassRuns = frame.Settings.Geometry.SoftwareRasterEnabled && frame.Capabilities.SoftwareRasterAvailable &&
-                                            m_SoftwareRasterVisibilityBuffer && !m_Engine.m_Scene.Instances.empty();
+                                            m_SoftwareRasterVisibilityBuffer && !m_Engine.GetScene().Instances.empty();
         bb.SoftwareRasterPassRuns = softwareRasterPassRuns;
         if (softwareRasterPassRuns)
         {
@@ -1732,7 +1740,7 @@ namespace Kurenai::Passes
             // 撮った深度」になる。それで遮蔽を判定すると見えているものを消す。
             // 【トグルを往復させると必ず起きる】メッシュレット描画やオクルージョンを一度OFFにして
             // ONへ戻す操作で踏むので、"構築しなかった"を必ず記録しておく
-            m_Engine.m_HiZValid = false;
+            m_HiZValid = false;
         }
         if (hiZPassRuns && !hiZFromDepthPrepass)
         {

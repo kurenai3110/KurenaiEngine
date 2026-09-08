@@ -124,10 +124,6 @@ namespace Kurenai
     class KURENAI_3D_API KurenaiEngine3D : public KurenaiEngineBase
     {
     public:
-        // 切り出したパス群は、まだエンジンのprivate(PSO・定数バッファ・統計カウンタ)を
-        // m_Engine越しに触る。所有権を群へ移し終えたらこのfriendは外す(段階6)
-        friend class Passes::GeometryPasses;
-
         // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
         //   実行時に「システム」パネルからも変更できる)。
         // initialSceneIndex: 起動時に読み込むシーンの番号(Assets/Scenes/*.ksceneをファイル名の
@@ -499,7 +495,7 @@ namespace Kurenai
         std::atomic<uint32_t>& GetSceneLoadProgressLoaded() { return m_SceneLoadProgressLoaded; }
         std::atomic<uint32_t>& GetSceneLoadProgressTotal() { return m_SceneLoadProgressTotal; }
 
-        uint32_t GetHiZMipLevels() const { return m_HiZMipLevels; }
+        uint32_t GetHiZMipLevels() const;
         const std::vector<Assets::EmissiveProxy>& GetEmissiveProxies() const { return m_EmissiveProxies; }
         const RenderStats& GetRenderStats() const { return m_RenderStats; }
         RHI::IRHIGPUProfiler* GetGPUProfiler() const { return m_GPUProfiler.get(); }
@@ -507,6 +503,19 @@ namespace Kurenai
         uint32_t GetProbeRealtimeProbeIndex() const;
         uint32_t GetProbeRealtimeFace() const;
         const Assets::Scene& GetScene() const { return m_Scene; }
+        // 【publicにしてある】G-Bufferパスが水面インスタンスのt7へ張る。
+        // 差し替えるのはシーン読み込み(Scene/SceneLoadService.cpp)なので持ち主は変えない
+        RHI::IRHITexture* GetWaterNormalMapTexture() const { return m_WaterNormalMapTexture.get(); }
+        // 【publicにしてある】カウンタをGPUからコピーするのはジオメトリのパス群で、
+        // 読み戻して数値にするのはこちらのRender()。受け皿のリングはこちらが持つ
+        RHI::IRHIBuffer* GetMeshletCullStatsReadbackSlot() const
+        {
+            return m_MeshletCullStatsReadback[m_MeshletCullStatsRingIndex].get();
+        }
+        RHI::IRHIBuffer* GetModelCullReadbackSlot() const
+        {
+            return m_ModelCullReadback[m_ModelCullRingIndex].get();
+        }
         const RenderCapabilities& GetRenderCapabilities() const { return m_RenderCapabilities; }
         bool GetHasGIVolume() const { return m_GIResources.HasGIVolume; }
         const Assets::GIVolume& GetGIVolume() const { return m_GIResources.GIVolume; }
@@ -762,8 +771,9 @@ namespace Kurenai
         // 【エンジンへの参照を持たせている】段階6は「登録順を1つも変えない」ことだけを
         // 決め手に進めており、その担保はパスマニフェストの完全一致である。状態の引っ越しと
         // 登録位置の移動を同時にやると、食い違ったときにどちらが原因か分けられない。
-        // まず登録コードだけを機械的に移し、リソースの所有権は後から群へ移す。
-        // それまでの間、群はここのprivateをm_Engine越しに触る(下のfriend宣言)。
+        // まず登録コードだけを機械的に移し、リソースの所有権は後から群へ移した。
+        // 【所有権の引っ越しは完了している】群はエンジンのprivateを触らず、
+        // 必要なものは公開のアクセサ(GetScene / ForEachGeometryDraw など)から取る。
         // 不完全型のままにするため、デストラクタは.cpp側で定義する
         std::unique_ptr<Passes::DDGIPasses> m_DDGIPasses;
         std::unique_ptr<Passes::EnvironmentPasses> m_EnvironmentPasses;
@@ -958,7 +968,8 @@ namespace Kurenai
         // 増幅シェーダーが数え上げる先。uint×3 = [判定, 視錐台+コーンで間引き, オクルージョンで間引き]
         // 出所は Passes/GeometryConstants.h(移行中の別名)
         static constexpr uint32_t kMeshletCullStatsCount = Passes::kMeshletCullStatsCount;
-        std::unique_ptr<RHI::IRHIBuffer> m_MeshletCullStatsBuffer;
+        // カウンタバッファ本体は Passes::GeometryPasses が持つ(数えるのが増幅シェーダーのため)。
+
         // カウンタをCPUへ持ってくるための受け皿。
         //
         // 【リングにする理由】コピーを積んだ直後に読んでもGPUはまだ実行していない。
@@ -1013,12 +1024,6 @@ namespace Kurenai
         // 区画ごとにGPUが実際に発行したドロー数(読み戻した値)。
         // ここが0のまま絵が出ているなら、間接描画ではなく従来のCPUループが描いている
         uint32_t m_ModelCullRegionIssued[kModelCullRegionCount]{};
-        // Hi-Zを深度プリパスから作った経路だったか。
-        //
-        // 【これが無いと切り替えを確かめられない】カメラが止まっていると新旧どちらの経路でも
-        // 間引き数が一致する(前フレームのHi-Zと今フレームのHi-Zが同じ内容になるため)。
-        // 「差が出ない」を合格と読まないために、経路そのものをログへ出す
-        bool m_HiZFromDepthPrepassLastFrame = false;
         // GPUの数値と突き合わせるためのCPU側の値を積むリング。
         //
         // 【GPUの数値は2フレーム遅れなので、CPU側も同じだけ遅らせて比べる】
@@ -1110,21 +1115,9 @@ namespace Kurenai
         bool m_DroneShowLightTileOverflowLogged = false;
         bool m_DroneShowLightValuesLogged = false;
 
-        // Hi-Zミップチェーン: G-Buffer深度から、コンピュートシェーダーで1x1まで縮小するミップチェーンを
-        // 構築するパス。各ミップは2x2ブロックの最小値(Reverse-Zのため「最も遠い」深度)を保持する。
-        //
-        // 消費者は2つ: デバッグ表示(Render Targets - Hi-Z)と、増幅シェーダーの
-        // オクルージョンカリング(m_GeometrySettings.OcclusionCullingEnabled)。**どちらも要らないフレームでは
-        // 構築しない** ―― 1280x720で「コピー1回 + ミップ段数-1回のディスパッチ」が走り、
-        // Intel UHD 620での実測で1.19〜1.21ms(GPUフレーム時間30msの約4%)を占めるため
-        uint32_t m_HiZMipLevels = 1;
-        // デバッグ表示(Render Targets - Hi-Z)で確認するミップレベルはm_DebugViewSettings.HiZDebugMipLevelへ移した
-        // RenderTargets::HiZTextureの中身が「1回でも構築されたHi-Z」になっているか。
-        //
-        // 【オクルージョン判定の門番】CreateHiZTextureが作った直後の中身は未定義で、
-        // それを深度として判定すると視界内のほぼ全部を「隠れている」と誤判定しうる。
-        // 解像度変更・シーン読み込みでfalseへ戻し、Hi-Zパスが1回走ってからtrueにする
-        bool m_HiZValid = false;
+        // Hi-Zのミップ段数と「1回でも構築されたか」は Passes::GeometryPasses が持つ
+        // (構築するのがHi-Zパス自身のため)。デバッグ表示で確認するミップレベルは
+        // m_DebugViewSettings.HiZDebugMipLevelへ移した
 
         ReflectionSettings m_ReflectionSettings;
         // UIの「既定値に戻す」(右クリック)が戻る先。シーン読み込み時に決まった手法を控えておく。
@@ -1223,7 +1216,7 @@ namespace Kurenai
         // 【publicにしてある】呼ぶのはPasses::PresentPassだけだが、名前を焼く対象は
         // エンジン全体のテクスチャ表(BuildDumpableTextureTable)なので、この機能を
         // Present群へ降ろすことはできない。**旗の判定と下ろしをここへ閉じておく**と、
-        // 群がエンジンのメンバ変数を触る必要が無くなり、friend を外せる
+        // 群がエンジンのメンバ変数を触らずに済む
         void ApplyDebugNamesIfDirty();
 
     private:
@@ -2402,8 +2395,10 @@ namespace Kurenai
         uint64_t m_FrameStatsMeshletOcclusionCulledSum = 0;
         uint32_t m_FrameStatsMeshletSampleCount = 0;
 
-        // パス別のドローコール数(1フレーム分)。フラスタムカリングの統計と同じく
+        // パス別のドローコール数の集計(1フレーム分)。フラスタムカリングの統計と同じく
         // フレーム先頭でリセットし、LogFrameStatsIfDueが集計期間の平均として出す。
+        // 数える本体は Passes::GeometryPasses(G-Buffer・深度プリパス)と
+        // Passes::ShadowPasses が持ち、ここはその和を積むだけ。
         //
         // 【なぜパスごとに分けるのか】フラスタムカリングの統計が全パス合計になっていて、
         // どのパスが何回描いているのかが分からない。ドローコールの削減はこのエンジンで
@@ -2411,12 +2406,8 @@ namespace Kurenai
         // 「G-Bufferは減ったがシャドウは減っていない」のような片手落ちは
         // パス別に見ないと気づけない。
         //
-        // 数えるのはCPUが発行したDrawIndexed/DispatchMeshの回数で、
-        // 増幅シェーダーがカリングした後に実際にラスタライズされた塊の数ではない
-        uint32_t m_DrawCallsGBuffer = 0;
-        uint32_t m_DrawCallsDepthPrepass = 0;
         // 直前に描き終えたフレームの値はm_RenderStats.DrawCalls*LastFrameへ出す。
-        // **UIパネルはこちらを読むこと** ―― 上のカウンタはフレーム先頭で0に戻るため、
+        // **UIパネルはこちらを読むこと** ―― パス群のカウンタはフレーム先頭で0に戻るため、
         // Renderの外で描かれるUIからは常に0に見える
         uint64_t m_FrameStatsDrawCallsGBufferSum = 0;
         uint64_t m_FrameStatsDrawCallsShadowSum = 0;

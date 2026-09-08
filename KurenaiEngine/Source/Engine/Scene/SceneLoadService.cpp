@@ -13,6 +13,7 @@
 #include "Core/Logger.h"
 #include "Core/StringUtil.h"
 #include "../Passes/EnvironmentPasses.h"
+#include "../Passes/GeometryPasses.h"
 #include "../Passes/PostProcessPasses.h"
 #include "../Passes/ReflectionProbePasses.h"
 
@@ -927,8 +928,8 @@ namespace Kurenai
 
         // Hi-Zにも前のシーンの深度が入っている。カメラが新シーンの初期位置へ飛ぶ以上、
         // それで遮蔽を判定すると見えているものを消しうる。TAAの履歴と同じ理由で捨てる
-        // (ApplyLoadedSceneはRenderスレッドから呼ばれ、m_HiZValidもRenderスレッドしか触らない)
-        m_HiZValid = false;
+        // (ApplyLoadedSceneはRenderスレッドから呼ばれ、Hi-Zの有効フラグもRenderスレッドしか触らない)
+        m_GeometryPasses->InvalidateHiZ();
 
         // ホットリロードの基準時刻を、いま読んだファイルの更新時刻で取り直す。
         // これをしないと (1)シーンを切り替えたあとも前のファイルを見続ける

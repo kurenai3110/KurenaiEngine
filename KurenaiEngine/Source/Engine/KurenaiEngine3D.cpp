@@ -770,21 +770,20 @@ namespace Kurenai
         {
             try
             {
-                RHI::BufferDesc cullStatsDesc;
-                cullStatsDesc.Usage = RHI::BufferUsage::Structured;
-                cullStatsDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * kMeshletCullStatsCount;
-                cullStatsDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
-                m_MeshletCullStatsBuffer = m_Device->CreateBuffer(cullStatsDesc);
+                // 【元の行位置のまま呼ぶ】DX12はディスクリプタ枠を生成順に割り当てるため、
+                // 所有権をGeometryPassesへ移しても生成の順序はここから動かさない
+                m_GeometryPasses->CreateMeshletCullStatsBuffer(*m_Device);
 
                 // 【SRVではなくUAVを登録する】増幅シェーダーは読むのではなく書く。
                 // RegisterBindless(SRV)の番号を渡すと読み取り専用のビューへ書き込むことになる
-                m_MeshletCullStatsBindlessIndex = m_Device->RegisterBindlessUAV(m_MeshletCullStatsBuffer.get());
+                m_MeshletCullStatsBindlessIndex =
+                    m_Device->RegisterBindlessUAV(m_GeometryPasses->GetMeshletCullStatsBuffer());
                 if (m_MeshletCullStatsBindlessIndex == RHI::kInvalidBindlessIndex)
                 {
                     Core::Logger::Warning(
                         "KurenaiEngine3D",
                         "メッシュレットカリングの統計バッファをbindlessへ登録できませんでした(統計を無効にします)");
-                    m_MeshletCullStatsBuffer.reset();
+                    m_GeometryPasses->ResetMeshletCullStatsBuffer();
                 }
                 else
                 {
@@ -792,8 +791,9 @@ namespace Kurenai
                     {
                         RHI::BufferDesc readbackDesc;
                         readbackDesc.Usage = RHI::BufferUsage::Readback;
-                        readbackDesc.SizeInBytes = cullStatsDesc.SizeInBytes;
-                        readbackDesc.StrideInBytes = cullStatsDesc.StrideInBytes;
+                        readbackDesc.SizeInBytes =
+                            static_cast<uint32_t>(sizeof(uint32_t)) * kMeshletCullStatsCount;
+                        readbackDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
                         m_MeshletCullStatsReadback[i] = m_Device->CreateBuffer(readbackDesc);
                     }
                 }
@@ -804,7 +804,7 @@ namespace Kurenai
                 Core::Logger::Warning(
                     "KurenaiEngine3D",
                     std::string("メッシュレットカリングの統計の初期化に失敗したため無効にします: ") + e.what());
-                m_MeshletCullStatsBuffer.reset();
+                m_GeometryPasses->ResetMeshletCullStatsBuffer();
                 for (auto& readback : m_MeshletCullStatsReadback)
                 {
                     readback.reset();
@@ -2000,6 +2000,10 @@ namespace Kurenai
         return m_GeometrySettings.MeshletRenderingEnabled && m_GeometryPasses->HasMeshletPipelineState();
     }
 
+    uint32_t KurenaiEngine3D::GetHiZMipLevels() const
+    {
+        return m_GeometryPasses->GetHiZMipLevels();
+    }
     bool KurenaiEngine3D::IsMeshVisibleCounted(
         const Rendering::FrustumPlanes& frustum, const Assets::ModelInstance& instance,
         const Assets::Model& model, const Assets::Mesh& mesh)
@@ -2277,11 +2281,12 @@ namespace Kurenai
             // m_TAAHistoryIndexが今フレームの書き込み先。
             m_RenderTargets.CreateTAAHistory(*m_Device, width, height);
 
-            m_HiZMipLevels = ComputeMipLevelCount(width, height);
-            m_RenderTargets.CreateHiZ(*m_Device, width, height, m_HiZMipLevels);
+            const uint32_t hiZMipLevels = ComputeMipLevelCount(width, height);
+            m_GeometryPasses->SetHiZMipLevels(hiZMipLevels);
+            m_RenderTargets.CreateHiZ(*m_Device, width, height, hiZMipLevels);
             m_DebugViewSettings.HiZDebugMipLevel = 0;
             // 作り直した直後の中身は未定義。Hi-Zパスが1回走るまでオクルージョン判定を止める
-            m_HiZValid = false;
+            m_GeometryPasses->InvalidateHiZ();
 
             // タイルライトカリングのライトグリッド。タイル数は解像度に依存するためここで作り直す。
             // 端のタイルは部分的にしか埋まらないので切り上げる
@@ -3369,12 +3374,11 @@ namespace Kurenai
         // 【0に戻す前に前フレームの値を控える】UIパネルはRenderの外で描かれるため、
         // 現在のカウンタを読むと必ずリセット直後の0になる(実際にそう表示されていた)。
         // 完成した最後のフレームの値を別に持たせる
-        m_RenderStats.DrawCallsGBufferLastFrame = m_DrawCallsGBuffer;
+        m_RenderStats.DrawCallsGBufferLastFrame = m_GeometryPasses->GetDrawCallsGBuffer();
         m_RenderStats.DrawCallsShadowLastFrame = m_ShadowPasses->GetDrawCalls();
-        m_RenderStats.DrawCallsDepthPrepassLastFrame = m_DrawCallsDepthPrepass;
-        m_DrawCallsGBuffer = 0;
+        m_RenderStats.DrawCallsDepthPrepassLastFrame = m_GeometryPasses->GetDrawCallsDepthPrepass();
+        m_GeometryPasses->ResetDrawCalls();
         m_ShadowPasses->ResetDrawCalls();
-        m_DrawCallsDepthPrepass = 0;
         // bindless区画の使用数を控える(UIパネルは m_Device へ直接触れないため。
         // m_RenderCapabilities.MeshShaderAvailable と同じ扱い)。登録はシーン読み込み時にしか起きないので、
         // フレームごとに1回問い合わせるだけで足りる
@@ -4277,7 +4281,8 @@ namespace Kurenai
         // メッシュレットカリングの統計をこのフレームで数えるか。
         // 増幅シェーダーが走らなければ数える相手がいない
         const bool meshletCullStatsActive =
-            m_GeometrySettings.MeshletCullStatsEnabled && meshletPathActive && m_MeshletCullStatsBuffer != nullptr;
+            m_GeometrySettings.MeshletCullStatsEnabled && meshletPathActive
+            && m_GeometryPasses->HasMeshletCullStatsBuffer();
 
         FrameConstants constants;
         const DirectX::XMMATRIX viewProj = viewMatrix * jitteredProj;
@@ -4622,7 +4627,7 @@ namespace Kurenai
         // 本物である」ことの両方が要る。どちらかが欠けたフレームでは判定を丸ごと止める ――
         // 初回フレームや解像度変更の直後にここを通すと、未定義の深度で視界内をまとめて消す
         const bool occlusionCullEnabledThisFrame =
-            occlusionCullingActive && m_HiZValid && m_TAAPrevViewProjValid;
+            occlusionCullingActive && m_GeometryPasses->IsHiZValid() && m_TAAPrevViewProjValid;
 
         // 深度プリパスが走るなら、その深度からHi-Zを作れる。**そのフレームのG-Bufferは
         // 前フレームのHi-Zを待たなくてよい** ―― 上の2条件はどちらも要らなくなる。
@@ -4654,7 +4659,7 @@ namespace Kurenai
             (occlusionCullEnabledThisFrame || hiZFromDepthPrepass) ? 1.0f : 0.0f,
             m_GeometrySettings.OcclusionCullRadiusScale,
             cameraMoveDistance,
-            static_cast<float>(m_HiZMipLevels),
+            static_cast<float>(m_GeometryPasses->GetHiZMipLevels()),
         };
         // Hi-Zのミップ0はG-Buffer深度と同じ解像度で作られる(CreateRenderTargets)
         constants.HiZScreenParams = {

@@ -822,9 +822,9 @@ namespace Kurenai
         m_FrameStatsLODFadingSum += m_RenderStats.LODFadingCount;
         m_FrameStatsMeshCullTestedSum += m_MeshCullTested;
         m_FrameStatsMeshCullCulledSum += m_MeshCullCulled;
-        m_FrameStatsDrawCallsGBufferSum += m_DrawCallsGBuffer;
+        m_FrameStatsDrawCallsGBufferSum += m_GeometryPasses->GetDrawCallsGBuffer();
         m_FrameStatsDrawCallsShadowSum += m_ShadowPasses->GetDrawCalls();
-        m_FrameStatsDrawCallsDepthPrepassSum += m_DrawCallsDepthPrepass;
+        m_FrameStatsDrawCallsDepthPrepassSum += m_GeometryPasses->GetDrawCallsDepthPrepass();
         m_FrameStatsInstancedBatchSum += m_InstancedBatchCount;
         m_FrameStatsInstancedInstanceSum += m_InstancedInstanceCount;
 
@@ -1089,7 +1089,7 @@ namespace Kurenai
             std::snprintf(
                 modelCullPathText, sizeof(modelCullPathText),
                 "  Hi-Zの出どころ: %s / 判定ディスパッチ: プリパスぶん %u + G-Bufferぶん %u",
-                m_HiZFromDepthPrepassLastFrame ? "深度プリパス(今フレーム)" : "G-Bufferの後(前フレーム)",
+                m_GeometryPasses->WasHiZFromDepthPrepassLastFrame() ? "深度プリパス(今フレーム)" : "G-Bufferの後(前フレーム)",
                 m_GeometryPasses->GetModelCullDispatchCount(0), m_GeometryPasses->GetModelCullDispatchCount(1));
             Core::Logger::Info("Perf", modelCullPathText);
 
