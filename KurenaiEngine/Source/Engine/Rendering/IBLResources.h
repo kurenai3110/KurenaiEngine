@@ -34,7 +34,7 @@ namespace Kurenai::Rendering
         void CreateEnvironmentMaps(
             RHI::IRHIDevice& device, uint32_t irradianceSize, uint32_t prefilterBaseSize,
             uint32_t prefilterMipLevels);
-        // BRDF積分LUT。**中間バッファ(m_BRDFLUTScratchTexture)の生成を挟んでから呼ぶこと**
+        // BRDF積分LUT。**中間バッファ(EnvironmentPassesのm_BRDFLUTScratchTexture)の生成を挟んでから呼ぶこと**
         void CreateBRDFLUT(RHI::IRHIDevice& device, uint32_t size);
         void CreatePrefilterConstantBuffer(RHI::IRHIDevice& device, uint32_t sizeInBytes);
     };

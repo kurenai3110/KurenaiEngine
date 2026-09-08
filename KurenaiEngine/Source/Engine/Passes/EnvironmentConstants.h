@@ -63,6 +63,8 @@ namespace Kurenai::Passes
         // 無いため、射影側は独立した固定解像度を持つ(IBLConvolve.hlslのSHProjectionSizeコメント参照)。
         // 64×64×6=24,576テクセルはCSIrradianceの約9,750万サンプルに対し十分密で、
         // 9個の係数を求めるだけの積分には(理論上は32でも足りる範囲)余裕を持たせた値
+        // 実数SH L2(l<=2)の項数
+        inline constexpr uint32_t kSHCoeffCount = 9;
         inline constexpr uint32_t kSHProjectionSize = 64;
 
         // IBLConvolve.hlsl(CSIrradiance/CSPrefilter)へ、処理対象の面(キューブマップは面ごとに

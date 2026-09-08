@@ -12,6 +12,7 @@
 #include "Assets/SceneLoader.h"
 #include "Core/Logger.h"
 #include "Core/StringUtil.h"
+#include "../Passes/EnvironmentPasses.h"
 #include "../Passes/PostProcessPasses.h"
 #include "../Passes/ReflectionProbePasses.h"
 
@@ -756,7 +757,7 @@ namespace Kurenai
         m_WaterSettings.WaveStrength = m_Scene.WaterWaveStrength;
 
         // スカイボックスが差し替わった場合のみ非nullptr。IBLの拡散イラディアンス・プリフィルタ済み
-        // 鏡面はスカイボックスから焼かれるため、差し替えたらm_IBLBakedを倒して焼き直させる
+        // 鏡面はスカイボックスから焼かれるため、差し替えたら焼き上がりの旗を倒して焼き直させる
         if (loaded.SkyboxTexture)
         {
             // 旧スカイボックスもアセット由来なのでLoaderスレッドへ破棄を委ねる。
@@ -767,10 +768,10 @@ namespace Kurenai
 
             m_SkyboxTexture = std::move(loaded.SkyboxTexture);
             m_CurrentSkyboxPath = loaded.SkyboxPath;
-            m_IBLBaked = false;
+            m_EnvironmentPasses->GetIBLBaked() = false;
             // 検証用の拡散イラディアンスマップも古いスカイボックス由来のものになるため倒す
             // (実際に焼き直すのは検証トグル・デバッグ表示が有効なときだけ)
-            m_IBLIrradianceBaked = false;
+            m_EnvironmentPasses->GetIBLIrradianceBaked() = false;
         }
 
         // 水面法線マップが差し替わった場合のみ非nullptr。スカイボックスとまったく同じ方式で

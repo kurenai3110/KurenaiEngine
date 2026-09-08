@@ -258,6 +258,9 @@ namespace Kurenai::Rendering
         // 今フレームのTAA履歴の書き込み先(RenderTargets::TAAHistoryの添字)。
         // もう一方が前フレームの結果=履歴。Render()の末尾で入れ替わる
         uint32_t TAAHistoryIndex = 0;
+        // 雲による平均透過率のキャッシュ。空のベイクのタイミングでしか更新しないため、
+        // 焼き込む値にだけ掛ける(被覆率が変わらない限り1.0)
+        float ActiveCloudTransmittance = 1.0f;
         // 前フレームからの経過秒。自動露出の時間順応だけが読む。
         // **上限の切り詰めは読む側が行う**(一時停止やシーン読み込み直後の巨大なdtへの備え)
         float DeltaTime = 0.0f;

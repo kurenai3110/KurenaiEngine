@@ -127,7 +127,6 @@ namespace Kurenai
         // 切り出したパス群は、まだエンジンのprivate(PSO・定数バッファ・統計カウンタ)を
         // m_Engine越しに触る。所有権を群へ移し終えたらこのfriendは外す(段階6)
         friend class Passes::DDGIPasses;
-        friend class Passes::EnvironmentPasses;
         friend class Passes::GeometryPasses;
         friend class Passes::MegaLightsPasses;
 
@@ -480,8 +479,9 @@ namespace Kurenai
         int& GetSelectedLightIndex() { return m_SelectedLightIndex; }
         bool& GetBufferPrecisionDirty() { return m_BufferPrecisionDirty; }
         bool& GetSkyBakeDirty() { return m_SkyBakeDirty; }
-        bool& GetIBLBaked() { return m_IBLBaked; }
-        bool& GetIBLIrradianceBaked() { return m_IBLIrradianceBaked; }
+        // 焼き上がりの状態の持ち主は Passes::EnvironmentPasses。ここは委譲するだけ
+        bool& GetIBLBaked();
+        bool& GetIBLIrradianceBaked();
         bool& GetEmissiveLightsCapLogged() { return m_EmissiveLightsCapLogged; }
         bool& GetEmissiveLightsValuesLogged() { return m_EmissiveLightsValuesLogged; }
         bool& GetDDGIEmissiveSuppressLoggedRaster() { return m_DDGIEmissiveSuppressLoggedRaster; }
@@ -1694,7 +1694,7 @@ namespace Kurenai
         // IBL(Image Based Lighting): m_SkyboxTextureから拡散イラディアンス・プリフィルタ済み鏡面・
         // BRDF積分LUTの3つをコンピュートシェーダーで畳み込む(split-sum近似、Karis 2013)。
         // スカイボックスは実行時に変化しない静的アセットのため、起動後最初のRender()で一度だけ
-        // 焼いてm_IBLBakedを立て、以降は焼き直さない(詳細はdocs/Architecture.html参照)。
+        // 焼いてEnvironmentPassesのm_IBLBakedを立て、以降は焼き直さない(詳細はdocs/Architecture.html参照)。
         // 拡散イラディアンス・プリフィルタ済み鏡面はいずれも本物のTextureCube
         // (CreateUAVTextureCube/CreateMippedUAVTextureCube、面ごとに個別のUAVを持つ)で、
         // IBLConvolve.hlslが面ごとに1回ずつディスパッチして書き込む
@@ -1757,13 +1757,11 @@ namespace Kurenai
         // ActiveSkyTexture()がフレームごとにどちらを使うか決める
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
         static constexpr uint32_t kProceduralSkySize = Passes::kProceduralSkySize;
-        std::unique_ptr<RHI::IRHITexture> m_ProceduralSkyTexture;
-        std::unique_ptr<RHI::IRHIShader> m_SkyGenerateComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_SkyGeneratePipelineState;
+        // 手続き空のキューブマップは持ち主を SkyResources::ProceduralSkyTexture へ移した
+        // シェーダー・PSO・定数バッファは Passes/EnvironmentPasses へ移した
         // SkyGenerate用の専用定数バッファ。m_IBLResources.PrefilterConstantBufferと共用しないこと
         // (UpdateBuffer→SetComputeConstantBufferの順序制約があり、共用すると事故りやすい。
         //  詳細はRHI/IRHICommandList.hのSetConstantBufferのコメント)
-        std::unique_ptr<RHI::IRHIBuffer> m_SkyBakeConstantBuffer;
         // 手続き空を焼き直す必要があるか。太陽が動いたとき等に立てる
         bool m_SkyBakeDirty = true;
         // 最後に焼いたときの太陽の向き。これと現在の向きの角度差が閾値を超えたら焼き直す。
@@ -1815,69 +1813,17 @@ namespace Kurenai
         // 空パラメータ(ティント4本+照度正規化済みの天頂輝度)をGPU側で計算するコンピュートシェーダー
         // (SkyIntegrate.hlsl)。**CPU側に同じ式のミラーを置いてはいけない**(二重実装になる)。
         // 結果はm_SkyResources.ParametersBuffer(SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む)へ書く
-        std::unique_ptr<RHI::IRHIShader> m_SkyIntegrateComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_SkyIntegratePipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_SkyIntegrateConstantBuffer;
         // 空・大気・雲のリソースの持ち主は Rendering/SkyResources.h
         Rendering::SkyResources m_SkyResources;
-        // m_SkyResources.ParametersBufferへSkyIntegrateパスが一度でも書き込んだかどうか。手続き空を使わない
-        // シーン(.ksceneのDDSスカイボックス使用時)ではbakeSkyThisFrameが常にfalseになりSkyIntegrate
-        // パスも通常は走らないため、このフラグがfalseの間だけRender()がskyIntegrateThisFrameを
-        // trueにして1回だけ強制的に走らせ、未初期化のまま読まれることを防ぐ。
-        // 【なぜCPU側からのUpdateBufferでゼロ埋めしないのか】DX12のStructuredRWバッファは
-        // GPU専用(UAV/SRV)のDEFAULTヒープに確保しておりCPUから書き込む経路を持たないため、
-        // UpdateBufferを呼ぶとクラッシュする(m_SkyResources.ParametersBuffer作成箇所のコメント参照)
-        bool m_SkyParametersBufferInitialized = false;
-        // 雲のノイズテクスチャが無くP18(雲込みの空の照度)を積めなかったことを1度だけログへ出す。
-        // 毎ベイクで出すとログが埋まるため(m_PlanarReflectionMultipleWaterLoggedと同じ扱い)
-        bool m_SkyIntegrateCloudMissingLogged = false;
+        // 空パラメータの初期化済み旗は持ち主を Passes/EnvironmentPasses へ移した
 
-        bool m_IBLBaked = false;
-        // BRDF積分LUTを焼き終えたか(m_IBLBakedとは別管理)。このLUTは(NdotV, ラフネス)の
-        // 2Dテーブルでスカイボックスにも太陽の位置にも一切依存しないため、起動後に一度焼けば
-        // 二度と焼き直す必要がない。プリフィルタ済み鏡面が空の変化に追従して再ベイクされるように
-        // なった以降も巻き込まれて焼き直されないよう、専用のフラグとパスに分離してある
-        // (128x128 x 1024サンプル = 約1,680万イテレーションあり、毎回焼くと丸損になる)
-        bool m_BRDFLUTBaked = false;
-        // 検証用の拡散イラディアンスマップを焼き終えたか(m_IBLBakedとは別管理)。既定の描画経路は
-        // プリフィルタ済み鏡面の最終ミップなので、こちらは検証を有効にしたときにだけ焼く
-        bool m_IBLIrradianceBaked = false;
+        // IBL・BRDF・雲ノイズ・大気の焼き上がりの状態は Passes/EnvironmentPasses へ移した
         // 畳み込み結果とBRDF積分LUTの持ち主は Rendering/IBLResources.h
         Rendering::IBLResources m_IBLResources;
-        // 上のLUTを焼く2パス構成の中間バッファ。パス1が(A, B)をここへ書き、パス2がこれをSRVで
-        // 読んでEavgを足しつつ最終LUTへ書く。同一リソースをSRVとUAVへ同時バインドできないため必要
-        std::unique_ptr<RHI::IRHITexture> m_BRDFLUTScratchTexture;
-        std::unique_ptr<RHI::IRHIShader> m_BRDFLUTComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_BRDFLUTPipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_BRDFLUTCombineComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_BRDFLUTCombinePipelineState;
+        // BRDF積分LUTのスクラッチとPSO2本は Passes/EnvironmentPasses へ移した
 
-        std::unique_ptr<RHI::IRHIShader> m_CloudShapeNoiseComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_CloudShapeNoisePipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_CloudDetailNoiseComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_CloudDetailNoisePipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_CloudWeatherNoiseComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_CloudWeatherNoisePipelineState;
-        bool m_CloudNoiseBaked = false;
 
-        std::unique_ptr<RHI::IRHIBuffer> m_AtmosphereConstantBuffer;
-        std::unique_ptr<RHI::IRHIShader> m_TransmittanceComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_TransmittancePipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_MultiScatteringComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_MultiScatteringPipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_SkyViewComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_SkyViewPipelineState;
-        // Transmittance/MultiScatteringを焼いたときの濁り。負の値は「まだ一度も焼いていない」。
-        // 濁りが変わるとエアロゾルの量が変わるので、この2枚も焼き直す必要がある
-        float m_AtmosphereLUTBakedTurbidity = -1.0f;
-        // SkyView LUTを最後に焼いたときの太陽の向きと濁り。負の濁りは「まだ一度も焼いていない」。
-        // 【なぜ毎フレーム焼かなくてよいのか】CSSkyViewの入力はこの2つだけである
-        // (視点位置はkSkyViewHeightKm固定でカメラに依存しない。AtmosphereLUT.hlsl参照)。
-        // どちらも動いていなければ、まったく同じ内容のLUTを焼き直しているだけになる。
-        // 手続き空の焼き直し(m_LastBakedSunPosition)とまったく同じ判定の形だが、
-        // あちらは露出・彩度にも依存するため条件を共用はできない
-        DirectX::XMFLOAT3 m_SkyViewBakedSunPosition{ 0.0f, 0.0f, 0.0f };
-        float m_SkyViewBakedTurbidity = -1.0f;
+        // 大気散乱の定数バッファとPSO3本は Passes/EnvironmentPasses へ移した
         // 太陽がこの角度以上動いたらSkyView LUTを焼き直す。LUTは天頂方向180度を108テクセルで
         // 持つので1テクセルあたり約1.67度あり、その1/30以下しかずらさない値にしてある。
         //
@@ -1893,14 +1839,13 @@ namespace Kurenai
         // その場合は起動直後の1回だけになる
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
         static constexpr float kSkyViewRebakeAngleDegrees = Passes::kSkyViewRebakeAngleDegrees;
-        std::unique_ptr<RHI::IRHIShader> m_IrradianceComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_IrradiancePipelineState;
+        // イラディアンス畳み込みのシェーダーとPSOは Passes/EnvironmentPasses へ移した
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
         // 畳み込みのPSOは持ち主を IBLResources::PrefilterPipelineState へ移した
         // 拡散イラディアンスの球面調和関数(SH L2)経路。CSIrradianceの高速な
         // 代替で、m_IBLSettings.UseSHIrradianceでA/B比較できるようトグルにしてある。詳細は
         // IBLConvolve.hlsl冒頭のコメントとdocs/Architecture.htmlを参照
-        static constexpr uint32_t kSHCoeffCount = 9; // 実数SH L2(l<=2)の項数
+        // SHの項数の定数は Passes/EnvironmentConstants.h へ移した
         // CSProjectSHの射影に使う離散化解像度(1面の1辺のテクセル数)。
         // 【SourceSkyboxの実解像度とは無関係】スカイボックスはDDS(シーンごとに任意の解像度)や
         // 手続き空(256)など実行時に変わりうる一方、IRHITextureには解像度を問い合わせる手段が
@@ -1909,16 +1854,7 @@ namespace Kurenai
         // 9個の係数を求めるだけの積分には(理論上は32でも足りる範囲)余裕を持たせた値
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
         static constexpr uint32_t kSHProjectionSize = Passes::kSHProjectionSize;
-        std::unique_ptr<RHI::IRHIShader> m_ProjectSHComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_ProjectSHPipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_ProjectSHFinalComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_ProjectSHFinalPipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_EvaluateSHComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_EvaluateSHPipelineState;
-        // CSProjectSHのグループごとの部分和(9係数×グループ数)と、CSProjectSHFinalが
-        // 合算した最終係数(9個)。どちらもRGB(float4のxyz、wは詰め物)
-        std::unique_ptr<RHI::IRHIBuffer> m_SHPartialSumsBuffer;
-        std::unique_ptr<RHI::IRHIBuffer> m_SHCoefficientsBuffer;
+        // SHのシェーダー3本・PSO3本・バッファ2本は Passes/EnvironmentPasses へ移した
         // IBLの有効/強度・SH経路・専用イラディアンス・環境光の拡散/鏡面/フォールバック強度は
         // m_IBLSettingsへ移した(Settings/IBLSettings.h)。bent normal/multi-bounce AOの
         // ソース選択はm_AmbientOcclusionSettingsへ移した(Settings/AmbientOcclusionSettings.h)

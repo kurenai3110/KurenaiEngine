@@ -29,11 +29,18 @@ namespace Kurenai::Rendering
         // サンプルなので、背景評価のためだけに毎フレーム走らせるのは無駄が大きい
         std::unique_ptr<RHI::IRHIBuffer> ParametersBuffer;
 
+        // 手続き空(SkyGenerate.hlsl)を焼き込むキューブマップ。太陽が動くたびに焼き直す。
+        // 【なぜここが持つか】焼くのはEnvironmentPassesだけだが、
+        // KurenaiEngine3D が「今フレームどちらの空を使うか」(DDSのスカイボックスか手続き空か)を
+        // これとの同一性で判定するため、エンジン側からも見える必要がある。
+        // プリフィルタの入力にしかならないので解像度はオフラインDDS(512)より小さい256で足りる
+        std::unique_ptr<RHI::IRHITexture> ProceduralSkyTexture;
+
         // --- ボリュメトリック雲の3Dノイズ ---
         //
         // 雲の形状ノイズ。カメラにも太陽にも空の状態にも一切依存しない純粋な手続き生成なので、
         // BRDF積分LUTとまったく同じ理由で起動後に一度だけ焼き、二度と焼き直さない
-        // (m_CloudNoiseBaked)。生成の中身はShaders/3D/CloudNoiseGenerate.hlsl。
+        // (EnvironmentPassesのm_CloudNoiseBaked)。生成の中身はShaders/3D/CloudNoiseGenerate.hlsl。
         //
         // 【なぜ2枚に分けるか】Shapeは雲の大まかな塊、Detailはその縁を削る高周波成分で、
         // 必要な解像度が2桁違う。1枚にまとめると細かい側に合わせた巨大なテクスチャが要る
@@ -51,10 +58,10 @@ namespace Kurenai::Rendering
         // TransmittanceとMultiScatteringは大気パラメータ(AtmosphereLUT.hlsl冒頭の定数と、
         // 実行時に動かせる濁り)だけで決まり、カメラにも太陽にも時刻にも依存しない。
         // そのためBRDF積分LUT・雲の3Dノイズとほぼ同じ「一度だけ焼く」作法に乗せ、
-        // 濁りが変わったときだけ焼き直す(m_AtmosphereLUTBakedTurbidity)。
+        // 濁りが変わったときだけ焼き直す(EnvironmentPassesのm_AtmosphereLUTBakedTurbidity)。
         //
         // SkyViewは空そのもので太陽の位置に依存するため、太陽か濁りが動いたときに焼き直す
-        // (m_SkyViewBakedSunPosition)。
+        // (同 m_SkyViewBakedSunPosition)。
         // 【毎フレーム焼いていた頃の実測】192x108=20,736テクセルと小さいので「負荷は実質的に無い」と
         // 書いていたが、Intel UHD Graphics 620 / DX11 / Release の実測では1.15〜1.53msあった。
         // 1テクセルあたり視線32段+天頂32段の計64段のレイマーチで、各段が

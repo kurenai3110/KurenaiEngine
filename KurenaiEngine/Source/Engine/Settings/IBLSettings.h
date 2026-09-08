@@ -35,7 +35,7 @@ namespace Kurenai
         // これによりリフレクションプローブのような実行時のキューブマップ焼き直しから、最も重い
         // CSIrradiance(約9750万サンプル)を丸ごと省ける。
         // 畳み込み処理自体はいつでも検証できるよう残してあり、このトグルをONにすると
-        // その場で焼いて(m_IBLIrradianceBaked)従来経路に切り替わる
+        // その場で焼いて(EnvironmentPassesのm_IBLIrradianceBaked)従来経路に切り替わる
         bool UseDedicatedIrradiance = Defaults::IBLUseDedicatedIrradiance;
 
         // 環境光(間接光)の拡散・鏡面それぞれの倍率。FrameConstants.IBLParams.y / .z として渡す。
