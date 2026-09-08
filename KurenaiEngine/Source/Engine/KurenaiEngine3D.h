@@ -111,6 +111,21 @@ namespace Kurenai::Rendering
     struct RenderFrameContext;
 }
 
+namespace Kurenai::Passes
+{
+    // BuildFrameContext の出力引数にだけ使う。実体は Passes/LightingConstants.h
+    struct LightingConstants;
+}
+
+namespace Kurenai
+{
+    // BuildFrameContext の引数にだけ使う。どちらも参照で受けるだけなので、
+    // 公開ヘッダの重さを増やさないよう前方宣言で止める
+    // (実体は Rendering/GPULight.h と Rendering/SunLighting.h)
+    struct GPULight;
+    struct SunLighting;
+}
+
 namespace Kurenai
 {
     // インスタンシングで1体ぶんの変換を渡すレコード。
@@ -759,6 +774,30 @@ namespace Kurenai
         // 作り直し・テクスチャの常駐目標を、レンダーグラフを組む前にこの1回だけ進める
         void UpdateSceneForFrame(
             RHI::IRHICommandList* commandList, const DirectX::XMFLOAT3& cameraPosition, const Core::Camera& camera);
+
+        // --- Render()から切り出したフレームの値の組み立て(段階6.6のB+Cブロック) ---
+        // ジッター・ライト配列・空のパラメータ・FrameConstants・LightingConstants を
+        // 組み立て、frameContext のフィールドを埋める(ビューポート・BakedLightCount・
+        // ProbeFaceProjection・ProbeCaptureReads・CascadeViewProj の5つだけは
+        // RegisterPasses が登録の合間に埋める)。
+        //
+        // 【定義だけKurenaiEngine3D.cppに残してある】A/D/EブロックはRendering/RenderFrame.cppへ
+        // 移したが、この本体はあちらの無名名前空間のkMaxLights・MakeGPULight・
+        // GPUReflectionProbe等に依存しており、それらを外へ出すのは別の関心事になる。
+        //
+        // 【後半4つを出力引数で受ける理由】frameContext.Lights / Lighting / Constants が
+        // これらを指す。この関数のローカルにすると graph.Execute() の時点で解放済みになるが、
+        // 解放直後なら中身が残っていて同じ絵が出るため、採取では絶対に捕まらない。
+        // 寿命を Render() のスコープに保つため、実体は呼び出し側に置く
+        void BuildFrameContext(
+            const FrameState& frameState, RHI::IRHICommandList* commandList,
+            const SunLighting& sunLighting, float effectiveExposure, float manualExposureScale,
+            float keyReferenceEV100, const DirectX::XMFLOAT3& cameraPosition,
+            const float (&cascadeSplits)[kCascadeCount],
+            const DirectX::XMMATRIX (&cascadeViewProj)[kCascadeCount],
+            Rendering::RenderFrameContext& frameContext, std::vector<GPULight>& gpuLights,
+            ShaderInterop::FrameConstants& constants, Passes::LightingConstants& lightingConstants,
+            size_t& bakedLightCount);
 
         // --- Render()から切り出したパスの登録(段階6.6のDブロック) ---
         // 【定義はRendering/RenderFrame.cppにある】13回のRegisterを1つにまとめたもの。

@@ -3416,6 +3416,72 @@ namespace Kurenai
 
         UpdateSceneForFrame(commandList, cameraPosition, frameState.Camera);
 
+        // --- フレームの値の組み立て(段階6.6のB+Cブロック) ---
+        // 【graph.Execute()が終わるまで生かすこと】パスのExecuteラムダはこれらより長生きする。
+        // BuildFrameContextのローカルにすると、graph.Execute()の時点で解放済みのメモリを指す。
+        // 解放直後なら中身が残っていて同じ絵が出るため、10構成の採取を何回回しても捕まらない
+        Rendering::RenderFrameContext frameContext{};
+        std::vector<GPULight> gpuLights;
+        FrameConstants constants;
+        Passes::LightingConstants lightingConstants{};
+        // ライトのうちベイク済み(手動+発光プロキシ)の数。Dブロックが登録前に読む
+        size_t bakedLightCount = 0;
+        BuildFrameContext(
+            frameState, commandList, sunLighting, effectiveExposure, manualExposureScale, keyReferenceEV100,
+            cameraPosition, cascadeSplits, cascadeViewProj, frameContext, gpuLights, constants,
+            lightingConstants, bakedLightCount);
+
+        Rendering::RenderBlackboard blackboard{};
+
+        Core::RenderGraph graph(commandList, m_GPUProfiler.get(), &m_CPUProfiler);
+
+        // 【frameContext.ProbeCaptureReads が指す先はここに置く】RegisterPasses の
+        // ローカルにすると graph.Execute() の時点で解放済みのメモリを指す。
+        // 直後なら中身が残っていて同じ絵が出るため、採取では捕まらない
+        std::vector<RHI::IRHITexture*> probeCaptureReads;
+
+        // 13回の Register を1つにまとめた。**呼び出し順は実行順の一部**なので、
+        // 中の並びを1つも入れ替えないこと(RenderGraph は依存が同点のとき最小登録番号を選ぶ)
+        RegisterPasses(
+            graph, frameContext, blackboard, commandList, probeCaptureReads, bakedLightCount,
+            frameContext.SkyTexture, cascadeViewProj, frameState.Camera);
+
+        WritePassManifestIfDue(graph);
+
+        graph.Execute();
+
+        // --- グラフの実行より後: 読み戻しとフレームの締め(段階6.6のEブロック) ---
+        // 【この6つは呼ぶ順が実行順の一部】読み戻し(Presentより前でなければ2フレーム前の値が
+        // 読めない) → ImGui/Present → 前フレーム状態の確定 → 計測の書き出し →
+        // ダンプの回収 → 履歴の反転。切り出す前の並びをそのまま保っている
+        ResolveFrameCullStats(blackboard, frameContext.MeshletCullStatsActive);
+        SubmitAndPresentFrame();
+        AdvanceFramePrevViewState(constants, frameContext.JitterUv);
+        AccumulatePerfDump();
+
+        // --- 中間レンダーターゲットの生値ダンプ(検証専用) ---
+        // 【perfdumpと同じく毎フレーム走る場所へ置く】積んだコピーを数フレーム後に読む仕組みなので、
+        // ここが毎フレーム呼ばれないと待ちフレームがいつまでも進まない
+        ResolveTextureDumps();
+
+        AdvanceFrameHistory();
+    }
+
+    // 【この翻訳単位に置いてある】Aブロック・Dブロック・EブロックはRendering/RenderFrame.cppへ
+    // 移したが、ここだけは移せない。組み立ての本体がこのファイルの無名名前空間にある
+    // kMaxLights / kMaxDrones / kTAAJitterSampleCount / RadicalInverse / MakeGPULight /
+    // ComputeCloudAverageTransmittance / GPUReflectionProbe に依存しており、
+    // それらを外へ出すのは所有権の話で、Render()の分割とは別の関心事になるため
+    void KurenaiEngine3D::BuildFrameContext(
+        const KurenaiEngine3D::FrameState& frameState, RHI::IRHICommandList* commandList,
+        const SunLighting& sunLighting, float effectiveExposure, float manualExposureScale,
+        float keyReferenceEV100, const DirectX::XMFLOAT3& cameraPosition,
+        const float (&cascadeSplits)[kCascadeCount],
+        const DirectX::XMMATRIX (&cascadeViewProj)[kCascadeCount],
+        Rendering::RenderFrameContext& frameContext, std::vector<GPULight>& gpuLights,
+        ShaderInterop::FrameConstants& constants, Passes::LightingConstants& lightingConstants,
+        size_t& bakedLightCount)
+    {
         // --- TAAのサブピクセルジッター ---
         // 投影行列を1ピクセル未満だけずらして、同じ画素が毎フレームわずかに違う位置をサンプルする
         // ようにする。TAAが複数フレームぶんを蓄積することで実質的なスーパーサンプリングになる。
@@ -3528,7 +3594,7 @@ namespace Kurenai
         // 数までしかループしないため、無効なライトはそもそもGPUへ送らない。DirectLight/Transparentの
         // 両パスがこの1つのリストを共有する(FrameConstants.ActiveLightCountに人数を書き込むため、
         // 各パスのExecute内ではなくFrameConstants確定より前にここで組み立てる必要がある)
-        std::vector<GPULight> gpuLights;
+        // 【実体はRender()にある】frameContext.Lightsがこれを指し、graph.Execute()の時点でも生きている必要がある
         gpuLights.reserve(m_Lights.size());
         for (const Assets::Light& light : m_Lights)
         {
@@ -3673,7 +3739,7 @@ namespace Kurenai
         // OnDemand で焼くので「焼いた瞬間の編隊」が環境キューブに固定で残り、DDGI は
         // ヒステリシスで編隊を追いかけ続けて収束しない。どちらも動く光を入れる前提の
         // 構造になっていないため、この2つからは外す
-        size_t bakedLightCount = gpuLights.size();
+        bakedLightCount = gpuLights.size();
 
         // --- ドローンショーの機体を光源として後ろへ連結する ---
         //
@@ -4008,7 +4074,8 @@ namespace Kurenai
             m_GeometrySettings.MeshletCullStatsEnabled && meshletPathActive
             && m_GeometryPasses->HasMeshletCullStatsBuffer();
 
-        FrameConstants constants;
+        // 【実体はRender()にある】frameContext.Constantsがこれを指す。元と同じく未初期化のまま
+        // 受け取り、以降の代入で全フィールドを埋める
         const DirectX::XMMATRIX viewProj = viewMatrix * jitteredProj;
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
 
@@ -4429,7 +4496,7 @@ namespace Kurenai
                 ? ShadowMode::CascadedShadowMap
                 : m_ShadowSettings.Mode;
 
-        Passes::LightingConstants lightingConstants{};
+        // 【実体はRender()にある】frameContext.Lightingがこれを指す
         lightingConstants.LightCount =
         {
             static_cast<uint32_t>(gpuLights.size()),
@@ -4489,10 +4556,9 @@ namespace Kurenai
         // 各パスをリソースの読み書き依存関係から自動的に順序付けて実行するレンダーグラフ。
         // トランジェントリソースの確保は行わず、既存の永続確保済みテクスチャ(G-Buffer・SceneColor等)を
         // そのまま読み書きする(詳細はRenderGraph.h参照)
-        // --- パス群へ配るフレームのスナップショットと、登録中に確定していく出力(段階6) ---
-        // 【graph.Execute() が終わるまで生かすこと】パスの Execute ラムダはこの2つより
-        // 長生きするので、ここより内側のスコープへ置くと参照が浮く
-        Rendering::RenderFrameContext frameContext{};
+        // --- パス群へ配るフレームのスナップショット(段階6) ---
+        // 【実体はRender()にある】この下で埋めるフィールドのうち、Lights / Lighting / Constants /
+        // Sun は生ポインタで、指す先もRender()のローカル
         // パス群が読む設定を、この1箇所でまとめて写す。**UIパネルの描画
         // (m_UIManager->Draw)はこの行より前で終わっている**ので、写しても値は変わらない
         frameContext.Settings.AmbientOcclusion = m_AmbientOcclusionSettings;
@@ -4590,40 +4656,5 @@ namespace Kurenai
         frameContext.DroneCount = static_cast<uint32_t>(m_DroneInstances.size());
         frameContext.DroneShowBrightness = m_DroneShow.Data().Brightness;
         frameContext.DroneShowMinScreenRadius = m_DroneShowMinScreenRadius;
-
-        Rendering::RenderBlackboard blackboard{};
-
-        Core::RenderGraph graph(commandList, m_GPUProfiler.get(), &m_CPUProfiler);
-
-        // 【frameContext.ProbeCaptureReads が指す先はここに置く】RegisterPasses の
-        // ローカルにすると graph.Execute() の時点で解放済みのメモリを指す。
-        // 直後なら中身が残っていて同じ絵が出るため、採取では捕まらない
-        std::vector<RHI::IRHITexture*> probeCaptureReads;
-
-        // 13回の Register を1つにまとめた。**呼び出し順は実行順の一部**なので、
-        // 中の並びを1つも入れ替えないこと(RenderGraph は依存が同点のとき最小登録番号を選ぶ)
-        RegisterPasses(
-            graph, frameContext, blackboard, commandList, probeCaptureReads, bakedLightCount, skyTexture,
-            cascadeViewProj, frameState.Camera);
-
-        WritePassManifestIfDue(graph);
-
-        graph.Execute();
-
-        // --- グラフの実行より後: 読み戻しとフレームの締め(段階6.6のEブロック) ---
-        // 【この6つは呼ぶ順が実行順の一部】読み戻し(Presentより前でなければ2フレーム前の値が
-        // 読めない) → ImGui/Present → 前フレーム状態の確定 → 計測の書き出し →
-        // ダンプの回収 → 履歴の反転。切り出す前の並びをそのまま保っている
-        ResolveFrameCullStats(blackboard, meshletCullStatsActive);
-        SubmitAndPresentFrame();
-        AdvanceFramePrevViewState(constants, jitterUv);
-        AccumulatePerfDump();
-
-        // --- 中間レンダーターゲットの生値ダンプ(検証専用) ---
-        // 【perfdumpと同じく毎フレーム走る場所へ置く】積んだコピーを数フレーム後に読む仕組みなので、
-        // ここが毎フレーム呼ばれないと待ちフレームがいつまでも進まない
-        ResolveTextureDumps();
-
-        AdvanceFrameHistory();
     }
 }
