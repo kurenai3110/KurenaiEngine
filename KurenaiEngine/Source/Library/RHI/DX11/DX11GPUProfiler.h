@@ -7,6 +7,7 @@
 #include <vector>
 #include <wrl/client.h>
 
+#include "RHI/GPUProfilerCore.h"
 #include "RHI/IRHIGPUProfiler.h"
 
 namespace Kurenai::RHI
@@ -21,48 +22,31 @@ namespace Kurenai::RHI
         void EndScope() override;
         void EndFrame() override;
 
-        const std::vector<GPUTimingResult>& GetResults() const override { return m_Results; }
-        float GetTotalFrameTimeMs() const override { return m_TotalFrameTimeMs; }
+        const std::vector<GPUTimingResult>& GetResults() const override { return m_Core.GetResults(); }
+        float GetTotalFrameTimeMs() const override { return m_Core.GetTotalFrameTimeMs(); }
 
     private:
-        // GPU実行がCPUの記録より数フレーム遅れてもクエリ結果を取りこぼさないためのリングバッファ段数
-        static constexpr uint32_t kFrameLatency = 4;
-        // RenderGraphは1フレームに34種以上のパスを登録し、DDGI有効シーンではさらにプローブ数分
-        // (DDGIProbesPerFrame、既定16)が加算される。この値が足りないと超過した区間の計測が捨てられ、
-        // 「各パスの計測値の合計」であるGPU Frame Time(ResolveSlot参照)まで過小報告される。
-        //
-        // 【DX12側(DX12GPUProfiler.h)と必ず同じ値にすること】バックエンドごとに上限が違うと、
-        // 同じシーンでもDX11とDX12で計測できるパスの数が変わり、GPU Frame Timeを比べられなくなる。
+        // 1スロットぶんのクエリ。リングの段数・区間数の上限・区間名・結果の集計は
+        // GPUProfilerCoreが持ち、ここはID3D11Queryのオブジェクトだけを同じ添字で並べる。
         //
         // 【DX12より確保が重い】あちらはタイムスタンプ1本ぶんの添字で済むが、こちらは
-        // ID3D11Queryのオブジェクトを1区間につき2個、リングの段数だけ前もって作る
-        // (kFrameLatency × kMaxScopesPerFrame × 2 個)。96なら776個で、生成は起動時の1回きり
-        static constexpr uint32_t kMaxScopesPerFrame = 96;
-
-        struct FrameSlot
+        // 1区間につき2個、リングの段数だけ前もって作る(96区間なら776個)。生成は起動時の1回きり
+        struct QuerySlot
         {
             Microsoft::WRL::ComPtr<ID3D11Query> DisjointQuery;
             Microsoft::WRL::ComPtr<ID3D11Query> FrameStartQuery;
             Microsoft::WRL::ComPtr<ID3D11Query> FrameEndQuery;
-            std::array<Microsoft::WRL::ComPtr<ID3D11Query>, kMaxScopesPerFrame> BeginQueries;
-            std::array<Microsoft::WRL::ComPtr<ID3D11Query>, kMaxScopesPerFrame> EndQueries;
-            std::array<std::string, kMaxScopesPerFrame> ScopeNames;
-            uint32_t ScopeCount = 0;
-            bool Pending = false; // EndFrame済みでGetDataによる結果確定を待っている状態か
+            std::array<Microsoft::WRL::ComPtr<ID3D11Query>, GPUProfilerCore::kMaxScopesPerFrame> BeginQueries;
+            std::array<Microsoft::WRL::ComPtr<ID3D11Query>, GPUProfilerCore::kMaxScopesPerFrame> EndQueries;
         };
 
         Microsoft::WRL::ComPtr<ID3D11Query> CreateTimestampQuery() const;
-        void ResolveSlot(FrameSlot& slot);
+        // いま記録中のスロット(GPUProfilerCore::GetWriteIndex)の結果を確定させる
+        void ResolveWriteSlot();
 
         Microsoft::WRL::ComPtr<ID3D11Device> m_Device;
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
-        std::array<FrameSlot, kFrameLatency> m_Slots;
-        uint32_t m_WriteIndex = 0;
-
-        std::vector<GPUTimingResult> m_Results;
-        float m_TotalFrameTimeMs = 0.0f;
-        // 区間数がkMaxScopesPerFrameを超えたことの警告は毎フレーム出ると
-        // ログのflushでフレーム時間が崩れるため、一度だけ出す
-        bool m_ScopeOverflowLogged = false;
+        GPUProfilerCore m_Core{ "DX11" };
+        std::array<QuerySlot, GPUProfilerCore::kFrameLatency> m_QuerySlots;
     };
 }
