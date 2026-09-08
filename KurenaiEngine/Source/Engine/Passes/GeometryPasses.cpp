@@ -24,6 +24,248 @@ namespace Kurenai::Passes
         using ShaderInterop::FrameConstants;
     }
 
+    void GeometryPasses::CreateGeometryShaders(
+        RHI::IRHIDevice& device, const std::wstring& shaderDirectory, bool meshShaderAvailable)
+    {
+        // ジオメトリパス(G-Buffer書き込み)
+        RHI::ShaderDesc gbufferVsDesc;
+        gbufferVsDesc.Stage = RHI::ShaderStage::Vertex;
+        gbufferVsDesc.FilePath = shaderDirectory + L"GBuffer.kshader";
+        gbufferVsDesc.EntryPoint = "VSMain";
+        m_GBufferVertexShader = device.CreateShader(gbufferVsDesc);
+
+        RHI::ShaderDesc gbufferPsDesc;
+        gbufferPsDesc.Stage = RHI::ShaderStage::Pixel;
+        gbufferPsDesc.FilePath = shaderDirectory + L"GBuffer.kshader";
+        gbufferPsDesc.EntryPoint = "PSMain";
+        m_GBufferPixelShader = device.CreateShader(gbufferPsDesc);
+
+        // 水面(ModelInstance::IsWater)専用のピクセルシェーダー(水面マテリアル基盤)。
+        // 頂点シェーダーはWater.hlslもGBufferCommon.hlsli由来の同じVSMainを使うため、
+        // m_GBufferVertexShaderをそのまま共有する(専用のVSは作らない)
+        RHI::ShaderDesc gbufferWaterPsDesc;
+        gbufferWaterPsDesc.Stage = RHI::ShaderStage::Pixel;
+        gbufferWaterPsDesc.FilePath = shaderDirectory + L"Water.kshader";
+        gbufferWaterPsDesc.EntryPoint = "PSMain";
+        m_GBufferWaterPixelShader = device.CreateShader(gbufferWaterPsDesc);
+
+        // 深度プリパス(41.22節)のアルファカットアウト用。頂点シェーダーはG-Bufferと共有する
+        // (プリパスとG-Bufferで深度が1ulpでもずれると面が消えるため。PSO作成側のコメント参照)
+        try
+        {
+            RHI::ShaderDesc depthPrepassCutoutPsDesc;
+            depthPrepassCutoutPsDesc.Stage = RHI::ShaderStage::Pixel;
+            depthPrepassCutoutPsDesc.FilePath = shaderDirectory + L"DepthPrepass.kshader";
+            depthPrepassCutoutPsDesc.EntryPoint = "PSMainCutout";
+            m_DepthPrepassCutoutPixelShader = device.CreateShader(depthPrepassCutoutPsDesc);
+        }
+        catch (const std::exception& e)
+        {
+            // 作れなくてもプリパス自体は成立する(カットアウトのメッシュをプリパスから
+            // 除外して従来どおりG-Bufferだけで描く)ため、致命的とはしない
+            m_DepthPrepassCutoutPixelShader.reset();
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                std::string("深度プリパスのアルファカットアウト用ピクセルシェーダーの作成に失敗しました。"
+                            "カットアウトのメッシュはプリパスから除外します: ") + e.what());
+        }
+
+        // メッシュシェーダー版のG-Bufferパス(GBufferMeshlet.hlsl)。
+        // 対応環境でのみ作る ―― 非対応環境ではas/msプロファイルのコンパイル自体ができず
+        // 毎回エラーログが出てしまうため。ピクセルシェーダーはGBuffer.hlslのものを共有する
+        // (メッシュレットのON/OFFで見た目が変わらないことがこのパスの前提)
+        if (meshShaderAvailable)
+        {
+            RHI::ShaderDesc gbufferAsDesc;
+            gbufferAsDesc.Stage = RHI::ShaderStage::Amplification;
+            gbufferAsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.kshader";
+            gbufferAsDesc.EntryPoint = "ASMain";
+            m_GBufferAmplificationShader = device.CreateShader(gbufferAsDesc);
+
+            RHI::ShaderDesc gbufferMsDesc;
+            gbufferMsDesc.Stage = RHI::ShaderStage::Mesh;
+            gbufferMsDesc.FilePath = shaderDirectory + L"GBufferMeshlet.kshader";
+            gbufferMsDesc.EntryPoint = "MSMain";
+            m_GBufferMeshShader = device.CreateShader(gbufferMsDesc);
+
+            // メッシュレットごとに色分けするデバッグ表示用
+            RHI::ShaderDesc gbufferMeshletDebugPsDesc;
+            gbufferMeshletDebugPsDesc.Stage = RHI::ShaderStage::Pixel;
+            // 実体はGBuffer.hlsl側(PSMainをそのまま呼んでアルベドだけ差し替えるため)
+            gbufferMeshletDebugPsDesc.FilePath = shaderDirectory + L"GBuffer.kshader";
+            gbufferMeshletDebugPsDesc.EntryPoint = "PSMainMeshletDebug";
+            m_GBufferMeshletDebugPixelShader = device.CreateShader(gbufferMeshletDebugPsDesc);
+        }
+    }
+
+    void GeometryPasses::CreateHiZResources(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        // Hi-Zミップチェーン構築パス(コンピュートシェーダー)。CSCopyでG-Buffer深度をミップ0へコピーし、
+        // CSDownsampleをミップ数-1回ディスパッチして1x1まで縮小する
+        RHI::ShaderDesc hizCopyCsDesc;
+        hizCopyCsDesc.Stage = RHI::ShaderStage::Compute;
+        hizCopyCsDesc.FilePath = shaderDirectory + L"HiZ.kshader";
+        hizCopyCsDesc.EntryPoint = "CSCopy";
+        m_HiZCopyComputeShader = device.CreateShader(hizCopyCsDesc);
+        m_HiZCopyPipelineState = device.CreateComputePipelineState({ m_HiZCopyComputeShader.get() });
+
+        RHI::ShaderDesc hizDownsampleCsDesc;
+        hizDownsampleCsDesc.Stage = RHI::ShaderStage::Compute;
+        hizDownsampleCsDesc.FilePath = shaderDirectory + L"HiZ.kshader";
+        hizDownsampleCsDesc.EntryPoint = "CSDownsample";
+        m_HiZDownsampleComputeShader = device.CreateShader(hizDownsampleCsDesc);
+        m_HiZDownsamplePipelineState = device.CreateComputePipelineState({ m_HiZDownsampleComputeShader.get() });
+
+        RHI::BufferDesc hizConstantBufferDesc;
+        hizConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        hizConstantBufferDesc.SizeInBytes = sizeof(HiZConstants);
+        m_HiZConstantBuffer = device.CreateBuffer(hizConstantBufferDesc);
+    }
+
+    void GeometryPasses::CreatePrecisionDependentPipelineStates(
+        RHI::IRHIDevice& device, RHI::Format emissiveFormat,
+        const std::vector<RHI::InputElementDesc>& modelInputLayout)
+    {
+        // ジオメトリパス(G-Buffer書き込み)
+        RHI::PipelineStateDesc gbufferPipelineDesc;
+        gbufferPipelineDesc.InputLayout = modelInputLayout;
+        gbufferPipelineDesc.VertexShader = m_GBufferVertexShader.get();
+        gbufferPipelineDesc.PixelShader = m_GBufferPixelShader.get();
+        gbufferPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        gbufferPipelineDesc.RenderTargetFormats =
+        {
+            RHI::Format::R8G8B8A8_UNorm, // Albedo
+            RHI::Format::R16G16_Float,   // Normal(オクタヘドラルエンコード)
+            RHI::Format::R8G8B8A8_UNorm, // Material(R=Metallic, G=Roughness)
+            emissiveFormat,              // Emissive(バッファ精度に依存)
+            RHI::Format::R16G16_Float,   // Velocity(モーションベクター。UV単位の2Dベクトル)
+            RHI::Format::R16G16B16A16_Float, // BentNormal(.rgb = bRaw、.a = 有効フラグ)
+        };
+        gbufferPipelineDesc.HasDepthStencil = true;
+        gbufferPipelineDesc.ReverseZ = true;
+        // 深度プリパス(41.22節)を通したとき、プリパスが書いた深度と同じ値になる最前面の
+        // 断片だけを通すため、比較をGREATER_EQUALへ緩める。プリパスを切っていても
+        // 不透明G-Bufferでは絵が変わらない(理由はRHIDesc.hのDepthAllowEqualのコメント)ので、
+        // 有効/無効でPSOを2組に増やさず常にこちらにしてある
+        gbufferPipelineDesc.DepthAllowEqual = true;
+        m_GBufferPipelineState = device.CreatePipelineState(gbufferPipelineDesc);
+
+        // ミラーリングされたインスタンス用に、表裏判定だけを入れ替えた同じパイプラインを用意する。
+        // DX12はラスタライザステートがPSOに焼き込まれ描画中に差し替えられないため、DX11/DX12で
+        // 同じ構成にできるよう両バックエンドともPSOを2本持つ方式にしている
+        gbufferPipelineDesc.FrontCounterClockwise = true;
+        m_GBufferPipelineStateMirrored = device.CreatePipelineState(gbufferPipelineDesc);
+
+        // 水面(ModelInstance::IsWater)用。頂点シェーダー・入力レイアウト・レンダーターゲット
+        // フォーマットは通常のG-Bufferとまったく同じで、ピクセルシェーダーだけをWater.hlslへ
+        // 差し替える。ミラーリングとの組み合わせも通常PSOと同じ方式で2本持つ
+        gbufferPipelineDesc.FrontCounterClockwise = false;
+        gbufferPipelineDesc.PixelShader = m_GBufferWaterPixelShader.get();
+        m_GBufferWaterPipelineState = device.CreatePipelineState(gbufferPipelineDesc);
+        gbufferPipelineDesc.FrontCounterClockwise = true;
+        m_GBufferWaterPipelineStateMirrored = device.CreatePipelineState(gbufferPipelineDesc);
+
+        // メッシュシェーダー版のG-Bufferパス(GBufferMeshlet.hlsl)。
+        // 入力レイアウトを持たない以外は上の通常PSOと同じ設定にする ―― ラスタライザ・
+        // 深度・レンダーターゲットのどれか1つでもずれると、メッシュレットのON/OFFで
+        // 見た目が変わってしまい「切り替えても一致するはず」という検証が成立しなくなる。
+        //
+        // 非対応環境ではCreateMeshPipelineStateがnullptrを返す。ポインタが空なら
+        // 描画側が従来経路を使うため、ここで分岐して作成をスキップする必要はない
+        if (device.SupportsMeshShader() && m_GBufferMeshShader && m_GBufferAmplificationShader)
+        {
+            RHI::MeshPipelineStateDesc meshPipelineDesc;
+            meshPipelineDesc.AmplificationShader = m_GBufferAmplificationShader.get();
+            meshPipelineDesc.MeshShader = m_GBufferMeshShader.get();
+            meshPipelineDesc.PixelShader = m_GBufferPixelShader.get();
+            meshPipelineDesc.RenderTargetFormats = gbufferPipelineDesc.RenderTargetFormats;
+            meshPipelineDesc.HasDepthStencil = true;
+            meshPipelineDesc.ReverseZ = true;
+            // 頂点シェーダー版と1つでもずれると切り替えで見た目が変わるため、深度比較も揃える
+            meshPipelineDesc.DepthAllowEqual = true;
+            meshPipelineDesc.FrontCounterClockwise = false;
+            m_GBufferMeshletPipelineState = device.CreateMeshPipelineState(meshPipelineDesc);
+
+            meshPipelineDesc.FrontCounterClockwise = true;
+            m_GBufferMeshletPipelineStateMirrored = device.CreateMeshPipelineState(meshPipelineDesc);
+
+            // メッシュレットの分かれ方を色で確かめるデバッグ表示用。
+            // ピクセルシェーダーだけを差し替えた同じパイプライン
+            if (m_GBufferMeshletDebugPixelShader)
+            {
+                meshPipelineDesc.PixelShader = m_GBufferMeshletDebugPixelShader.get();
+                meshPipelineDesc.FrontCounterClockwise = false;
+                m_GBufferMeshletDebugPipelineState = device.CreateMeshPipelineState(meshPipelineDesc);
+                meshPipelineDesc.FrontCounterClockwise = true;
+                m_GBufferMeshletDebugPipelineStateMirrored = device.CreateMeshPipelineState(meshPipelineDesc);
+            }
+        }
+
+        // 深度プリパス(41.22節)。G-Bufferとまったく同じ頂点シェーダー・入力レイアウトで
+        // 深度だけを書く。レンダーターゲットは持たず、不透明マテリアル用は
+        // ピクセルシェーダーそのものを持たない(段ごと省く)。
+        //
+        // 【頂点シェーダーを共有する理由】プリパスとG-Bufferで頂点の変換結果が
+        // 1ulpでも違うと、深度が一致せずGREATER_EQUALのテストを通らなくなり、
+        // その面がまるごと消える。別のシェーダーに写すと最適化の差で容易にずれる
+        RHI::PipelineStateDesc depthPrepassPipelineDesc;
+        depthPrepassPipelineDesc.InputLayout = modelInputLayout;
+        depthPrepassPipelineDesc.VertexShader = m_GBufferVertexShader.get();
+        depthPrepassPipelineDesc.PixelShader = nullptr;
+        depthPrepassPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        depthPrepassPipelineDesc.HasDepthStencil = true;
+        depthPrepassPipelineDesc.ReverseZ = true;
+        m_DepthPrepassPipelineState = device.CreatePipelineState(depthPrepassPipelineDesc);
+        depthPrepassPipelineDesc.FrontCounterClockwise = true;
+        m_DepthPrepassPipelineStateMirrored = device.CreatePipelineState(depthPrepassPipelineDesc);
+
+        // アルファカットアウト(glTFのalphaMode=MASK)用。切り抜かれる部分の深度まで
+        // 書いてしまうとG-Buffer側のclipと食い違って穴が開くため、こちらだけ
+        // 同じ判定のclipを持つピクセルシェーダーを通す(DepthPrepass.hlsl)
+        if (m_DepthPrepassCutoutPixelShader)
+        {
+            depthPrepassPipelineDesc.PixelShader = m_DepthPrepassCutoutPixelShader.get();
+            depthPrepassPipelineDesc.FrontCounterClockwise = false;
+            m_DepthPrepassCutoutPipelineState = device.CreatePipelineState(depthPrepassPipelineDesc);
+            depthPrepassPipelineDesc.FrontCounterClockwise = true;
+            m_DepthPrepassCutoutPipelineStateMirrored = device.CreatePipelineState(depthPrepassPipelineDesc);
+        }
+
+        // メッシュシェーダー版の深度プリパス。
+        //
+        // 【これが無いとプリパスがまるごと止まる】かつてプリパスはメッシュレット経路と
+        // 排他だった。プリパスが頂点シェーダーで深度を書き、G-Bufferがメッシュシェーダーで
+        // 描くと、同じ頂点でも変換の丸めが一致する保証が無く、深度が1ulpずれた面が
+        // GREATER_EQUALを通らずに消えるため。**G-Bufferと同じ増幅/メッシュシェーダーを
+        // そのまま使えば変換は文字どおり同一のコードになり、この問題自体が消える。**
+        //
+        // 不透明用はピクセルシェーダーを持たない(段ごと省く)。カットアウト用は
+        // G-Bufferとまったく同じ判定のclipを通す(DepthPrepass.hlsl)
+        if (m_GBufferMeshShader && m_GBufferAmplificationShader)
+        {
+            RHI::MeshPipelineStateDesc prepassMeshDesc;
+            prepassMeshDesc.AmplificationShader = m_GBufferAmplificationShader.get();
+            prepassMeshDesc.MeshShader = m_GBufferMeshShader.get();
+            prepassMeshDesc.PixelShader = nullptr;
+            prepassMeshDesc.HasDepthStencil = true;
+            prepassMeshDesc.ReverseZ = true;
+            prepassMeshDesc.FrontCounterClockwise = false;
+            m_DepthPrepassMeshletPipelineState = device.CreateMeshPipelineState(prepassMeshDesc);
+            prepassMeshDesc.FrontCounterClockwise = true;
+            m_DepthPrepassMeshletPipelineStateMirrored = device.CreateMeshPipelineState(prepassMeshDesc);
+
+            if (m_DepthPrepassCutoutPixelShader)
+            {
+                prepassMeshDesc.PixelShader = m_DepthPrepassCutoutPixelShader.get();
+                prepassMeshDesc.FrontCounterClockwise = false;
+                m_DepthPrepassMeshletCutoutPipelineState = device.CreateMeshPipelineState(prepassMeshDesc);
+                prepassMeshDesc.FrontCounterClockwise = true;
+                m_DepthPrepassMeshletCutoutPipelineStateMirrored =
+                    device.CreateMeshPipelineState(prepassMeshDesc);
+            }
+        }
+    }
+
     void GeometryPasses::Register(
         Core::RenderGraph& graph,
         const Rendering::RenderFrameContext& frame,
@@ -134,23 +376,23 @@ namespace Kurenai::Passes
         RHI::IRHIPipelineState* modelCullRegionPipelines[kModelCullRegionCount]{};
         if (modelCullGpuActive)
         {
-            const bool meshletDebug = frame.Settings.Geometry.MeshletDebugViewEnabled && m_Engine.m_GBufferMeshletDebugPipelineState;
+            const bool meshletDebug = frame.Settings.Geometry.MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
             modelCullRegionPipelines[kModelCullRegionGBuffer] = meshletDebug
-                ? m_Engine.m_GBufferMeshletDebugPipelineState.get()
-                : m_Engine.m_GBufferMeshletPipelineState.get();
+                ? m_GBufferMeshletDebugPipelineState.get()
+                : m_GBufferMeshletPipelineState.get();
             modelCullRegionPipelines[kModelCullRegionGBufferMirrored] = meshletDebug
-                ? m_Engine.m_GBufferMeshletDebugPipelineStateMirrored.get()
-                : m_Engine.m_GBufferMeshletPipelineStateMirrored.get();
+                ? m_GBufferMeshletDebugPipelineStateMirrored.get()
+                : m_GBufferMeshletPipelineStateMirrored.get();
             if (depthPrepassRuns)
             {
                 modelCullRegionPipelines[kModelCullRegionPrepassOpaque] =
-                    m_Engine.m_DepthPrepassMeshletPipelineState.get();
+                    m_DepthPrepassMeshletPipelineState.get();
                 modelCullRegionPipelines[kModelCullRegionPrepassOpaqueMirrored] =
-                    m_Engine.m_DepthPrepassMeshletPipelineStateMirrored.get();
+                    m_DepthPrepassMeshletPipelineStateMirrored.get();
                 modelCullRegionPipelines[kModelCullRegionPrepassCutout] =
-                    m_Engine.m_DepthPrepassMeshletCutoutPipelineState.get();
+                    m_DepthPrepassMeshletCutoutPipelineState.get();
                 modelCullRegionPipelines[kModelCullRegionPrepassCutoutMirrored] =
-                    m_Engine.m_DepthPrepassMeshletCutoutPipelineStateMirrored.get();
+                    m_DepthPrepassMeshletCutoutPipelineStateMirrored.get();
             }
         }
 
@@ -450,15 +692,15 @@ namespace Kurenai::Passes
                     HiZConstants hizConstants{};
                     hizConstants.SrcSize = { renderWidth, renderHeight };
                     hizConstants.DstSize = { renderWidth, renderHeight };
-                    cmd->UpdateBuffer(m_Engine.m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
+                    cmd->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
 
-                    cmd->SetComputePipelineState(m_Engine.m_HiZCopyPipelineState.get());
-                    cmd->SetComputeConstantBuffer(0, m_Engine.m_HiZConstantBuffer.get());
+                    cmd->SetComputePipelineState(m_HiZCopyPipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
                     cmd->SetComputeTexture(0, targets->GBufferDepth.get());
                     cmd->SetComputeUnorderedAccessTexture(0, targets->HiZTexture.get(), 0);
                     cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
 
-                    cmd->SetComputePipelineState(m_Engine.m_HiZDownsamplePipelineState.get());
+                    cmd->SetComputePipelineState(m_HiZDownsamplePipelineState.get());
                     uint32_t hizSrcWidth = renderWidth;
                     uint32_t hizSrcHeight = renderHeight;
                     for (uint32_t mip = 1; mip < m_Engine.m_HiZMipLevels; ++mip)
@@ -468,8 +710,8 @@ namespace Kurenai::Passes
 
                         hizConstants.SrcSize = { hizSrcWidth, hizSrcHeight };
                         hizConstants.DstSize = { hizDstWidth, hizDstHeight };
-                        cmd->UpdateBuffer(m_Engine.m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
-                        cmd->SetComputeConstantBuffer(0, m_Engine.m_HiZConstantBuffer.get());
+                        cmd->UpdateBuffer(m_HiZConstantBuffer.get(), &hizConstants, sizeof(hizConstants));
+                        cmd->SetComputeConstantBuffer(0, m_HiZConstantBuffer.get());
                         cmd->SetComputeUnorderedAccessTexture(0, targets->HiZTexture.get(), mip - 1);
                         cmd->SetComputeUnorderedAccessTexture(1, targets->HiZTexture.get(), mip);
                         cmd->Dispatch((hizDstWidth + 7) / 8, (hizDstHeight + 7) / 8, 1);
@@ -531,26 +773,26 @@ namespace Kurenai::Passes
                     if (modelCullIndirectActive)
                     {
                         if (m_Engine.IssueModelCullIndirect(
-                                cmd, kModelCullRegionPrepassOpaque, m_Engine.m_DepthPrepassMeshletPipelineState.get(),
+                                cmd, kModelCullRegionPrepassOpaque, m_DepthPrepassMeshletPipelineState.get(),
                                 currentPipelineState))
                         {
                             ++m_Engine.m_DrawCallsDepthPrepass;
                         }
                         if (m_Engine.IssueModelCullIndirect(
                                 cmd, kModelCullRegionPrepassOpaqueMirrored,
-                                m_Engine.m_DepthPrepassMeshletPipelineStateMirrored.get(), currentPipelineState))
+                                m_DepthPrepassMeshletPipelineStateMirrored.get(), currentPipelineState))
                         {
                             ++m_Engine.m_DrawCallsDepthPrepass;
                         }
                         if (m_Engine.IssueModelCullIndirect(
                                 cmd, kModelCullRegionPrepassCutout,
-                                m_Engine.m_DepthPrepassMeshletCutoutPipelineState.get(), currentPipelineState))
+                                m_DepthPrepassMeshletCutoutPipelineState.get(), currentPipelineState))
                         {
                             ++m_Engine.m_DrawCallsDepthPrepass;
                         }
                         if (m_Engine.IssueModelCullIndirect(
                                 cmd, kModelCullRegionPrepassCutoutMirrored,
-                                m_Engine.m_DepthPrepassMeshletCutoutPipelineStateMirrored.get(), currentPipelineState))
+                                m_DepthPrepassMeshletCutoutPipelineStateMirrored.get(), currentPipelineState))
                         {
                             ++m_Engine.m_DrawCallsDepthPrepass;
                         }
@@ -603,7 +845,7 @@ namespace Kurenai::Passes
                                 return true;
                             }
 
-                            if (!m_Engine.m_DepthPrepassMeshletPipelineState)
+                            if (!m_DepthPrepassMeshletPipelineState)
                             {
                                 // メッシュレット版のPSOが無い。このモデルはプリパスから外す
                                 // (早期Zが効かないだけで、G-Buffer側が深度を書くので絵は壊れない)
@@ -642,16 +884,16 @@ namespace Kurenai::Passes
 
                             // 不透明ぶん(ピクセルシェーダー無し)。半透明とカットアウトを落とす
                             dispatchMeshletPrepass(
-                                instance.IsMirrored ? m_Engine.m_DepthPrepassMeshletPipelineStateMirrored.get()
-                                                    : m_Engine.m_DepthPrepassMeshletPipelineState.get(),
+                                instance.IsMirrored ? m_DepthPrepassMeshletPipelineStateMirrored.get()
+                                                    : m_DepthPrepassMeshletPipelineState.get(),
                                 Assets::kGpuMaterialFlagTransparent | Assets::kGpuMaterialFlagCutout, 0);
 
                             // カットアウトぶん(clipを通す)。持たないモデルではこの回は発行しない
                             if (lodModel.HasCutoutMaterial)
                             {
                                 dispatchMeshletPrepass(
-                                    instance.IsMirrored ? m_Engine.m_DepthPrepassMeshletCutoutPipelineStateMirrored.get()
-                                                        : m_Engine.m_DepthPrepassMeshletCutoutPipelineState.get(),
+                                    instance.IsMirrored ? m_DepthPrepassMeshletCutoutPipelineStateMirrored.get()
+                                                        : m_DepthPrepassMeshletCutoutPipelineState.get(),
                                     Assets::kGpuMaterialFlagTransparent, Assets::kGpuMaterialFlagCutout);
                             }
                             return true;
@@ -668,10 +910,10 @@ namespace Kurenai::Passes
                             // クロスディザで捨てる画素があるため、PS無しのPSOでは抜けない
                             const bool cutout = mesh.AlphaCutoff > 0.0f || lodDitherFade < 1.0f;
                             RHI::IRHIPipelineState* const wanted =
-                                cutout ? (instance.IsMirrored ? m_Engine.m_DepthPrepassCutoutPipelineStateMirrored.get()
-                                                              : m_Engine.m_DepthPrepassCutoutPipelineState.get())
-                                       : (instance.IsMirrored ? m_Engine.m_DepthPrepassPipelineStateMirrored.get()
-                                                              : m_Engine.m_DepthPrepassPipelineState.get());
+                                cutout ? (instance.IsMirrored ? m_DepthPrepassCutoutPipelineStateMirrored.get()
+                                                              : m_DepthPrepassCutoutPipelineState.get())
+                                       : (instance.IsMirrored ? m_DepthPrepassPipelineStateMirrored.get()
+                                                              : m_DepthPrepassPipelineState.get());
                             if (wanted != currentPipelineState)
                             {
                                 cmd->SetPipelineState(wanted);
@@ -774,7 +1016,7 @@ namespace Kurenai::Passes
                     cmd->ClearDepth(0.0f);
                 }
 
-                cmd->SetPipelineState(m_Engine.m_GBufferPipelineState.get());
+                cmd->SetPipelineState(m_GBufferPipelineState.get());
                 cmd->SetConstantBuffer(0, frameConstantBuffer);
                 cmd->SetSamplerSet(materialSamplers);
 
@@ -805,7 +1047,7 @@ namespace Kurenai::Passes
                 //
                 // メッシュレット経路(useMeshlet)はさらにその上の分岐。頂点シェーダー版と
                 // 同じG-Bufferへ同じ内容を書くので、切り替えても見た目は一致する
-                RHI::IRHIPipelineState* currentPipelineState = m_Engine.m_GBufferPipelineState.get();
+                RHI::IRHIPipelineState* currentPipelineState = m_GBufferPipelineState.get();
                 const auto bindPipelineState = [&](bool mirrored, bool water, bool useMeshlet)
                 {
                     RHI::IRHIPipelineState* wanted = nullptr;
@@ -813,18 +1055,18 @@ namespace Kurenai::Passes
                     {
                         // デバッグ表示が有効ならメッシュレットごとの色分けPSOを使う。
                         // 用意できていない場合(作成失敗)は通常のメッシュレットPSOへ落とす
-                        const bool debugView = geometrySettings.MeshletDebugViewEnabled && m_Engine.m_GBufferMeshletDebugPipelineState;
+                        const bool debugView = geometrySettings.MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
                         wanted = debugView
-                            ? (mirrored ? m_Engine.m_GBufferMeshletDebugPipelineStateMirrored.get()
-                                        : m_Engine.m_GBufferMeshletDebugPipelineState.get())
-                            : (mirrored ? m_Engine.m_GBufferMeshletPipelineStateMirrored.get()
-                                        : m_Engine.m_GBufferMeshletPipelineState.get());
+                            ? (mirrored ? m_GBufferMeshletDebugPipelineStateMirrored.get()
+                                        : m_GBufferMeshletDebugPipelineState.get())
+                            : (mirrored ? m_GBufferMeshletPipelineStateMirrored.get()
+                                        : m_GBufferMeshletPipelineState.get());
                     }
                     else
                     {
                         wanted = water
-                            ? (mirrored ? m_Engine.m_GBufferWaterPipelineStateMirrored.get() : m_Engine.m_GBufferWaterPipelineState.get())
-                            : (mirrored ? m_Engine.m_GBufferPipelineStateMirrored.get() : m_Engine.m_GBufferPipelineState.get());
+                            ? (mirrored ? m_GBufferWaterPipelineStateMirrored.get() : m_GBufferWaterPipelineState.get())
+                            : (mirrored ? m_GBufferPipelineStateMirrored.get() : m_GBufferPipelineState.get());
                     }
                     if (wanted == currentPipelineState)
                     {
@@ -854,19 +1096,19 @@ namespace Kurenai::Passes
                 // 選ぶPSOはbindPipelineState(mirrored, false, true)と同じもの
                 if (modelCullIndirectActive)
                 {
-                    const bool meshletDebug = geometrySettings.MeshletDebugViewEnabled && m_Engine.m_GBufferMeshletDebugPipelineState;
+                    const bool meshletDebug = geometrySettings.MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
                     if (m_Engine.IssueModelCullIndirect(
                             cmd, kModelCullRegionGBuffer,
-                            meshletDebug ? m_Engine.m_GBufferMeshletDebugPipelineState.get()
-                                         : m_Engine.m_GBufferMeshletPipelineState.get(),
+                            meshletDebug ? m_GBufferMeshletDebugPipelineState.get()
+                                         : m_GBufferMeshletPipelineState.get(),
                             currentPipelineState))
                     {
                         ++m_Engine.m_DrawCallsGBuffer;
                     }
                     if (m_Engine.IssueModelCullIndirect(
                             cmd, kModelCullRegionGBufferMirrored,
-                            meshletDebug ? m_Engine.m_GBufferMeshletDebugPipelineStateMirrored.get()
-                                         : m_Engine.m_GBufferMeshletPipelineStateMirrored.get(),
+                            meshletDebug ? m_GBufferMeshletDebugPipelineStateMirrored.get()
+                                         : m_GBufferMeshletPipelineStateMirrored.get(),
                             currentPipelineState))
                     {
                         ++m_Engine.m_DrawCallsGBuffer;

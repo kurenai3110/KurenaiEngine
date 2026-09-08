@@ -851,42 +851,9 @@ namespace Kurenai
         // Render()の先頭(RenderGraphの構築より前)でm_Device->WaitForGPUIdle()を挟んで処理する
         bool m_BufferPrecisionDirty = false;
 
-        // ジオメトリパス(G-Buffer書き込み)
-        std::unique_ptr<RHI::IRHIShader> m_GBufferVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_GBufferPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferPipelineState;
-        // ミラーリング(Worldの行列式が負)されたインスタンス用。表裏判定を入れ替えただけで
-        // 他は上と同一(ModelInstance::IsMirrored、docs/Architecture.html 10.2節)
-        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferPipelineStateMirrored;
-        // 水面(ModelInstance::IsWater)専用のピクセルシェーダー・PSO(水面マテリアル基盤)。
-        // 頂点シェーダーはm_GBufferVertexShaderをそのまま共有する(Water.hlslもGBufferCommon.hlsli
-        // 由来の同じVSMainを使うため)。ミラーリングとの組み合わせ(4値)はGBufferパスの
-        // bindPipelineStateラムダが選ぶ
-        std::unique_ptr<RHI::IRHIShader> m_GBufferWaterPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferWaterPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferWaterPipelineStateMirrored;
+        // G-Buffer・水面・深度プリパス・メッシュレット経路・Hi-Zのシェーダーと
+        // PSOは Passes/GeometryPasses へ移した
 
-        // --- 深度プリパス(41.22節。Shaders/3D/DepthPrepass.hlsl) ------------------------
-        //
-        // G-Bufferを描く前に不透明ジオメトリの深度だけを埋め、G-Buffer側の深度比較を
-        // GREATER_EQUALにして最前面の断片だけを通す。隠れる画素のピクセルシェーダー
-        // (6テクスチャ + 6レンダーターゲット書き込み)がまるごと省ける。
-        //
-        // 【頂点シェーダーはm_GBufferVertexShaderを共有する】プリパスとG-Bufferで頂点の
-        // 変換結果が1ulpでもずれると深度が一致せず、GREATER_EQUALのテストを通らずに
-        // その面がまるごと消える。写して2本にすると最適化の差で容易にずれる。
-        // 不透明マテリアル用はピクセルシェーダーを持たない(nullptr = 段ごと省く)
-        std::unique_ptr<RHI::IRHIShader> m_DepthPrepassCutoutPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassPipelineStateMirrored;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassCutoutPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassCutoutPipelineStateMirrored;
-        // メッシュシェーダー版のプリパス(G-Bufferと同じ増幅/メッシュシェーダーを使う)。
-        // これが無いと、メッシュレット経路で描くモデルの深度をプリパスで埋められない
-        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletPipelineStateMirrored;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletCutoutPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DepthPrepassMeshletCutoutPipelineStateMirrored;
         // プリパスを走らせるか・メッシュ単位のフラスタムカリングを行うかは
         // m_GeometrySettings.DepthPrepassEnabled / MeshCullingEnabledへ移した
 
@@ -989,23 +956,6 @@ namespace Kurenai
         uint64_t m_FrameStatsInstancedBatchSum = 0;
         uint64_t m_FrameStatsInstancedInstanceSum = 0;
 
-        // --- メッシュシェーダー版のジオメトリパス(Shaders/3D/GBufferMeshlet.hlsl) ---------
-        //
-        // 増幅シェーダーがメッシュレット単位で錐台・法線コーンのカリングを行い、
-        // 生き残った塊だけをメッシュシェーダーがラスタライザへ流す。書き込む先も内容も
-        // 上の通常パスとまったく同じG-Bufferで、ピクセルシェーダーも共有している
-        // (m_GBufferPixelShader)。そのため切り替えても見た目は一致するのが正しい。
-        //
-        // 非対応環境(DX11、メッシュシェーダーTier 1未満、bindless非対応)では
-        // すべてnullptrのままになり、描画側は自動的に従来経路を使う
-        std::unique_ptr<RHI::IRHIShader> m_GBufferAmplificationShader;
-        std::unique_ptr<RHI::IRHIShader> m_GBufferMeshShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletPipelineStateMirrored;
-        // メッシュレットごとに色分けするデバッグ表示。ピクセルシェーダーだけが違う
-        std::unique_ptr<RHI::IRHIShader> m_GBufferMeshletDebugPixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletDebugPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_GBufferMeshletDebugPipelineStateMirrored;
         // 起動時に決まる能力値(メッシュシェーダー・レイトレーシング等)。詳細は
         // Diagnostics/RenderCapabilities.h
         RenderCapabilities m_RenderCapabilities;
@@ -1222,11 +1172,6 @@ namespace Kurenai
         // オクルージョンカリング(m_GeometrySettings.OcclusionCullingEnabled)。**どちらも要らないフレームでは
         // 構築しない** ―― 1280x720で「コピー1回 + ミップ段数-1回のディスパッチ」が走り、
         // Intel UHD 620での実測で1.19〜1.21ms(GPUフレーム時間30msの約4%)を占めるため
-        std::unique_ptr<RHI::IRHIShader> m_HiZCopyComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_HiZCopyPipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_HiZDownsampleComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_HiZDownsamplePipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_HiZConstantBuffer;
         uint32_t m_HiZMipLevels = 1;
         // デバッグ表示(Render Targets - Hi-Z)で確認するミップレベルはm_DebugViewSettings.HiZDebugMipLevelへ移した
         // RenderTargets::HiZTextureの中身が「1回でも構築されたHi-Z」になっているか。
