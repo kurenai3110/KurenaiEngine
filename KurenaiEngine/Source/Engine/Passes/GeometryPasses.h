@@ -18,6 +18,7 @@ namespace Kurenai::Rendering
 {
     struct RenderFrameContext;
     struct RenderBlackboard;
+    struct RenderTargets;
 }
 
 // ジオメトリのパス群(段階6)。
@@ -89,6 +90,15 @@ namespace Kurenai
             // 「どの経路で描いたか」と「判定を何件ずつに分けたか」を添える
             bool WasModelCullIndirectActiveLastFrame() const { return m_ModelCullIndirectActiveLastFrame; }
             uint32_t GetModelCullDispatchCount(uint32_t index) const { return m_ModelCullDispatchCounts[index]; }
+
+            // 自前ソフトウェアラスタライザ(46章)のシェーダー・PSO・定数バッファと、
+            // 解像度に依存しないバッファ。**呼び出し元のtry内から呼ぶこと**
+            // (失敗時のログと RenderCapabilities の切り替えは KurenaiEngine3D 側が持つ)
+            void CreateSoftwareRasterResources(RHI::IRHIDevice& device, const std::wstring& shaderDirectory);
+            void ResetSoftwareRasterResources();
+            // visibility buffer(画素あたり64bit)。解像度が変わるたびに作り直す
+            void CreateSoftwareRasterVisibilityBuffer(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+            void ResetSoftwareRasterVisibilityBuffer();
 
         private:
             KurenaiEngine3D& m_Engine;
@@ -201,6 +211,42 @@ namespace Kurenai
             // これを参照捕捉するため、登録関数のローカルにすると寿命が足りない。
             // 中身はフレームごとに clear() して作り直す(容量は使い回す)
             std::vector<ModelCullDrawCandidate> m_ModelCullDraws;
+
+            // --- 自前ソフトウェアラスタライザ(46章) ---
+            //
+            // 三角形をコンピュートシェーダーで自前にラスタライズする比較用の経路。
+            // 既存のG-Buffer経路には一切影響せず、専用のバッファへ描いてDebugViewで見る。
+            //
+            // DX12かつSM 6.6 + Int64ShaderOps + bindlessの環境でのみ動く
+            // (IRHIDevice::SupportsSoftwareRaster)
+            std::unique_ptr<RHI::IRHIShader> m_SoftwareRasterComputeShader;
+            std::unique_ptr<RHI::IRHIShader> m_SoftwareRasterLargeComputeShader;
+            std::unique_ptr<RHI::IRHIShader> m_SoftwareRasterResolveComputeShader;
+            std::unique_ptr<RHI::IRHIPipelineState> m_SoftwareRasterPipelineState;
+            std::unique_ptr<RHI::IRHIPipelineState> m_SoftwareRasterLargePipelineState;
+            std::unique_ptr<RHI::IRHIPipelineState> m_SoftwareRasterResolvePipelineState;
+            std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterConstantBuffer;
+            // メッシュ1件 = 1レコード。毎フレームシーンのインスタンスから組み直す
+            std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterMeshInfoBuffer;
+            // 巨大三角形の通し番号リストと、その個数を兼ねた間接ディスパッチ引数
+            std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterLargeEntriesBuffer;
+            std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterIndirectArgsBuffer;
+            // 解像度に依存するためレンダーターゲットの作り直しに合わせて作る。
+            // 画素あたり64bit(深度32 + 三角形番号32)。
+            // 出力3枚(色・深度・法線)はPresentPassのデバッグ表示も読むため
+            // RenderTargets(SoftwareRaster*)が持つ
+            std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterVisibilityBuffer;
+            // メッシュレコード数が容量を超えた最初のフレームだけ警告を出すためのフラグ
+            bool m_SoftwareRasterMeshOverflowLogged = false;
+
+            // 上のパスの中身。クリア2回とディスパッチ3回(CSRaster → CSRasterLarge →
+            // CSResolve)を積む。
+            // viewProjはGBufferパスが使ったものとまったく同じ行列(ジッターを含む)を渡すこと ――
+            // 別の行列で描くと深度の比較が意味を失う。
+            // sunDirectionは光が進む向き(FrameConstants::LightDirectionと同じ規約)
+            void ExecuteSoftwareRasterPass(
+                RHI::IRHICommandList* cmd, const DirectX::XMMATRIX& viewProj,
+                const DirectX::XMFLOAT3& sunDirection, const Rendering::RenderTargets& targets);
         };
     }
 }

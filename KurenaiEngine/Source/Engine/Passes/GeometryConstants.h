@@ -135,6 +135,76 @@ namespace Kurenai::Passes
             return (bytes + 255u) & ~255u;
         }
 
+        // --- 自前ソフトウェアラスタライザ(46章) -------------------------------------------
+        //
+        // 三角形をコンピュートシェーダーで自前にラスタライズする比較用の経路。
+        // 既存のG-Buffer経路には一切影響せず、専用のバッファへ描いてDebugViewで見る。
+        // 詳細はShaders/3D/SoftwareRasterCommon.hlsli冒頭
+
+        // 巨大三角形リストの容量(要素数)。超えた分は描かれず、CSResolveが画面左上を
+        // マゼンタで塗って知らせる
+        inline constexpr uint32_t kSWRasterLargeListCapacity = 4096;
+        // 1フレームに扱えるメッシュレコード数の上限。Bistro Exteriorで約400
+        inline constexpr uint32_t kSWRasterMaxMeshes = 2048;
+        // CSRasterの1グループのスレッド数。SoftwareRaster.hlslの
+        // KURENAI_SWRASTER_GROUP_SIZEと一致させること
+        inline constexpr uint32_t kSWRasterGroupSize = 64;
+        // Dispatchの1次元あたりの上限(65535)に収めるための2D分解の刻み
+        inline constexpr uint32_t kSWRasterMaxGroupsPerAxis = 32768;
+        // 自前ソフトウェアラスタライザ用。Shaders/3D/SoftwareRasterCommon.hlsliの
+        // cbuffer SWRasterConstants(b1)と並び・サイズを一致させること
+        struct alignas(16) SWRasterConstants
+        {
+            DirectX::XMFLOAT4X4 ViewProj;
+            // xy=レンダー解像度(画素)、zw=その逆数
+            DirectX::XMFLOAT4 RenderSize;
+            // xyz=太陽光が進む向き(正規化済み)、w=未使用
+            DirectX::XMFLOAT4 SunDirection;
+            // x=CSRasterのX方向グループ数(2D分解の復元用)、y=シーン全体の三角形数、
+            // z=メッシュレコード数、w=巨大三角形とみなすbbox画素面積のしきい値
+            DirectX::XMUINT4 DispatchParams;
+            // x=巨大三角形リストの容量、yzw=未使用
+            DirectX::XMUINT4 LargeParams;
+        };
+        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
+        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
+        // HLSL側を直さないかぎり黙って別の値を読むことになる。
+        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
+        //
+        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
+        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
+        static_assert(offsetof(SWRasterConstants, ViewProj) == 0, "ViewProj のレイアウトが変わっている");
+        static_assert(offsetof(SWRasterConstants, RenderSize) == 64, "RenderSize のレイアウトが変わっている");
+        static_assert(offsetof(SWRasterConstants, SunDirection) == 80, "SunDirection のレイアウトが変わっている");
+        static_assert(offsetof(SWRasterConstants, DispatchParams) == 96, "DispatchParams のレイアウトが変わっている");
+        static_assert(offsetof(SWRasterConstants, LargeParams) == 112, "LargeParams のレイアウトが変わっている");
+        static_assert(sizeof(SWRasterConstants) == 128, "SWRasterConstants の総サイズが変わっている");
+
+        // 自前ソフトウェアラスタライザが読むメッシュ1件ぶんの情報。
+        // Shaders/3D/SoftwareRasterCommon.hlsliのSWRasterMeshInfoと並び・サイズを一致させること。
+        //
+        // 【構造化バッファは詰めて並ぶ】定数バッファと違いHLSLのStructuredBuffer<T>は
+        // C++と同じ詰め方になるため、このままのレイアウトで一致する
+        struct SWRasterMeshInfo
+        {
+            DirectX::XMFLOAT4X4 World;
+            DirectX::XMFLOAT4X4 NormalMatrix;
+            // 頂点/インデックスバッファのbindless番号(IRHIBuffer::GetBindlessIndex)
+            uint32_t VertexBufferIndex;
+            uint32_t IndexBufferIndex;
+            // シーン全体の通し三角形番号における、このメッシュの先頭。シェーダー側の二分探索のキー
+            uint32_t FirstTriangle;
+            uint32_t TriangleCount;
+            // ミラーリングされたインスタンス(ModelInstance::IsMirrored)なら-1。
+            // 表裏判定の符号を反転させる
+            float FrontFaceSign;
+            // bit0 = アルファカットアウト(フェーズ2で使う。現在は常に0)
+            uint32_t Flags;
+            uint32_t Padding[2];
+        };
+
+        static_assert(sizeof(SWRasterMeshInfo) == 160, "HLSL側のSWRasterMeshInfoと一致させるため160バイト固定");
+
         struct ModelCullDrawCandidate
         {
             const Assets::ModelInstance* Instance;

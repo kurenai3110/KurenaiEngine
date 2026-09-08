@@ -559,16 +559,6 @@ namespace Kurenai
         // このバッファは常にHDR固定フォーマットのため)。呼び出し箇所はCreateRenderTargetsと
         // 同じ2か所(Initialize直後、Render()の解像度変更ハンドリング)
         void CreatePlanarReflectionTargets();
-        // 自前ソフトウェアラスタライザパス(46章)の本体。クリア2回とディスパッチ3回を積む。
-        // 呼ぶのはRender()のレンダーグラフ登録からのみで、
-        // m_GeometrySettings.SoftwareRasterEnabled && m_RenderCapabilities.SoftwareRasterAvailable のときだけ登録される。
-        // viewProjはGBufferパスが使ったものとまったく同じ行列(ジッターを含む)を渡すこと ――
-        // 別の行列で描くと深度の比較が意味を失う。
-        // sunDirectionは光が進む向き(FrameConstants::LightDirectionと同じ規約)
-        void ExecuteSoftwareRasterPass(
-            RHI::IRHICommandList* cmd,
-            const DirectX::XMMATRIX& viewProj,
-            const DirectX::XMFLOAT3& sunDirection);
         // このフレームでRT反射パスを実行するか。手法がRaytracedでも、高速化構造が無ければ
         // (非対応環境・シーン読み込み中の空シーン・構築失敗)撃つ相手がいないため実行しない。
         // 「パスを追加する条件」と「後段がその出力を読む条件」がずれると、
@@ -607,6 +597,15 @@ namespace Kurenai
         // 【publicにしてある】ForEachGeometryDrawと対で使う述語で、Passes/*の各群が
         // コールバックの中から呼ぶ。状態を持たない判定なので公開しても持ち主は変わらない
         bool ShouldUseModelMeshletPath(const Assets::ModelInstance& instance, const Assets::Model& model) const;
+
+        // メッシュ単位カリングの判定を、共通の描画ループとまったく同じカウンタへ数えながら行う。
+        //
+        // 【publicにしてある】自前ソフトウェアラスタライザは共通ループへ判定を任せられない
+        // (三角形が3つ未満のメッシュを先に落とすため、任せると分母がずれる)。
+        // それでも統計は共通ループと同じ2つのカウンタへ積む必要がある
+        bool IsMeshVisibleCounted(
+            const Rendering::FrustumPlanes& frustum, const Assets::ModelInstance& instance,
+            const Assets::Model& model, const Assets::Mesh& mesh);
 
     private:
         // このフレームでライティングパス等が読むべきAO/GIバッファ(ブラー後 / ブラー前の生値)。
@@ -1979,51 +1978,11 @@ namespace Kurenai
         bool m_LightTileOverflowLogged = false;
         // DebugView::LightTilesのヒートマップの上限はm_DebugViewSettings.LightTileHeatmapMaxへ移した
 
-        // --- 自前ソフトウェアラスタライザ(46章) -------------------------------------------
-        //
-        // 三角形をコンピュートシェーダーで自前にラスタライズする比較用の経路。
-        // 既存のG-Buffer経路には一切影響せず、専用のバッファへ描いてDebugViewで見る。
-        // 詳細はShaders/3D/SoftwareRasterCommon.hlsli冒頭。
-        //
-        // DX12かつSM 6.6 + Int64ShaderOps + bindlessの環境でのみ動く
-        // (IRHIDevice::SupportsSoftwareRaster)。
-
-        // 巨大三角形リストの容量(要素数)。超えた分は描かれず、CSResolveが画面左上を
-        // マゼンタで塗って知らせる
-        static constexpr uint32_t kSWRasterLargeListCapacity = 4096;
-    public:
-        // 1フレームに扱えるメッシュレコード数の上限。Bistro Exteriorで約400
-        static constexpr uint32_t kSWRasterMaxMeshes = 2048;
-    private:
-        // CSRasterの1グループのスレッド数。SoftwareRaster.hlslの
-        // KURENAI_SWRASTER_GROUP_SIZEと一致させること
-        static constexpr uint32_t kSWRasterGroupSize = 64;
-        // Dispatchの1次元あたりの上限(65535)に収めるための2D分解の刻み
-        static constexpr uint32_t kSWRasterMaxGroupsPerAxis = 32768;
-
-        std::unique_ptr<RHI::IRHIShader> m_SoftwareRasterComputeShader;
-        std::unique_ptr<RHI::IRHIShader> m_SoftwareRasterLargeComputeShader;
-        std::unique_ptr<RHI::IRHIShader> m_SoftwareRasterResolveComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_SoftwareRasterPipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_SoftwareRasterLargePipelineState;
-        std::unique_ptr<RHI::IRHIPipelineState> m_SoftwareRasterResolvePipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterConstantBuffer;
-        // メッシュ1件 = 1レコード。毎フレームm_Scene.Instancesから組み直す
-        std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterMeshInfoBuffer;
-        // 巨大三角形の通し番号リストと、その個数を兼ねた間接ディスパッチ引数
-        std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterLargeEntriesBuffer;
-        std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterIndirectArgsBuffer;
-        // 以下は解像度に依存するためCreateRenderTargetsで作る。
-        // visibility bufferは画素あたり64bit(深度32 + 三角形番号32)
-        std::unique_ptr<RHI::IRHIBuffer> m_SoftwareRasterVisibilityBuffer;
-        // 出力3枚(色・深度・法線)はPresentPassのデバッグ表示も読むため、
-        // 持ち主をRenderTargets(m_RenderTargets.SoftwareRaster*)へ移した
-
+        // 自前ソフトウェアラスタライザ(46章)の資源とパス本体は Passes::GeometryPasses が持つ。
+        // 型と定数(SWRasterConstants / SWRasterMeshInfo / kSWRaster*)は
+        // Passes/GeometryConstants.h へ移した。
         // 巨大三角形とみなすbbox画素面積のしきい値と、その既定値・可動範囲(kSWRasterDefault/Min/Max
         // LargeTriangleArea)はm_GeometrySettings.SoftwareRasterLargeTriangleAreaへ移した
-        // メッシュレコード数が容量を超えた最初のフレームだけ警告を出すためのフラグ
-        // (m_LightTileOverflowLoggedと同じ作法)
-        bool m_SoftwareRasterMeshOverflowLogged = false;
 
         // --- 品質プリセット(41章) ---------------------------------------------------------
         //

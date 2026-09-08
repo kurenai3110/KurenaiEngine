@@ -4,6 +4,7 @@
 
 #include "EngineDefaults.h"
 #include "KurenaiEngine3D.h"
+#include "Passes/GeometryConstants.h"
 #include "UI/UIWidgets.h"
 
 namespace Kurenai::UI
@@ -861,11 +862,11 @@ namespace Kurenai::UI
             }
         }
         ImGui::Text("対象メッシュ: %zu / 三角形: %zu", targetMeshCount, triangleCount);
-        if (targetMeshCount > KurenaiEngine3D::kSWRasterMaxMeshes)
+        if (targetMeshCount > Passes::kSWRasterMaxMeshes)
         {
             ImGui::TextWrapped(
                 "メッシュ数が上限を超えている。超過分は描画されない"
-                "(上限はKurenaiEngine3D::kSWRasterMaxMeshes)");
+                "(上限はPasses::kSWRasterMaxMeshes)");
         }
 
         ImGui::TextWrapped(

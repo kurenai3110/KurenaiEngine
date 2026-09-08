@@ -390,6 +390,296 @@ namespace Kurenai::Passes
         return true;
     }
 
+    void GeometryPasses::CreateSoftwareRasterResources(
+        RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        RHI::ShaderDesc swRasterCsDesc;
+        swRasterCsDesc.Stage = RHI::ShaderStage::Compute;
+        swRasterCsDesc.FilePath = shaderDirectory + L"SoftwareRaster.kshader";
+        swRasterCsDesc.EntryPoint = "CSRaster";
+        m_SoftwareRasterComputeShader = device.CreateShader(swRasterCsDesc);
+
+        RHI::ShaderDesc swRasterLargeCsDesc;
+        swRasterLargeCsDesc.Stage = RHI::ShaderStage::Compute;
+        swRasterLargeCsDesc.FilePath = shaderDirectory + L"SoftwareRaster.kshader";
+        swRasterLargeCsDesc.EntryPoint = "CSRasterLarge";
+        m_SoftwareRasterLargeComputeShader = device.CreateShader(swRasterLargeCsDesc);
+
+        RHI::ShaderDesc swRasterResolveCsDesc;
+        swRasterResolveCsDesc.Stage = RHI::ShaderStage::Compute;
+        swRasterResolveCsDesc.FilePath = shaderDirectory + L"SoftwareRasterResolve.kshader";
+        swRasterResolveCsDesc.EntryPoint = "CSResolve";
+        m_SoftwareRasterResolveComputeShader = device.CreateShader(swRasterResolveCsDesc);
+
+        m_SoftwareRasterPipelineState =
+            device.CreateComputePipelineState({ m_SoftwareRasterComputeShader.get() });
+        m_SoftwareRasterLargePipelineState =
+            device.CreateComputePipelineState({ m_SoftwareRasterLargeComputeShader.get() });
+        m_SoftwareRasterResolvePipelineState =
+            device.CreateComputePipelineState({ m_SoftwareRasterResolveComputeShader.get() });
+
+        RHI::BufferDesc swRasterConstantBufferDesc;
+        swRasterConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        swRasterConstantBufferDesc.SizeInBytes = sizeof(SWRasterConstants);
+        m_SoftwareRasterConstantBuffer = device.CreateBuffer(swRasterConstantBufferDesc);
+
+        // メッシュレコード。毎フレームCPUから書き直すためStructuredReadOnly
+        RHI::BufferDesc swRasterMeshInfoDesc;
+        swRasterMeshInfoDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+        swRasterMeshInfoDesc.SizeInBytes =
+            static_cast<uint32_t>(sizeof(SWRasterMeshInfo)) * kSWRasterMaxMeshes;
+        swRasterMeshInfoDesc.StrideInBytes = static_cast<uint32_t>(sizeof(SWRasterMeshInfo));
+        m_SoftwareRasterMeshInfoBuffer = device.CreateBuffer(swRasterMeshInfoDesc);
+
+        // 巨大三角形リスト。CSRasterがUAVで書き、CSRasterLargeがSRVで読むためStructuredRW
+        RHI::BufferDesc swRasterLargeEntriesDesc;
+        swRasterLargeEntriesDesc.Usage = RHI::BufferUsage::StructuredRW;
+        swRasterLargeEntriesDesc.SizeInBytes =
+            static_cast<uint32_t>(sizeof(uint32_t)) * kSWRasterLargeListCapacity;
+        swRasterLargeEntriesDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+        m_SoftwareRasterLargeEntriesBuffer = device.CreateBuffer(swRasterLargeEntriesDesc);
+
+        // 間接ディスパッチ引数(uint3)。16バイトにしているのは4の倍数の要件と
+        // アライメントを揃えるためで、実際に使うのは先頭12バイト
+        RHI::BufferDesc swRasterIndirectArgsDesc;
+        swRasterIndirectArgsDesc.Usage = RHI::BufferUsage::IndirectArgs;
+        swRasterIndirectArgsDesc.SizeInBytes = 16;
+        swRasterIndirectArgsDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+        m_SoftwareRasterIndirectArgsBuffer = device.CreateBuffer(swRasterIndirectArgsDesc);
+    }
+
+    void GeometryPasses::ResetSoftwareRasterResources()
+    {
+        m_SoftwareRasterComputeShader.reset();
+        m_SoftwareRasterLargeComputeShader.reset();
+        m_SoftwareRasterResolveComputeShader.reset();
+        m_SoftwareRasterPipelineState.reset();
+        m_SoftwareRasterLargePipelineState.reset();
+        m_SoftwareRasterResolvePipelineState.reset();
+        m_SoftwareRasterConstantBuffer.reset();
+        m_SoftwareRasterMeshInfoBuffer.reset();
+        m_SoftwareRasterLargeEntriesBuffer.reset();
+        m_SoftwareRasterIndirectArgsBuffer.reset();
+    }
+
+    void GeometryPasses::CreateSoftwareRasterVisibilityBuffer(
+        RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        // visibility buffer。画素あたり64bit(上位32bit=深度、下位32bit=三角形番号)。
+        // CSRasterがUAVで書き、CSResolveがSRVで読むためStructuredRW
+        RHI::BufferDesc visibilityDesc;
+        visibilityDesc.Usage = RHI::BufferUsage::StructuredRW;
+        visibilityDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint64_t)) * width * height;
+        visibilityDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint64_t));
+        m_SoftwareRasterVisibilityBuffer = device.CreateBuffer(visibilityDesc);
+    }
+
+    void GeometryPasses::ResetSoftwareRasterVisibilityBuffer()
+    {
+        m_SoftwareRasterVisibilityBuffer.reset();
+    }
+    void GeometryPasses::ExecuteSoftwareRasterPass(
+        RHI::IRHICommandList* cmd,
+        const DirectX::XMMATRIX& viewProj,
+        const DirectX::XMFLOAT3& sunDirection,
+        const Rendering::RenderTargets& targets)
+    {
+        // --- メッシュレコードを組み直す ---------------------------------------------------
+        //
+        // 描画用の頂点/インデックスバッファはbindlessで直接引けるので(ModelLoader参照)、
+        // ここで作るのは「どのメッシュがどのbindless番号を持ち、通し三角形番号のどこから
+        // 始まるか」の表だけ。数百件のオーダーなので毎フレーム組み直して構わない
+        std::vector<SWRasterMeshInfo> meshInfos;
+        meshInfos.reserve(64);
+
+        uint32_t firstTriangle = 0;
+        bool overflowed = false;
+
+        const Rendering::FrustumPlanes swRasterFrustum = ExtractFrustumPlanes(viewProj);
+
+        // 【このパスはクロスディザ非対応】なのでフェード中でも段は1つに決め打つ。
+        // 【バッチは使わない】ここで作るのはドローではなくメッシュの表なので、
+        // まとめる意味が無い
+        Rendering::GeometryDrawLoopDesc swRasterLoop;
+        swRasterLoop.Frustum = &swRasterFrustum;
+        swRasterLoop.UseDrawUnits = false;
+        swRasterLoop.LODMode = Rendering::GeometryLODMode::Current;
+        // 半透明(alphaMode=BLEND)はハードウェア側でもG-Bufferに描かれないため揃える
+        swRasterLoop.MeshFilter = Rendering::GeometryMeshFilter::Opaque;
+        // 【メッシュ単位のカリングは共通ループに任せない】このパスは三角形が3つ未満の
+        // メッシュも落とすので、判定の順序が変わると分母がずれる。原文どおり
+        // 「描かないメッシュを弾いた後」に自分で呼ぶ
+        swRasterLoop.MeshCulling = false;
+
+        m_Engine.ForEachGeometryDraw(
+            swRasterLoop,
+            [](const Rendering::InstanceDrawUnit&, const Assets::Model&, float) { return false; },
+            [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& currentModel,
+                const Assets::Mesh& mesh, float)
+            {
+                const Assets::ModelInstance& instance = *unit.Instance;
+                if (mesh.IndexCount < 3)
+                {
+                    return true;
+                }
+
+                // メッシュ単位のカリング。統計はモデル単位とは別カウンタへ入れる。
+                // 【描かないメッシュを弾いた後に置く】分母を「このパスが実際に描くメッシュ」に
+                // 揃えないと、間引き率が薄まって効きが読めなくなる
+                if (!m_Engine.IsMeshVisibleCounted(swRasterFrustum, instance, currentModel, mesh))
+                {
+                    return true;
+                }
+
+                const uint32_t vertexBufferIndex =
+                    mesh.VertexBuffer ? mesh.VertexBuffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
+                const uint32_t indexBufferIndex =
+                    mesh.IndexBuffer ? mesh.IndexBuffer->GetBindlessIndex() : RHI::kInvalidBindlessIndex;
+                // bindless登録が無いメッシュ(ShaderReadableを指定せずに作られた等)は引けない。
+                // シェーダー側で無効番号を判定する手段が無いため、ここで落とす
+                if (vertexBufferIndex == RHI::kInvalidBindlessIndex ||
+                    indexBufferIndex == RHI::kInvalidBindlessIndex)
+                {
+                    return true;
+                }
+
+                if (meshInfos.size() >= kSWRasterMaxMeshes)
+                {
+                    // 表があふれた。**列挙そのものを打ち切る**(偽を返す)
+                    overflowed = true;
+                    return false;
+                }
+
+                SWRasterMeshInfo info{};
+                info.World = instance.World;
+                info.NormalMatrix = instance.NormalMatrix;
+                info.VertexBufferIndex = vertexBufferIndex;
+                info.IndexBufferIndex = indexBufferIndex;
+                info.FirstTriangle = firstTriangle;
+                info.TriangleCount = mesh.IndexCount / 3;
+                // ミラーリングされたインスタンスはワインディングが反転する。ハードウェア側が
+                // FrontCounterClockwise=trueの別PSOで描いているのと同じ対処をしないと、
+                // 鏡像配置のモデルだけ表裏が入れ替わって消える
+                info.FrontFaceSign = instance.IsMirrored ? -1.0f : 1.0f;
+                info.Flags = 0;
+
+                firstTriangle += info.TriangleCount;
+                meshInfos.push_back(info);
+                return true;
+            });
+
+        if (overflowed && !m_SoftwareRasterMeshOverflowLogged)
+        {
+            // 毎フレーム出続けるのを避けるため最初の1回だけ報告する(m_LightTileOverflowLoggedと同じ作法)
+            m_SoftwareRasterMeshOverflowLogged = true;
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "ソフトウェアラスタライザのメッシュ数が上限(" + std::to_string(kSWRasterMaxMeshes) +
+                    ")を超えました。超過分は描画されません");
+        }
+
+        if (meshInfos.empty())
+        {
+            // 描くものが1つも無くても、visibility bufferは必ずクリアしてから戻る。
+            //
+            // 【クリアせずに戻ってはいけない】このバッファは散布書き込みで、三角形が当たらなかった
+            // 画素には前フレームの値が残る(下の「0. クリア」のコメント参照)。カリングで全インスタンスが
+            // 落ちたフレームだけ前フレームの絵が焼き付いて残る、という形で出る
+            cmd->ClearUnorderedAccessBufferUint(m_SoftwareRasterVisibilityBuffer.get(), 0);
+            cmd->ClearUnorderedAccessBufferUint(m_SoftwareRasterIndirectArgsBuffer.get(), 0);
+            return;
+        }
+
+        cmd->UpdateBuffer(
+            m_SoftwareRasterMeshInfoBuffer.get(),
+            meshInfos.data(),
+            meshInfos.size() * sizeof(SWRasterMeshInfo));
+
+        // --- 定数バッファ -----------------------------------------------------------------
+
+        const uint32_t totalTriangles = firstTriangle;
+
+        // Dispatchの1次元あたりの上限は65535。三角形数はシーン読み込み時に確定する静的な値なので
+        // CPUが持てばよく、ここを間接ディスパッチにする理由は無い(巨大三角形の個数と違って
+        // GPU上でしか分からない値ではない)
+        const uint32_t groupsTotal = (totalTriangles + kSWRasterGroupSize - 1) / kSWRasterGroupSize;
+        const uint32_t groupsX = std::min(groupsTotal, kSWRasterMaxGroupsPerAxis);
+        const uint32_t groupsY = (groupsTotal + groupsX - 1) / groupsX;
+
+        SWRasterConstants constants{};
+        DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
+        constants.RenderSize = {
+            static_cast<float>(m_Engine.GetRenderWidth()),
+            static_cast<float>(m_Engine.GetRenderHeight()),
+            1.0f / static_cast<float>(m_Engine.GetRenderWidth()),
+            1.0f / static_cast<float>(m_Engine.GetRenderHeight()),
+        };
+        constants.SunDirection = { sunDirection.x, sunDirection.y, sunDirection.z, 0.0f };
+        constants.DispatchParams = {
+            groupsX,
+            totalTriangles,
+            static_cast<uint32_t>(meshInfos.size()),
+            static_cast<uint32_t>(std::clamp(
+                m_Engine.GetGeometrySettings().SoftwareRasterLargeTriangleArea,
+                static_cast<int>(GeometrySettings::kSWRasterMinLargeTriangleArea),
+                static_cast<int>(GeometrySettings::kSWRasterMaxLargeTriangleArea))),
+        };
+        constants.LargeParams = { kSWRasterLargeListCapacity, 0u, 0u, 0u };
+
+        cmd->UpdateBuffer(m_SoftwareRasterConstantBuffer.get(), &constants, sizeof(constants));
+
+        // --- 0. クリア --------------------------------------------------------------------
+        //
+        // visibility bufferは散布書き込みなので、三角形が当たらなかった画素には前フレームの値が
+        // 残る。0は「深度0 = 遠平面 = 当たり無し」を意味する(SWRasterPackVisibility参照)。
+        // 間接ディスパッチ引数も、X成分をカウンタとして使うため毎フレーム0へ戻す必要がある
+        cmd->ClearUnorderedAccessBufferUint(m_SoftwareRasterVisibilityBuffer.get(), 0);
+        cmd->ClearUnorderedAccessBufferUint(m_SoftwareRasterIndirectArgsBuffer.get(), 0);
+
+        // --- 1. CSRaster: 1スレッド = 1三角形 ---------------------------------------------
+        //
+        // 【UAVはディスパッチごとに張り直す】Dispatch直後に全スロットが自動解除されるため
+        // (IRHICommandList::SetComputeUnorderedAccessTextureのコメント)
+        cmd->SetComputePipelineState(m_SoftwareRasterPipelineState.get());
+        cmd->SetComputeConstantBuffer(1, m_SoftwareRasterConstantBuffer.get());
+        cmd->SetComputeShaderResourceBuffer(0, m_SoftwareRasterMeshInfoBuffer.get());
+        cmd->SetComputeUnorderedAccessBuffer(0, m_SoftwareRasterVisibilityBuffer.get());
+        cmd->SetComputeUnorderedAccessBuffer(1, m_SoftwareRasterLargeEntriesBuffer.get());
+        cmd->SetComputeUnorderedAccessBuffer(2, m_SoftwareRasterIndirectArgsBuffer.get());
+        cmd->Dispatch(groupsX, groupsY, 1);
+
+        // --- 2. CSRasterLarge: 1スレッドグループ = 巨大三角形1個 --------------------------
+        //
+        // 巨大三角形の個数はGPU上でしか分からないため、グループ数をCPUから書けない。
+        // これが間接ディスパッチをRHIへ足した理由。
+        // 【引数バッファをUAVに張らない】DispatchIndirectは引数バッファを
+        // INDIRECT_ARGUMENT状態へ遷移させるので、同じディスパッチのUAVスロットに
+        // 張ったままにはできない(DX12CommandList::DispatchIndirectのコメント)
+        cmd->SetComputePipelineState(m_SoftwareRasterLargePipelineState.get());
+        cmd->SetComputeConstantBuffer(1, m_SoftwareRasterConstantBuffer.get());
+        cmd->SetComputeShaderResourceBuffer(0, m_SoftwareRasterMeshInfoBuffer.get());
+        cmd->SetComputeShaderResourceBuffer(1, m_SoftwareRasterLargeEntriesBuffer.get());
+        cmd->SetComputeUnorderedAccessBuffer(0, m_SoftwareRasterVisibilityBuffer.get());
+        cmd->DispatchIndirect(m_SoftwareRasterIndirectArgsBuffer.get(), 0);
+
+        // --- 3. CSResolve: 1スレッド = 1画素 ----------------------------------------------
+        //
+        // visibility bufferの三角形番号からジオメトリを引き直し、深度・法線・陰影を書く
+        constexpr uint32_t kResolveGroupSize = ShaderInterop::kSWRasterResolveGroupSize;
+        cmd->SetComputePipelineState(m_SoftwareRasterResolvePipelineState.get());
+        cmd->SetComputeConstantBuffer(1, m_SoftwareRasterConstantBuffer.get());
+        cmd->SetComputeShaderResourceBuffer(0, m_SoftwareRasterMeshInfoBuffer.get());
+        cmd->SetComputeShaderResourceBuffer(1, m_SoftwareRasterVisibilityBuffer.get());
+        cmd->SetComputeUnorderedAccessTexture(0, targets.SoftwareRasterColor.get());
+        cmd->SetComputeUnorderedAccessTexture(1, targets.SoftwareRasterDepth.get());
+        cmd->SetComputeUnorderedAccessTexture(2, targets.SoftwareRasterNormal.get());
+        cmd->SetComputeUnorderedAccessBuffer(3, m_SoftwareRasterIndirectArgsBuffer.get());
+        cmd->Dispatch(
+            (m_Engine.GetRenderWidth() + kResolveGroupSize - 1) / kResolveGroupSize,
+            (m_Engine.GetRenderHeight() + kResolveGroupSize - 1) / kResolveGroupSize,
+            1);
+    }
+
     void GeometryPasses::Register(
         Core::RenderGraph& graph,
         const Rendering::RenderFrameContext& frame,
@@ -1389,7 +1679,7 @@ namespace Kurenai::Passes
         // 深度は丸め誤差とフィルルールの差を除いて一致するはず。差が面全体に出たら
         // 座標変換の間違いで、シルエットの±1画素ならフィルルールの差(想定内)
         const bool softwareRasterPassRuns = frame.Settings.Geometry.SoftwareRasterEnabled && frame.Capabilities.SoftwareRasterAvailable &&
-                                            m_Engine.m_SoftwareRasterVisibilityBuffer && !m_Engine.m_Scene.Instances.empty();
+                                            m_SoftwareRasterVisibilityBuffer && !m_Engine.m_Scene.Instances.empty();
         bb.SoftwareRasterPassRuns = softwareRasterPassRuns;
         if (softwareRasterPassRuns)
         {
@@ -1397,13 +1687,13 @@ namespace Kurenai::Passes
                 .Name = "SWRaster",
                 .Writes = { targets->SoftwareRasterColor.get(), targets->SoftwareRasterDepth.get(),
                             targets->SoftwareRasterNormal.get() },
-                .BufferReads = { m_Engine.m_SoftwareRasterMeshInfoBuffer.get() },
-                .BufferWrites = { m_Engine.m_SoftwareRasterVisibilityBuffer.get(),
-                                  m_Engine.m_SoftwareRasterLargeEntriesBuffer.get(),
-                                  m_Engine.m_SoftwareRasterIndirectArgsBuffer.get() },
-                .Execute = [this, viewProj, sunLighting](RHI::IRHICommandList* cmd)
+                .BufferReads = { m_SoftwareRasterMeshInfoBuffer.get() },
+                .BufferWrites = { m_SoftwareRasterVisibilityBuffer.get(),
+                                  m_SoftwareRasterLargeEntriesBuffer.get(),
+                                  m_SoftwareRasterIndirectArgsBuffer.get() },
+                .Execute = [this, viewProj, sunLighting, targets](RHI::IRHICommandList* cmd)
                 {
-                    m_Engine.ExecuteSoftwareRasterPass(cmd, viewProj, sunLighting.Direction);
+                    ExecuteSoftwareRasterPass(cmd, viewProj, sunLighting.Direction, *targets);
                 },
             });
         }
