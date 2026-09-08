@@ -165,6 +165,9 @@
     <ClCompile Include="Source\Engine\Rendering\RenderTargets.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Engine\Rendering\RenderFrame.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
     <ClCompile Include="Source\Engine\Settings\QualitySettings.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>

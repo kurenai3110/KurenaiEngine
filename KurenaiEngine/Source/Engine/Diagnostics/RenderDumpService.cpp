@@ -1151,4 +1151,54 @@ namespace Kurenai
             Core::Logger::Info("Perf", vramLine);
         }
     }
+
+    void KurenaiEngine3D::AccumulatePerfDump()
+    {
+        // --- GPU計測の書き出し(計測専用) ---
+        // 【毎フレーム走る場所へ置くこと】Perfログを出す関数は1秒に1回しか先へ進まない
+        // (集計期間に達するまで早期returnする)。そこへ置くと収集が毎秒になり、
+        // 300フレーム集めるのに5分かかって測定が終わらない
+        // 【Perfログとは別に集める】あちらは0.05ms未満を落とし1フレームの代表値しか出さない。
+        // ここでは**閾値なしで全パスを、指定枚数ぶん平均**する
+        if (!m_PerfDumpPath.empty() && !m_PerfDumpDone && m_GPUProfiler)
+        {
+            ++m_PerfDumpWarmupFrames;
+            // 整定を待つ。内部解像度の切り替えとストリーミングが片付くまで
+            if (m_PerfDumpWarmupFrames > static_cast<int32_t>(kMegaLightsAccumWarmup))
+            {
+                for (const RHI::GPUTimingResult& pass : m_GPUProfiler->GetResults())
+                {
+                    m_PerfDumpTotals[pass.Name] += static_cast<double>(pass.TimeMs);
+                }
+                ++m_PerfDumpCollected;
+
+                if (m_PerfDumpCollected >= m_PerfDumpTargetFrames)
+                {
+                    m_PerfDumpDone = true;
+                    std::ofstream file(m_PerfDumpPath, std::ios::trunc);
+                    if (file)
+                    {
+                        file << "pass,avg_ms\n";
+                        for (const auto& entry : m_PerfDumpTotals)
+                        {
+                            file << entry.first << ','
+                                 << (entry.second / static_cast<double>(m_PerfDumpCollected)) << '\n';
+                        }
+                        file << "__frames," << m_PerfDumpCollected << '\n';
+                        Core::Logger::Info(
+                            "KurenaiEngine3D",
+                            "GPU計測を書き出しました: " + Core::WideToUtf8(m_PerfDumpPath) + " (" +
+                                std::to_string(m_PerfDumpCollected) + "フレームの平均)");
+                    }
+                    else
+                    {
+                        Core::Logger::Error(
+                            "KurenaiEngine3D",
+                            "GPU計測を書き出せませんでした(ファイルを開けない): " +
+                                Core::WideToUtf8(m_PerfDumpPath));
+                    }
+                }
+            }
+        }
+    }
 }

@@ -94,6 +94,20 @@ namespace Kurenai::Passes
     class PresentPass;
 }
 
+namespace Kurenai::ShaderInterop
+{
+    // AdvanceFramePrevViewState()の引数にだけ使う。実体はShaderInterop/FrameConstants.hにあり、
+    // このヘッダを公開APIから重くしないため前方宣言で止める
+    struct FrameConstants;
+}
+
+namespace Kurenai::Rendering
+{
+    // Render()から切り出したフレームの締め(ResolveFrameCullStats)の引数にだけ使う。
+    // 実体はRendering/RenderBlackboard.hにあり、そちらはRHIのヘッダ群を引き込むため前方宣言で止める
+    struct RenderBlackboard;
+}
+
 namespace Kurenai
 {
     // インスタンシングで1体ぶんの変換を渡すレコード。
@@ -719,6 +733,21 @@ namespace Kurenai
         void TickFrame();
         void RenderThreadMain();
         void Render(const FrameState& frameState);
+        // --- Render()から切り出したフレームの締め(段階6.6のEブロック) ---
+        // 【定義はRendering/RenderFrame.cppにある】KurenaiEngine3Dのメンバ関数のまま、
+        // 翻訳単位だけを分けている(Diagnostics/RenderDumpService.cppと同じ作法)。
+        // **Render()から呼ぶ順序が実行順の一部**なので、呼ぶ位置を動かさないこと
+        //
+        // GPUカリングの結果(メッシュレット統計とモデル単位)を読み戻す。
+        // graph.Execute()の直後、Presentより前で呼ぶ
+        void ResolveFrameCullStats(const Rendering::RenderBlackboard& blackboard, bool meshletCullStatsActive);
+        // ImGuiの描画をバックバッファへ重ね、GPU計測を締めてPresentする
+        void SubmitAndPresentFrame();
+        // 次フレームが「前フレーム」として参照する行列・ジッター・カメラ位置を確定させる
+        void AdvanceFramePrevViewState(const ShaderInterop::FrameConstants& constants, const DirectX::XMFLOAT2& jitterUv);
+        // 履歴テクスチャのping-pongを反転する(TAA / MegaLightsの時間再利用・デノイザ)。
+        // 【ResolveTextureDumps()より後で呼ぶこと】ダンプは今フレームの書き込み先を読む
+        void AdvanceFrameHistory();
         // このフレームの計測値を集計し、集計期間(FrameStatsLogIntervalSeconds)ぶん溜まっていれば
         // 1行にまとめてログへ出す。Renderスレッドからフレームごとに呼ぶ
         void LogFrameStatsIfDue(float renderDeltaTime);
@@ -1168,6 +1197,9 @@ namespace Kurenai
         // パス名 -> 合計時間[ms]。同じ名前のパスが1フレームに複数あるぶんも足し込む
         // (a-trousは段の数だけ同名で登録される。**合計が知りたいので足すのが正しい**)
         std::map<std::string, double> m_PerfDumpTotals;
+        // このフレームのパス別GPU時間を上の合計へ足し込み、目標枚数に達したらCSVへ書き出す。
+        // 【定義はDiagnostics/RenderDumpService.cppにある】LogFrameStatsIfDueと同じ翻訳単位
+        void AccumulatePerfDump();
 
         // --- 作り直し経路の予約(検証専用。AddScheduledRecreation) ---
         // 発火済みのものはFiredを立てて二度と撃たない。フレームが飛んでも取りこぼさないよう、

@@ -167,6 +167,7 @@
     <ClCompile Include="Source\Engine\Rendering\IBLResources.cpp" />
     <ClCompile Include="Source\Engine\Rendering\SkyResources.cpp" />
     <ClCompile Include="Source\Engine\Rendering\RenderTargets.cpp" />
+    <ClCompile Include="Source\Engine\Rendering\RenderFrame.cpp" />
     <ClCompile Include="Source\Engine\Passes\DDGIPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\EnvironmentPasses.cpp" />
     <ClCompile Include="Source\Engine\Passes\MegaLightsPasses.cpp" />
