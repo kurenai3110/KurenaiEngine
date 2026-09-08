@@ -1802,8 +1802,10 @@ IBLのために<code>IRHIDevice</code>/<code>IRHICommandList</code>は以下のA
 </p>
 <ul>
 <li><code>CreateMippedUAVTexture(width, height, format, mipLevels)</code> —
-ミップごとに個別のUAVを張るテクスチャを作る。<code>CreateHiZTexture</code>はこの関数を
-R32_Float固定で呼ぶだけの薄いラッパーである。</li>
+ミップごとに個別のUAVを張るテクスチャを作る。Hi-Z(<code>R32_Float</code>)もIBLの
+プリフィルタ済み鏡面(<code>R16G16B16A16_Float</code>)もこの1本で作る
+(以前あった用途名のファクトリ<code>CreateHiZTexture</code>は、フォーマットを固定して
+これへ委譲するだけだったため削除した)。</li>
 <li><code>CreateUAVTextureCube(size, format)</code> / <code>CreateMippedUAVTextureCube(size, format, mipLevels)</code> —
 上記の「キューブマップ版」。DX11は<code>ArraySize=6</code> + <code>D3D11_RESOURCE_MISC_TEXTURECUBE</code>の
 <code>Texture2D</code>として作成し、読み取り用SRVは<code>D3D11_SRV_DIMENSION_TEXTURECUBE</code>(全6面・
@@ -4528,7 +4530,7 @@ Loaderスレッドが作る・壊すのは<strong>アセット由来のリソー
 <tbody>
 <tr><td>頂点/インデックスバッファ</td><td>G-Buffer・SceneColor・SSAO/SSIL・SSR・Tonemap等(<code>CreateRenderTexture</code>)</td></tr>
 <tr><td>マテリアルテクスチャ(<code>CreateTextureFromImage</code>)</td><td>深度・シャドウマップ配列(<code>CreateDepthTexture</code>系)</td></tr>
-<tr><td>スカイボックス(<code>CreateTextureFromFile</code>)</td><td>Hi-Z・ブルームチェーン(<code>CreateHiZTexture</code> / <code>CreateMippedUAVTexture</code>)</td></tr>
+<tr><td>スカイボックス(<code>CreateTextureFromFile</code>)</td><td>Hi-Z・ブルームチェーン(<code>CreateMippedUAVTexture</code>)</td></tr>
 <tr><td>RT統合ジオメトリバッファ(<code>StructuredImmutable</code>)</td><td>IBL・反射プローブのキューブマップ(<code>CreateUAVTextureCube</code>系)</td></tr>
 <tr><td>BLAS / TLAS</td><td>ライトタイルバッファ・サンプラーセット・PSO・スワップチェーンのリサイズ</td></tr>
 </tbody>
@@ -4542,7 +4544,7 @@ Loaderスレッドが作る・壊すのは<strong>アセット由来のリソー
 </p>
 <pre><code>m_AssetSrvCpuHeap   … CreateTextureFromFile / FromImage / SolidColor / FromMemory /
                         CreateBuffer(StructuredImmutable) / CreateTopLevelAS  → Loaderのみ
-m_RenderSrvCpuHeap  … CreateRenderTexture / CreateUAVTexture / CreateHiZTexture /
+m_RenderSrvCpuHeap  … CreateRenderTexture / CreateUAVTexture /
                         CreateMippedUAVTexture / CreateUAVTextureCube系 /
                         CreateDepthTexture系 / CreateBuffer(Structured系) /
                         nullディスクリプタ                                    → Renderのみ</code></pre>

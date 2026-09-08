@@ -8789,3 +8789,113 @@ Set/Draw/Dispatchと無同期に同じ配列を書き換えることになり、
 何フレーム目に切り替わるかが採取ごとに変わる。実測で切り替え直後のパスマニフェスト2本が
 食い違ったので、比較スクリプト側を「基準3回で揃ったフレームだけ比べる」方式へ変えた。
 中間バッファで既にやっていた「安定集合」の考え方をマニフェストへも広げた。
+
+## 89. RHIの重複は「D3D呼び出し」ではなく「引数検証とエラーメッセージ」だった
+
+`DX11Device.cpp` と `DX12Device.cpp` は合わせて5,080行あり、そのうち相当量が
+書き写しだった。ただし**重複していたのはD3Dの呼び出しではない。**
+どのフォーマットへ写すか、どのブレンド係数を使うか、どんな引数を断るか、
+断ったときに何をログへ出すか —— つまり**判断と文言**のほうが重複していた。
+
+D3Dの呼び出しそのものは、バリア・ディスクリプタ・コピーの発行のように本質的に別物で、
+寄せようとすると片方の都合をもう片方へ持ち込むことになる。そこで
+**「何を決めたか」だけを共通層へ出し、「どのAPIで実現するか」を各バックエンドに残す**
+方針で切った。
+
+### 何をどこへ寄せたか
+
+| 新設 | 寄せたもの |
+|---|---|
+| `RHI/DXGIFormatUtil.h` | `ToDXGIFormat(Format)`。**24行が1文字も違わずに両方へ書かれていた** |
+| `RHI/PipelineStateNormalize.{h,cpp}` | BlendModeの5値・深度比較の4通り・サンプラーのフィルタ/アドレスを**意味値**へ正規化する。`D3D11_BLEND` / `D3D12_BLEND` への最終変換だけが各バックエンドに残る |
+| `RHI/ReadbackUtil.{h,cpp}` | リードバックのサイズ検証・ミップ寸法検証・行パディング除去・受け皿の記述子作り |
+| `RHI/GPUProfilerCore.{h,cpp}` | リングの段数と進め方・区間数の上限・区間名・結果の集計・上限超過の警告 |
+| `IRHICommandList` の非仮想層 | ビューポートとシザーの状態、`DispatchIndirect` / `ClearUnorderedAccessBufferUint` / `CopyBufferToReadback` / `CopyTextureToReadback` の引数検証 |
+
+### 意味値を挟んだのはなぜか
+
+ブレンドを共通化しようとすると、まず「共通ヘッダが `D3D11_BLEND` を返す」案が浮かぶ。
+値は D3D11 と D3D12 で同じなので動く。**が、それをやるとバックエンド中立のはずの層が
+`d3d11.h` を引き込む**(`RHI/TextureImage.cpp` が既にそうなっていて、DX12起動時にも
+D3D11デバイスが立つという積み残しになっている)。
+
+そこで `BlendFactorValue` / `DepthCompareValue` / `SamplerFilterValue` という
+**どちらのAPIにも属さない列挙**を挟んだ。共通層は「アルファブレンドとは
+src=SrcAlpha, dst=InvSrcAlpha, op=Add のことだ」とだけ決め、
+それを `D3D11_BLEND_SRC_ALPHA` に写すのは `DX11Device.cpp` の仕事にした。
+各バックエンドに6行の変換表が増えるが、**そこには判断が1つも無い。**
+
+### NVIにしたのは「検証を飛ばせる形」を消すため
+
+`SetViewport` / `SetScissorRect` / `DispatchIndirect` / `CopyTextureToReadback` などは、
+検証部分がログのタグだけ変えて両方へ書かれていた。共通の関数を作って
+「両方から呼ぶ」約束にしてもよいが、**それは呼び忘れられる。**
+
+`IRHICommandList` 側で非仮想にし、実装を `protected` の純粋仮想
+(`ApplyViewport` / `*Impl`)へ委ねる形にすると、**バックエンドは検証を通さない経路を
+そもそも書けなくなる。** 「これは何か」だけをバックエンドが答え
+(`IsIndirectArgsBuffer` / `IsReadbackBuffer` / `IsReadbackTexture` /
+`HasUnorderedAccessView`)、「何を断るか」は基底が決める。
+
+ビューポートの現在値(`m_CurrentViewport` / `m_HasViewport`)も基底へ引き上げた。
+シザーのクランプ先であり、両バックエンドが同じ規則で持っていたため。
+
+### 用途名がインターフェースに漏れていた ―― `CreateHiZTexture` の削除
+
+`IRHIDevice::CreateHiZTexture(w, h, mipLevels)` の中身は、DX11もDX12も
+
+```cpp
+return CreateMippedUAVTexture(w, h, Format::R32_Float, mipLevels);
+```
+
+の1行だった。**同じ委譲を両方が書いている。** これはインターフェースが
+「何を作るか」ではなく「何に使うか」を持ってしまっている状態で、
+呼び出し元は1箇所(`Rendering/RenderTargets.cpp`)しかない。削除して
+`CreateMippedUAVTexture` を直接呼ぶようにした。
+
+### 手で同期させる義務が2つ消えた
+
+- `PipelineStateDesc` と `MeshPipelineStateDesc` は、ラスタライザ・深度・ブレンド・
+  レンダーターゲットの8フィールドを重複させ、「**対応するフィールドは名前も既定値も
+  揃えてある**」というコメントで手で同期させていた。共通基底
+  `GraphicsPipelineCommonDesc` へ括った。同じG-Bufferへ書くパスを頂点シェーダー版と
+  メッシュシェーダー版で切り替えられることが前提になっており、
+  片方へ足して他方へ足し忘れても**コンパイルは通り、実行時にも何も言わない**
+- `kMaxScopesPerFrame`(96)は両方のプロファイラのヘッダに書かれ、
+  「**DX12側と必ず同じ値にすること**」というコメントが付いていた。
+  `GPUProfilerCore` へ寄せた時点で義務自体が消えた
+
+### 既定実装付きの3つを純粋仮想へ揃えた
+
+`IRHIDevice` の `GetBindlessUsedCount` / `GetBindlessCapacity` /
+`SupportsIndirectDispatchMesh` だけが既定実装を持ち、**DX11 が override せずに
+黙って継承していた。** 他の非対応機能(`SupportsRaytracing` / `SupportsBindless` /
+`SupportsMeshShader`)は明示 override して理由をコメントで残す方針だったので、
+純粋仮想にして DX11 側にも明示の override とコメントを置いた。
+既定実装があると「実装し忘れたのか、非対応だから0なのか」が区別できない。
+
+### 結果
+
+`DX11Device.cpp` + `DX12Device.cpp` は 5,080行 → 5,016行。
+RHI全体では 827行削って 586行足した。**行数の減りが小さいのは、
+消えた重複と同じ量だけ「意味値→D3D型」の変換表が増えたため**で、
+そちらには判断が無いので片方だけ直して静かにずれることは起こらない。
+
+### 検証
+
+`.hlsl` を1行も触っていない(`git diff -- '*.hlsl' '*.hlsli'` が空、
+`.kshader` 49本の焼き直しなし)。10構成の採取で**中間バッファ346本すべて一致**。
+
+パスマニフェストは2,560本中2本が食い違ったが、**同じバイナリで3回採ると
+0本 / 2本 / 2本と割れた。** 中身を見ると、R4(DX12・実行中のシーン切り替え)の
+切り替わりが1フレーム後ろへずれているだけで、フレーム74以降は完全に一致する。
+シーンの切り替えはLoaderスレッドが読み終えた次のフレームで取り込まれる非同期処理なので、
+**何フレーム目に切り替わるかは採取ごとに変わる**(85章)。この段階の変更によるものではない。
+
+採取では通らない経路も個別に確かめた —— ウィンドウのリサイズ(DX11/DX12とも
+1024x640 ⇄ 1280x720 でエラー0件)、プロファイラパネルの表示(両バックエンドで
+パス別GPU時間が出る)、**Debugビルドでの起動**(Releaseにはデバッグレイヤーが無いため、
+性能ログの「エラー0件」はD3D12のAPI誤用を検証していない)。
+Debug/DX12 で出たデバッグレイヤーの指摘2件(ID 1158 / 538)は
+**71.6節に記録済みの既存の問題**(BLASの圧縮後サイズをREADBACKヒープへ直接書いている)で、
+この段階の変更とは無関係。

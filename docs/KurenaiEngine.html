@@ -803,7 +803,7 @@ std::unique_ptr&lt;IRHITexture&gt;   CreateRenderTexture(uint32_t width, uint32_
 std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTexture(uint32_t width, uint32_t height, float clearDepth = 1.0f);
 std::unique_ptr&lt;IRHITexture&gt;   CreateDepthTextureArray(uint32_t width, uint32_t height, uint32_t arraySize, float clearDepth = 1.0f);
 std::unique_ptr&lt;IRHITexture&gt;   CreateUAVTexture(uint32_t width, uint32_t height, Format format);
-std::unique_ptr&lt;IRHITexture&gt;   CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels);
+std::unique_ptr&lt;IRHITexture&gt;   CreateMippedUAVTexture(uint32_t width, uint32_t height, Format format, uint32_t mipLevels);
 std::unique_ptr&lt;IRHISamplerSet&gt; CreateSamplerSet(const SamplerDesc* descs, uint32_t count);
 IRHICommandList*                GetImmediateCommandList();
 
@@ -1047,7 +1047,7 @@ void DispatchMesh(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32
 void SetComputePipelineState(IRHIPipelineState* pipelineState);
 void SetComputeConstantBuffer(uint32_t slot, IRHIBuffer* buffer);
 void SetComputeTexture(uint32_t slot, IRHITexture* texture);
-void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0); // mipLevelはCreateHiZTexture用(4.3.2参照)
+void SetComputeUnorderedAccessTexture(uint32_t slot, IRHITexture* texture, uint32_t mipLevel = 0); // mipLevelはCreateMippedUAVTexture用(4.3.2参照)
 void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer);
 void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* as); // TLASをtスロットへ(4.2.1参照)
 void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ);</code></pre>
@@ -1114,9 +1114,9 @@ DX11バックエンドも同じAPIで動作するが、UAVはDispatch呼び出�
 呼び出し後に自動的にアンバインドされる(同一リソースをUAVとSRVへ同時バインドできないDX11の制約のため)。
 </p>
 
-<h4 id="hiz">4.3.2 Hi-Zミップチェーン</h4>
+<h4 id="hiz">4.3.2 ミップチェーンへの書き込み(Hi-Z)</h4>
 <p>
-<code>CreateHiZTexture(width, height, mipLevels)</code>は、単チャンネル(<code>R32_Float</code>)で
+<code>CreateMippedUAVTexture(width, height, format, mipLevels)</code>は、指定したフォーマットで
 <code>width</code>/<code>height</code>から1x1までのフルミップチェーンを持つテクスチャを作る。
 通常の<code>CreateUAVTexture</code>が常に1ミップしか持たないのに対し、こちらは
 <strong>ミップごとに個別のUAV</strong>を張るため、<code>SetComputeUnorderedAccessTexture</code>の
@@ -1130,7 +1130,7 @@ auto downsampleCs = device->CreateShader({ RHI::ShaderStage::Compute, L"HiZ.hlsl
 auto downsamplePso = device->CreateComputePipelineState({ downsampleCs.get() });
 
 const uint32_t mipLevels = /* floor(log2(max(width, height))) + 1 */;
-auto hiZTexture = device->CreateHiZTexture(width, height, mipLevels);
+auto hiZTexture = device->CreateMippedUAVTexture(width, height, RHI::Format::R32_Float, mipLevels);
 
 // ミップ0: 通常の深度テクスチャ(1ミップ)からコピーする
 cmd->SetComputePipelineState(copyPso.get());
