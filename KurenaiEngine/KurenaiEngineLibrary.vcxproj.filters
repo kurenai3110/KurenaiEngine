@@ -105,6 +105,21 @@
     <ClInclude Include="Source\Library\RHI\RHIShaderPackage.h">
       <Filter>Source\Library\RHI</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Library\RHI\DXGIFormatUtil.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\RHIReadbackFormat.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\PipelineStateNormalize.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\ReadbackUtil.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Library\RHI\GPUProfilerCore.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
     <ClInclude Include="Source\Library\Assets\RaytracingGeometry.h">
       <Filter>Source\Library\Assets</Filter>
     </ClInclude>
@@ -319,6 +334,18 @@
       <Filter>Source\Library\Assets</Filter>
     </ClCompile>
     <ClCompile Include="Source\Library\RHI\RHIShaderPackage.cpp">
+      <Filter>Source\Library\RHI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\IRHICommandList.cpp">
+      <Filter>Source\Library\RHI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\PipelineStateNormalize.cpp">
+      <Filter>Source\Library\RHI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\ReadbackUtil.cpp">
+      <Filter>Source\Library\RHI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\RHI\GPUProfilerCore.cpp">
       <Filter>Source\Library\RHI</Filter>
     </ClCompile>
     <ClCompile Include="Source\Library\RHI\TextureImage.cpp">
