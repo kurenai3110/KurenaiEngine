@@ -141,6 +141,21 @@ namespace Kurenai::Passes
         m_DDGIDirtyProbeBuffer = device.CreateBuffer(ddgiDirtyBufferDesc);
     }
 
+    void DDGIPasses::ResetProgress(uint32_t probeCount)
+    {
+        // 確保し直した直後のアトラスは中身が未定義なので、全スロットを「未確定」として持つ。
+        // 【あり得ない座標で埋める】0で埋めると、たまたまその座標を担当するスロットが
+        // 「もう焼いてある」と誤判定される
+        m_DDGIProbeBakedCoord.assign(probeCount, DirectX::XMINT3{ INT32_MIN, INT32_MIN, INT32_MIN });
+        m_DDGIDirtyProbeList.clear();
+
+        // 確保し直した直後のアトラスは中身が未定義なので、一巡目からやり直す
+        m_DDGIBaked = false;
+        m_DDGIWarmingUp = true;
+        m_DDGIUpdateCursor = 0;
+        m_DDGIOverwriteRemaining = 0;
+        m_DDGILastExposureValid = false;
+    }
     void DDGIPasses::RegisterProbeUpdate(
         Core::RenderGraph& graph,
         const Rendering::RenderFrameContext& frame,
@@ -198,7 +213,7 @@ namespace Kurenai::Passes
         // 反射プローブとまったく同じキャプチャ経路を使い、解像度だけkDDGICaptureSizeへ落とす。
         // 6面×16×16 = 1536テクセルがそのままDDGIの「1536本のレイ」になる。
         // フルベイクは持たず、初回も含めて常に1フレームm_DDGISettings.ProbesPerFrame個ずつ時間分割で回す
-        // (理由はKurenaiEngine3D.hのm_DDGIWarmingUpのコメント参照)
+        // (理由はDDGIPasses.hのm_DDGIWarmingUpのコメント参照)
 
         // プローブ1面ぶんのキャプチャ → スクラッチのキューブ2本(放射輝度・距離)の該当面へコピー。
         // コピーCSはIBLConvolve.hlslのCSCopyCaptureToCubeFaceをそのまま使う。u1の宣言が
@@ -290,8 +305,8 @@ namespace Kurenai::Passes
                     // 必ず一致するため冗長でもあるが、将来プロキシ生成に条件が入ったときに
                     // 静かに乖離する形になる
                     const bool instanceHasProxy =
-                        unit.InstanceIndex < m_Engine.m_EmissiveProxyInstances.size()
-                        && m_Engine.m_EmissiveProxyInstances[unit.InstanceIndex];
+                        unit.InstanceIndex < m_Engine.GetEmissiveProxyInstances().size()
+                        && m_Engine.GetEmissiveProxyInstances()[unit.InstanceIndex];
 
                     // 【シェーダーには手を入れない】倍率を0にすればEmissiveFactorごと0になる。
                     // 判定をクラスタの有無で行うのは、係数が0でないのにテクスチャの平均が
@@ -330,9 +345,9 @@ namespace Kurenai::Passes
                     return true;
                 });
 
-            if (!m_Engine.m_DDGIEmissiveSuppressLoggedRaster)
+            if (!m_DDGIEmissiveSuppressLoggedRaster)
             {
-                m_Engine.m_DDGIEmissiveSuppressLoggedRaster = true;
+                m_DDGIEmissiveSuppressLoggedRaster = true;
                 Core::Logger::Info(
                     "KurenaiEngine3D",
                     std::string("DDGI(ラスタ)の自発光: 抑止 ") + (suppressEmissiveForDDGI ? "する" : "しない") +
@@ -397,9 +412,9 @@ namespace Kurenai::Passes
             // ここだけ揃っていないと、DX11(ラスタ)とDX12(レイトレ)でDDGIの結果が黙って食い違う
             traceConstants.Params2 = { static_cast<float>(bakedLightCount), 0.0f, 0.0f, 0.0f };
 
-            if (!m_Engine.m_DDGIEmissiveSuppressLoggedTrace)
+            if (!m_DDGIEmissiveSuppressLoggedTrace)
             {
-                m_Engine.m_DDGIEmissiveSuppressLoggedTrace = true;
+                m_DDGIEmissiveSuppressLoggedTrace = true;
                 Core::Logger::Info(
                     "KurenaiEngine3D",
                     "DDGI(レイトレ)の自発光: Params1.y(強度) " + std::to_string(traceConstants.Params1.y) +
@@ -496,29 +511,29 @@ namespace Kurenai::Passes
         // 焼き上がりに影響する状態が変わったら、停止していた更新を再開する。
         // 【判定はm_DDGISettings.Enabled等のガードの外に置く】無効な間も署名を追い続けないと、
         // 無効中に時刻を動かして再度有効にしたとき「署名は同じ」と誤判定して止まったままになる
-        if (gi->HasGIVolume && m_Engine.m_DDGIProbeCount > 0)
+        if (gi->HasGIVolume && gi->DDGIProbeCount > 0)
         {
             const uint64_t bakeSignature = frame.ProbeBakeSignature;
-            if (!m_Engine.m_DDGIBakeSignatureValid || bakeSignature != m_Engine.m_DDGIBakeSignature)
+            if (!m_DDGIBakeSignatureValid || bakeSignature != m_DDGIBakeSignature)
             {
-                m_Engine.m_DDGIBakeSignature = bakeSignature;
-                m_Engine.m_DDGIBakeSignatureValid = true;
-                m_Engine.m_DDGIStableCycles = 0;
-                m_Engine.m_DDGIUpdateSuspended = false;
+                m_DDGIBakeSignature = bakeSignature;
+                m_DDGIBakeSignatureValid = true;
+                m_DDGIStableCycles = 0;
+                m_DDGIUpdateSuspended = false;
             }
         }
 
-        if (frame.Settings.DDGI.Enabled && gi->HasGIVolume && m_Engine.m_DDGIProbeCount > 0 && !m_Engine.m_DDGIUpdateSuspended)
+        if (frame.Settings.DDGI.Enabled && gi->HasGIVolume && gi->DDGIProbeCount > 0 && !m_DDGIUpdateSuspended)
         {
             // レイの取得をどちらで行うか。パスの登録とキャプチャの実行で同じ判定を使う
             const bool useRaytracedTrace = raytracedDDGITraceRuns;
 
             // 【どちらの経路が実際に走ったかをログに残す】切り替えたつもりで切り替わっていない、
             // という取り違えをA/B比較の前に潰すため。切り替わったときだけ出す
-            if (!m_Engine.m_DDGIRayModeReported || m_Engine.m_DDGIRayModeReportedRaytraced != useRaytracedTrace)
+            if (!m_DDGIRayModeReported || m_DDGIRayModeReportedRaytraced != useRaytracedTrace)
             {
-                m_Engine.m_DDGIRayModeReported = true;
-                m_Engine.m_DDGIRayModeReportedRaytraced = useRaytracedTrace;
+                m_DDGIRayModeReported = true;
+                m_DDGIRayModeReportedRaytraced = useRaytracedTrace;
                 Core::Logger::Info(
                     "KurenaiEngine3D",
                     useRaytracedTrace
@@ -528,34 +543,34 @@ namespace Kurenai::Passes
             }
 
             uint32_t perFrame = std::min<uint32_t>(
-                static_cast<uint32_t>(std::max(frame.Settings.DDGI.ProbesPerFrame, 1)), m_Engine.m_DDGIProbeCount);
+                static_cast<uint32_t>(std::max(frame.Settings.DDGI.ProbesPerFrame, 1)), gi->DDGIProbeCount);
             if (!useRaytracedTrace)
             {
                 // 1フレームの描画回数・定数書き込み回数の上限はラスタ経路だけの制約。
                 // レイトレース経路はメッシュごとの描画をしないので抑える必要が無い
                 perFrame = m_Engine.ClampDDGIProbesPerFrameToConstantRing(perFrame);
             }
-            const bool warmingUp = m_Engine.m_DDGIWarmingUp;
+            const bool warmingUp = m_DDGIWarmingUp;
 
             // 実効プリ露出が大きく動いたら、一巡ぶんだけ上書きへ切り替えて即座に追従させる
-            // (理由はKurenaiEngine3D.hのm_DDGIOverwriteRemainingのコメント参照)。
+            // (理由はDDGIPasses.hのm_DDGIOverwriteRemainingのコメント参照)。
             // 一巡目(warmingUp)は元から上書きなので何もしない
             if (!warmingUp)
             {
-                if (!m_Engine.m_DDGILastExposureValid)
+                if (!m_DDGILastExposureValid)
                 {
-                    m_Engine.m_DDGILastExposureEV100 = effectiveExposureEV100;
-                    m_Engine.m_DDGILastExposureValid = true;
+                    m_DDGILastExposureEV100 = effectiveExposureEV100;
+                    m_DDGILastExposureValid = true;
                 }
-                else if (std::abs(effectiveExposureEV100 - m_Engine.m_DDGILastExposureEV100) > kDDGIExposureRewarmEV)
+                else if (std::abs(effectiveExposureEV100 - m_DDGILastExposureEV100) > kDDGIExposureRewarmEV)
                 {
-                    m_Engine.m_DDGIOverwriteRemaining = m_Engine.m_DDGIProbeCount;
-                    m_Engine.m_DDGILastExposureEV100 = effectiveExposureEV100;
+                    m_DDGIOverwriteRemaining = gi->DDGIProbeCount;
+                    m_DDGILastExposureEV100 = effectiveExposureEV100;
                 }
             }
             // このフレームで上書きするぶんを先に確定させる(ラムダへ値で渡すため)
-            const uint32_t overwriteThisFrame = std::min(m_Engine.m_DDGIOverwriteRemaining, perFrame);
-            m_Engine.m_DDGIOverwriteRemaining -= overwriteThisFrame;
+            const uint32_t overwriteThisFrame = std::min(m_DDGIOverwriteRemaining, perFrame);
+            m_DDGIOverwriteRemaining -= overwriteThisFrame;
 
             // 【止めるモードでは停止するまでの全巡回を上書きで焼く】理由はKurenaiEngine3D.hの
             // kDDGIBounceCyclesのコメント参照。露出追従のm_DDGIOverwriteRemainingとは
@@ -568,16 +583,16 @@ namespace Kurenai::Passes
             // いるのでプローブのワールド座標そのものは動かないが、範囲から抜けた列のセルが
             // 反対側の新しい列へ回るため、そのセルは「別の場所を担当する」ようになる。
             // そこには前の場所のイラディアンスが残っているので、焼き直すまで使ってはいけない。
-            m_Engine.m_DDGIDirtyProbeList.clear();
-            if (m_Engine.m_DDGIProbeBakedCoord.size() == m_Engine.m_DDGIProbeCount)
+            m_DDGIDirtyProbeList.clear();
+            if (m_DDGIProbeBakedCoord.size() == gi->DDGIProbeCount)
             {
-                for (uint32_t slot = 0; slot < m_Engine.m_DDGIProbeCount; ++slot)
+                for (uint32_t slot = 0; slot < gi->DDGIProbeCount; ++slot)
                 {
                     const DirectX::XMINT3 current = m_Engine.ComputeDDGIProbeWorldCoord(slot);
-                    const DirectX::XMINT3& baked = m_Engine.m_DDGIProbeBakedCoord[slot];
+                    const DirectX::XMINT3& baked = m_DDGIProbeBakedCoord[slot];
                     if (current.x != baked.x || current.y != baked.y || current.z != baked.z)
                     {
-                        m_Engine.m_DDGIDirtyProbeList.push_back(slot);
+                        m_DDGIDirtyProbeList.push_back(slot);
                     }
                 }
             }
@@ -589,14 +604,14 @@ namespace Kurenai::Passes
             // その間そのスロットはαの印(2.0)でサンプリングから外れているので、
             // 「別の場所の色を配る」ことは無い(遅れるだけで壊れない)
             const uint32_t dirtyThisFrame =
-                std::min<uint32_t>(static_cast<uint32_t>(m_Engine.m_DDGIDirtyProbeList.size()), perFrame);
+                std::min<uint32_t>(static_cast<uint32_t>(m_DDGIDirtyProbeList.size()), perFrame);
 
             // 【スナップが効いているかを数で見るためのログ】カメラが1セル未満しか動かなければ
             // どのプローブもワールド座標を変えないので、未確定は0のままでなければならない。
             // セル境界をまたぐと、その軸に垂直な面1枚ぶんが一度に未確定になる。
             // 追従が「スナップせず連続的に動く」実装になっていると毎フレーム全数が未確定になるので、
             // この数を見れば取り違えにすぐ気づける
-            if (gi->GIVolume.FollowCamera && !m_Engine.m_DDGIDirtyProbeList.empty())
+            if (gi->GIVolume.FollowCamera && !m_DDGIDirtyProbeList.empty())
             {
                 // 【LOD0の基準格子座標も出す】これが同じなら格子は同じ場所にある。
                 // 往復の検証で「カメラが同じセルへ戻ったか」を、絵ではなく数で確かめられる
@@ -604,8 +619,8 @@ namespace Kurenai::Passes
                 Core::Logger::Info(
                     "KurenaiEngine3D",
                     "DDGIの格子がスクロールしました: 未確定 " +
-                        std::to_string(m_Engine.m_DDGIDirtyProbeList.size()) + " / " +
-                        std::to_string(m_Engine.m_DDGIProbeCount) + " スロット(このフレームで焼き直すのは " +
+                        std::to_string(m_DDGIDirtyProbeList.size()) + " / " +
+                        std::to_string(gi->DDGIProbeCount) + " スロット(このフレームで焼き直すのは " +
                         std::to_string(dirtyThisFrame) + " 個) LOD0基準=(" +
                         std::to_string(base0.x) + "," + std::to_string(base0.y) + "," +
                         std::to_string(base0.z) + ")");
@@ -616,17 +631,17 @@ namespace Kurenai::Passes
             // 【焼ける数より多くてもすべて外す】このフレームで焼けるのは perFrame 個までだが、
             // 印を付けるのは全部に対して行う。付けそこねたスロットは、焼き直されるまでの間
             // 「別の場所のイラディアンス」を配り続けることになる
-            if (!m_Engine.m_DDGIDirtyProbeList.empty() && m_DDGIInvalidateProbesPipelineState && m_DDGIDirtyProbeBuffer)
+            if (!m_DDGIDirtyProbeList.empty() && m_DDGIInvalidateProbesPipelineState && m_DDGIDirtyProbeBuffer)
             {
                 const uint32_t dirtyCount =
-                    std::min<uint32_t>(static_cast<uint32_t>(m_Engine.m_DDGIDirtyProbeList.size()), kDDGIMaxProbes);
+                    std::min<uint32_t>(static_cast<uint32_t>(m_DDGIDirtyProbeList.size()), kDDGIMaxProbes);
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "DDGIInvalidate",
                     .Writes = { gi->DDGIIrradianceAtlas.get() },
                     .Execute = [this, gi, dirtyCount](RHI::IRHICommandList* cmd)
                     {
                         cmd->UpdateBuffer(
-                            m_DDGIDirtyProbeBuffer.get(), m_Engine.m_DDGIDirtyProbeList.data(),
+                            m_DDGIDirtyProbeBuffer.get(), m_DDGIDirtyProbeList.data(),
                             dirtyCount * static_cast<uint32_t>(sizeof(uint32_t)));
 
                         DDGIUpdateConstants invalidateConstants{};
@@ -662,8 +677,8 @@ namespace Kurenai::Passes
                 // 未確定のスロットを先に消化し、余った枠を通常のラウンドロビンへ回す
                 const bool isDirtySlot = (i < dirtyThisFrame);
                 const uint32_t probeIndex = isDirtySlot
-                    ? m_Engine.m_DDGIDirtyProbeList[i]
-                    : (m_Engine.m_DDGIUpdateCursor + (i - dirtyThisFrame)) % m_Engine.m_DDGIProbeCount;
+                    ? m_DDGIDirtyProbeList[i]
+                    : (m_DDGIUpdateCursor + (i - dirtyThisFrame)) % gi->DDGIProbeCount;
 
                 // 一巡目はヒステリシスを使わず上書きする(混ぜる相手の「前の値」が未初期化のため)。
                 // 露出が急変した直後も同じく上書きで追従させる。
@@ -672,9 +687,9 @@ namespace Kurenai::Passes
                     warmingUp || overwriteWholeCycle || isDirtySlot || (i < overwriteThisFrame);
 
                 // このスロットを焼いたので、担当しているワールド格子座標を記録し直す
-                if (m_Engine.m_DDGIProbeBakedCoord.size() == m_Engine.m_DDGIProbeCount)
+                if (m_DDGIProbeBakedCoord.size() == gi->DDGIProbeCount)
                 {
-                    m_Engine.m_DDGIProbeBakedCoord[probeIndex] = m_Engine.ComputeDDGIProbeWorldCoord(probeIndex);
+                    m_DDGIProbeBakedCoord[probeIndex] = m_Engine.ComputeDDGIProbeWorldCoord(probeIndex);
                 }
 
                 graph.AddPass(Core::RenderGraphPassDesc{
@@ -707,26 +722,26 @@ namespace Kurenai::Passes
 
             // 【未確定ぶんはカーソルを進めない】未確定のスロットは番号順ではなく飛び飛びに
             // 選ばれるので、その枠までカーソルを進めると通常の巡回に穴が空く
-            const uint32_t nextCursor = m_Engine.m_DDGIUpdateCursor + (perFrame - dirtyThisFrame);
-            const bool cycleCompleted = nextCursor >= m_Engine.m_DDGIProbeCount;
+            const uint32_t nextCursor = m_DDGIUpdateCursor + (perFrame - dirtyThisFrame);
+            const bool cycleCompleted = nextCursor >= gi->DDGIProbeCount;
 
             // 一巡ぶん焼き終えるたびに数え、モードごとの巡回数に達したら止める。
             // 【上書きが残っている間は止めない】まだ焼き切っていないため。
             // 一巡目(warmingUp)はこの後の分岐で別に扱うのでここでは数えない
             if (cycleCompleted && !warmingUp && frame.Settings.DDGI.UpdateMode != DDGIUpdateMode::Always)
             {
-                ++m_Engine.m_DDGIStableCycles;
-                if (m_Engine.m_DDGIOverwriteRemaining == 0)
+                ++m_DDGIStableCycles;
+                if (m_DDGIOverwriteRemaining == 0)
                 {
                     const uint32_t requiredCycles = (frame.Settings.DDGI.UpdateMode == DDGIUpdateMode::OverwriteThenStop)
                         ? 1u
                         : kDDGIBounceCycles;
-                    if (m_Engine.m_DDGIStableCycles >= requiredCycles)
+                    if (m_DDGIStableCycles >= requiredCycles)
                     {
-                        m_Engine.m_DDGIUpdateSuspended = true;
+                        m_DDGIUpdateSuspended = true;
                         Core::Logger::Info(
                             "KurenaiEngine3D",
-                            "DDGIが収束したため更新を停止しました(" + std::to_string(m_Engine.m_DDGIStableCycles) +
+                            "DDGIが収束したため更新を停止しました(" + std::to_string(m_DDGIStableCycles) +
                                 "巡)。焼き上がりに影響する状態が変わると再開します");
                     }
                 }
@@ -736,15 +751,15 @@ namespace Kurenai::Passes
             {
                 // 全プローブが一度ずつ書かれた。ここから先はヒステリシスで滑らかに追従させ、
                 // 同時にサンプリング側(DDGIParams0.w)を有効にする
-                m_Engine.m_DDGIWarmingUp = false;
-                m_Engine.m_DDGIBaked = true;
-                m_Engine.m_DDGILastExposureEV100 = effectiveExposureEV100;
-                m_Engine.m_DDGILastExposureValid = true;
+                m_DDGIWarmingUp = false;
+                m_DDGIBaked = true;
+                m_DDGILastExposureEV100 = effectiveExposureEV100;
+                m_DDGILastExposureValid = true;
                 Core::Logger::Info(
                     "KurenaiEngine3D",
-                    "DDGIの初回一巡が完了しました(" + std::to_string(m_Engine.m_DDGIProbeCount) + "プローブ)");
+                    "DDGIの初回一巡が完了しました(" + std::to_string(gi->DDGIProbeCount) + "プローブ)");
             }
-            m_Engine.m_DDGIUpdateCursor = nextCursor % m_Engine.m_DDGIProbeCount;
+            m_DDGIUpdateCursor = nextCursor % gi->DDGIProbeCount;
         }
     }
 
@@ -768,12 +783,12 @@ namespace Kurenai::Passes
         // 拡散イラディアンスとinsideWeightを1/2解像度で求め、Lightingパスが深度を見て
         // アップサンプルする。雲と違い厳密ではない近似のため既定は無効(DDGIResolve.hlsl冒頭参照)
         const bool ddgiResolvePassRuns =
-            frame.Settings.DDGI.HalfResolution && gi->DDGIResolveTexture && frame.Settings.DDGI.Enabled && gi->HasGIVolume && m_Engine.m_DDGIBaked;
+            frame.Settings.DDGI.HalfResolution && gi->DDGIResolveTexture && frame.Settings.DDGI.Enabled && gi->HasGIVolume && m_DDGIBaked;
         if (ddgiResolvePassRuns)
         {
             RHI::Viewport ddgiResolveViewport;
-            ddgiResolveViewport.Width = static_cast<float>(m_Engine.m_DDGIResolveWidth);
-            ddgiResolveViewport.Height = static_cast<float>(m_Engine.m_DDGIResolveHeight);
+            ddgiResolveViewport.Width = static_cast<float>(gi->DDGIResolveWidth);
+            ddgiResolveViewport.Height = static_cast<float>(gi->DDGIResolveHeight);
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "DDGIResolve",

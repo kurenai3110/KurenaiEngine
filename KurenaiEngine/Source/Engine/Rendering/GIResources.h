@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -26,11 +27,20 @@ namespace Kurenai::Rendering
         std::unique_ptr<RHI::IRHITexture> DDGIIrradianceAtlas;
         std::unique_ptr<RHI::IRHITexture> DDGIDistanceAtlas;
 
+        // プローブの総数(= ボリュームの格子数 × LOD段数)。KurenaiEngine3D::RecreateDDGIAtlases が
+        // ボリュームから算出し、DDGIPasses と ImGui が読む。
+        // 【なぜここが持つか】上のアトラスの大きさを決めているのと同じ値で、
+        // アトラスと切り離すと「アトラスは作り直したがプローブ数が古い」状態が作れてしまう
+        uint32_t DDGIProbeCount = 1;
+
         std::unique_ptr<RHI::IRHITexture> DDGIResolveTexture;
         // 上のパスが2枚目のレンダーターゲットへ書く低解像度の深度(41.24節)。
         // 合成側のバイラテラルアップサンプルがGatherRed 1回で4テクセルぶんを取るために使う
         std::unique_ptr<RHI::IRHITexture> DDGIResolveDepthTexture;
-
+        // 上2枚の実寸(内部レンダー解像度の1/2)。奇数解像度の切り捨てと最低1pxの下限があるため、
+        // 割り算をその場でやり直さずここへ保存する。パスのビューポート指定に使う
+        uint32_t DDGIResolveWidth = 0;
+        uint32_t DDGIResolveHeight = 0;
         // シーンから読み込んだボリューム(先頭の1つだけを使う)。HasGIVolumeがfalseの間は
         // アトラスは1プローブぶんのダミーとして確保され、シェーダー側もDDGIParams0.w=0で無効になる
         Assets::GIVolume GIVolume;

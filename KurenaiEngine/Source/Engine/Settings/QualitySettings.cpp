@@ -4,6 +4,7 @@
 #include <string>
 
 #include "Core/Logger.h"
+#include "../Passes/DDGIPasses.h"
 
 // 品質プリセットの取得・適用。KurenaiEngine3D のメンバ関数のまま、
 // 翻訳単位だけをここへ分けている(宣言は KurenaiEngine3D.h のまま)。
@@ -51,8 +52,8 @@ namespace Kurenai
         if (m_DDGISettings.UpdateMode != settings.DDGIUpdate)
         {
             m_DDGISettings.UpdateMode = settings.DDGIUpdate;
-            m_DDGIUpdateSuspended = false;
-            m_DDGIStableCycles = 0;
+            m_DDGIPasses->GetUpdateSuspended() = false;
+            m_DDGIPasses->GetStableCycles() = 0;
         }
 
         // 平面反射の解像度倍率だけはレンダーターゲットの作り直しを伴う。GPUがまだ参照している

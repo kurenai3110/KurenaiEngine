@@ -1,7 +1,11 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
+
+#include <DirectXMath.h>
 
 #include "RHI/IRHIDevice.h"
 
@@ -66,8 +70,85 @@ namespace Kurenai
                 return m_DDGIProbeTracePipelineState != nullptr && m_DDGITraceConstantBuffer != nullptr;
             }
 
+            // アトラスを確保し直したときに、進行状態を一巡目からやり直させる。
+            // **KurenaiEngine3D::RecreateDDGIAtlases から、アトラスを作った直後に呼ぶこと** ――
+            // 中身が未定義の新しいアトラスに対して「もう焼いてある」と誤判定させないため。
+            // probeCount は確保し直したアトラスが持つプローブ数
+            void ResetProgress(uint32_t probeCount);
+
+            // 【publicにしてある】焼き上がりと更新の状態を**進める**のはこの群だけだが、
+            // ImGui のパネルが表示と手動リセットのために読み書きし、
+            // 品質設定の切り替えも更新の一時停止を解除する。
+            // KurenaiEngine3D の同名のアクセサがここへ委譲している
+            bool& GetEmissiveSuppressLoggedRaster() { return m_DDGIEmissiveSuppressLoggedRaster; }
+            bool& GetEmissiveSuppressLoggedTrace() { return m_DDGIEmissiveSuppressLoggedTrace; }
+            bool& GetUpdateSuspended() { return m_DDGIUpdateSuspended; }
+            uint32_t& GetStableCycles() { return m_DDGIStableCycles; }
+            bool IsWarmingUp() const { return m_DDGIWarmingUp; }
+            // 全プローブが一度でも書かれたか。書かれる前のアトラスは中身が未定義なので、
+            // それまではDDGIを無効にして従来のIBLのまま描く
+            bool IsBaked() const { return m_DDGIBaked; }
+
         private:
             KurenaiEngine3D& m_Engine;
+
+            // 各スロットが「最後に焼いたときのワールド格子座標」。いまの座標と違えば未確定(dirty)。
+            // 【ワールド座標で持つこと】アトラスのセル番号で持つと、スクロールしてもセル番号は
+            // 変わらないので「別の場所を担当するようになった」ことを検出できない
+            std::vector<DirectX::XMINT3> m_DDGIProbeBakedCoord;
+            // 焼き直し待ちのスロット番号(毎フレーム組み直す。GPUへ渡す一時の並び)
+            std::vector<uint32_t> m_DDGIDirtyProbeList;
+
+            // 全プローブが一度でも書かれたか。書かれる前のアトラスは中身が未定義なので、
+            // それまではDDGIを無効にして従来のIBLのまま描く(反射プローブの「一度でも焼けたか」と同じ方針)
+            bool m_DDGIBaked = false;
+            // 初回の一巡が終わっていないか。
+            //
+            // 【反射プローブと違い「フルベイク」を持たない】反射プローブは8個までなので全プローブを
+            // 1フレームで焼けるが、DDGIは数百個ある。同じことをするとBistroのようなシーンでは
+            // 数百×6回のシーン描画が1フレームに集中して数秒のハングになる。
+            // DDGIはヒステリシスで時間収束させる手法なので、初回も時間分割で埋めるのが素直。
+            // ただし初回だけは「前の値」が存在しないため、一巡目はヒステリシスを使わず上書きする
+            // (未初期化のアトラスと混ぜてはいけない)
+            bool m_DDGIWarmingUp = true;
+            // 時間分割の進行状態。1フレームにm_DDGISettings.ProbesPerFrame個ずつ順に焼き直す
+            uint32_t m_DDGIUpdateCursor = 0;
+            // ヒステリシスを使わず上書きで焼き直す残りプローブ数。
+            //
+            // 【なぜ要るか】実効プリ露出は時刻に連動して最大18段動く(21.5節)。アトラス自体は
+            // 露出非依存の物理量で持っているので数値が壊れることはないが、ヒステリシス0.97と
+            // ラウンドロビンの積で時定数が約17秒あるため、時刻を大きく動かすとその間ずっと
+            // 「前の時刻の間接光」が表示され続ける。露出が急変する時間帯ほど、この遅れが
+            // 露出倍率で拡大されて目に見える(夕方に昼の間接光を夕方の露出で見ることになる)。
+            // そこで露出が一定以上動いたら、一巡ぶんだけ上書きへ切り替えて即座に追従させる。
+            // m_DDGIWarmingUpと違いDDGI自体は有効なまま(無効にすると従来のIBLとの間でちらつく)
+            uint32_t m_DDGIOverwriteRemaining = 0;
+            // 最後にアトラスを追従させた時点の実効プリ露出EV100
+            float m_DDGILastExposureEV100 = 0.0f;
+            bool m_DDGILastExposureValid = false;
+            // どちらの経路(ラスタ / DXR)が実際に走ったかを、切り替わったときだけログへ出すための状態。
+            // 毎フレーム出すと埋もれるが、出さないと「切り替えたつもり」の取り違えに気づけない
+            bool m_DDGIRayModeReported = false;
+            bool m_DDGIRayModeReportedRaytraced = false;
+            // DDGIの二重計上の抑止が「実際に何をしたか」を1回だけログへ出したか。
+            // 【絵から分からない】抑止はプローブのイラディアンスにしか出ず、しかも
+            // 「効いていない」と「効いた結果が小さい」が同じ絵になる。実効値を出すしかない。
+            //
+            // 【2経路で別々に持つ】1つのフラグを共有すると、先に走ったほうがもう一方のログを
+            // 永久に潰す。どちらの経路の話なのか区別できないログは、切り分けの役に立たない
+            bool m_DDGIEmissiveSuppressLoggedRaster = false;
+            bool m_DDGIEmissiveSuppressLoggedTrace = false;
+            // 停止判定用。最後に「焼き上がりに影響する状態」が変わった時点の署名。
+            // 反射プローブと同じKurenaiEngine3D::ComputeProbeBakeSignature()を使う ――
+            // DDGIのキャプチャも同じFrameConstants(太陽・時刻・影・ライト・IBL・自発光)を
+            // 読むため、影響する状態は同じ
+            uint64_t m_DDGIBakeSignature = 0;
+            bool m_DDGIBakeSignatureValid = false;
+            // 署名が変わらないまま完了した巡回数。停止判定に使う
+            uint32_t m_DDGIStableCycles = 0;
+            // 収束済みとみなして更新を止めている状態。署名が変わると倒れる。
+            // 停止までの巡回数(kDDGIBounceCycles)の根拠は Passes/DDGIConstants.h を参照
+            bool m_DDGIUpdateSuspended = false;
 
             // 格子から画面へ解決する低解像度パス(雲パスと同じ作り。拡散イラディアンスと
             // insideWeightを書く)。書き先2枚と実寸は GIResources 側が持つ

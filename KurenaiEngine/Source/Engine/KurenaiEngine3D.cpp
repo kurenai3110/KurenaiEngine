@@ -1567,6 +1567,12 @@ namespace Kurenai
     // 反射プローブの焼き上がりの状態は Passes::ReflectionProbePasses が持つ。
     // ここはImGuiのパネルとシーン読み込みのために委譲するだけで、状態そのものは持たない。
     // **ヘッダではPasses::*を前方宣言しかしていないため、定義はここに置く**
+    // DDGIの進行状態は Passes::DDGIPasses が持つ。ここはImGuiと品質設定のために委譲するだけ
+    bool& KurenaiEngine3D::GetDDGIEmissiveSuppressLoggedRaster() { return m_DDGIPasses->GetEmissiveSuppressLoggedRaster(); }
+    bool& KurenaiEngine3D::GetDDGIEmissiveSuppressLoggedTrace() { return m_DDGIPasses->GetEmissiveSuppressLoggedTrace(); }
+    bool& KurenaiEngine3D::GetDDGIUpdateSuspended() { return m_DDGIPasses->GetUpdateSuspended(); }
+    uint32_t& KurenaiEngine3D::GetDDGIStableCycles() { return m_DDGIPasses->GetStableCycles(); }
+    bool KurenaiEngine3D::GetDDGIWarmingUp() const { return m_DDGIPasses->IsWarmingUp(); }
     // IBLの焼き上がりの状態は Passes::EnvironmentPasses が持つ。ここは委譲するだけ
     bool& KurenaiEngine3D::GetIBLBaked() { return m_EnvironmentPasses->GetIBLBaked(); }
     bool& KurenaiEngine3D::GetIBLIrradianceBaked() { return m_EnvironmentPasses->GetIBLIrradianceBaked(); }
@@ -2806,15 +2812,15 @@ namespace Kurenai
             // バインドしておく必要がある(DX12のディスクリプタテーブルを埋め切るため)。
             // フォーマットを雲と揃えているのも同じ理由 ―― イラディアンスはHDRの物理量で、
             // 8bitでは飽和と量子化がそのまま間接光のバンディングになる
-            m_DDGIResolveWidth = std::max(1u, width / 2);
-            m_DDGIResolveHeight = std::max(1u, height / 2);
+            m_GIResources.DDGIResolveWidth = std::max(1u, width / 2);
+            m_GIResources.DDGIResolveHeight = std::max(1u, height / 2);
             m_GIResources.DDGIResolveTexture = m_Device->CreateRenderTexture(
-                m_DDGIResolveWidth, m_DDGIResolveHeight, RHI::Format::R16G16B16A16_Float);
+                m_GIResources.DDGIResolveWidth, m_GIResources.DDGIResolveHeight, RHI::Format::R16G16B16A16_Float);
             // 上のパスが同時に書く「そのテクセルが代表している全解像度の深度」(41.24節)。
             // 合成側(DeferredLighting.hlsl)がGatherRed 1回で4テクセルぶんを取るためのもので、
             // t19と同じ理由で常に確保する(t21を空のままにできない)
             m_GIResources.DDGIResolveDepthTexture = m_Device->CreateRenderTexture(
-                m_DDGIResolveWidth, m_DDGIResolveHeight, RHI::Format::R32_Float);
+                m_GIResources.DDGIResolveWidth, m_GIResources.DDGIResolveHeight, RHI::Format::R32_Float);
             // RT反射はコンピュートシェーダーがUAVで書くため、レンダーターゲットではなくUAVテクスチャを作る。
             // 非対応環境ではパス自体が実行されないので確保しない
             if (m_RenderCapabilities.RaytracingAvailable)
@@ -5306,7 +5312,7 @@ namespace Kurenai
 
         // DDGI(22章)。一度も焼けていない間はアトラスの中身が未定義なので無効にしておく
         // (反射プローブの「一度でも焼けたか」と同じ方針)
-        const bool ddgiActive = m_DDGISettings.Enabled && m_GIResources.HasGIVolume && m_DDGIBaked;
+        const bool ddgiActive = m_DDGISettings.Enabled && m_GIResources.HasGIVolume && m_DDGIPasses->IsBaked();
         constants.DDGIParams0 = {
             m_GIResources.GIVolume.Origin[0], m_GIResources.GIVolume.Origin[1], m_GIResources.GIVolume.Origin[2],
             ddgiActive ? 1.0f : 0.0f,
@@ -5332,7 +5338,7 @@ namespace Kurenai
         // (あるいは未初期化の)低解像度バッファを読んで間接光が固まる/壊れる。
         // 条件はDDGIResolveパスの登録側(ddgiResolvePassRuns)と同じものを並べている
         const bool ddgiHalfResolutionActive =
-            m_DDGISettings.HalfResolution && m_GIResources.DDGIResolveTexture && m_DDGISettings.Enabled && m_GIResources.HasGIVolume && m_DDGIBaked;
+            m_DDGISettings.HalfResolution && m_GIResources.DDGIResolveTexture && m_DDGISettings.Enabled && m_GIResources.HasGIVolume && m_DDGIPasses->IsBaked();
         // プローブ分類のしきい値。裏面の情報を持てるのはレイトレース経路だけなので、
         // ラスタ経路では分類そのものを無効(0)にして従来どおりの挙動に保つ
         // (ラスタ経路のαは常に0なのでどのしきい値でも有効側に倒れるが、

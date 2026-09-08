@@ -5,6 +5,7 @@
 #include <string>
 
 #include "Core/Logger.h"
+#include "../Passes/DDGIPasses.h"
 
 // DDGI(動的拡散GI)のプローブ配置とアトラスの管理。
 // KurenaiEngine3D のメンバ関数のまま、翻訳単位だけをここへ分けている
@@ -25,7 +26,7 @@ namespace Kurenai
             ? std::clamp(m_GIResources.GIVolume.LODCount, 1u, kDDGIMaxLODCount)
             : 1u;
         m_DDGIProbesPerLOD = countX * countY * countZ;
-        m_DDGIProbeCount = m_DDGIProbesPerLOD * m_DDGILODCount;
+        m_GIResources.DDGIProbeCount = m_DDGIProbesPerLOD * m_DDGILODCount;
 
         // 【LODは縦に積むだけ】列は変えず、行だけ段数倍にする。こうすると通し番号
         // slot = k*(Cx*Cy*Cz) + z*Cx*Cy + y*Cx + x に対して
@@ -45,21 +46,11 @@ namespace Kurenai
         m_GIResources.DDGIDistanceAtlas = m_Device->CreateUAVTexture(
             columns * kDDGIDistanceCell, rows * kDDGIDistanceCell, RHI::Format::R32G32_Float);
 
-        // 確保し直した直後のアトラスは中身が未定義なので、全スロットを「未確定」として持つ。
-        // 【あり得ない座標で埋める】0で埋めると、たまたまその座標を担当するスロットが
-        // 「もう焼いてある」と誤判定される
-        m_DDGIProbeBakedCoord.assign(
-            m_DDGIProbeCount, DirectX::XMINT3{ INT32_MIN, INT32_MIN, INT32_MIN });
-        m_DDGIDirtyProbeList.clear();
-
-        // 確保し直した直後のアトラスは中身が未定義なので、一巡目からやり直す
-        m_DDGIBaked = false;
-        m_DDGIWarmingUp = true;
-        m_DDGIUpdateCursor = 0;
+        // 進行状態は Passes::DDGIPasses が持つ。中身が未定義の新しいアトラスに対して
+        // 「もう焼いてある」と誤判定させないため、確保の直後に一巡目からやり直させる
+        m_DDGIPasses->ResetProgress(m_GIResources.DDGIProbeCount);
         // シーンが変わればメッシュ数も変わるので、クランプの報告も出し直す
         m_DDGIProbesPerFrameClampReported = false;
-        m_DDGIOverwriteRemaining = 0;
-        m_DDGILastExposureValid = false;
 
         if (m_GIResources.HasGIVolume)
         {
@@ -67,7 +58,7 @@ namespace Kurenai
                 "KurenaiEngine3D",
                 "DDGIボリューム '" + m_GIResources.GIVolume.Name + "' を確保しました: " +
                     std::to_string(countX) + "x" + std::to_string(countY) + "x" + std::to_string(countZ) +
-                    " = " + std::to_string(m_DDGIProbeCount) + "プローブ, アトラス " +
+                    " = " + std::to_string(m_GIResources.DDGIProbeCount) + "プローブ, アトラス " +
                     std::to_string(columns * kDDGIIrradianceCell) + "x" + std::to_string(rows * kDDGIIrradianceCell) +
                     " / " + std::to_string(columns * kDDGIDistanceCell) + "x" + std::to_string(rows * kDDGIDistanceCell));
         }

@@ -126,7 +126,6 @@ namespace Kurenai
     public:
         // 切り出したパス群は、まだエンジンのprivate(PSO・定数バッファ・統計カウンタ)を
         // m_Engine越しに触る。所有権を群へ移し終えたらこのfriendは外す(段階6)
-        friend class Passes::DDGIPasses;
         friend class Passes::GeometryPasses;
         friend class Passes::MegaLightsPasses;
 
@@ -484,15 +483,15 @@ namespace Kurenai
         bool& GetIBLIrradianceBaked();
         bool& GetEmissiveLightsCapLogged() { return m_EmissiveLightsCapLogged; }
         bool& GetEmissiveLightsValuesLogged() { return m_EmissiveLightsValuesLogged; }
-        bool& GetDDGIEmissiveSuppressLoggedRaster() { return m_DDGIEmissiveSuppressLoggedRaster; }
-        bool& GetDDGIEmissiveSuppressLoggedTrace() { return m_DDGIEmissiveSuppressLoggedTrace; }
+        bool& GetDDGIEmissiveSuppressLoggedRaster();
+        bool& GetDDGIEmissiveSuppressLoggedTrace();
         std::vector<Assets::ReflectionProbe>& GetReflectionProbes() { return m_GIResources.ReflectionProbes; }
         int& GetSelectedProbeIndex() { return m_SelectedProbeIndex; }
         // 焼き上がりの状態の持ち主は Passes::ReflectionProbePasses。ここは委譲するだけ
         bool& GetProbeBaked();
         bool& GetProbeBakeRequested();
-        bool& GetDDGIUpdateSuspended() { return m_DDGIUpdateSuspended; }
-        uint32_t& GetDDGIStableCycles() { return m_DDGIStableCycles; }
+        bool& GetDDGIUpdateSuspended();
+        uint32_t& GetDDGIStableCycles();
         Assets::TextureStreamingManager& GetTextureStreaming() { return m_TextureStreaming; }
 
         // std::atomicは呼び出し側が使っているメモリオーダーの書き方(.load/.store)を
@@ -512,8 +511,8 @@ namespace Kurenai
         const RenderCapabilities& GetRenderCapabilities() const { return m_RenderCapabilities; }
         bool GetHasGIVolume() const { return m_GIResources.HasGIVolume; }
         const Assets::GIVolume& GetGIVolume() const { return m_GIResources.GIVolume; }
-        uint32_t GetDDGIProbeCount() const { return m_DDGIProbeCount; }
-        bool GetDDGIWarmingUp() const { return m_DDGIWarmingUp; }
+        uint32_t GetDDGIProbeCount() const { return m_GIResources.DDGIProbeCount; }
+        bool GetDDGIWarmingUp() const;
         ReflectionMode GetSceneDefaultReflectionMode() const { return m_SceneDefaultReflectionMode; }
         bool GetSceneLoadInFlight() const { return m_SceneLoadInFlight; }
         const std::vector<std::wstring>& GetSceneDisplayNames() const { return m_SceneDisplayNames; }
@@ -1546,12 +1545,7 @@ namespace Kurenai
         // シェーダーとPSOはPasses/LightingPassesへ移した。書き先2枚と実寸は
         // レンダー解像度に追従して作り直すためRenderTargets(SkyCloud*)にある
 
-        // --- DDGIの低解像度解決パス ---
-        // シェーダーとPSOはPasses/DDGIPassesへ、書き先2枚の持ち主は Rendering/GIResources.h。
-        // ここに残るのは実寸だけ
-        // RenderTargets::SkyCloudWidth/Heightと同じ理由でここへ保存する(パスのビューポート指定に使う)
-        uint32_t m_DDGIResolveWidth = 0;
-        uint32_t m_DDGIResolveHeight = 0;
+        // DDGIの低解像度解決パスの資源と実寸は Passes/DDGIPasses と Rendering/GIResources.h へ移した
         DDGISettings m_DDGISettings;
 
         // --- 大気遠近(height fog / aerial perspective) ---
@@ -1864,6 +1858,12 @@ namespace Kurenai
         // プロキシが持つMeshIndex(段0の番号)では引けない。インスタンス単位で
         // 判定し、メッシュ側はEmissiveClustersの有無で見る
         std::vector<bool> m_EmissiveProxyInstances;
+    public:
+        // 【publicにしてある】シーン読み込みが構築し、Passes::DDGIPasses が
+        // ラスタ経路で「このインスタンスは自発光プロキシか」を引くために読むだけ
+        const std::vector<bool>& GetEmissiveProxyInstances() const { return m_EmissiveProxyInstances; }
+
+    private:
         // 段階2: 発光面を三角形のまま面積分するか。MegaLights 経路でのみ効く
         // (有効なフレームは参照実装が型3のプロキシを読み飛ばし、代わりに三角形を積む)
         bool m_MeshLightsEnabled = Defaults::MeshLightsEnabled;
@@ -1876,14 +1876,6 @@ namespace Kurenai
         // 署名へ入れないと、収束済みのプローブだけ古い集合のまま残る
         uint64_t m_EmissiveLightsSelectionHash = 0;
         bool m_EmissiveLightsCapLogged = false;
-        // DDGIの二重計上の抑止が「実際に何をしたか」を1回だけログへ出したか。
-        // 【絵から分からない】抑止はプローブのイラディアンスにしか出ず、しかも
-        // 「効いていない」と「効いた結果が小さい」が同じ絵になる。実効値を出すしかない。
-        //
-        // 【2経路で別々に持つ】1つのフラグを共有すると、先に走ったほうがもう一方のログを
-        // 永久に潰す。どちらの経路の話なのか区別できないログは、切り分けの役に立たない
-        bool m_DDGIEmissiveSuppressLoggedRaster = false;
-        bool m_DDGIEmissiveSuppressLoggedTrace = false;
         // 送信した灯の実効値を1回だけログへ出したか(「走っていない」と「暗い」の切り分け用)
         bool m_EmissiveLightsValuesLogged = false;
 
@@ -1971,9 +1963,6 @@ namespace Kurenai
         // 出所は Passes/DDGIConstants.h(移行中の別名)
         static constexpr uint32_t kDDGICaptureSize = Passes::kDDGICaptureSize;
 
-        // シーン全体の総プローブ数(= ProbeCountsの3軸の積 × LOD段数)。ダミー時は1。
-        // アトラスの確保と更新のラウンドロビンはこの数で回る
-        uint32_t m_DDGIProbeCount = 1;
         // LOD 1段ぶんのプローブ数(ProbeCountsの3軸の積)。通し番号からLODを割り出すのに使う
         uint32_t m_DDGIProbesPerLOD = 1;
         // 実際に使うLOD段数(m_GIResources.GIVolume.LODCountをkDDGIMaxLODCountでクランプしたもの)
@@ -1983,57 +1972,11 @@ namespace Kurenai
         // すべてこれを基準に決まるので、1フレームの途中で動くと食い違う
         DirectX::XMFLOAT3 m_DDGIFollowCenter{ 0.0f, 0.0f, 0.0f };
 
-        // 各スロットが「最後に焼いたときのワールド格子座標」。いまの座標と違えば未確定(dirty)。
-        // 【ワールド座標で持つこと】アトラスのセル番号で持つと、スクロールしてもセル番号は
-        // 変わらないので「別の場所を担当するようになった」ことを検出できない
-        std::vector<DirectX::XMINT3> m_DDGIProbeBakedCoord;
-        // 焼き直し待ちのスロット番号(毎フレーム組み直す。GPUへ渡す一時の並び)
-        std::vector<uint32_t> m_DDGIDirtyProbeList;
         // レイ取得(DXR)の経路とキャプチャ資源一式は Passes/DDGIPasses へ移した
 
-        // 全プローブが一度でも書かれたか。書かれる前のアトラスは中身が未定義なので、
-        // それまではDDGIを無効にして従来のIBLのまま描く(反射プローブの「一度でも焼けたか」と同じ方針)
-        bool m_DDGIBaked = false;
-        // 初回の一巡が終わっていないか。
-        //
-        // 【反射プローブと違い「フルベイク」を持たない】反射プローブは8個までなので全プローブを
-        // 1フレームで焼けるが、DDGIは数百個ある。同じことをするとBistroのようなシーンでは
-        // 数百×6回のシーン描画が1フレームに集中して数秒のハングになる。
-        // DDGIはヒステリシスで時間収束させる手法なので、初回も時間分割で埋めるのが素直。
-        // ただし初回だけは「前の値」が存在しないため、一巡目はヒステリシスを使わず上書きする
-        // (未初期化のアトラスと混ぜてはいけない)
-        bool m_DDGIWarmingUp = true;
-        // ヒステリシスを使わず上書きで焼き直す残りプローブ数。
-        //
-        // 【なぜ要るか】実効プリ露出は時刻に連動して最大18段動く(21.5節)。アトラス自体は
-        // 露出非依存の物理量で持っているので数値が壊れることはないが、ヒステリシス0.97と
-        // ラウンドロビンの積で時定数が約17秒あるため、時刻を大きく動かすとその間ずっと
-        // 「前の時刻の間接光」が表示され続ける。露出が急変する時間帯ほど、この遅れが
-        // 露出倍率で拡大されて目に見える(夕方に昼の間接光を夕方の露出で見ることになる)。
-        // そこで露出が一定以上動いたら、一巡ぶんだけ上書きへ切り替えて即座に追従させる。
-        // m_DDGIWarmingUpと違いDDGI自体は有効なまま(無効にすると従来のIBLとの間でちらつく)
-        uint32_t m_DDGIOverwriteRemaining = 0;
-        // 最後にアトラスを追従させた時点の実効プリ露出EV100
-        float m_DDGILastExposureEV100 = 0.0f;
-        bool m_DDGILastExposureValid = false;
         // これを超えて実効プリ露出が動いたら追従させる(段)。1段=明るさ2倍ぶん
         // 出所は Passes/DDGIConstants.h(移行中の別名)
         static constexpr float kDDGIExposureRewarmEV = Passes::kDDGIExposureRewarmEV;
-        // 時間分割の進行状態。1フレームにm_DDGISettings.ProbesPerFrame個ずつ順に焼き直す
-        uint32_t m_DDGIUpdateCursor = 0;
-        // どちらの経路が実際に走ったかを、切り替わったときだけログへ出すための状態。
-        // 毎フレーム出すと埋もれるが、出さないと「切り替えたつもり」の取り違えに気づけない
-        bool m_DDGIRayModeReported = false;
-        bool m_DDGIRayModeReportedRaytraced = false;
-        // 停止判定用。最後に「焼き上がりに影響する状態」が変わった時点の署名。
-        // 反射プローブと同じComputeProbeBakeSignature()を使う ―― DDGIのキャプチャも
-        // 同じFrameConstants(太陽・時刻・影・ライト・IBL・自発光)を読むため、影響する状態は同じ
-        uint64_t m_DDGIBakeSignature = 0;
-        bool m_DDGIBakeSignatureValid = false;
-        // 署名が変わらないまま完了した巡回数。停止判定に使う
-        uint32_t m_DDGIStableCycles = 0;
-        // 収束済みとみなして更新を止めている状態。署名が変わると倒れる
-        bool m_DDGIUpdateSuspended = false;
         // ConvergeThenStopで停止するまでの巡回数。
         //
         // 【なぜヒステリシス由来の巡回数をやめたか】以前は残差0.01を切る巡回数
@@ -2078,12 +2021,17 @@ namespace Kurenai
         // **CPUとシェーダーで同じ値を使う必要があるので、CPU側で求めて渡す**
         // (原点÷間隔をシェーダー側でも計算すると、丸めが食い違ったときに
         //  プローブの位置とアトラスのセルがずれる)
+    public:
+        // 【publicにしてある】Passes::DDGIPasses がプローブの位置と担当座標を引くために呼ぶ。
+        // どれも設定と格子から導くだけの計算で、状態を持たないので公開しても持ち主は変わらない
         DirectX::XMINT3 ComputeDDGILODBaseIndex(uint32_t lod) const;
 
         // そのスロットがいま担当しているワールド格子座標。dirty判定の基準になる
         DirectX::XMINT3 ComputeDDGIProbeWorldCoord(uint32_t probeIndex) const;
 
         DirectX::XMFLOAT3 ComputeDDGIProbePosition(uint32_t probeIndex) const;
+
+    private:
 
         // m_GIResources.GIVolumeのProbeCountsに合わせてアトラス2枚を確保し直す。ボリュームが無いシーンでは
         // 1プローブぶんのダミーを確保する(SRVは常にバインドできる必要があるため、
@@ -2103,7 +2051,12 @@ namespace Kurenai
         // 59×6×16 = 5664 となり、実際に前者を踏んで起動直後に落ちていた。
         //
         // レイトレース経路にはメッシュごとの描画そのものが無いので、この制約は掛からない
+    public:
+        // 【publicにしてある】上と同じ理由。1フレームに焼けるプローブ数を
+        // ObjectConstantsのリング段数から決める判定で、群が登録時に呼ぶ
         uint32_t ClampDDGIProbesPerFrameToConstantRing(uint32_t requested);
+
+    private:
         // ObjectConstantsのリングに要求する「1フレームあたりの書き込み回数」。
         // 根拠はこのバッファを作っている箇所(KurenaiEngine3D.cpp)のコメントを参照
         static constexpr uint32_t kObjectConstantUpdatesPerFrame = 16384;
