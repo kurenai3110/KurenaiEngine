@@ -8,20 +8,31 @@
 // std::begin / std::end (m_ModelCullRegionIssued の一括ゼロ埋め)
 #include <iterator>
 #include <string>
+#include <vector>
 
 #include "Core/CPUProfiler.h"
 #include "Core/Logger.h"
-// パス群のカウンタと履歴の反転を呼ぶため、前方宣言では足りない
+// パス群のRegisterとカウンタと履歴の反転を呼ぶため、前方宣言では足りない
+#include "../Passes/DDGIPasses.h"
+#include "../Passes/EnvironmentPasses.h"
 #include "../Passes/GeometryPasses.h"
+#include "../Passes/LightingPasses.h"
 #include "../Passes/MegaLightsPasses.h"
+#include "../Passes/PostProcessPasses.h"
+#include "../Passes/PresentPass.h"
+#include "../Passes/ReflectionPasses.h"
+#include "../Passes/ReflectionProbePasses.h"
 #include "../Passes/ShadowPasses.h"
 #include "../ShaderInterop/FrameConstants.h"
 #include "../UI/UIManager.h"
 #include "../UI/UITheme.h"
+#include "CubeFaceMath.h"
 #include "RenderBlackboard.h"
+#include "RenderFrameContext.h"
 #include "SunLighting.h"
 
-// Render()から切り出したフレームの先頭(Aブロック)と締め(Eブロック)。段階6.6。
+// Render()から切り出したフレームの先頭(Aブロック)・パスの登録(Dブロック)・
+// 締め(Eブロック)。段階6.6。
 // KurenaiEngine3D のメンバ関数のまま、翻訳単位だけをここへ分けている
 // (宣言は KurenaiEngine3D.h のまま。Diagnostics/RenderDumpService.cpp と同じ作法)。
 //
@@ -338,6 +349,99 @@ namespace Kurenai
         // 内部解像度を下げているときは必要なテクセル密度もその分下がる)
         m_TextureStreaming.UpdateTargets(
             cameraPosition, std::tan(camera.GetFovY() * 0.5f), m_RenderHeight, m_RenderDeltaTime);
+    }
+
+    void KurenaiEngine3D::RegisterPasses(
+        Core::RenderGraph& graph, Rendering::RenderFrameContext& frameContext,
+        Rendering::RenderBlackboard& blackboard, RHI::IRHICommandList* commandList,
+        std::vector<RHI::IRHITexture*>& probeCaptureReads, size_t bakedLightCount,
+        RHI::IRHITexture* skyTexture, const DirectX::XMMATRIX (&cascadeViewProj)[kCascadeCount],
+        const Core::Camera& camera)
+    {
+        // --- 環境(空・大気・雲・IBL)の焼き込みパス群(段階6で Passes/EnvironmentPasses へ移設) ---
+        // 【必ずグラフの先頭で登録すること】依存解決は登録順の前方走査なので、
+        // ここより後ろへ動かすとSkyIntegrateが未初期化のLUTを読む
+        m_EnvironmentPasses->Register(graph, frameContext, blackboard);
+
+        RHI::Viewport shadowViewport;
+        shadowViewport.Width = static_cast<float>(kShadowMapSize);
+        shadowViewport.Height = static_cast<float>(kShadowMapSize);
+
+        RHI::Viewport gbufferViewport;
+        gbufferViewport.Width = static_cast<float>(m_RenderWidth);
+        gbufferViewport.Height = static_cast<float>(m_RenderHeight);
+        frameContext.GBufferViewport = gbufferViewport;
+        frameContext.ShadowViewport = shadowViewport;
+        frameContext.BakedLightCount = bakedLightCount;
+
+        // プローブのキューブ面キャプチャが使う射影。**反射プローブとDDGIで同じものを使う**
+        // ため、どちらの群からも引けるようフレームのスナップショットへ載せる
+        const DirectX::XMMATRIX probeFaceProjection =
+            ComputeCubeFaceProjection(camera.GetNearZ(), camera.GetFarZ());
+        frameContext.ProbeFaceProjection = probeFaceProjection;
+
+        // プローブのキャプチャが読むテクスチャ一式。反射プローブとDDGIが同じ組を読む。
+        // 【実体はRender()にある】frameContext.ProbeCaptureReadsがこれを指し、
+        // graph.Execute()の時点でも生きている必要があるのでここのローカルにはしない
+        probeCaptureReads = {
+            m_RenderTargets.ShadowCascadeArray.get(),
+            skyTexture, m_IBLResources.IrradianceTexture.get(), m_IBLResources.PrefilteredEnvTexture.get(), m_IBLResources.BRDFLUTTexture.get(),
+        };
+        frameContext.ProbeCaptureReads = &probeCaptureReads;
+        frameContext.CascadeViewProj = cascadeViewProj;
+
+        // --- シャドウのパス群(段階6で Passes/ShadowPasses へ移設) ---
+        // 【この位置で登録すること】依存が同点のときRenderGraphは最小登録番号を選ぶ。
+        // 登録順そのものが実行順の一部になっている
+        m_ShadowPasses->RegisterCascades(graph, frameContext);
+
+        // --- 反射プローブのパス群(段階6で Passes/ReflectionProbePasses へ移設) ---
+        // 【この位置で登録すること】依存が同点のときRenderGraphは最小登録番号を選ぶ。
+        // 登録順そのものが実行順の一部になっている
+        m_ReflectionProbePasses->Register(graph, frameContext, blackboard);
+
+        // --- DDGIのパス群(段階6で Passes/DDGIPasses へ移設) ---
+        // 【この位置で登録すること】依存が同点のときRenderGraphは最小登録番号を選ぶ。
+        // 登録順そのものが実行順の一部になっている
+        m_DDGIPasses->RegisterProbeUpdate(graph, frameContext, blackboard);
+
+        // --- ジオメトリのパス群(段階6で Passes/GeometryPasses へ移設) ---
+        // 【この位置で登録すること】依存が同点のときRenderGraphは最小登録番号を選ぶ。
+        // 登録順そのものが実行順の一部になっている
+        m_GeometryPasses->Register(graph, frameContext, blackboard);
+
+        // --- MegaLightsのパス群(段階6で Passes/MegaLightsPasses へ移設) ---
+        // 【この位置で登録すること】依存が同点のときRenderGraphは最小登録番号を選ぶ。
+        // 登録順そのものが実行順の一部になっている
+        m_MegaLightsPasses->Register(graph, frameContext, blackboard);
+
+        // --- RTシャドウ(段階6で Passes/ShadowPasses へ移設) ---
+        m_ShadowPasses->RegisterRaytraced(graph, frameContext);
+
+        // --- 直接光・AO/GI・雲のパス群(段階6で Passes/LightingPasses へ移設) ---
+        m_LightingPasses->RegisterDirectAndAO(graph, frameContext, blackboard);
+
+        // --- DDGIの解決(段階6で Passes/DDGIPasses へ移設) ---
+        m_DDGIPasses->RegisterResolve(graph, frameContext);
+
+        // --- 合成と半透明のパス群(段階6で Passes/LightingPasses へ移設) ---
+        // 【この位置で登録すること】依存が同点のときRenderGraphは最小登録番号を選ぶ
+        m_LightingPasses->RegisterSceneLighting(graph, frameContext, blackboard);
+
+        // --- 反射のパス群(段階6で Passes/ReflectionPasses へ移設) ---
+        // 【この位置で登録すること】依存が同点のときRenderGraphは最小登録番号を選ぶ。
+        // 登録順そのものが実行順の一部になっている
+        m_ReflectionPasses->Register(graph, frameContext, blackboard);
+
+        // --- ポストプロセスのパス群(段階6で Passes/PostProcessPasses へ移設) ---
+        // 【この位置で登録すること】依存が同点のときRenderGraphは最小登録番号を選ぶ。
+        // 登録順そのものが実行順の一部になっている
+        m_PostProcessPasses->Register(graph, frameContext, blackboard);
+
+        // --- Present パス群(段階6で Passes/PresentPass へ移設) ---
+        // 【この位置で登録すること】RenderGraph は依存が同点のとき最小登録番号を選ぶため、
+        // 登録順そのものが実行順の一部になっている。移設で順番が動くと実行順が変わる
+        m_PresentPass->Register(graph, commandList, frameContext, blackboard);
     }
 
     void KurenaiEngine3D::ResolveFrameCullStats(

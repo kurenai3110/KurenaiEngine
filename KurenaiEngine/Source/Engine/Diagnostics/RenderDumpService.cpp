@@ -15,7 +15,8 @@
 #include "../Passes/ShadowPasses.h"
 #include "RenderDumpService.h"
 
-// 中間レンダーターゲットのダンプ(-dumptex)と、性能記録のログ出力。
+// 中間レンダーターゲットのダンプ(-dumptex)、パスマニフェストの書き出し(-passmanifest)、
+// 性能記録のログ出力。
 // KurenaiEngine3D のメンバ関数のまま、翻訳単位だけをここへ分けている
 // (宣言は KurenaiEngine3D.h のまま)
 namespace Kurenai
@@ -1197,6 +1198,54 @@ namespace Kurenai
                             "GPU計測を書き出せませんでした(ファイルを開けない): " +
                                 Core::WideToUtf8(m_PerfDumpPath));
                     }
+                }
+            }
+        }
+    }
+
+    void KurenaiEngine3D::WritePassManifestIfDue(Core::RenderGraph& graph)
+    {
+        // 1枚だけなら既存のテクスチャダンプと同じフレームを使う。複数枚では焼き込みを捕まえるため最初から出す。
+        const uint32_t manifestTargetFrame =
+            m_TextureDumpFrame >= 0 ? static_cast<uint32_t>(m_TextureDumpFrame) : kMegaLightsAccumWarmup;
+        const bool writeSingleManifest =
+            m_PassManifestTargetFrames == 1 && !m_PassManifestIssued && m_TAAFrameIndex >= manifestTargetFrame;
+        const bool writeManifestSequence =
+            m_PassManifestTargetFrames > 1 && m_PassManifestIssuedFrames < m_PassManifestTargetFrames;
+        if (!m_PassManifestPath.empty() && (writeSingleManifest || writeManifestSequence))
+        {
+            const uint32_t manifestSequenceIndex = m_PassManifestIssuedFrames;
+            m_PassManifestIssued = true;
+            ++m_PassManifestIssuedFrames;
+            std::string executionOrderError;
+            const std::string manifest = graph.BuildPassManifest(&executionOrderError);
+            if (!executionOrderError.empty())
+            {
+                Core::Logger::Error("KurenaiEngine3D", "パスマニフェストの実行順を解決できませんでした: " + executionOrderError);
+            }
+
+            const std::wstring outputPath = MakeTextureDumpSequencePath(
+                m_PassManifestPath, m_PassManifestTargetFrames, manifestSequenceIndex);
+            std::ofstream file(outputPath, std::ios::binary);
+            if (!file)
+            {
+                Core::Logger::Error(
+                    "KurenaiEngine3D", "パスマニフェストを書き出せませんでした(ファイルを開けない): " +
+                        Core::WideToUtf8(outputPath));
+            }
+            else
+            {
+                file.write(manifest.data(), static_cast<std::streamsize>(manifest.size()));
+                if (!file)
+                {
+                    Core::Logger::Error(
+                        "KurenaiEngine3D", "パスマニフェストを書き出せませんでした(書き込み失敗): " +
+                            Core::WideToUtf8(outputPath));
+                }
+                else
+                {
+                    Core::Logger::Info(
+                        "KurenaiEngine3D", "パスマニフェストを書き出しました: " + Core::WideToUtf8(outputPath));
                 }
             }
         }

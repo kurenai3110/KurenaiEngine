@@ -68,8 +68,9 @@
 
 namespace Kurenai::Core
 {
-    // IssueTextureDumpsの引数にだけ使う。RenderGraph.hはRHIのヘッダ群を芋づるで引き込むため、
-    // このヘッダをインクルードする側(UIパネル・Sample3D)へ広げないよう前方宣言で済ませる
+    // IssueTextureDumps / RegisterPasses / WritePassManifestIfDue の引数にだけ使う。
+    // RenderGraph.hはRHIのヘッダ群を芋づるで引き込むため、このヘッダをインクルードする側
+    // (UIパネル・Sample3D)へ広げないよう前方宣言で済ませる
     class RenderGraph;
 }
 
@@ -103,9 +104,11 @@ namespace Kurenai::ShaderInterop
 
 namespace Kurenai::Rendering
 {
-    // Render()から切り出したフレームの締め(ResolveFrameCullStats)の引数にだけ使う。
-    // 実体はRendering/RenderBlackboard.hにあり、そちらはRHIのヘッダ群を引き込むため前方宣言で止める
+    // Render()から切り出した関数(ResolveFrameCullStats / RegisterPasses)の引数にだけ使う。
+    // 実体はRendering/RenderBlackboard.h・RenderFrameContext.hにあり、
+    // そちらはRHIのヘッダ群を引き込むため前方宣言で止める
     struct RenderBlackboard;
+    struct RenderFrameContext;
 }
 
 namespace Kurenai
@@ -757,6 +760,21 @@ namespace Kurenai
         void UpdateSceneForFrame(
             RHI::IRHICommandList* commandList, const DirectX::XMFLOAT3& cameraPosition, const Core::Camera& camera);
 
+        // --- Render()から切り出したパスの登録(段階6.6のDブロック) ---
+        // 【定義はRendering/RenderFrame.cppにある】13回のRegisterを1つにまとめたもの。
+        // **中の呼び出し順は実行順の一部**で、RenderGraphは依存が同点のとき最小登録番号を
+        // 選ぶ。1つでも入れ替えると実行順が変わる。
+        //
+        // 【probeCaptureReadsを引数で受ける理由】frameContext.ProbeCaptureReadsがこれを指し、
+        // graph.Execute()の時点でも生きている必要がある。この関数のローカルにすると
+        // 解放済みのメモリを指すが、直後なら中身が残っていて同じ絵が出るため採取では捕まらない
+        void RegisterPasses(
+            Core::RenderGraph& graph, Rendering::RenderFrameContext& frameContext,
+            Rendering::RenderBlackboard& blackboard, RHI::IRHICommandList* commandList,
+            std::vector<RHI::IRHITexture*>& probeCaptureReads, size_t bakedLightCount,
+            RHI::IRHITexture* skyTexture, const DirectX::XMMATRIX (&cascadeViewProj)[kCascadeCount],
+            const Core::Camera& camera);
+
         // --- Render()から切り出したフレームの締め(段階6.6のEブロック) ---
         // 【定義はRendering/RenderFrame.cppにある】KurenaiEngine3Dのメンバ関数のまま、
         // 翻訳単位だけを分けている(Diagnostics/RenderDumpService.cppと同じ作法)。
@@ -1357,6 +1375,9 @@ namespace Kurenai
 
     private:
         void ResolveTextureDumps();
+        // このフレームのパスマニフェスト(RenderGraphの実行順)を、指定のフレームに達していれば
+        // ファイルへ書き出す(検証専用の -passmanifest)。graph.Execute()の直前に呼ぶこと
+        void WritePassManifestIfDue(Core::RenderGraph& graph);
         // 1件ぶんをファイルへ書く。書けたらtrue
         bool WriteTextureDumpFile(
             const TextureDumpRequest& request, const TextureDumpSlot& slot, const std::vector<uint8_t>& pixels) const;
