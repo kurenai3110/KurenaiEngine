@@ -958,31 +958,9 @@ namespace Kurenai
 
         m_LightingPasses->CreateSkyCloudPipelineState(*m_Device, shaderDirectory);
 
-        // DDGIの低解像度解決パス(雲パスと同じ作り。拡散イラディアンスとinsideWeightを書く)
-        RHI::ShaderDesc ddgiResolveVsDesc;
-        ddgiResolveVsDesc.Stage = RHI::ShaderStage::Vertex;
-        ddgiResolveVsDesc.FilePath = shaderDirectory + L"DDGIResolve.kshader";
-        ddgiResolveVsDesc.EntryPoint = "VSMain";
-        m_DDGIResolveVertexShader = m_Device->CreateShader(ddgiResolveVsDesc);
-
-        RHI::ShaderDesc ddgiResolvePsDesc;
-        ddgiResolvePsDesc.Stage = RHI::ShaderStage::Pixel;
-        ddgiResolvePsDesc.FilePath = shaderDirectory + L"DDGIResolve.kshader";
-        ddgiResolvePsDesc.EntryPoint = "PSMain";
-        m_DDGIResolvePixelShader = m_Device->CreateShader(ddgiResolvePsDesc);
-
-        RHI::PipelineStateDesc ddgiResolvePipelineDesc;
-        ddgiResolvePipelineDesc.VertexShader = m_DDGIResolveVertexShader.get();
-        ddgiResolvePipelineDesc.PixelShader = m_DDGIResolvePixelShader.get();
-        ddgiResolvePipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
-        // 2枚目はこのテクセルが代表している全解像度の深度(41.24節)。並びはDDGIResolve.hlslの
-        // PSOutputおよびDDGIResolveパスのRenderTargetsと一致させること。
-        // Reverse-Zの生値をそのまま持つのでR32_Float(合成側の相対差の判定に十分な精度が要る)
-        ddgiResolvePipelineDesc.RenderTargetFormats = {
-            RHI::Format::R16G16B16A16_Float,
-            RHI::Format::R32_Float,
-        };
-        m_DDGIResolvePipelineState = m_Device->CreatePipelineState(ddgiResolvePipelineDesc);
+        // 【元の行位置のまま呼ぶ】DX12はディスクリプタ枠を生成順に割り当てるため、
+        // 所有権をDDGIPassesへ移しても生成の順序はここから動かさない
+        m_DDGIPasses->CreateResolvePipelineState(*m_Device, shaderDirectory);
 
         // RT反射パス(コンピュートシェーダー。TLASへ鏡面レイを撃ち反射色を求める)。
         // RTReflection.hlslはRayQueryを含むためシェーダーモデル6.5でしかコンパイルできない。
@@ -1256,31 +1234,13 @@ namespace Kurenai
             // ここで捕まえてDDGIのレイ取得だけをラスタ経路へ戻す(自前ラスタライザと同じ扱い)
             try
             {
-                RHI::ShaderDesc ddgiTraceCsDesc;
-                ddgiTraceCsDesc.Stage = RHI::ShaderStage::Compute;
-                ddgiTraceCsDesc.FilePath = shaderDirectory + L"DDGIProbeTrace.kshader";
-                ddgiTraceCsDesc.EntryPoint = "CSMain";
-                m_DDGIProbeTraceComputeShader = m_Device->CreateShader(ddgiTraceCsDesc);
-                m_DDGIProbeTracePipelineState =
-                    m_Device->CreateComputePipelineState({ m_DDGIProbeTraceComputeShader.get() });
-
-                RHI::BufferDesc ddgiTraceConstantBufferDesc;
-                ddgiTraceConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-                ddgiTraceConstantBufferDesc.SizeInBytes = sizeof(Passes::DDGITraceConstants);
-                // プローブ1個につき6面ぶん書き換えるため、既定の段数では
-                // 更新プローブ数を増やしたときに足りなくなる(1フレーム最大64プローブ×6面=384回)
-                ddgiTraceConstantBufferDesc.MaxConstantUpdatesPerFrame = 1024;
-                m_DDGITraceConstantBuffer = m_Device->CreateBuffer(ddgiTraceConstantBufferDesc);
+                m_DDGIPasses->CreateRaytracedTraceResources(*m_Device, shaderDirectory);
 
                 m_RenderCapabilities.DDGIRaytracedTraceAvailable = true;
             }
             catch (const std::exception& e)
             {
-                // ShouldRunRaytracedDDGITraceがパイプラインステートのnullを見ているため、
-                // ここで捨てておけばレイ取得はラスタ経路のまま動く
-                m_DDGIProbeTracePipelineState.reset();
-                m_DDGIProbeTraceComputeShader.reset();
-                m_DDGITraceConstantBuffer.reset();
+                m_DDGIPasses->ResetRaytracedTraceResources();
                 m_RenderCapabilities.DDGIRaytracedTraceAvailable = false;
                 Core::Logger::Error(
                     "KurenaiEngine3D",
@@ -1504,53 +1464,9 @@ namespace Kurenai
         // キャプチャ経路は反射プローブとまったく同じ(ProbeCapture.hlslとm_GIResources.ProbeCapturePipelineStateを
         // そのまま使う)で、解像度だけkDDGICaptureSizeへ落とす。レンダーターゲットのフォーマットは
         // PSOと一致していなければならないため、反射プローブ側と同じ組み合わせにする
-        m_DDGICaptureColor = m_Device->CreateRenderTexture(kDDGICaptureSize, kDDGICaptureSize, RHI::Format::R16G16B16A16_Float);
-        m_DDGICaptureDistance = m_Device->CreateRenderTexture(kDDGICaptureSize, kDDGICaptureSize, RHI::Format::R32_Float);
-        m_DDGICaptureDepth = m_Device->CreateDepthTexture(kDDGICaptureSize, kDDGICaptureSize, 0.0f);
-        // 6面を組み上げるスクラッチのキューブ。更新CSは1テクセル(=1つの方向)を出力するのに
-        // 6面ぶん1536本のレイを全て走査するため、面ごとの2Dテクスチャではキューブとして
-        // 引けず具合が悪い。放射輝度と距離で2本要る
-        m_DDGICaptureRadianceCube = m_Device->CreateUAVTextureCube(kDDGICaptureSize, RHI::Format::R16G16B16A16_Float);
-        m_DDGICaptureDistanceCube = m_Device->CreateUAVTextureCube(kDDGICaptureSize, RHI::Format::R32_Float);
+        m_DDGIPasses->CreateCaptureResources(*m_Device);
 
-        RHI::ShaderDesc ddgiUpdateCsDesc;
-        ddgiUpdateCsDesc.Stage = RHI::ShaderStage::Compute;
-        ddgiUpdateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.kshader";
-        ddgiUpdateCsDesc.EntryPoint = "CSUpdateProbe";
-        m_DDGIProbeUpdateComputeShader = m_Device->CreateShader(ddgiUpdateCsDesc);
-        m_DDGIProbeUpdatePipelineState = m_Device->CreateComputePipelineState({ m_DDGIProbeUpdateComputeShader.get() });
-
-        // 境界の複製は本体の書き込みが全て終わってからでなければ正しい値を読めないため、
-        // 同じディスパッチ内では行えず別パスになる(オクタヘドラルの縁は対辺へ折り返して繋がるので、
-        // 自分のセルの反対側のテクセルを読む必要がある)
-        RHI::ShaderDesc ddgiBorderCsDesc;
-        ddgiBorderCsDesc.Stage = RHI::ShaderStage::Compute;
-        ddgiBorderCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.kshader";
-        ddgiBorderCsDesc.EntryPoint = "CSCopyBorder";
-        m_DDGIBorderCopyComputeShader = m_Device->CreateShader(ddgiBorderCsDesc);
-        m_DDGIBorderCopyPipelineState = m_Device->CreateComputePipelineState({ m_DDGIBorderCopyComputeShader.get() });
-
-        RHI::BufferDesc ddgiUpdateConstantBufferDesc;
-        ddgiUpdateConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
-        ddgiUpdateConstantBufferDesc.SizeInBytes = sizeof(Passes::DDGIUpdateConstants);
-        m_DDGIUpdateConstantBuffer = m_Device->CreateBuffer(ddgiUpdateConstantBufferDesc);
-
-        // スクロールで未確定になったプローブを、焼き直されるまでサンプリングから外すパス
-        RHI::ShaderDesc ddgiInvalidateCsDesc;
-        ddgiInvalidateCsDesc.Stage = RHI::ShaderStage::Compute;
-        ddgiInvalidateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.kshader";
-        ddgiInvalidateCsDesc.EntryPoint = "CSInvalidateProbes";
-        m_DDGIInvalidateProbesComputeShader = m_Device->CreateShader(ddgiInvalidateCsDesc);
-        m_DDGIInvalidateProbesPipelineState =
-            m_Device->CreateComputePipelineState({ m_DDGIInvalidateProbesComputeShader.get() });
-
-        // 焼き直し待ちのスロット番号を渡す。最悪ケース(全プローブが一度に未確定)でも足りる大きさ。
-        // 1フレームに1回しか書かないのでリングの段数は既定のままでよい
-        RHI::BufferDesc ddgiDirtyBufferDesc;
-        ddgiDirtyBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
-        ddgiDirtyBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * kDDGIMaxProbes;
-        ddgiDirtyBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
-        m_DDGIDirtyProbeBuffer = m_Device->CreateBuffer(ddgiDirtyBufferDesc);
+        m_DDGIPasses->CreateProbeUpdateResources(*m_Device, shaderDirectory);
 
         // ここまでで全シェーダーの生成が終わっている。読み込んだ.kshaderはもう誰も読まないので、
         // バイトコードをプロセスの寿命ぶん抱え続けないよう明示的に捨てる
@@ -2410,7 +2326,7 @@ namespace Kurenai
     bool KurenaiEngine3D::ShouldRunRaytracedDDGITrace() const
     {
         return m_DDGISettings.RayMode == DDGIRayMode::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
-               m_DDGIProbeTracePipelineState != nullptr && m_DDGITraceConstantBuffer != nullptr;
+               m_DDGIPasses->HasRaytracedTraceResources();
     }
 
     bool KurenaiEngine3D::ShouldUseMeshletPath(

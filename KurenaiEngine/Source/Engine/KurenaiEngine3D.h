@@ -1547,19 +1547,8 @@ namespace Kurenai
         // レンダー解像度に追従して作り直すためRenderTargets(SkyCloud*)にある
 
         // --- DDGIの低解像度解決パス ---
-        // 雲と同じくLightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
-        // DDGIの拡散イラディアンスだけを内部レンダー解像度の1/2(面積で1/4)で評価し、
-        // 「rgb=イラディアンス, a=insideWeight」を書く。
-        //
-        // 【雲と違い近似である】雲は視線方向だけの関数で深度に依存しないため、
-        // 低解像度化してバイリニアで引き伸ばしても数学的に等価だった。DDGIは面の位置と
-        // 法線の関数なので、ジオメトリの輪郭をまたぐと手前の間接光が奥へ滲む。
-        // 合成側(DeferredLighting.hlslのUpsampleDDGI)が深度を見たアップサンプルで
-        // 抑えているが、厳密ではない。そのため**既定では無効**にしてある
-        std::unique_ptr<RHI::IRHIShader> m_DDGIResolveVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_DDGIResolvePixelShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIResolvePipelineState;
-        // DDGIの解決2枚の持ち主は Rendering/GIResources.h
+        // シェーダーとPSOはPasses/DDGIPassesへ、書き先2枚の持ち主は Rendering/GIResources.h。
+        // ここに残るのは実寸だけ
         // RenderTargets::SkyCloudWidth/Heightと同じ理由でここへ保存する(パスのビューポート指定に使う)
         uint32_t m_DDGIResolveWidth = 0;
         uint32_t m_DDGIResolveHeight = 0;
@@ -1994,35 +1983,13 @@ namespace Kurenai
         // すべてこれを基準に決まるので、1フレームの途中で動くと食い違う
         DirectX::XMFLOAT3 m_DDGIFollowCenter{ 0.0f, 0.0f, 0.0f };
 
-        std::unique_ptr<RHI::IRHIShader> m_DDGIProbeUpdateComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIProbeUpdatePipelineState;
-        std::unique_ptr<RHI::IRHIShader> m_DDGIBorderCopyComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIBorderCopyPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_DDGIUpdateConstantBuffer;
-        // スクロールで担当する場所が変わったプローブを、焼き直されるまでサンプリングから外すパス。
-        // 詳細はDDGIProbeUpdate.hlslのCSInvalidateProbesを参照
-        std::unique_ptr<RHI::IRHIShader> m_DDGIInvalidateProbesComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIInvalidateProbesPipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_DDGIDirtyProbeBuffer;
         // 各スロットが「最後に焼いたときのワールド格子座標」。いまの座標と違えば未確定(dirty)。
         // 【ワールド座標で持つこと】アトラスのセル番号で持つと、スクロールしてもセル番号は
         // 変わらないので「別の場所を担当するようになった」ことを検出できない
         std::vector<DirectX::XMINT3> m_DDGIProbeBakedCoord;
         // 焼き直し待ちのスロット番号(毎フレーム組み直す。GPUへ渡す一時の並び)
         std::vector<uint32_t> m_DDGIDirtyProbeList;
-        // DDGIのレイ取得をDXRで行う経路(DDGIProbeTrace.hlsl)。
-        // m_RenderCapabilities.RaytracingAvailableがtrueのときだけ作る(RTAO/RT反射と同じ扱い)
-        std::unique_ptr<RHI::IRHIShader> m_DDGIProbeTraceComputeShader;
-        std::unique_ptr<RHI::IRHIPipelineState> m_DDGIProbeTracePipelineState;
-        std::unique_ptr<RHI::IRHIBuffer> m_DDGITraceConstantBuffer;
-        // DDGIのキャプチャ先(反射プローブとは解像度が違うため別に持つ)
-        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureColor;
-        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDistance;
-        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDepth;
-        // キャプチャした6面を組み上げるスクラッチのキューブ(放射輝度・距離の2本)。
-        // 更新CSは「6面ぶんのレイ」をまとめて走査するため、面ごとの2Dではなくキューブで受ける
-        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureRadianceCube;
-        std::unique_ptr<RHI::IRHITexture> m_DDGICaptureDistanceCube;
+        // レイ取得(DXR)の経路とキャプチャ資源一式は Passes/DDGIPasses へ移した
 
         // 全プローブが一度でも書かれたか。書かれる前のアトラスは中身が未定義なので、
         // それまではDDGIを無効にして従来のIBLのまま描く(反射プローブの「一度でも焼けたか」と同じ方針)

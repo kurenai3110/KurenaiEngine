@@ -27,6 +27,120 @@ namespace Kurenai::Passes
         using ShaderInterop::FrameConstants;
     }
 
+    void DDGIPasses::CreateResolvePipelineState(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        // DDGIの低解像度解決パス(雲パスと同じ作り。拡散イラディアンスとinsideWeightを書く)
+        RHI::ShaderDesc ddgiResolveVsDesc;
+        ddgiResolveVsDesc.Stage = RHI::ShaderStage::Vertex;
+        ddgiResolveVsDesc.FilePath = shaderDirectory + L"DDGIResolve.kshader";
+        ddgiResolveVsDesc.EntryPoint = "VSMain";
+        m_DDGIResolveVertexShader = device.CreateShader(ddgiResolveVsDesc);
+
+        RHI::ShaderDesc ddgiResolvePsDesc;
+        ddgiResolvePsDesc.Stage = RHI::ShaderStage::Pixel;
+        ddgiResolvePsDesc.FilePath = shaderDirectory + L"DDGIResolve.kshader";
+        ddgiResolvePsDesc.EntryPoint = "PSMain";
+        m_DDGIResolvePixelShader = device.CreateShader(ddgiResolvePsDesc);
+
+        RHI::PipelineStateDesc ddgiResolvePipelineDesc;
+        ddgiResolvePipelineDesc.VertexShader = m_DDGIResolveVertexShader.get();
+        ddgiResolvePipelineDesc.PixelShader = m_DDGIResolvePixelShader.get();
+        ddgiResolvePipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
+        // 2枚目はこのテクセルが代表している全解像度の深度(41.24節)。並びはDDGIResolve.hlslの
+        // PSOutputおよびDDGIResolveパスのRenderTargetsと一致させること。
+        // Reverse-Zの生値をそのまま持つのでR32_Float(合成側の相対差の判定に十分な精度が要る)
+        ddgiResolvePipelineDesc.RenderTargetFormats = {
+            RHI::Format::R16G16B16A16_Float,
+            RHI::Format::R32_Float,
+        };
+        m_DDGIResolvePipelineState = device.CreatePipelineState(ddgiResolvePipelineDesc);
+    }
+
+    void DDGIPasses::CreateRaytracedTraceResources(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        RHI::ShaderDesc ddgiTraceCsDesc;
+        ddgiTraceCsDesc.Stage = RHI::ShaderStage::Compute;
+        ddgiTraceCsDesc.FilePath = shaderDirectory + L"DDGIProbeTrace.kshader";
+        ddgiTraceCsDesc.EntryPoint = "CSMain";
+        m_DDGIProbeTraceComputeShader = device.CreateShader(ddgiTraceCsDesc);
+        m_DDGIProbeTracePipelineState =
+            device.CreateComputePipelineState({ m_DDGIProbeTraceComputeShader.get() });
+
+        RHI::BufferDesc ddgiTraceConstantBufferDesc;
+        ddgiTraceConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        ddgiTraceConstantBufferDesc.SizeInBytes = sizeof(DDGITraceConstants);
+        // プローブ1個につき6面ぶん書き換えるため、既定の段数では
+        // 更新プローブ数を増やしたときに足りなくなる(1フレーム最大64プローブ×6面=384回)
+        ddgiTraceConstantBufferDesc.MaxConstantUpdatesPerFrame = 1024;
+        m_DDGITraceConstantBuffer = device.CreateBuffer(ddgiTraceConstantBufferDesc);
+    }
+
+    void DDGIPasses::ResetRaytracedTraceResources()
+    {
+        // HasRaytracedTraceResources がパイプラインステートのnullを見ているため、
+        // ここで捨てておけばレイ取得はラスタ経路のまま動く
+        m_DDGIProbeTracePipelineState.reset();
+        m_DDGIProbeTraceComputeShader.reset();
+        m_DDGITraceConstantBuffer.reset();
+    }
+
+    void DDGIPasses::CreateCaptureResources(RHI::IRHIDevice& device)
+    {
+        // キャプチャ経路は反射プローブとまったく同じ(ProbeCapture.hlslとGIResources::ProbeCapturePipelineStateを
+        // そのまま使う)で、解像度だけkDDGICaptureSizeへ落とす。レンダーターゲットのフォーマットは
+        // PSOと一致していなければならないため、反射プローブ側と同じ組み合わせにする
+        m_DDGICaptureColor = device.CreateRenderTexture(kDDGICaptureSize, kDDGICaptureSize, RHI::Format::R16G16B16A16_Float);
+        m_DDGICaptureDistance = device.CreateRenderTexture(kDDGICaptureSize, kDDGICaptureSize, RHI::Format::R32_Float);
+        m_DDGICaptureDepth = device.CreateDepthTexture(kDDGICaptureSize, kDDGICaptureSize, 0.0f);
+        // 6面を組み上げるスクラッチのキューブ。更新CSは1テクセル(=1つの方向)を出力するのに
+        // 6面ぶん1536本のレイを全て走査するため、面ごとの2Dテクスチャではキューブとして
+        // 引けず具合が悪い。放射輝度と距離で2本要る
+        m_DDGICaptureRadianceCube = device.CreateUAVTextureCube(kDDGICaptureSize, RHI::Format::R16G16B16A16_Float);
+        m_DDGICaptureDistanceCube = device.CreateUAVTextureCube(kDDGICaptureSize, RHI::Format::R32_Float);
+    }
+
+    void DDGIPasses::CreateProbeUpdateResources(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        RHI::ShaderDesc ddgiUpdateCsDesc;
+        ddgiUpdateCsDesc.Stage = RHI::ShaderStage::Compute;
+        ddgiUpdateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.kshader";
+        ddgiUpdateCsDesc.EntryPoint = "CSUpdateProbe";
+        m_DDGIProbeUpdateComputeShader = device.CreateShader(ddgiUpdateCsDesc);
+        m_DDGIProbeUpdatePipelineState = device.CreateComputePipelineState({ m_DDGIProbeUpdateComputeShader.get() });
+
+        // 境界の複製は本体の書き込みが全て終わってからでなければ正しい値を読めないため、
+        // 同じディスパッチ内では行えず別パスになる(オクタヘドラルの縁は対辺へ折り返して繋がるので、
+        // 自分のセルの反対側のテクセルを読む必要がある)
+        RHI::ShaderDesc ddgiBorderCsDesc;
+        ddgiBorderCsDesc.Stage = RHI::ShaderStage::Compute;
+        ddgiBorderCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.kshader";
+        ddgiBorderCsDesc.EntryPoint = "CSCopyBorder";
+        m_DDGIBorderCopyComputeShader = device.CreateShader(ddgiBorderCsDesc);
+        m_DDGIBorderCopyPipelineState = device.CreateComputePipelineState({ m_DDGIBorderCopyComputeShader.get() });
+
+        RHI::BufferDesc ddgiUpdateConstantBufferDesc;
+        ddgiUpdateConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        ddgiUpdateConstantBufferDesc.SizeInBytes = sizeof(DDGIUpdateConstants);
+        m_DDGIUpdateConstantBuffer = device.CreateBuffer(ddgiUpdateConstantBufferDesc);
+
+        // スクロールで未確定になったプローブを、焼き直されるまでサンプリングから外すパス
+        RHI::ShaderDesc ddgiInvalidateCsDesc;
+        ddgiInvalidateCsDesc.Stage = RHI::ShaderStage::Compute;
+        ddgiInvalidateCsDesc.FilePath = shaderDirectory + L"DDGIProbeUpdate.kshader";
+        ddgiInvalidateCsDesc.EntryPoint = "CSInvalidateProbes";
+        m_DDGIInvalidateProbesComputeShader = device.CreateShader(ddgiInvalidateCsDesc);
+        m_DDGIInvalidateProbesPipelineState =
+            device.CreateComputePipelineState({ m_DDGIInvalidateProbesComputeShader.get() });
+
+        // 焼き直し待ちのスロット番号を渡す。最悪ケース(全プローブが一度に未確定)でも足りる大きさ。
+        // 1フレームに1回しか書かないのでリングの段数は既定のままでよい
+        RHI::BufferDesc ddgiDirtyBufferDesc;
+        ddgiDirtyBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+        ddgiDirtyBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * kDDGIMaxProbes;
+        ddgiDirtyBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+        m_DDGIDirtyProbeBuffer = device.CreateBuffer(ddgiDirtyBufferDesc);
+    }
+
     void DDGIPasses::RegisterProbeUpdate(
         Core::RenderGraph& graph,
         const Rendering::RenderFrameContext& frame,
@@ -98,7 +212,7 @@ namespace Kurenai::Passes
             RHI::Viewport ddgiViewport;
             ddgiViewport.Width = static_cast<float>(kDDGICaptureSize);
             ddgiViewport.Height = static_cast<float>(kDDGICaptureSize);
-            RHI::IRHITexture* const captureTargets[] = { m_Engine.m_DDGICaptureColor.get(), m_Engine.m_DDGICaptureDistance.get() };
+            RHI::IRHITexture* const captureTargets[] = { m_DDGICaptureColor.get(), m_DDGICaptureDistance.get() };
 
             FrameConstants captureConstants = constants;
             const DirectX::XMMATRIX faceViewProj = ComputeCubeFaceView(probePosition, face) * probeFaceProjection;
@@ -109,7 +223,7 @@ namespace Kurenai::Passes
             captureConstants.ActiveLightCount.x = static_cast<float>(bakedLightCount);
             cmd->UpdateBuffer(gi->ProbeCaptureConstantBuffer.get(), &captureConstants, sizeof(captureConstants));
 
-            cmd->SetRenderTargets(captureTargets, 2, m_Engine.m_DDGICaptureDepth.get());
+            cmd->SetRenderTargets(captureTargets, 2, m_DDGICaptureDepth.get());
             cmd->SetViewport(ddgiViewport);
             cmd->ClearRenderTarget({ 0.0f, 0.0f, 0.0f, 0.0f });
             // Reverse-Zのため遠平面側(NDC z=0.0)。コピー側はこの0を「空」の判定に使う
@@ -247,11 +361,11 @@ namespace Kurenai::Passes
             cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
             cmd->SetComputeSamplerSet(materialSamplers);
             cmd->SetComputeTexture(0, skyTexture);
-            cmd->SetComputeTexture(1, m_Engine.m_DDGICaptureColor.get());
-            cmd->SetComputeTexture(2, m_Engine.m_DDGICaptureDepth.get());
-            cmd->SetComputeTexture(3, m_Engine.m_DDGICaptureDistance.get());
-            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_DDGICaptureRadianceCube.get(), face, 0, 0);
-            cmd->SetComputeUnorderedAccessTextureCubeFace(1, m_Engine.m_DDGICaptureDistanceCube.get(), face, 0, 0);
+            cmd->SetComputeTexture(1, m_DDGICaptureColor.get());
+            cmd->SetComputeTexture(2, m_DDGICaptureDepth.get());
+            cmd->SetComputeTexture(3, m_DDGICaptureDistance.get());
+            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_DDGICaptureRadianceCube.get(), face, 0, 0);
+            cmd->SetComputeUnorderedAccessTextureCubeFace(1, m_DDGICaptureDistanceCube.get(), face, 0, 0);
             cmd->Dispatch((kDDGICaptureSize + 7) / 8, (kDDGICaptureSize + 7) / 8, 1);
         };
 
@@ -294,14 +408,14 @@ namespace Kurenai::Passes
                         "件 / 全メッシュ " + std::to_string(raytracingScene->GetMeshCount()) + "件");
             }
 
-            cmd->SetComputePipelineState(m_Engine.m_DDGIProbeTracePipelineState.get());
+            cmd->SetComputePipelineState(m_DDGIProbeTracePipelineState.get());
             // ヒット面のマテリアルテクスチャをbindlessで引くためs0にWrapが要る(RTAOと同じ理由)
             cmd->SetComputeSamplerSet(materialSamplers);
-            cmd->UpdateBuffer(m_Engine.m_DDGITraceConstantBuffer.get(), &traceConstants, sizeof(traceConstants));
+            cmd->UpdateBuffer(m_DDGITraceConstantBuffer.get(), &traceConstants, sizeof(traceConstants));
             // b0はこのフレームのFrameConstantsをそのまま使う。ラスタ経路と違い、
             // プローブ位置は専用の定数バッファ(b1)で渡すのでViewProjを差し替える必要が無い
             cmd->SetComputeConstantBuffer(0, frameConstantBuffer);
-            cmd->SetComputeConstantBuffer(1, m_Engine.m_DDGITraceConstantBuffer.get());
+            cmd->SetComputeConstantBuffer(1, m_DDGITraceConstantBuffer.get());
 
             cmd->SetComputeAccelerationStructure(0, raytracingScene->GetTopLevelAS());
             cmd->SetComputeShaderResourceBuffer(1, raytracingScene->GetVertexAttributeBuffer());
@@ -326,8 +440,8 @@ namespace Kurenai::Passes
             cmd->SetComputeTexture(13, gi->DDGIDistanceAtlas.get());
 
             // UAVはDispatch直後に解除されるため毎回バインドし直す(IRHICommandList.h参照)
-            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_Engine.m_DDGICaptureRadianceCube.get(), face, 0, 0);
-            cmd->SetComputeUnorderedAccessTextureCubeFace(1, m_Engine.m_DDGICaptureDistanceCube.get(), face, 0, 0);
+            cmd->SetComputeUnorderedAccessTextureCubeFace(0, m_DDGICaptureRadianceCube.get(), face, 0, 0);
+            cmd->SetComputeUnorderedAccessTextureCubeFace(1, m_DDGICaptureDistanceCube.get(), face, 0, 0);
             cmd->Dispatch((kDDGICaptureSize + 7) / 8, (kDDGICaptureSize + 7) / 8, 1);
         };
 
@@ -354,17 +468,17 @@ namespace Kurenai::Passes
                 static_cast<float>(gi->GIVolume.ProbeCounts[2]),
                 effectiveExposure,
             };
-            cmd->UpdateBuffer(m_Engine.m_DDGIUpdateConstantBuffer.get(), &updateConstants, sizeof(updateConstants));
+            cmd->UpdateBuffer(m_DDGIUpdateConstantBuffer.get(), &updateConstants, sizeof(updateConstants));
 
             // 本体の書き込み。スレッドは2つの解像度の広いほうに合わせて起動し、
             // それぞれの範囲外はシェーダー側で弾く
             constexpr uint32_t kUpdateThreads = (kDDGIIrradianceTexels > kDDGIDistanceTexels)
                 ? kDDGIIrradianceTexels : kDDGIDistanceTexels;
-            cmd->SetComputePipelineState(m_Engine.m_DDGIProbeUpdatePipelineState.get());
-            cmd->SetComputeConstantBuffer(0, m_Engine.m_DDGIUpdateConstantBuffer.get());
+            cmd->SetComputePipelineState(m_DDGIProbeUpdatePipelineState.get());
+            cmd->SetComputeConstantBuffer(0, m_DDGIUpdateConstantBuffer.get());
             cmd->SetComputeSamplerSet(materialSamplers);
-            cmd->SetComputeTexture(0, m_Engine.m_DDGICaptureRadianceCube.get());
-            cmd->SetComputeTexture(1, m_Engine.m_DDGICaptureDistanceCube.get());
+            cmd->SetComputeTexture(0, m_DDGICaptureRadianceCube.get());
+            cmd->SetComputeTexture(1, m_DDGICaptureDistanceCube.get());
             cmd->SetComputeUnorderedAccessTexture(0, gi->DDGIIrradianceAtlas.get());
             cmd->SetComputeUnorderedAccessTexture(1, gi->DDGIDistanceAtlas.get());
             cmd->Dispatch((kUpdateThreads + 7) / 8, (kUpdateThreads + 7) / 8, 1);
@@ -372,8 +486,8 @@ namespace Kurenai::Passes
             // 境界の複製。セル全体(境界込み)を走査するので広いほうのセルサイズに合わせる
             constexpr uint32_t kBorderThreads = (kDDGIIrradianceCell > kDDGIDistanceCell)
                 ? kDDGIIrradianceCell : kDDGIDistanceCell;
-            cmd->SetComputePipelineState(m_Engine.m_DDGIBorderCopyPipelineState.get());
-            cmd->SetComputeConstantBuffer(0, m_Engine.m_DDGIUpdateConstantBuffer.get());
+            cmd->SetComputePipelineState(m_DDGIBorderCopyPipelineState.get());
+            cmd->SetComputeConstantBuffer(0, m_DDGIUpdateConstantBuffer.get());
             cmd->SetComputeUnorderedAccessTexture(0, gi->DDGIIrradianceAtlas.get());
             cmd->SetComputeUnorderedAccessTexture(1, gi->DDGIDistanceAtlas.get());
             cmd->Dispatch((kBorderThreads + 7) / 8, (kBorderThreads + 7) / 8, 1);
@@ -502,7 +616,7 @@ namespace Kurenai::Passes
             // 【焼ける数より多くてもすべて外す】このフレームで焼けるのは perFrame 個までだが、
             // 印を付けるのは全部に対して行う。付けそこねたスロットは、焼き直されるまでの間
             // 「別の場所のイラディアンス」を配り続けることになる
-            if (!m_Engine.m_DDGIDirtyProbeList.empty() && m_Engine.m_DDGIInvalidateProbesPipelineState && m_Engine.m_DDGIDirtyProbeBuffer)
+            if (!m_Engine.m_DDGIDirtyProbeList.empty() && m_DDGIInvalidateProbesPipelineState && m_DDGIDirtyProbeBuffer)
             {
                 const uint32_t dirtyCount =
                     std::min<uint32_t>(static_cast<uint32_t>(m_Engine.m_DDGIDirtyProbeList.size()), kDDGIMaxProbes);
@@ -512,7 +626,7 @@ namespace Kurenai::Passes
                     .Execute = [this, gi, dirtyCount](RHI::IRHICommandList* cmd)
                     {
                         cmd->UpdateBuffer(
-                            m_Engine.m_DDGIDirtyProbeBuffer.get(), m_Engine.m_DDGIDirtyProbeList.data(),
+                            m_DDGIDirtyProbeBuffer.get(), m_Engine.m_DDGIDirtyProbeList.data(),
                             dirtyCount * static_cast<uint32_t>(sizeof(uint32_t)));
 
                         DDGIUpdateConstants invalidateConstants{};
@@ -530,11 +644,11 @@ namespace Kurenai::Passes
                             static_cast<float>(gi->GIVolume.ProbeCounts[2]), 1.0f
                         };
                         cmd->UpdateBuffer(
-                            m_Engine.m_DDGIUpdateConstantBuffer.get(), &invalidateConstants, sizeof(invalidateConstants));
+                            m_DDGIUpdateConstantBuffer.get(), &invalidateConstants, sizeof(invalidateConstants));
 
-                        cmd->SetComputePipelineState(m_Engine.m_DDGIInvalidateProbesPipelineState.get());
-                        cmd->SetComputeConstantBuffer(0, m_Engine.m_DDGIUpdateConstantBuffer.get());
-                        cmd->SetComputeShaderResourceBuffer(2, m_Engine.m_DDGIDirtyProbeBuffer.get());
+                        cmd->SetComputePipelineState(m_DDGIInvalidateProbesPipelineState.get());
+                        cmd->SetComputeConstantBuffer(0, m_DDGIUpdateConstantBuffer.get());
+                        cmd->SetComputeShaderResourceBuffer(2, m_DDGIDirtyProbeBuffer.get());
                         // UAVはDispatch直後に解除されるため毎回バインドし直す
                         cmd->SetComputeUnorderedAccessTexture(0, gi->DDGIIrradianceAtlas.get());
                         // 1グループ = 1プローブのセル
@@ -567,8 +681,8 @@ namespace Kurenai::Passes
                     .Name = "DDGIUpdate" + std::to_string(probeIndex),
                     .Reads = probeCaptureReads,
                     .Writes = {
-                        m_Engine.m_DDGICaptureColor.get(), m_Engine.m_DDGICaptureDistance.get(), m_Engine.m_DDGICaptureDepth.get(),
-                        m_Engine.m_DDGICaptureRadianceCube.get(), m_Engine.m_DDGICaptureDistanceCube.get(),
+                        m_DDGICaptureColor.get(), m_DDGICaptureDistance.get(), m_DDGICaptureDepth.get(),
+                        m_DDGICaptureRadianceCube.get(), m_DDGICaptureDistanceCube.get(),
                         gi->DDGIIrradianceAtlas.get(), gi->DDGIDistanceAtlas.get(),
                     },
                     .Execute = [captureDDGIProbeFace, traceDDGIProbeFace, updateDDGIProbe, probeIndex, overwrite, useRaytracedTrace](RHI::IRHICommandList* cmd)
@@ -675,7 +789,7 @@ namespace Kurenai::Passes
                 .Execute = [this, gi, targets, ddgiResolveViewport, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(ddgiResolveViewport);
-                    cmd->SetPipelineState(m_Engine.m_DDGIResolvePipelineState.get());
+                    cmd->SetPipelineState(m_DDGIResolvePipelineState.get());
                     cmd->SetConstantBuffer(0, frameConstantBuffer);
                     cmd->SetSamplerSet(screenSpaceSamplers);
                     cmd->SetTexture(0, gi->DDGIIrradianceAtlas.get());
