@@ -566,8 +566,10 @@ namespace Kurenai
         m_UIManager = std::make_unique<UI::UIManager>(*this);
 
         // Render()から切り出したパス群(段階6)。CreateSceneResources()より前に作ってよい
-        // ―― 群はまだリソースを持たず、登録時にエンジン側を参照するだけである
-        m_EnvironmentPasses = std::make_unique<Passes::EnvironmentPasses>(*this);
+        // ―― この時点では空で、シェーダーやPSOは後段の生成呼び出しで受け取る。
+        // 【エンジンへの参照を渡している群と渡していない群がある】段階6.5で所有権を
+        // 移し終えた結果、エンジンの公開APIを1つも使わなくなった群は参照を持たない
+        m_EnvironmentPasses = std::make_unique<Passes::EnvironmentPasses>();
         m_PostProcessPasses = std::make_unique<Passes::PostProcessPasses>(*this);
         m_DDGIPasses = std::make_unique<Passes::DDGIPasses>(*this);
         m_GeometryPasses = std::make_unique<Passes::GeometryPasses>(*this);

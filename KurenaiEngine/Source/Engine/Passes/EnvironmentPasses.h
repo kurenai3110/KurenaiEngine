@@ -30,15 +30,11 @@ namespace Kurenai::Rendering
 // SkyViewBake を SkyIntegrate より後ろへ動かすと辺が張られず、未初期化の LUT を積分する。
 namespace Kurenai
 {
-    class KurenaiEngine3D;
-
     namespace Passes
     {
         class EnvironmentPasses
         {
         public:
-            explicit EnvironmentPasses(KurenaiEngine3D& engine) : m_Engine(engine) {}
-
             void Register(
                 Core::RenderGraph& graph,
                 const Rendering::RenderFrameContext& frame,
@@ -76,8 +72,6 @@ namespace Kurenai
             bool IsSkyParametersBufferInitialized() const { return m_SkyParametersBufferInitialized; }
 
         private:
-            KurenaiEngine3D& m_Engine;
-
             // BRDF積分LUTは2パスで焼く。パス1(CSMain)が(A, B)をスクラッチへ書き、
             // パス2(CSCombineEavg)がそれを読んでEavgを足した float4(A, B, Eavg, 0) を最終LUTへ書く。
             // 同一リソースをSRVとUAVへ同時バインドできないためスクラッチが要る(BRDFLUT.hlsl参照)。
