@@ -76,15 +76,6 @@ namespace Kurenai::Core
 namespace Kurenai::UI
 {
     class UIManager;
-    class ScenePanel;
-    class RenderingPanel;
-    class PostProcessPanel;
-    class DebugViewPanel;
-    class LightingPanel;
-    class SystemPanel;
-    class ProfilerPanel;
-    class ReflectionProbePanel;
-    class StreamingPanel;
 }
 
 namespace Kurenai::Passes
