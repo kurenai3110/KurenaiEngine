@@ -1376,21 +1376,38 @@ Renderスレッドはフレームを進め続けるが、<strong>旧シーンは
 </p>
 <p>
 機能を1つ足すときに触るのは原則「そのパネルの<code>.cpp</code>」だけになる。新しいパネルを
-足す場合だけ、<code>UIManager</code>のコンストラクタへの追加・既定ドックスロットへの追加・
-<code>KurenaiEngine3D.h</code>の前方宣言とfriend宣言・<code>kDockSpaceId</code>の世代繰り上げが
-セットで必要になる(いずれか1つでも漏れると、パネルが出ない/privateに触れない/
-既存の<code>imgui.ini</code>のせいで宙に浮く、のいずれかが起きる)。
+足す場合だけ、<code>UIManager</code>のコンストラクタへの追加(<code>UIManager.cpp</code>の
+<code>m_Panels.push_back</code>の並び)・既定ドックスロットへの追加・<code>kDockSpaceId</code>の
+世代繰り上げがセットで必要になる(いずれか1つでも漏れると、パネルが出ない/
+既存の<code>imgui.ini</code>のせいで宙に浮く、のどちらかが起きる)。
+<strong><code>KurenaiEngine3D.h</code>は触らない</strong> ―― パネルはエンジンの公開APIしか使わないため、
+あちら側にパネルの名前が出てくることはない。
 </p>
 <p>
-各パネルは<code>KurenaiEngine3D</code>のパラメータメンバ(<code>m_SSAORadius</code>等)を
-ImGuiウィジェットへアドレスで直接渡すため、<code>KurenaiEngine3D</code>のprivateへアクセスする
-必要がある。ここは<strong>friend宣言</strong>で解決している。
+各パネルはパラメータをImGuiウィジェットへ<strong>アドレスで直接渡す</strong>ため、書き換え可能な参照が要る。
+ここは<code>KurenaiEngine3D</code>が<strong>設定構造体への参照を返す公開アクセサ</strong>
+(<code>GetAmbientOcclusionSettings()</code>・<code>GetShadowSettings()</code>等)を持つことで解決している。
+パラメータは種類ごとの構造体(<code>Settings/*.h</code>)へまとまっており、パネルは
+<code>&amp;m_Engine.GetAmbientOcclusionSettings().SSAORadius</code>のように書く。
+<strong>friend宣言は使っていない</strong> ―― 以前はパネルを<code>friend</code>にしていたが、
+パラメータを設定構造体へ移した結果、公開アクセサ1本で足りるようになった
+(当初friendを選んだ判断と、それが不要になった経緯は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 13.6.1)。
 </p>
 <p>
-<code>m_SceneMutex</code>の保護対象は、UIの描画がRenderスレッドから、<code>LoadScene</code>が
-Updateスレッドから同じメンバを触るという関係で決まる。またfriendは全privateメンバを
-見せてしまうため、<strong>「UIから触ってよいのはパラメータ用メンバだけで、RHIリソース
-(<code>RenderTargets::GBufferAlbedo</code>等)には触らない」</strong>という規約は各パネルの実装側で守る必要がある。
+シーンの受け渡しを守るミューテックスが2本(<code>m_LoadedSceneMutex</code>: Loader→Renderの完成品、
+<code>m_AppliedSceneMutex</code>: Render→Updateの初期カメラとウィンドウタイトル)あるのは、
+UIの描画がRenderスレッドから、<code>LoadScene</code>がUpdateスレッドから同じメンバを触るという
+関係で決まる。
+パネルが触るのは設定構造体だけではない。表示のための状態(<code>GetRenderStats()</code>・
+<code>GetCPUProfiler()</code>・<code>GetEmissiveProxies()</code>等)はconst参照で読む。
+バックエンド名を出すための<code>GetDevice()</code>は非constのポインタで、
+<strong>型の上では何でもできる</strong>(パネル側が読むだけに留めている)。書き換え可能な参照を返すアクセサも
+設定構造体だけではなく、シーンが持つ配列(<code>GetLights()</code>・<code>GetReflectionProbes()</code>)、
+再計算を要求する旗(<code>GetSkyBakeDirty()</code>等の<code>bool&amp;</code>)、
+スレッド間で共有する状態(<code>GetTAAHistoryValid()</code>等の<code>std::atomic&amp;</code>)にも及ぶ。
+<strong>「RHIリソース(<code>RenderTargets::GBufferAlbedo</code>等)にはUIから触らない」</strong>という規約は
+型では縛れておらず、アクセサを増やすときに守る決めごとである ―― <code>friend</code>で
+全privateを見せていた頃と比べて露出は狭まったが、なくなってはいない。
 </p>
 <p>
 ウィンドウ名は<code>"日本語表示###ASCII_ID"</code>形式にしている。<code>ImHashStr</code>は文字列中に
@@ -2020,7 +2037,7 @@ Reads/RenderTargets/DepthTargetから依存関係を機械的に解決する。�
 Write-after-Writeの依存関係から自動的にその後に置かれる。SSRパス(有効時)はSceneColorを
 <strong>読む</strong>ため、Read-after-Writeの依存関係から自動的に半透明フォワードパスの後に置かれる
 (SSRが無効な場合はTonemapパスがSceneColorを直接読むため、同じ理屈でTonemapが後に置かれる)。
-この2つの依存関係だけで、<code>m_SSREnabled</code>の値に関わらず「最終合成→半透明→SSR/Tonemap」の
+この2つの依存関係だけで、<code>m_ReflectionSettings.Mode</code>の値に関わらず「最終合成→半透明→SSR/Tonemap」の
 順序が常に成立する。<code>DepthTarget = GBufferDepth</code>もWriteとして扱われるため
 ジオメトリパスの後に置かれるという(実際には書き込まないため過剰だが無害な)依存関係が追加で
 生まれるが、SceneColor側の依存関係だけで必要な順序は既に確定しているため実害はない。
@@ -3026,7 +3043,7 @@ Tonemap・Bloom・AutoExposureはいずれも同じ値を受け取って割り�
 </p>
 <p>
 自動露出(<a href="#tonemap-exposure-bloom">17章</a>)の順応も同じ扱いが要る。順応の状態はGPU側の
-<code>m_ExposureTexture</code>にあり、初回だけ順応を飛ばすフラグもそのテクセルに入っている
+<code>RenderTargets::ExposureTexture</code>にあり、初回だけ順応を飛ばすフラグもそのテクセルに入っている
 (UAVがゼロ初期化されることを利用している)。CPU側から「初回に戻す」ために定数へ
 <code>ResetAdaptation</code>を持たせ、<code>LoadScene</code>が立てた要求を1フレームだけ渡す。
 </p>
@@ -3767,7 +3784,7 @@ AOを持たないパスへ無条件に掛けても見た目が変わらないこ
 アルベドがそのまま環境光の減衰係数として掛かり、色付きで極端に暗い絵になる。</p>
 <h3>22.4.1 実行時に遮蔽マップだけを切るトグル</h3>
 <p>
-「レンダリング」パネルの<b>AO / 間接光を有効にする</b>(<code>m_AOEnabled</code>)は
+「レンダリング」パネルの<b>AO / 間接光を有効にする</b>(<code>m_AmbientOcclusionSettings.Enabled</code>)は
 スクリーンスペースAO/GI(SSAO / SSIL / RTAO)専用で、無効にしても
 <code>m_AODisabledTexture</code>(遮蔽なし・間接光なし)が差し替わるだけであり、
 G-Bufferの<code>material.b</code>に載った<b>遮蔽マップは素通しで効き続ける</b>。
@@ -5690,8 +5707,8 @@ z=fBmのUVを異方的に伸ばす倍率、w=未使用)を持つ。
 C++側の宣言と1フィールドずつ突き合わせること</strong>(ずれると全シェーダーが静かに壊れる)。
 風のスクロール(<code>m_CirrusScrollOffset</code>)は
 <code>m_CloudScrollOffset</code>とまったく同じ形(<code>kCloudNoisePeriod</code>で
-<code>std::fmod</code>)でCPU側が進める。風向・凍結トグル(<code>m_CloudTimeFrozen</code>)は
-積雲と共有し、速度(<code>m_CirrusWindSpeed</code>)とUVスケール(<code>m_CirrusUvScale</code>)だけ
+<code>std::fmod</code>)でCPU側が進める。風向・凍結トグル(<code>m_CloudSettings.TimeFrozen</code>)は
+積雲と共有し、速度(<code>m_CloudSettings.CirrusWindSpeed</code>)とUVスケール(<code>m_CloudSettings.CirrusUvScale</code>)だけ
 巻雲固有の値を持つ。凍結トグルを共有しているのは、片方の層にしか効かないとA/B比較で
 スクロールが揺れる側だけ残ってしまい対照が取れなくなるため。前方散乱の強さ
 (<code>kCirrusForwardG</code>)と自己影ステップ数(<code>kCirrusShadowSteps</code>)はUIつまみを
@@ -5890,7 +5907,7 @@ GBufferパスとは異なり、<strong><code>instance.IsMirrored</code>の否定
 <code>[0,1]</code>の外に出た場合は平面反射を使わず解析空のみになる。
 </p>
 <p>
-平面反射が無効(<code>m_PlanarReflectionEnabled=false</code>、または水面インスタンスが
+平面反射が無効(<code>m_ReflectionSettings.PlanarEnabled=false</code>、または水面インスタンスが
 存在しない)なフレームでは、<code>ApplyPlanarReflection</code>は<code>Params1.x</code>が0の
 時点で解析空をそのまま返すため、<code>SSR.hlsl</code>は平面反射が無いときと厳密に同じ
 コードパスを通る。
@@ -6702,7 +6719,7 @@ PSOは<code>BlendMode::PremultipliedAlpha</code>(<code>SrcBlend = ONE / DestBlen
 
 <p>
 平面反射パスの実行条件は
-<code>m_PlanarReflectionEnabled &amp;&amp; hasWaterInstance &amp;&amp; m_ReflectionMode == ReflectionMode::ScreenSpace</code>
+<code>m_ReflectionSettings.PlanarEnabled &amp;&amp; hasWaterInstance &amp;&amp; m_ReflectionSettings.Mode == ReflectionMode::ScreenSpace</code>
 であり、DXR対応環境では<code>DefaultReflectionMode</code> / <code>ReflectionModeForCapability</code>が
 <code>Raytraced</code>を返すため、<strong>DX12では平面反射パスが走らない</strong>。DX12の水面に映っているのは
 TLASへレイを撃った結果であり、ドローンは手続き的に展開するビルボードでTLASに入っていないので
@@ -7226,7 +7243,7 @@ SM 6.6には対応しているがメッシュシェーダーを持たないGPU(N
 </p>
 
 <p>
-エンジン側が毎フレーム組み直すのは<strong>メッシュ1件=1レコードの表だけ</strong>
+<code>Passes::GeometryPasses</code>が毎フレーム組み直すのは<strong>メッシュ1件=1レコードの表だけ</strong>
 (<code>SWRasterMeshInfo</code>、160バイト)。ワールド行列・法線行列・頂点/インデックスの
 bindless番号・シーン全体での通し三角形番号の先頭と本数・表裏の符号を持つ。
 数百件のオーダーなので毎フレーム走査で構わない。
