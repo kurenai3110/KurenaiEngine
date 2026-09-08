@@ -219,7 +219,7 @@
   <div class="toc-title">目次</div>
   <ol>
     <li><a href="#pipeline">1. 描画パイプライン</a></li>
-    <li><a href="#rendergraph">2. RenderGraph</a></li>
+    <li><a href="#rendergraph">2. RenderGraph とパス群</a></li>
     <li><a href="#depth">3. 深度バッファ(Reverse-Z)</a></li>
     <li><a href="#shadow">4. カスケードシャドウマップ(CSM)とPCSS</a></li>
     <li><a href="#tangent">5. 法線マッピングの接線ベクトル計算</a></li>
@@ -342,15 +342,149 @@ Tonemapパスで行う。</strong>後段のSSRパスが反射元として読む�
 </section>
 
 <section id="rendergraph">
-<h2>2. RenderGraph</h2>
+<h2>2. RenderGraph とパス群</h2>
 <p>
 上記の各パスは、内部的には<code>Kurenai::Core::RenderGraph</code>(軽量なレンダーグラフ、
 <code>Source/Library/Core/RenderGraph.h</code>)へパスごとに読み書きするテクスチャを宣言する形で
 登録されており、実行順序はその読み書き依存関係から自動的に解決されます(トランジェントリソースの
 確保・エイリアシングは行わず、永続確保済みテクスチャをそのまま扱う軽量な実装です)。
 レンダーターゲットの自動バインドとCPU/GPUプロファイラのスコープ計測もこのクラスが肩代わりするため、
-<code>KurenaiEngine3D::Render()</code>側は各パスの中身(ビューポート設定・クリア・描画/ディスパッチ呼び出し)を
-書くだけで済みます。
+パスを登録する側は中身(ビューポート設定・クリア・描画/ディスパッチ呼び出し)を書くだけで済みます。
+</p>
+
+<h3>2.1 パスの登録はパス群クラスが持つ</h3>
+<p>
+パスの登録コードは<code>KurenaiEngine3D</code>本体ではなく、<code>Source/Engine/Passes/</code>の
+<strong>10個のパス群クラス</strong>が持ちます ――
+<code>DDGIPasses</code> / <code>EnvironmentPasses</code> / <code>GeometryPasses</code> /
+<code>LightingPasses</code> / <code>MegaLightsPasses</code> / <code>PostProcessPasses</code> /
+<code>ReflectionPasses</code> / <code>ReflectionProbePasses</code> / <code>ShadowPasses</code> /
+<code>PresentPass</code>。<code>Render()</code>はこれらの登録メソッドを<strong>13回</strong>呼びます
+(3つのクラスは登録を2回に分けています ―― <code>ShadowPasses</code>はカスケードと
+レイトレースシャドウ、<code>DDGIPasses</code>はプローブ更新と解決、<code>LightingPasses</code>は
+直接光/AOとシーン合成)。
+</p>
+<p>
+<strong>この13回の呼び出し順は実行順の一部です。</strong>
+<code>RenderGraph::Execute()</code>のトポロジカルソート(Kahn法)は、準備完了のパスが複数あるとき
+<strong>登録順(インデックス最小)を優先します</strong>。読み書き依存が同点になるパスどうしは
+登録した順に実行されるため、<strong>登録の順番を入れ替えると実行順が変わり、絵が変わります</strong>。
+</p>
+
+<h3>2.2 <code>RenderFrameContext</code> ―― パス群へ配る入力</h3>
+<p>
+パス群はエンジンのメンバへ直接触れません。パス群が読む値は
+<code>Rendering::RenderFrameContext</code>(<code>Source/Engine/Rendering/RenderFrameContext.h</code>)
+という<strong>1つのスナップショット</strong>にまとめ、パス群へは<code>const&amp;</code>で配ります。
+現在81フィールドあり、解像度・行列・露出・各パスを走らせるかの述語・デバイス/スワップチェーン/
+サンプラーのほか、共有リソースの束(<code>RenderTargets</code> / <code>IBLResources</code> /
+<code>GIResources</code> / <code>SkyResources</code> / <code>SceneGPUResources</code> /
+<code>DroneShowResources</code>)へのポインタが載っています。
+</p>
+<p>
+大半はフレームの先頭で確定しますが、<strong>6フィールドだけは登録の合間に埋まります</strong> ――
+<code>GBufferViewport</code> / <code>ShadowViewport</code> / <code>BakedLightCount</code> /
+<code>ProbeFaceProjection</code> / <code>ProbeCaptureReads</code> / <code>CascadeViewProj</code>で、
+最初の登録(<code>EnvironmentPasses</code>)の後、2番目の登録の前に<code>RegisterPasses</code>が書きます。
+<strong>これらを読む群より前で書かれていることが前提</strong>なので、登録の並びと同様に
+この書き込みの位置も動かせません。
+</p>
+<p>
+個別の引数で渡さずスナップショットにしてあるのは、パス群が増えるたびに引数が増え、
+どの値がどのパスで要るのかが読めなくなるためです。<code>const&amp;</code>で渡すことで、
+受け取る側が書き換えられないことも型で示せます。
+</p>
+<p>
+パス群が読む設定は<code>Rendering::RenderSettingsSnapshot</code>として14個の設定構造体を
+まとめて写します(エンジンとUIしか読まないSystem / Quality / Fog / Starsは載せません)。
+<strong>写す位置を<code>Render()</code>の先頭へ上げてはいけません</strong> ――
+UIパネルの描画(<code>m_UIManager-&gt;Draw</code>)が終わった後で写す決まりで、
+先頭へ上げるとUIが書き換える前の値を配ることになります。
+</p>
+
+<h3>2.3 <code>RenderBlackboard</code> ―― 登録の途中で確定する出力</h3>
+<p>
+<code>Rendering::RenderBlackboard</code>は<strong>登録が進むにつれて確定していく値</strong>を置く場所で、
+「前の群が書いた先を、後ろの群が読む」ための受け渡しに使います。
+<code>RenderFrameContext</code>が「登録より前に決まる入力」なのに対し(2.2の6フィールドは
+<code>RegisterPasses</code>が埋める例外で、群が書くわけではありません)、こちらは
+<strong>群そのものが登録の途中で書き換えます</strong>。したがって書く側は非<code>const</code>参照、
+読む側は<code>const&amp;</code>で受けます。
+</p>
+<p>
+載っているのは、Tonemapが読むHDRシーンカラー(<code>HdrSceneColor</code>)、ソフトウェアラスタライザ・
+超解像・MegaLightsデノイズを今フレーム走らせたかの3つの旗、モデル単位GPUカリングの候補が
+揃ったか(<code>ModelCullReady</code>)、MegaLightsの蓄積フレーム数です。
+</p>
+<p>
+<strong>ここに置いたポインタを<code>Execute</code>ラムダへ渡すときは必ず値で捕捉してください。</strong>
+Blackboardを参照捕捉すると、あとで別の群が書き換えた値をラムダが読むことになり、
+登録した時点の依存宣言(Reads/Writes)と実際にバインドするテクスチャが食い違います。
+<code>HdrSceneColor</code>はTAAパスを登録した<strong>後</strong>で確定させる決まりで、
+先に差し替えるとTAAが自分の出力を読む形になりグラフが循環します。
+</p>
+
+<h3>2.4 <code>Render()</code>の構成</h3>
+<p>
+<code>Render()</code>自身は<strong>フレームの流れ</strong>を書いた関数で、まとまった処理は名前の付いた
+関数へ出してあります(太陽光・露出・カスケード行列のように、次の段へ渡す短い計算だけが
+<code>Render()</code>に直接残っています)。切り出した関数の定義は
+<code>Source/Engine/Rendering/RenderFrame.cpp</code>
+(<code>KurenaiEngine3D</code>のメンバ関数のまま翻訳単位だけを分けたもの)、
+<code>Diagnostics/RenderDumpService.cpp</code>、および<code>KurenaiEngine3D.cpp</code>にあります。
+</p>
+<ol>
+<li><strong>統計のリセットと作り直しの確定</strong> ―― フレーム単位のカウンタを前フレームぶんへ控えて
+0に戻し、ウィンドウのリサイズ・予約された作り直し・シーンの切り替え・常駐ミップの差し替えを
+確定させる(<code>ApplyPendingRecreations</code>)</li>
+<li><strong>ウィンドウが0x0(最小化)なら、ここで早期<code>return</code></strong>。
+1.は潰れている間も進み、2.以降は走りません。<strong>この境界を動かさないこと</strong></li>
+<li><strong>ImGuiのフレーム開始と、精度/解像度の作り直し</strong>
+(<code>BeginImGuiFrame</code> / <code>RecreateDirtyRenderTargets</code>)。
+作り直しは<code>WaitForGPUIdle()</code>を挟むため、GPUコマンドをまだ1つも積んでいないこの位置で行う</li>
+<li><strong>フレームの値の組み立て</strong>(<code>BuildFrameContext</code>) ―― ジッター・ライト配列・
+空のパラメータ・<code>FrameConstants</code>・<code>LightingConstants</code>を作り、
+<code>RenderFrameContext</code>を埋める</li>
+<li><strong>パスの登録</strong>(<code>RegisterPasses</code>) ―― 2.1の13回</li>
+<li><code>graph.Execute()</code></li>
+<li><strong>フレームの締め</strong> ―― GPUカリング結果の読み戻し、ImGuiの描画とPresent、
+次フレームが参照する前フレーム状態の確定、計測とダンプの回収、履歴バッファのping-pong反転</li>
+</ol>
+
+<h3>2.5 スナップショットが指す先の寿命</h3>
+<p>
+<code>RenderFrameContext</code>の81フィールドのうち<strong>22個は生ポインタ</strong>で、
+そのうち<strong>6個は<code>Render()</code>のローカル変数を指しています</strong>。
+</p>
+<table>
+<thead><tr><th>フィールド</th><th>指す先(<code>Render()</code>のローカル)</th></tr></thead>
+<tbody>
+<tr><td><code>Lights</code></td><td><code>std::vector&lt;GPULight&gt; gpuLights</code></td></tr>
+<tr><td><code>Lighting</code></td><td><code>Passes::LightingConstants lightingConstants</code></td></tr>
+<tr><td><code>Constants</code></td><td><code>ShaderInterop::FrameConstants constants</code></td></tr>
+<tr><td><code>Sun</code></td><td><code>SunLighting sunLighting</code></td></tr>
+<tr><td><code>ProbeCaptureReads</code></td><td><code>std::vector&lt;RHI::IRHITexture*&gt; probeCaptureReads</code></td></tr>
+<tr><td><code>CascadeViewProj</code></td><td><code>DirectX::XMMATRIX cascadeViewProj[kCascadeCount]</code></td></tr>
+</tbody>
+</table>
+<p>
+<strong>この6つの実体は必ず<code>Render()</code>のスコープに置いてください。</strong>
+<code>BuildFrameContext</code>や<code>RegisterPasses</code>のローカルにすると、その関数を抜けた時点で
+解放され、<code>graph.Execute()</code>が解放済みメモリを読みます。
+</p>
+<p>
+そのため、この6つはどれも実体を<code>Render()</code>に置いたまま参照で渡します。
+中身を作るのが関数側の4つ(<code>gpuLights</code> / <code>constants</code> /
+<code>lightingConstants</code> / <code>probeCaptureReads</code>)は<strong>出力引数(非<code>const</code>参照)</strong>、
+<code>Render()</code>が作り終えてから渡す2つ(<code>sunLighting</code> / <code>cascadeViewProj</code>)は
+<strong>入力の<code>const&amp;</code></strong>です。渡し方は違いますが、<strong>実体の寿命が
+<code>Render()</code>のスコープである点は6つとも同じ</strong>で、それが要件です。
+</p>
+<p>
+<strong>この壊れ方は描画結果の比較では捕まりません。</strong>解放直後なら中身が残っているため、
+中間バッファをバイト比較しても同じ絵が出ます。<strong>コードレビューで見張るしかない種類の
+欠陥です。</strong>同じ理由で、パスの<code>Execute</code>ラムダは<code>RenderFrameContext</code>そのものではなく
+<strong>必要な値を値捕捉します</strong> ―― 構造体を参照捕捉すると、登録関数を抜けた時点で参照が浮きます。
 </p>
 </section>
 
