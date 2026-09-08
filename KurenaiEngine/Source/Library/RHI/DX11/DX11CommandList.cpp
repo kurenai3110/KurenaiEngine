@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "Core/Logger.h"
+#include "RHI/ReadbackUtil.h"
 
 #include "DX11Buffer.h"
 #include "DX11ComputePipelineState.h"
@@ -642,29 +643,14 @@ namespace Kurenai::RHI
 
         D3D11_TEXTURE2D_DESC srcDesc{};
         srcTexture->GetDesc(&srcDesc);
-        if (mipLevel >= srcDesc.MipLevels || arraySlice >= srcDesc.ArraySize)
-        {
-            Core::Logger::Error(
-                "DX11",
-                "CopyTextureToReadback: サブリソースの指定が範囲外です (mipLevel=" + std::to_string(mipLevel) +
-                    "/" + std::to_string(srcDesc.MipLevels) + ", arraySlice=" + std::to_string(arraySlice) + "/" +
-                    std::to_string(srcDesc.ArraySize) + ")");
-            return;
-        }
 
-        // 受け皿はCreateReadbackTextureの時点で「特定のミップ段の寸法」に合わせて作ってある。
-        // 別のミップを指定されるとサイズが合わず、静かに壊れるので突き合わせて弾く
+        // サブリソースの範囲と、受け皿の寸法がコピー元のミップ段と一致するかを見る。
+        // 判定はDX12と共有しており、片方だけ緩めるとそちらだけが静かに壊れる(ReadbackUtil.h)
         const TextureReadbackDesc dstDesc = dx11Dst->GetReadbackDesc(0);
-        const uint32_t mipWidth = std::max<uint32_t>(1u, srcDesc.Width >> mipLevel);
-        const uint32_t mipHeight = std::max<uint32_t>(1u, srcDesc.Height >> mipLevel);
-        if (dstDesc.Width != mipWidth || dstDesc.Height != mipHeight)
+        if (!ValidateTextureReadbackCopy(
+                "DX11", mipLevel, arraySlice, srcDesc.Width, srcDesc.Height, srcDesc.MipLevels, srcDesc.ArraySize,
+                dstDesc.Width, dstDesc.Height))
         {
-            Core::Logger::Error(
-                "DX11",
-                "CopyTextureToReadback: 受け皿の寸法(" + std::to_string(dstDesc.Width) + "x" +
-                    std::to_string(dstDesc.Height) + ")がコピー元のミップ" + std::to_string(mipLevel) + "(" +
-                    std::to_string(mipWidth) + "x" + std::to_string(mipHeight) +
-                    ")と一致しません。CreateReadbackTextureに渡したミップと同じものを指定してください");
             return;
         }
 

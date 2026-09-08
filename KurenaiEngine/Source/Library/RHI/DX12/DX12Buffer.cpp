@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "Core/Logger.h"
+#include "RHI/ReadbackUtil.h"
 
 #include "DX12Device.h"
 
@@ -258,24 +259,13 @@ namespace Kurenai::RHI
 
     bool DX12Buffer::ReadbackData(void* outData, uint32_t sizeInBytes)
     {
-        if (m_Usage != BufferUsage::Readback)
+        if (!ValidateBufferReadbackRequest(
+                "DX12", m_Usage == BufferUsage::Readback, outData, sizeInBytes, m_SlotSizeInBytes))
         {
-            Core::Logger::Error("DX12", "ReadbackData: BufferUsage::Readback以外のバッファから読もうとしました");
             return false;
         }
-        if (outData == nullptr || sizeInBytes == 0)
-        {
-            Core::Logger::Error("DX12", "ReadbackData: 出力先がnullptrかサイズが0です");
-            return false;
-        }
-        if (sizeInBytes > m_SlotSizeInBytes)
-        {
-            Core::Logger::Error(
-                "DX12",
-                "ReadbackData: 要求サイズ(" + std::to_string(sizeInBytes) + ")がバッファサイズ(" +
-                    std::to_string(m_SlotSizeInBytes) + ")を超えています");
-            return false;
-        }
+        // 【DX12だけの前提】READBACKヒープは作成時から永続マップしてある。
+        // DX11はここでMapを呼ぶため、この確認の代わりにコンテキストの有無を見ている
         if (m_MappedPtr == nullptr)
         {
             Core::Logger::Error("DX12", "ReadbackData: リードバックバッファがマップされていません");

@@ -8,6 +8,7 @@
 #include <d3dx12.h>
 
 #include "Core/Logger.h"
+#include "RHI/ReadbackUtil.h"
 
 #include "DX12AccelerationStructure.h"
 #include "DX12Buffer.h"
@@ -1004,30 +1005,14 @@ namespace Kurenai::RHI
         }
 
         const D3D12_RESOURCE_DESC srcDesc = srcResource->GetDesc();
-        if (mipLevel >= srcDesc.MipLevels || arraySlice >= srcDesc.DepthOrArraySize)
-        {
-            Core::Logger::Error(
-                "DX12",
-                "CopyTextureToReadback: サブリソースの指定が範囲外です (mipLevel=" + std::to_string(mipLevel) +
-                    "/" + std::to_string(srcDesc.MipLevels) + ", arraySlice=" + std::to_string(arraySlice) + "/" +
-                    std::to_string(srcDesc.DepthOrArraySize) + ")");
-            return;
-        }
 
-        // 受け皿はCreateReadbackTextureの時点で「特定のミップ段の寸法」に合わせて作ってある。
-        // 別のミップを指定されるとサイズが合わず、はみ出して書くか途中で切れる。
-        // どちらも静かに壊れるので、寸法を突き合わせて弾く
+        // サブリソースの範囲と、受け皿の寸法がコピー元のミップ段と一致するかを見る。
+        // 判定はDX11と共有しており、片方だけ緩めるとそちらだけが静かに壊れる(ReadbackUtil.h)
         const DX12ReadbackState* readback = dx12Dst->GetReadbackState();
-        const uint32_t mipWidth = std::max<uint32_t>(1u, static_cast<uint32_t>(srcDesc.Width) >> mipLevel);
-        const uint32_t mipHeight = std::max<uint32_t>(1u, srcDesc.Height >> mipLevel);
-        if (readback->Desc.Width != mipWidth || readback->Desc.Height != mipHeight)
+        if (!ValidateTextureReadbackCopy(
+                "DX12", mipLevel, arraySlice, static_cast<uint32_t>(srcDesc.Width), srcDesc.Height,
+                srcDesc.MipLevels, srcDesc.DepthOrArraySize, readback->Desc.Width, readback->Desc.Height))
         {
-            Core::Logger::Error(
-                "DX12",
-                "CopyTextureToReadback: 受け皿の寸法(" + std::to_string(readback->Desc.Width) + "x" +
-                    std::to_string(readback->Desc.Height) + ")がコピー元のミップ" + std::to_string(mipLevel) +
-                    "(" + std::to_string(mipWidth) + "x" + std::to_string(mipHeight) +
-                    ")と一致しません。CreateReadbackTextureに渡したミップと同じものを指定してください");
             return;
         }
 

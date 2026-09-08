@@ -23,6 +23,7 @@
 #include "DX11Util.h"
 #include "RHI/DXGIFormatUtil.h"
 #include "RHI/PipelineStateNormalize.h"
+#include "RHI/ReadbackUtil.h"
 #include "RHI/RHIReadbackFormat.h"
 #include "RHI/RHIShaderPackage.h"
 #include "RHI/TextureImage.h"
@@ -1113,35 +1114,19 @@ namespace Kurenai::RHI
 
         D3D11_TEXTURE2D_DESC sourceDesc{};
         sourceTexture->GetDesc(&sourceDesc);
-        if (mipLevel >= sourceDesc.MipLevels)
-        {
-            Core::Logger::Error(
-                "DX11",
-                "CreateReadbackTexture: ミップレベルが範囲外です (mipLevel=" + std::to_string(mipLevel) +
-                    ", MipLevels=" + std::to_string(sourceDesc.MipLevels) + ")");
-            return nullptr;
-        }
 
-        const uint32_t mipWidth = std::max<uint32_t>(1u, sourceDesc.Width >> mipLevel);
-        const uint32_t mipHeight = std::max<uint32_t>(1u, sourceDesc.Height >> mipLevel);
-
-        // 【DX12とまったく同じ表を引く】RHIReadbackFormat.hに置いてあるのは、
-        // ここを別々に書くと片方だけ直したときに静かに食い違うため
-        const TextureReadbackDesc readbackDesc = DescribeReadbackFormat(sourceDesc.Format, mipWidth, mipHeight);
-        if (readbackDesc.ElementType == TextureElementType::Unknown)
+        // 【DX12とまったく同じ判定と表を引く】ここを別々に書くと片方だけ直したときに静かに食い違う
+        TextureReadbackDesc readbackDesc{};
+        if (!PrepareReadbackTextureDesc(
+                "DX11", mipLevel, sourceDesc.MipLevels, sourceDesc.Width, sourceDesc.Height, sourceDesc.Format,
+                readbackDesc))
         {
-            // BC圧縮のアセットテクスチャなど。**黙って0で埋めた結果を返さない**
-            Core::Logger::Error(
-                "DX11",
-                "CreateReadbackTexture: 対応していないフォーマットです (DXGI_FORMAT=" +
-                    std::to_string(static_cast<int>(sourceDesc.Format)) +
-                    ")。RHIReadbackFormat.hの対応表に無いため読み出せません");
             return nullptr;
         }
 
         D3D11_TEXTURE2D_DESC stagingDesc{};
-        stagingDesc.Width = mipWidth;
-        stagingDesc.Height = mipHeight;
+        stagingDesc.Width = readbackDesc.Width;
+        stagingDesc.Height = readbackDesc.Height;
         stagingDesc.MipLevels = 1;
         stagingDesc.ArraySize = 1;
         // 【typelessのまま作らない】深度はDSVとSRVを両立させるためR32_TYPELESSで作られている。
@@ -1165,7 +1150,7 @@ namespace Kurenai::RHI
             Core::Logger::Error(
                 "DX11",
                 "CreateReadbackTexture: リードバックテクスチャの作成に失敗しました (" +
-                    std::to_string(mipWidth) + "x" + std::to_string(mipHeight) + ")");
+                    std::to_string(readbackDesc.Width) + "x" + std::to_string(readbackDesc.Height) + ")");
             return nullptr;
         }
 

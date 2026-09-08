@@ -29,6 +29,7 @@
 #include "Core/StringUtil.h"
 #include "RHI/DXGIFormatUtil.h"
 #include "RHI/PipelineStateNormalize.h"
+#include "RHI/ReadbackUtil.h"
 #include "RHI/RHIReadbackFormat.h"
 #include "RHI/RHIShaderPackage.h"
 #include "RHI/TextureImage.h"
@@ -2741,29 +2742,16 @@ namespace Kurenai::RHI
                     std::to_string(static_cast<int>(sourceDesc.Dimension)) + ")");
             return nullptr;
         }
-        if (mipLevel >= sourceDesc.MipLevels)
+        // 【DX11とまったく同じ判定と表を引く】ここを別々に書くと片方だけ直したときに静かに食い違う
+        TextureReadbackDesc readbackDesc{};
+        if (!PrepareReadbackTextureDesc(
+                "DX12", mipLevel, sourceDesc.MipLevels, static_cast<uint32_t>(sourceDesc.Width), sourceDesc.Height,
+                sourceDesc.Format, readbackDesc))
         {
-            Core::Logger::Error(
-                "DX12",
-                "CreateReadbackTexture: ミップレベルが範囲外です (mipLevel=" + std::to_string(mipLevel) +
-                    ", MipLevels=" + std::to_string(sourceDesc.MipLevels) + ")");
             return nullptr;
         }
-
-        const uint32_t mipWidth = std::max<uint32_t>(1u, static_cast<uint32_t>(sourceDesc.Width) >> mipLevel);
-        const uint32_t mipHeight = std::max<uint32_t>(1u, sourceDesc.Height >> mipLevel);
-
-        const TextureReadbackDesc readbackDesc = DescribeReadbackFormat(sourceDesc.Format, mipWidth, mipHeight);
-        if (readbackDesc.ElementType == TextureElementType::Unknown)
-        {
-            // BC圧縮のアセットテクスチャなど。**黙って0で埋めた結果を返さない**
-            Core::Logger::Error(
-                "DX12",
-                "CreateReadbackTexture: 対応していないフォーマットです (DXGI_FORMAT=" +
-                    std::to_string(static_cast<int>(sourceDesc.Format)) +
-                    ")。RHIReadbackFormat.hの対応表に無いため読み出せません");
-            return nullptr;
-        }
+        const uint32_t mipWidth = readbackDesc.Width;
+        const uint32_t mipHeight = readbackDesc.Height;
 
         // 【typelessのまま配置情報を求めない】深度はDSVとSRVを両立させるためR32_TYPELESSで
         // 作られている。コピー先の記述子に使う配置情報は型付きフォーマットで求める

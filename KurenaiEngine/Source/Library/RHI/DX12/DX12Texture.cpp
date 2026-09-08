@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "Core/Logger.h"
+#include "RHI/ReadbackUtil.h"
 
 #include "DX12Device.h"
 
@@ -86,32 +87,22 @@ namespace Kurenai::RHI
 
     bool DX12Texture::ReadbackData(void* outData, uint32_t sizeInBytes)
     {
-        if (!m_Readback)
+        // m_Readbackがnullptrのときも「リードバック用ではない」として同じ経路で断りたいので、
+        // 記述子は空のものを渡す(Validateは先に isReadbackTexture を見て抜ける)
+        static const TextureReadbackDesc kEmptyDesc{};
+        const TextureReadbackDesc& desc = m_Readback ? m_Readback->Desc : kEmptyDesc;
+
+        uint32_t tightRowPitch = 0;
+        if (!ValidateTextureReadbackRequest(
+                "DX12", m_Readback != nullptr, outData, sizeInBytes, desc, tightRowPitch))
         {
-            Core::Logger::Error("DX12", "ReadbackData: リードバック用ではないテクスチャから読もうとしました");
             return false;
         }
-        if (outData == nullptr || sizeInBytes == 0)
-        {
-            Core::Logger::Error("DX12", "ReadbackData: 出力先がnullptrかサイズが0です");
-            return false;
-        }
+        // 【DX12だけの前提】READBACKヒープは作成時から永続マップしてある。
+        // DX11はここでMapを呼ぶため、この確認の代わりにコンテキストの有無を見ている
         if (m_Readback->MappedPtr == nullptr)
         {
             Core::Logger::Error("DX12", "ReadbackData: リードバックテクスチャがマップされていません");
-            return false;
-        }
-
-        const TextureReadbackDesc& desc = m_Readback->Desc;
-        // パディングを剥がしたあとの必要バイト数。呼び出し側にはこれを要求する
-        const uint32_t tightRowPitch = desc.Width * desc.BytesPerTexel;
-        const uint64_t tightTotal = static_cast<uint64_t>(tightRowPitch) * desc.Height;
-        if (sizeInBytes < tightTotal)
-        {
-            Core::Logger::Error(
-                "DX12",
-                "ReadbackData: 出力先のサイズ(" + std::to_string(sizeInBytes) + ")が必要量(" +
-                    std::to_string(tightTotal) + ")に足りません");
             return false;
         }
 
@@ -123,15 +114,8 @@ namespace Kurenai::RHI
         // コピーコマンドがまだ実行されていなければ古い内容が返るが、待って直列化するよりは
         // 呼び出し側に「十分に古いものを読む」責務を持たせるほうがよい
         const auto* src = static_cast<const uint8_t*>(m_Readback->MappedPtr) + m_Readback->Footprint.Offset;
-        auto* dst = static_cast<uint8_t*>(outData);
         const uint32_t paddedRowPitch = m_Readback->Footprint.Footprint.RowPitch;
-        for (uint32_t y = 0; y < desc.Height; ++y)
-        {
-            std::memcpy(
-                dst + static_cast<size_t>(y) * tightRowPitch,
-                src + static_cast<size_t>(y) * paddedRowPitch,
-                tightRowPitch);
-        }
+        CopyReadbackRowsTightly(outData, src, tightRowPitch, paddedRowPitch, desc.Height);
         return true;
     }
 
