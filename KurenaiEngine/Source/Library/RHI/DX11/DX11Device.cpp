@@ -21,6 +21,7 @@
 #include "DX11SwapChain.h"
 #include "DX11Texture.h"
 #include "DX11Util.h"
+#include "RHI/DXGIFormatUtil.h"
 #include "RHI/RHIReadbackFormat.h"
 #include "RHI/RHIShaderPackage.h"
 #include "RHI/TextureImage.h"
@@ -29,30 +30,6 @@ namespace Kurenai::RHI
 {
     namespace
     {
-        DXGI_FORMAT ToDXGIFormat(Format format)
-        {
-            switch (format)
-            {
-            case Format::R32G32_Float:
-                return DXGI_FORMAT_R32G32_FLOAT;
-            case Format::R32G32B32_Float:
-                return DXGI_FORMAT_R32G32B32_FLOAT;
-            case Format::R8G8B8A8_UNorm:
-                return DXGI_FORMAT_R8G8B8A8_UNORM;
-            case Format::R32_Float:
-                return DXGI_FORMAT_R32_FLOAT;
-            case Format::R16G16_Float:
-                return DXGI_FORMAT_R16G16_FLOAT;
-            case Format::R16G16B16A16_Float:
-                return DXGI_FORMAT_R16G16B16A16_FLOAT;
-            case Format::R11G11B10_Float:
-                return DXGI_FORMAT_R11G11B10_FLOAT;
-            case Format::R32G32B32A32_Float:
-            default:
-                return DXGI_FORMAT_R32G32B32A32_FLOAT;
-            }
-        }
-
         UINT ToBindFlags(BufferUsage usage)
         {
             switch (usage)

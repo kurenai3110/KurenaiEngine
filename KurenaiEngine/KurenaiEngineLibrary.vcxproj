@@ -99,6 +99,7 @@
     <ClInclude Include="Source\Library\RHI\RHIDesc.h" />
     <ClInclude Include="Source\Library\RHI\RHIBindless.h" />
     <ClInclude Include="Source\Library\RHI\RHIShaderPackage.h" />
+    <ClInclude Include="Source\Library\RHI\DXGIFormatUtil.h" />
     <ClInclude Include="Source\Library\Assets\RaytracingGeometry.h" />
     <ClInclude Include="Source\Library\Assets\MeshLight.h" />
     <ClInclude Include="Source\Library\Assets\MeshLightScene.h" />
