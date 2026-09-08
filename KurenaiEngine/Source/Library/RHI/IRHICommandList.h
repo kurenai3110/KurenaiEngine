@@ -233,7 +233,7 @@ namespace Kurenai::RHI
         // 呼び出し不要でも動作するが、DX11との整合のため両バックエンドで同じ呼び出し規約にする)
         virtual void SetComputeSamplerSet(IRHISamplerSet* samplerSet) = 0;
         // RWTexture2D/RWStructuredBufferとしてバインドする(書き込み可能)。有効なスロットはu0〜u3。
-        // mipLevelはCreateHiZTextureで作成したミップチェーンテクスチャの特定ミップを指定する場合に使う
+        // mipLevelはCreateMippedUAVTextureで作成したミップチェーンテクスチャの特定ミップを指定する場合に使う
         // (通常のCreateUAVTextureは常に1ミップのみのため既定値の0で問題ない)。
         //
         // 【バインドの寿命】SRVと違い、UAVはDispatchの直後に全スロットが自動で解除される

@@ -821,11 +821,6 @@ namespace Kurenai::RHI
         return std::make_unique<DX11Texture>(srv, nullptr, nullptr, uav);
     }
 
-    std::unique_ptr<IRHITexture> DX11Device::CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels)
-    {
-        return CreateMippedUAVTexture(width, height, Format::R32_Float, mipLevels);
-    }
-
     std::unique_ptr<IRHITexture> DX11Device::CreateMippedUAVTexture(uint32_t width, uint32_t height, Format format, uint32_t mipLevels)
     {
         const DXGI_FORMAT dxgiFormat = ToDXGIFormat(format);

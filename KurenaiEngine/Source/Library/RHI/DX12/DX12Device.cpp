@@ -2448,11 +2448,6 @@ namespace Kurenai::RHI
             DX12Texture::kInvalid, DX12Texture::kInvalid, uavIndex);
     }
 
-    std::unique_ptr<IRHITexture> DX12Device::CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels)
-    {
-        return CreateMippedUAVTexture(width, height, Format::R32_Float, mipLevels);
-    }
-
     std::unique_ptr<IRHITexture> DX12Device::CreateMippedUAVTexture(uint32_t width, uint32_t height, Format format, uint32_t mipLevels)
     {
         const DXGI_FORMAT dxgiFormat = ToDXGIFormat(format);

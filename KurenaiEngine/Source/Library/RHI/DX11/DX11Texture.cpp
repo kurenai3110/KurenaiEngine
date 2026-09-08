@@ -145,7 +145,7 @@ namespace Kurenai::RHI
         {
             QueryTextureSize(m_SliceDsvs[0].Get(), m_Width, m_Height, m_MipLevels, m_Format, m_ArraySize);
         }
-        // ミップごとのUAVしか持たないテクスチャ(CreateHiZTexture等)も同様にミップ0から引く
+        // ミップごとのUAVしか持たないテクスチャ(CreateMippedUAVTexture等)も同様にミップ0から引く
         if (m_Width == 0 && !m_MipUavs.empty())
         {
             QueryTextureSize(m_MipUavs[0].Get(), m_Width, m_Height, m_MipLevels, m_Format, m_ArraySize);

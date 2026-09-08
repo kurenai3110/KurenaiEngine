@@ -72,7 +72,10 @@ namespace Kurenai::Rendering
 
     void RenderTargets::CreateHiZ(RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t mipLevels)
     {
-        HiZTexture = device.CreateHiZTexture(width, height, mipLevels);
+        // 単チャンネル(R32_Float)のフルミップチェーン。ミップごとのUAVへ
+        // 「ミップNを読んでN+1へ2x2ブロックの最小値(Reverse-Zで最も遠い深度)を書く」
+        // ダウンサンプルを1段ずつ繰り返す
+        HiZTexture = device.CreateMippedUAVTexture(width, height, RHI::Format::R32_Float, mipLevels);
     }
 
     void RenderTargets::CreateShadowCascadeArray(RHI::IRHIDevice& device, uint32_t size, uint32_t cascadeCount)

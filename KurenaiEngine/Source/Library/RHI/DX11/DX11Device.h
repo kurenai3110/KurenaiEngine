@@ -47,7 +47,6 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHITexture> CreateUAVTexture(uint32_t width, uint32_t height, Format format) override;
         std::unique_ptr<IRHITexture> CreateUAVTexture3D(
             uint32_t width, uint32_t height, uint32_t depth, Format format) override;
-        std::unique_ptr<IRHITexture> CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels) override;
         std::unique_ptr<IRHITexture> CreateMippedUAVTexture(uint32_t width, uint32_t height, Format format, uint32_t mipLevels) override;
         std::unique_ptr<IRHITexture> CreateUAVTextureCube(uint32_t size, Format format) override;
         std::unique_ptr<IRHITexture> CreateMippedUAVTextureCube(uint32_t size, Format format, uint32_t mipLevels) override;
@@ -91,10 +90,16 @@ namespace Kurenai::RHI
         // D3D12だけの機能でDX11には存在しない。上位層はSupports*()で分岐する設計のため、
         // 下の登録・作成関数は呼ばれないのが正常
         bool SupportsBindless() const override { return false; }
+        // bindless区画そのものが無いので、使用数も容量も0。
+        // 上位層(ProfilerPanelの表示)は容量0を「この環境にはbindlessが無い」として扱う
+        uint32_t GetBindlessUsedCount() const override { return 0; }
+        uint32_t GetBindlessCapacity() const override { return 0; }
         uint32_t RegisterBindless(IRHITexture* texture) override;
         uint32_t RegisterBindless(IRHIBuffer* buffer) override;
         uint32_t RegisterBindlessUAV(IRHIBuffer* buffer) override;
         bool SupportsMeshShader() const override { return false; }
+        // メッシュシェーダーが無い以上、その間接起動(D3D12のExecuteIndirect)も無い
+        bool SupportsIndirectDispatchMesh() const override { return false; }
         std::unique_ptr<IRHIPipelineState> CreateMeshPipelineState(const MeshPipelineStateDesc& desc) override;
         // コンピュートシェーダーによる自前ラスタライザもD3D12専用。DX11のコンピュートシェーダーは
         // cs_5_0固定で、必要な64bitアトミック(SM 6.6)もbindlessも原理的に持てない

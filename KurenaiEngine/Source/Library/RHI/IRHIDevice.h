@@ -141,15 +141,18 @@ namespace Kurenai::RHI
         // SetTexture/SetComputeTextureがそのまま使える(3D専用のバインドAPIは増やしていない)
         virtual std::unique_ptr<IRHITexture> CreateUAVTexture3D(
             uint32_t width, uint32_t height, uint32_t depth, Format format) = 0;
-        // Hi-Zミップチェーン用のテクスチャ。単チャンネル(R32_Float)でwidth/heightから1x1までの
-        // フルミップチェーンを持ち、各ミップに個別のUAV(RWTexture2D、SetComputeUnorderedAccessTextureの
-        // mipLevel引数で指定)を張る。コンピュートシェーダーで「ミップNを読んでミップN+1へ2x2ブロックの
-        // 最小値(Reverse-Zのため最も遠い深度)を書き込む」ダウンサンプルを1ミップずつ繰り返せるようにするための、
-        // 通常のCreateUAVTexture(常に1ミップ)とは別の専用ファクトリ
-        virtual std::unique_ptr<IRHITexture> CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels) = 0;
-        // CreateHiZTextureの汎用版。フォーマットを指定できるフルミップチェーンのUAV+SRVテクスチャを作る。
-        // IBLのプリフィルタ済み鏡面マップ(ラフネスに応じてミップごとに異なる畳み込みを書き込む、
-        // HDRのためR16G16B16A16_Float)のように、Hi-Z以外の用途でもミップ単位のUAV書き込みが必要な場合に使う
+        // フォーマットを指定できるフルミップチェーンのUAV+SRVテクスチャ。width/heightから1x1までの
+        // 全ミップを持ち、各ミップに個別のUAV(RWTexture2D、SetComputeUnorderedAccessTextureの
+        // mipLevel引数で指定)を張る。通常のCreateUAVTexture(常に1ミップ)とは別のファクトリ。
+        //
+        // 用途は、コンピュートシェーダーでミップを1段ずつ埋めていく処理
+        // ―― Hi-Z(R32_Floatで「ミップNを読んでN+1へ2x2ブロックの最小値を書く」)や、
+        // IBLのプリフィルタ済み鏡面マップ(ラフネスに応じてミップごとに異なる畳み込み、
+        // HDRのためR16G16B16A16_Float)。
+        //
+        // 【用途名のファクトリを持たない】以前は Hi-Z 専用の CreateHiZTexture があったが、
+        // 中身は format に R32_Float を渡すだけの1行で、DX11/DX12の両方が同じ委譲を
+        // 書いていた。インターフェースが持つべきなのは「何を作るか」であって「何に使うか」ではない
         virtual std::unique_ptr<IRHITexture> CreateMippedUAVTexture(uint32_t width, uint32_t height, Format format, uint32_t mipLevels) = 0;
         // コンピュートシェーダーから面ごとに書き込み可能なキューブマップ(6面、単一ミップ)。
         // IBLの拡散イラディアンス(IBLConvolve.hlsl CSIrradiance)のように、畳み込み結果を
@@ -263,9 +266,14 @@ namespace Kurenai::RHI
         // エラーログを出してkInvalidBindlessIndexを返す。消費側はそれを「テクスチャ無し」と
         // 解釈して白1x1へ落とすので、**絵はそれらしく出たまま静かに間違う**。
         // 上限に近づいていることを事前に見えるようにしておかないと、
-        // 「なぜかこのモデルだけ真っ白」の形でしか気づけない
-        virtual uint32_t GetBindlessUsedCount() const { return 0; }
-        virtual uint32_t GetBindlessCapacity() const { return 0; }
+        // 「なぜかこのモデルだけ真っ白」の形でしか気づけない。
+        //
+        // 【既定実装を持たせない】このインターフェースは「非対応のバックエンドも必ず
+        // 明示的にoverrideし、そこへ理由をコメントで残す」方針で書かれている
+        // (DX11Device.hのSupportsRaytracing / SupportsBindless / SupportsMeshShaderなど)。
+        // 既定実装があると、実装し忘れたのか非対応だから0なのかが区別できない
+        virtual uint32_t GetBindlessUsedCount() const = 0;
+        virtual uint32_t GetBindlessCapacity() const = 0;
 
         // バッファの**UAV**をbindlessヒープへ登録し、シェーダーが使う番号を返す。
         // 上のRegisterBindlessがSRV(読み取り専用)を登録するのに対し、こちらは書き込める。
@@ -296,8 +304,9 @@ namespace Kurenai::RHI
 
         // IRHICommandList::DispatchMeshIndirectが使えるか。
         // メッシュシェーダー対応に加えて、間接起動用のコマンドシグネチャの作成に
-        // 成功している必要がある(DX11は常にfalse)
-        virtual bool SupportsIndirectDispatchMesh() const { return false; }
+        // 成功している必要がある(DX11は常にfalse)。
+        // 上のGetBindless*と同じ理由で既定実装を持たせない
+        virtual bool SupportsIndirectDispatchMesh() const = 0;
 
         // 増幅シェーダー(任意)+ メッシュシェーダー + ピクセルシェーダーのパイプラインステート。
         // 入力レイアウトを持たない点以外はCreatePipelineStateと同じ扱いができる。
