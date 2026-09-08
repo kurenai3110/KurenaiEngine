@@ -22,7 +22,8 @@
 namespace Kurenai::RHI
 {
     DX12CommandList::DX12CommandList(DX12Device* device)
-        : m_Device(device)
+        : IRHICommandList("DX12")
+        , m_Device(device)
         , m_CurrentSamplerSetBase(device->GetFallbackSamplerSetBase())
         , m_CurrentComputeSamplerSetBase(device->GetFallbackSamplerSetBase())
     {
@@ -38,6 +39,26 @@ namespace Kurenai::RHI
         // 取得に失敗しても致命的ではない(メッシュシェーダー経路が使えないだけ)ため、
         // ここでは黙って握り、実際に呼ばれたときにDispatchMeshがログを出す
         device->GetCommandList()->QueryInterface(IID_PPV_ARGS(&m_CommandList6));
+    }
+
+    bool DX12CommandList::IsIndirectArgsBuffer(const IRHIBuffer* buffer) const
+    {
+        return static_cast<const DX12Buffer*>(buffer)->IsIndirectArgs();
+    }
+
+    bool DX12CommandList::IsReadbackBuffer(const IRHIBuffer* buffer) const
+    {
+        return static_cast<const DX12Buffer*>(buffer)->IsReadback();
+    }
+
+    bool DX12CommandList::IsReadbackTexture(const IRHITexture* texture) const
+    {
+        return static_cast<const DX12Texture*>(texture)->IsReadback();
+    }
+
+    bool DX12CommandList::HasUnorderedAccessView(const IRHIBuffer* buffer) const
+    {
+        return static_cast<const DX12Buffer*>(buffer)->HasUav();
     }
 
     void DX12CommandList::InvalidateShadowedDescriptors()
@@ -176,10 +197,12 @@ namespace Kurenai::RHI
         m_Device->GetCommandList()->ClearDepthStencilView(m_CurrentDepthStencilView, D3D12_CLEAR_FLAG_DEPTH, depth, 0, 0, nullptr);
     }
 
-    void DX12CommandList::SetViewport(const Viewport& viewport)
+    // 【シザー矩形はここでは張らない】ビューポート全体へ戻す規則は
+    // IRHICommandList::SetViewport が持っており、そこから ApplyScissorRect が続けて呼ばれる。
+    // D3D12はシザーが常時有効で、コマンドリストのリセット直後は矩形0本(=全クリップ)なので、
+    // 必ず張らなければならない ―― この危険はD3D11も同じ
+    void DX12CommandList::ApplyViewport(const Viewport& viewport)
     {
-        auto* cmdList = m_Device->GetCommandList();
-
         D3D12_VIEWPORT dxViewport{};
         dxViewport.TopLeftX = viewport.TopLeftX;
         dxViewport.TopLeftY = viewport.TopLeftY;
@@ -187,38 +210,7 @@ namespace Kurenai::RHI
         dxViewport.Height = viewport.Height;
         dxViewport.MinDepth = viewport.MinDepth;
         dxViewport.MaxDepth = viewport.MaxDepth;
-        cmdList->RSSetViewports(1, &dxViewport);
-
-        // D3D12はシザーが常時有効で、コマンドリストのリセット直後は矩形0本(=全クリップ)なので、
-        // 必ずビューポート全体を覆う矩形を張る。丸め方はDX11と共有するヘルパーに寄せてある
-        // (片方だけ直すとバックエンド間で端の1pxがずれるため。MakeFullViewportScissorRect参照)。
-        // SetScissorRectで絞っていてもここでビューポート全体へ戻る仕様
-        m_CurrentViewport = viewport;
-        m_HasViewport = true;
-        ApplyScissorRect(MakeFullViewportScissorRect(viewport));
-    }
-
-    void DX12CommandList::SetScissorRect(const ScissorRect& rect)
-    {
-        if (!m_HasViewport)
-        {
-            Core::Logger::Error(
-                "DX12",
-                "SetScissorRect: SetViewportより先に呼ばれました。クランプ先のビューポートが"
-                "決まらないため、この呼び出しを無視します");
-            return;
-        }
-        ApplyScissorRect(ClampScissorRectToViewport(rect, m_CurrentViewport));
-    }
-
-    void DX12CommandList::ResetScissorRect()
-    {
-        if (!m_HasViewport)
-        {
-            Core::Logger::Error("DX12", "ResetScissorRect: SetViewportより先に呼ばれました。この呼び出しを無視します");
-            return;
-        }
-        ApplyScissorRect(MakeFullViewportScissorRect(m_CurrentViewport));
+        m_Device->GetCommandList()->RSSetViewports(1, &dxViewport);
     }
 
     void DX12CommandList::ApplyScissorRect(const ScissorRect& rect)
@@ -798,30 +790,12 @@ namespace Kurenai::RHI
         ReleaseComputeUavBindingsAfterDispatch();
     }
 
-    void DX12CommandList::DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes)
+    void DX12CommandList::DispatchIndirectImpl(IRHIBuffer* argsBuffer, uint32_t offsetInBytes)
     {
-        if (!argsBuffer)
-        {
-            Core::Logger::Error("DX12", "DispatchIndirect: 引数バッファがnullptrです。ディスパッチをスキップします");
-            return;
-        }
-
         auto* dx12Buffer = static_cast<DX12Buffer*>(argsBuffer);
-        if (!dx12Buffer->IsIndirectArgs())
-        {
-            Core::Logger::Error(
-                "DX12", "DispatchIndirect: BufferUsage::IndirectArgs以外のバッファが渡されました。ディスパッチをスキップします");
-            return;
-        }
-        if ((offsetInBytes % 4) != 0)
-        {
-            Core::Logger::Error(
-                "DX12",
-                "DispatchIndirect: offsetInBytes(" + std::to_string(offsetInBytes) +
-                    ")が4の倍数ではありません。ディスパッチをスキップします");
-            return;
-        }
 
+        // 【これはDX12だけの前提】コマンドシグネチャの作成に失敗している可能性がある。
+        // DX11にはそもそも対応物が無いため、共通の検証層には置けない
         ID3D12CommandSignature* signature = m_Device->GetDispatchCommandSignature();
         if (!signature)
         {
@@ -904,21 +878,9 @@ namespace Kurenai::RHI
             countOffsetInBytes);
     }
 
-    void DX12CommandList::ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value)
+    void DX12CommandList::ClearUnorderedAccessBufferUintImpl(IRHIBuffer* buffer, uint32_t value)
     {
-        if (!buffer)
-        {
-            Core::Logger::Error("DX12", "ClearUnorderedAccessBufferUint: バッファがnullptrです。クリアをスキップします");
-            return;
-        }
-
         auto* dx12Buffer = static_cast<DX12Buffer*>(buffer);
-        if (!dx12Buffer->HasUav())
-        {
-            Core::Logger::Error(
-                "DX12", "ClearUnorderedAccessBufferUint: UAVを持たないバッファが渡されました。クリアをスキップします");
-            return;
-        }
 
         // ClearUnorderedAccessViewUintは「シェーダー可視ヒープ上のGPUハンドル」と
         // 「非シェーダー可視ヒープ上のCPUハンドル」の両方を要求する。後者はバッファが
@@ -953,22 +915,10 @@ namespace Kurenai::RHI
         m_Device->GetCommandList()->ResourceBarrier(1, &barrier);
     }
 
-    void DX12CommandList::CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes)
+    void DX12CommandList::CopyBufferToReadbackImpl(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes)
     {
-        if (dst == nullptr || src == nullptr || sizeInBytes == 0)
-        {
-            Core::Logger::Error("DX12", "CopyBufferToReadback: 引数が不正です。コピーをスキップします");
-            return;
-        }
-
         auto* dx12Dst = static_cast<DX12Buffer*>(dst);
         auto* dx12Src = static_cast<DX12Buffer*>(src);
-        if (!dx12Dst->IsReadback())
-        {
-            Core::Logger::Error(
-                "DX12", "CopyBufferToReadback: コピー先がBufferUsage::Readbackではありません。コピーをスキップします");
-            return;
-        }
 
         // コピー元をCOPY_SOURCEへ。コピー先(READBACKヒープ)はCOPY_DESTから動かせないので遷移しない
         dx12Src->TransitionTo(m_Device->GetCommandList(), D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -977,25 +927,11 @@ namespace Kurenai::RHI
             dx12Dst->GetResource(), 0, dx12Src->GetResource(), 0, sizeInBytes);
     }
 
-    void DX12CommandList::CopyTextureToReadback(
+    void DX12CommandList::CopyTextureToReadbackImpl(
         IRHITexture* dst, IRHITexture* src, uint32_t mipLevel, uint32_t arraySlice)
     {
-        if (dst == nullptr || src == nullptr)
-        {
-            Core::Logger::Error("DX12", "CopyTextureToReadback: 引数がnullptrです。コピーをスキップします");
-            return;
-        }
-
         auto* dx12Dst = static_cast<DX12Texture*>(dst);
         auto* dx12Src = static_cast<DX12Texture*>(src);
-        if (!dx12Dst->IsReadback())
-        {
-            Core::Logger::Error(
-                "DX12",
-                "CopyTextureToReadback: コピー先がCreateReadbackTextureで作ったテクスチャではありません。"
-                "コピーをスキップします");
-            return;
-        }
 
         ID3D12Resource* srcResource = dx12Src->GetResource();
         if (srcResource == nullptr)

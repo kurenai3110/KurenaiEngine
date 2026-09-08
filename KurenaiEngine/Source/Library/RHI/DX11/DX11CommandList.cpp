@@ -19,8 +19,29 @@
 namespace Kurenai::RHI
 {
     DX11CommandList::DX11CommandList(Microsoft::WRL::ComPtr<ID3D11DeviceContext> context)
-        : m_Context(std::move(context))
+        : IRHICommandList("DX11")
+        , m_Context(std::move(context))
     {
+    }
+
+    bool DX11CommandList::IsIndirectArgsBuffer(const IRHIBuffer* buffer) const
+    {
+        return static_cast<const DX11Buffer*>(buffer)->IsIndirectArgs();
+    }
+
+    bool DX11CommandList::IsReadbackBuffer(const IRHIBuffer* buffer) const
+    {
+        return static_cast<const DX11Buffer*>(buffer)->IsReadback();
+    }
+
+    bool DX11CommandList::IsReadbackTexture(const IRHITexture* texture) const
+    {
+        return static_cast<const DX11Texture*>(texture)->IsReadback();
+    }
+
+    bool DX11CommandList::HasUnorderedAccessView(const IRHIBuffer* buffer) const
+    {
+        return static_cast<const DX11Buffer*>(buffer)->GetUnorderedAccessView() != nullptr;
     }
 
     void DX11CommandList::SetRenderTarget(IRHISwapChain* swapChain)
@@ -82,7 +103,12 @@ namespace Kurenai::RHI
         m_Context->ClearDepthStencilView(m_CurrentDepthStencilView, D3D11_CLEAR_DEPTH, depth, 0);
     }
 
-    void DX11CommandList::SetViewport(const Viewport& viewport)
+    // 【シザー矩形はここでは張らない】ビューポート全体へ戻す規則は
+    // IRHICommandList::SetViewport が持っており、そこから ApplyScissorRect が続けて呼ばれる。
+    // ラスタライザは ScissorEnable=TRUE(DX11Device::CreatePipelineState)で、
+    // D3D11のシザー矩形の既定は「矩形0本」なので、有効なまま一度も張らないと
+    // 全ピクセルがクリップされて何も映らなくなる ―― この危険はD3D12も同じ
+    void DX11CommandList::ApplyViewport(const Viewport& viewport)
     {
         D3D11_VIEWPORT dxViewport{};
         dxViewport.TopLeftX = viewport.TopLeftX;
@@ -92,39 +118,6 @@ namespace Kurenai::RHI
         dxViewport.MinDepth = viewport.MinDepth;
         dxViewport.MaxDepth = viewport.MaxDepth;
         m_Context->RSSetViewports(1, &dxViewport);
-
-        // ラスタライザはScissorEnable=TRUE(DX11Device::CreatePipelineState)。
-        // D3D11のシザー矩形の既定は「矩形0本」なので、有効なまま一度も張らないと
-        // 全ピクセルがクリップされて何も映らなくなる。ここで必ずビューポート全体を張ることで、
-        // SetScissorRectを使わない呼び出し側から見た挙動は従来と変わらない。
-        // (D3D12もコマンドリストのリセット直後は矩形0本という同じ危険があり、
-        //  DX12CommandList::SetViewportが同じ方法で塞いでいる)
-        m_CurrentViewport = viewport;
-        m_HasViewport = true;
-        ApplyScissorRect(MakeFullViewportScissorRect(viewport));
-    }
-
-    void DX11CommandList::SetScissorRect(const ScissorRect& rect)
-    {
-        if (!m_HasViewport)
-        {
-            Core::Logger::Error(
-                "DX11",
-                "SetScissorRect: SetViewportより先に呼ばれました。クランプ先のビューポートが"
-                "決まらないため、この呼び出しを無視します");
-            return;
-        }
-        ApplyScissorRect(ClampScissorRectToViewport(rect, m_CurrentViewport));
-    }
-
-    void DX11CommandList::ResetScissorRect()
-    {
-        if (!m_HasViewport)
-        {
-            Core::Logger::Error("DX11", "ResetScissorRect: SetViewportより先に呼ばれました。この呼び出しを無視します");
-            return;
-        }
-        ApplyScissorRect(MakeFullViewportScissorRect(m_CurrentViewport));
     }
 
     void DX11CommandList::ApplyScissorRect(const ScissorRect& rect)
@@ -481,30 +474,9 @@ namespace Kurenai::RHI
     // 自前ラスタライザだけで、そちらはSM 6.6とbindlessを要求するためDX12専用
     // (IRHIDevice::SupportsSoftwareRaster()はDX11では常にfalse)。
     // RHIの抽象を片肺にしないため実装は用意してあるが、この経路は実行されない
-    void DX11CommandList::DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes)
+    void DX11CommandList::DispatchIndirectImpl(IRHIBuffer* argsBuffer, uint32_t offsetInBytes)
     {
-        if (!argsBuffer)
-        {
-            Core::Logger::Error("DX11", "DispatchIndirect: 引数バッファがnullptrです。ディスパッチをスキップします");
-            return;
-        }
-
         auto* dx11Buffer = static_cast<DX11Buffer*>(argsBuffer);
-        if (!dx11Buffer->IsIndirectArgs())
-        {
-            Core::Logger::Error(
-                "DX11", "DispatchIndirect: BufferUsage::IndirectArgs以外のバッファが渡されました。ディスパッチをスキップします");
-            return;
-        }
-        if ((offsetInBytes % 4) != 0)
-        {
-            Core::Logger::Error(
-                "DX11",
-                "DispatchIndirect: offsetInBytes(" + std::to_string(offsetInBytes) +
-                    ")が4の倍数ではありません。ディスパッチをスキップします");
-            return;
-        }
-
         m_Context->DispatchIndirect(dx11Buffer->GetBuffer(), offsetInBytes);
         ReleaseComputeUavBindingsAfterDispatch();
     }
@@ -524,22 +496,10 @@ namespace Kurenai::RHI
     }
 
     // 【DX11では呼び出し側が存在しない】理由はDispatchIndirectのコメントと同じ
-    void DX11CommandList::ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value)
+    void DX11CommandList::ClearUnorderedAccessBufferUintImpl(IRHIBuffer* buffer, uint32_t value)
     {
-        if (!buffer)
-        {
-            Core::Logger::Error("DX11", "ClearUnorderedAccessBufferUint: バッファがnullptrです。クリアをスキップします");
-            return;
-        }
-
         auto* dx11Buffer = static_cast<DX11Buffer*>(buffer);
         ID3D11UnorderedAccessView* uav = dx11Buffer->GetUnorderedAccessView();
-        if (!uav)
-        {
-            Core::Logger::Error(
-                "DX11", "ClearUnorderedAccessBufferUint: UAVを持たないバッファが渡されました。クリアをスキップします");
-            return;
-        }
 
         // UAVとして触る前に、同一リソースがピクセルシェーダのSRVとして張られていたら外す
         // (SetComputeUnorderedAccessBufferと同じ理由。DX11はSRVとUAVを同時にバインドできない)
@@ -549,22 +509,10 @@ namespace Kurenai::RHI
         m_Context->ClearUnorderedAccessViewUint(uav, values);
     }
 
-    void DX11CommandList::CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes)
+    void DX11CommandList::CopyBufferToReadbackImpl(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes)
     {
-        if (dst == nullptr || src == nullptr || sizeInBytes == 0)
-        {
-            Core::Logger::Error("DX11", "CopyBufferToReadback: 引数が不正です。コピーをスキップします");
-            return;
-        }
-
         auto* dx11Dst = static_cast<DX11Buffer*>(dst);
         auto* dx11Src = static_cast<DX11Buffer*>(src);
-        if (!dx11Dst->IsReadback())
-        {
-            Core::Logger::Error(
-                "DX11", "CopyBufferToReadback: コピー先がBufferUsage::Readbackではありません。コピーをスキップします");
-            return;
-        }
 
         // 【リソース状態の遷移は不要】DX11はドライバが暗黙に扱う(DX12との差はここだけ)。
         // 範囲を指定してコピーするためCopyResourceではなくCopySubresourceRegionを使う
@@ -614,25 +562,11 @@ namespace Kurenai::RHI
         m_CurrentDepthStencilView = nullptr;
     }
 
-    void DX11CommandList::CopyTextureToReadback(
+    void DX11CommandList::CopyTextureToReadbackImpl(
         IRHITexture* dst, IRHITexture* src, uint32_t mipLevel, uint32_t arraySlice)
     {
-        if (dst == nullptr || src == nullptr)
-        {
-            Core::Logger::Error("DX11", "CopyTextureToReadback: 引数がnullptrです。コピーをスキップします");
-            return;
-        }
-
         auto* dx11Dst = static_cast<DX11Texture*>(dst);
         auto* dx11Src = static_cast<DX11Texture*>(src);
-        if (!dx11Dst->IsReadback())
-        {
-            Core::Logger::Error(
-                "DX11",
-                "CopyTextureToReadback: コピー先がCreateReadbackTextureで作ったテクスチャではありません。"
-                "コピーをスキップします");
-            return;
-        }
 
         ID3D11Texture2D* srcTexture = dx11Src->GetTexture2D();
         if (srcTexture == nullptr)

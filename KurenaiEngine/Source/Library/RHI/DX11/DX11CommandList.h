@@ -17,9 +17,6 @@ namespace Kurenai::RHI
             IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture, uint32_t depthArraySlice = 0) override;
         void ClearRenderTarget(const ClearColor& color) override;
         void ClearDepth(float depth) override;
-        void SetViewport(const Viewport& viewport) override;
-        void SetScissorRect(const ScissorRect& rect) override;
-        void ResetScissorRect() override;
         void SetPipelineState(IRHIPipelineState* pipelineState) override;
         void SetVertexBuffer(IRHIBuffer* buffer) override;
         void SetIndexBuffer(IRHIBuffer* buffer) override;
@@ -47,14 +44,25 @@ namespace Kurenai::RHI
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
-        void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) override;
         void DispatchMeshIndirect(
             IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount,
             uint32_t countOffsetInBytes) override;
-        void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) override;
-        void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) override;
-        void CopyTextureToReadback(
-            IRHITexture* dst, IRHITexture* src, uint32_t mipLevel = 0, uint32_t arraySlice = 0) override;
+
+    protected:
+        // 具象型でしか答えられない問い。「何を断るか」の判断は IRHICommandList が持つ
+        bool IsIndirectArgsBuffer(const IRHIBuffer* buffer) const override;
+        bool IsReadbackBuffer(const IRHIBuffer* buffer) const override;
+        bool IsReadbackTexture(const IRHITexture* texture) const override;
+        bool HasUnorderedAccessView(const IRHIBuffer* buffer) const override;
+
+        // 検証済みの引数を受けて、実際にD3D11のコマンドを発行する
+        void ApplyViewport(const Viewport& viewport) override;
+        void ApplyScissorRect(const ScissorRect& rect) override;
+        void DispatchIndirectImpl(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) override;
+        void ClearUnorderedAccessBufferUintImpl(IRHIBuffer* buffer, uint32_t value) override;
+        void CopyBufferToReadbackImpl(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) override;
+        void CopyTextureToReadbackImpl(
+            IRHITexture* dst, IRHITexture* src, uint32_t mipLevel, uint32_t arraySlice) override;
 
     private:
         // Dispatch/DispatchIndirectの後始末。バインドしたUAVを全解除する
@@ -106,12 +114,6 @@ namespace Kurenai::RHI
         // CopySubresourceRegionを呼ぶとデバッグレイヤーが警告を出してコピーが無効になる。
         // UnbindPixelSrvForResourceの出力版で、リードバックのコピー直前に使う
         void UnbindRenderTargetsForResource(ID3D11Resource* resource);
-
-        // シザー矩形をD3D11へ設定する(SetViewport/SetScissorRect/ResetScissorRectの共通処理)
-        void ApplyScissorRect(const ScissorRect& rect);
-        // SetScissorRect/ResetScissorRectがクランプ先として使う、直近のSetViewportの値
-        Viewport m_CurrentViewport{};
-        bool m_HasViewport = false;
 
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
         ID3D11RenderTargetView* m_CurrentRenderTargetViews[kMaxRenderTargets] = {};

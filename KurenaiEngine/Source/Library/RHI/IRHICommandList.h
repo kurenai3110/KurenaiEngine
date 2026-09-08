@@ -75,6 +75,20 @@ namespace Kurenai::RHI
         float A = 1.0f;
     };
 
+    // 【非仮想の検証層 + 純粋仮想の実装層(NVI)】
+    //
+    // 下の public のうち、SetViewport / SetScissorRect / ResetScissorRect /
+    // DispatchIndirect / ClearUnorderedAccessBufferUint / CopyBufferToReadback /
+    // CopyTextureToReadback は**非仮想**で、引数の検証と「何を断るか」だけをここで行い、
+    // 実際のコマンド発行を protected の純粋仮想へ委ねる。
+    //
+    // 【なぜそうするのか】これらの検証は以前、DX11CommandList.cpp と DX12CommandList.cpp へ
+    // ログのタグだけ変えて書き写されていた。断る条件が片方だけ緩いと、
+    // **そちらのバックエンドでだけ、例外にもならず絵にも出ずに結果が壊れる。**
+    // オーバーライドできない形にすれば、バックエンドが検証を通さない経路を持てなくなる。
+    //
+    // ビューポートの現在値(シザーのクランプ先)も、両バックエンドが同じものを同じ規則で
+    // 持っていたのでここへ引き上げた
     class KURENAI_LIB_API IRHICommandList
     {
     public:
@@ -93,7 +107,7 @@ namespace Kurenai::RHI
         // 【重要】SetViewportはシザー矩形も「そのビューポート全体」へリセットする。
         // シザーを使わない呼び出し側から見た挙動を従来どおりに保つための仕様なので、
         // SetScissorRectは必ずSetViewportより後に呼ぶこと(先に呼ぶと上書きされる)
-        virtual void SetViewport(const Viewport& viewport) = 0;
+        void SetViewport(const Viewport& viewport);
         // 以後の描画を矩形の内側だけに制限する。矩形はピクセル単位・描画先の左上原点(Y-down)で、
         // 現在のビューポート全体との積へクランプされる(ClampScissorRectToViewport)。
         // 積が空なら以後の描画は1ピクセルも出ない。
@@ -103,9 +117,9 @@ namespace Kurenai::RHI
         // 常時有効なので、両バックエンドで挙動は完全に同一。
         // SetPipelineStateはシザー矩形をリセットしない(D3D11のラスタライザステートも
         // D3D12のPSOもシザー矩形自体は持たない)ため、パイプラインを切り替えても絞ったまま
-        virtual void SetScissorRect(const ScissorRect& rect) = 0;
+        void SetScissorRect(const ScissorRect& rect);
         // SetScissorRectで絞った範囲を、直近のSetViewportで設定したビューポート全体へ戻す
-        virtual void ResetScissorRect() = 0;
+        void ResetScissorRect();
         virtual void SetPipelineState(IRHIPipelineState* pipelineState) = 0;
         virtual void SetVertexBuffer(IRHIBuffer* buffer) = 0;
         virtual void SetIndexBuffer(IRHIBuffer* buffer) = 0;
@@ -253,7 +267,7 @@ namespace Kurenai::RHI
         //
         // 引数バッファ以外のUsageを渡すとログを出して何もしない。
         // Dispatchと同じく、この呼び出しの直後にUAVスロットは全解除される
-        virtual void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) = 0;
+        void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes);
 
         // 増幅シェーダーの間接起動(DX12のExecuteIndirect)。1件ぶんの引数は24バイトで、
         //   +0  : このドローが使う定数バッファ(b1)のGPU仮想アドレス(64bit)
@@ -287,7 +301,7 @@ namespace Kurenai::RHI
         // 【この呼び出しはバインド状態を変えない】SetComputeUnorderedAccess*で張ったスロットには
         // 影響しない(内部で一時的なディスクリプタを使うため)。
         // UAVを持たないバッファを渡すとログを出して何もしない
-        virtual void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) = 0;
+        void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value);
 
         // GPU上のバッファの内容を、BufferUsage::Readbackのバッファへ写す(GPUのコピーコマンド)。
         // 実際にCPUから読むのは IRHIBuffer::ReadbackData で、**数フレーム後に行うこと**。
@@ -298,7 +312,7 @@ namespace Kurenai::RHI
         //
         // srcはコピー元として読める状態へ遷移させる(DX12)。dstがBufferUsage::Readbackでない、
         // サイズが足りない、いずれかがnullptrならログを出して何もしない
-        virtual void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) = 0;
+        void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes);
 
         // テクスチャの1サブリソースを、IRHIDevice::CreateReadbackTextureで作った受け皿へ写す。
         // 実際にCPUから読むのは IRHITexture::ReadbackData で、**数フレーム後に行うこと**。
@@ -312,7 +326,47 @@ namespace Kurenai::RHI
         // 出力に張られたままのリソースをコピー元にできないため、張られていれば外す。
         // dstがリードバック用でない、寸法やフォーマットが食い違う、いずれかがnullptrの場合は
         // ログを出して何もしない
-        virtual void CopyTextureToReadback(
-            IRHITexture* dst, IRHITexture* src, uint32_t mipLevel = 0, uint32_t arraySlice = 0) = 0;
+        void CopyTextureToReadback(
+            IRHITexture* dst, IRHITexture* src, uint32_t mipLevel = 0, uint32_t arraySlice = 0);
+
+    protected:
+        // backendTag はログのタグ("DX11" / "DX12")。派生側はこれを渡して構築する
+        explicit IRHICommandList(const char* backendTag)
+            : m_BackendTag(backendTag)
+        {
+        }
+
+        const char* GetBackendTag() const { return m_BackendTag; }
+
+        // --- バックエンドの具象型でしか答えられない問い ---------------------------------
+        // 「何を断るか」は上の非仮想層が決めており、ここで答えるのは「これは何か」だけ。
+        // 判断がこちら側へ降りてくると、片方のバックエンドだけ緩い状態へ戻ってしまう
+
+        virtual bool IsIndirectArgsBuffer(const IRHIBuffer* buffer) const = 0;
+        virtual bool IsReadbackBuffer(const IRHIBuffer* buffer) const = 0;
+        virtual bool IsReadbackTexture(const IRHITexture* texture) const = 0;
+        virtual bool HasUnorderedAccessView(const IRHIBuffer* buffer) const = 0;
+
+        // --- 実際のコマンド発行 ---------------------------------------------------------
+        // ここへ来る時点で引数は検証済み。**再検証しないこと**(重ねると、
+        // どちらが本当の条件なのかが分からなくなる)
+
+        virtual void ApplyViewport(const Viewport& viewport) = 0;
+        virtual void ApplyScissorRect(const ScissorRect& rect) = 0;
+        virtual void DispatchIndirectImpl(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) = 0;
+        virtual void ClearUnorderedAccessBufferUintImpl(IRHIBuffer* buffer, uint32_t value) = 0;
+        virtual void CopyBufferToReadbackImpl(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) = 0;
+        virtual void CopyTextureToReadbackImpl(
+            IRHITexture* dst, IRHITexture* src, uint32_t mipLevel, uint32_t arraySlice) = 0;
+
+        // 直近のSetViewportで設定したビューポート。SetScissorRectのクランプ先になる。
+        // 【両バックエンドで同じ規則】SetViewportを一度も通していない状態で
+        // SetScissorRect/ResetScissorRectを呼ぶとクランプ先が決まらないため、
+        // エラーを出して呼び出しごと無視する
+        Viewport m_CurrentViewport;
+        bool m_HasViewport = false;
+
+    private:
+        const char* m_BackendTag;
     };
 }

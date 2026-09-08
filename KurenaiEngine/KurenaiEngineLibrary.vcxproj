@@ -181,6 +181,7 @@
     <ClCompile Include="Source\Library\RHI\PipelineStateNormalize.cpp" />
     <ClCompile Include="Source\Library\RHI\ReadbackUtil.cpp" />
     <ClCompile Include="Source\Library\RHI\GPUProfilerCore.cpp" />
+    <ClCompile Include="Source\Library\RHI\IRHICommandList.cpp" />
     <ClCompile Include="Source\Library\RHI\TextureImage.cpp" />
     <ClCompile Include="Source\Library\RHI\ImGuiContextSetup.cpp" />
     <ClCompile Include="Source\Library\RHI\DX11\DX11Buffer.cpp" />
