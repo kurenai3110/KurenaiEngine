@@ -446,13 +446,6 @@ namespace Kurenai
             "ShaderInterop::kDispatchMeshIndirectArgStride が RHI 側と食い違っている");
 
 
-        // 区画1つぶんのバイト数。区画の境目も8バイト境界に載せたいので256へ切り上げる
-        uint32_t ComputeModelCullRegionStride(uint32_t capacity)
-        {
-            const uint32_t bytes = RHI::IRHICommandList::kDispatchMeshIndirectArgStride * capacity;
-            return (bytes + 255u) & ~255u;
-        }
-
         // widthとheightのうち大きい方が1になるまでのミップ数(width/heightそのものを含む)を返す。
         // 例: 1280x720 -> max=1280 -> 1280,640,320,160,80,40,20,10,5,2,1 の11ミップ
         uint32_t ComputeMipLevelCount(uint32_t width, uint32_t height)
@@ -940,32 +933,18 @@ namespace Kurenai
         {
             try
             {
-                RHI::ShaderDesc modelCullCsDesc;
-                modelCullCsDesc.Stage = RHI::ShaderStage::Compute;
-                modelCullCsDesc.FilePath = shaderDirectory + L"ModelCull.kshader";
-                modelCullCsDesc.EntryPoint = "CSMain";
-                m_ModelCullComputeShader = m_Device->CreateShader(modelCullCsDesc);
-                m_ModelCullPipelineState =
-                    m_Device->CreateComputePipelineState({ m_ModelCullComputeShader.get() });
+                // 【元の行位置のまま呼ぶ】DX12はディスクリプタ枠を生成順に割り当てるため、
+                // 所有権をGeometryPassesへ移しても生成の順序はここから動かさない
+                m_GeometryPasses->CreateModelCullResources(*m_Device, shaderDirectory);
 
-                RHI::BufferDesc modelCullConstantDesc;
-                modelCullConstantDesc.Usage = RHI::BufferUsage::Constant;
-                modelCullConstantDesc.SizeInBytes = sizeof(Passes::ModelCullConstants);
-                m_ModelCullConstantBuffer = m_Device->CreateBuffer(modelCullConstantDesc);
-
-                RHI::BufferDesc modelCullCounterDesc;
-                modelCullCounterDesc.Usage = RHI::BufferUsage::Structured;
-                modelCullCounterDesc.SizeInBytes =
-                    static_cast<uint32_t>(sizeof(uint32_t)) * kModelCullCounterCount;
-                modelCullCounterDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
-                m_ModelCullCounterBuffer = m_Device->CreateBuffer(modelCullCounterDesc);
-
+                // カウンタの読み戻し。大きさは群が作るカウンタバッファと同じにする
                 for (uint32_t i = 0; i < kMeshletCullStatsRingSize; ++i)
                 {
                     RHI::BufferDesc readbackDesc;
                     readbackDesc.Usage = RHI::BufferUsage::Readback;
-                    readbackDesc.SizeInBytes = modelCullCounterDesc.SizeInBytes;
-                    readbackDesc.StrideInBytes = modelCullCounterDesc.StrideInBytes;
+                    readbackDesc.SizeInBytes =
+                        static_cast<uint32_t>(sizeof(uint32_t)) * kModelCullCounterCount;
+                    readbackDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
                     m_ModelCullReadback[i] = m_Device->CreateBuffer(readbackDesc);
                 }
             }
@@ -975,10 +954,7 @@ namespace Kurenai
                 Core::Logger::Warning(
                     "KurenaiEngine3D",
                     std::string("モデル単位のGPUカリングの初期化に失敗したため無効にします: ") + e.what());
-                m_ModelCullComputeShader.reset();
-                m_ModelCullPipelineState.reset();
-                m_ModelCullConstantBuffer.reset();
-                m_ModelCullCounterBuffer.reset();
+                m_GeometryPasses->ResetModelCullResources();
                 for (auto& readback : m_ModelCullReadback)
                 {
                     readback.reset();
@@ -2133,98 +2109,6 @@ namespace Kurenai
         }
 
         return m_GeometrySettings.MeshletRenderingEnabled && m_GeometryPasses->HasMeshletPipelineState();
-    }
-
-    void KurenaiEngine3D::EnsureModelCullCapacity(uint32_t candidateCount)
-    {
-        if (candidateCount == 0 || !m_ModelCullPipelineState)
-        {
-            return;
-        }
-        if (m_ModelCullInstanceBuffer && m_ModelCullDrawArgsBuffer && candidateCount <= m_ModelCullCapacity)
-        {
-            return;
-        }
-
-        // 作り直しの頻度を下げるため、必要数ぴったりではなく少し余裕を持たせる。
-        // シーン切り替えとストリーミングで候補数は増減する
-        const uint32_t capacity = std::max<uint32_t>(64u, candidateCount + candidateCount / 4u);
-
-        try
-        {
-            // 候補の配列。毎フレームCPUから書き直すのでStructuredReadOnly。
-            // 1フレームに1回しか書かないためMaxUpdatesPerFrameは既定のままでよい
-            RHI::BufferDesc instanceDesc;
-            instanceDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
-            instanceDesc.SizeInBytes = static_cast<uint32_t>(sizeof(GpuModelCullInstance)) * capacity;
-            instanceDesc.StrideInBytes = static_cast<uint32_t>(sizeof(GpuModelCullInstance));
-            instanceDesc.MaxUpdatesPerFrame = 1;
-            auto instanceBuffer = m_Device->CreateBuffer(instanceDesc);
-
-            // 生き残りの DispatchMesh 引数。そのままExecuteIndirectへ渡すのでIndirectArgs。
-            //
-            // 【区画ごとに配列を分ける】PSOはExecuteIndirectの引数では切り替えられないため、
-            // ミラーリングの有無・プリパスの不透明/カットアウトを別の配列へ詰め、
-            // PSOごとに1回ずつ発行する。
-            // 先頭のkModelCullArgsBaseOffsetバイトは区画ごとの発行数(uint)が占める
-            RHI::BufferDesc drawArgsDesc;
-            drawArgsDesc.Usage = RHI::BufferUsage::IndirectArgs;
-            drawArgsDesc.SizeInBytes =
-                kModelCullArgsBaseOffset + ComputeModelCullRegionStride(capacity) * kModelCullRegionCount;
-            drawArgsDesc.StrideInBytes = RHI::IRHICommandList::kDispatchMeshIndirectArgStride;
-            auto drawArgsBuffer = m_Device->CreateBuffer(drawArgsDesc);
-
-            // 【作り終えてから差し替える】途中で例外が出たときに、古いバッファを
-            // 手放した状態で戻ってしまうのを避ける
-            m_ModelCullInstanceBuffer = std::move(instanceBuffer);
-            m_ModelCullDrawArgsBuffer = std::move(drawArgsBuffer);
-            m_ModelCullCapacity = capacity;
-            m_ModelCullRegionStride = ComputeModelCullRegionStride(capacity);
-        }
-        catch (const std::exception& e)
-        {
-            Core::Logger::Warning(
-                "KurenaiEngine3D",
-                std::string("モデル単位のGPUカリングのバッファを作れませんでした(この機能を止めます): ") + e.what());
-            m_ModelCullInstanceBuffer.reset();
-            m_ModelCullDrawArgsBuffer.reset();
-            m_ModelCullCapacity = 0;
-            m_ModelCullRegionStride = 0;
-        }
-    }
-
-    bool KurenaiEngine3D::IssueModelCullIndirect(
-        RHI::IRHICommandList* cmd, uint32_t region, RHI::IRHIPipelineState* pipelineState,
-        RHI::IRHIPipelineState*& currentPipelineState)
-    {
-        if (!cmd || region >= kModelCullRegionCount || !pipelineState || !m_ModelCullDrawArgsBuffer)
-        {
-            return false;
-        }
-        // GPUが書く発行数の上限。候補が1件も無い区画はExecuteIndirectごと省く
-        const uint32_t maxCommandCount = m_ModelCullRegionCandidates[region];
-        if (maxCommandCount == 0)
-        {
-            return false;
-        }
-
-        if (pipelineState != currentPipelineState)
-        {
-            cmd->SetPipelineState(pipelineState);
-            cmd->SetConstantBuffer(0, m_FrameConstantBuffer.get());
-            cmd->SetSamplerSet(m_MaterialSamplers.get());
-            currentPipelineState = pipelineState;
-        }
-
-        // 【b1(ObjectConstants)はここでは張らない】コマンドシグネチャがドローごとに
-        // 差し替える。ここで張っても最初のドローで上書きされるだけで、意味が無いどころか
-        // 「張ってあるから大丈夫」という誤解の元になる
-        cmd->DispatchMeshIndirect(
-            m_ModelCullDrawArgsBuffer.get(),
-            kModelCullArgsBaseOffset + region * m_ModelCullRegionStride,
-            maxCommandCount,
-            region * static_cast<uint32_t>(sizeof(uint32_t)));
-        return true;
     }
 
     bool KurenaiEngine3D::ShouldUseModelMeshletPath(
@@ -5465,10 +5349,11 @@ namespace Kurenai
         {
             // 今フレームのCPU側の結果を、GPUのコピーとまったく同じ位置へ積む。
             // 読むときに同じ位置から取れば、比べるのは同じフレームのもの同士になる
-            m_ModelCullCpuFrustumHistory[m_ModelCullRingIndex] = m_ModelCullCpuFrustumCulled;
+            m_ModelCullCpuFrustumHistory[m_ModelCullRingIndex] = m_GeometryPasses->GetModelCullCpuFrustumCulled();
             // 【比べる相手はG-Bufferぶんの候補数】GPU側の「判定」もそこだけを数えている
             m_ModelCullCandidateHistory[m_ModelCullRingIndex] =
-                m_ModelCullCandidateCount - m_ModelCullPrepassCandidateCount;
+                m_GeometryPasses->GetModelCullCandidateCount()
+                - m_GeometryPasses->GetModelCullPrepassCandidateCount();
 
             const uint32_t oldest = (m_ModelCullRingIndex + 1) % kMeshletCullStatsRingSize;
             uint32_t counters[kModelCullCounterCount] = {};

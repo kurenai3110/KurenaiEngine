@@ -10,7 +10,8 @@
 #include "Core/Logger.h"
 #include "Core/RenderGraph.h"
 #include "Core/StringUtil.h"
-// シャドウのドローコール数を m_ShadowPasses->GetDrawCalls() で読むため、前方宣言では足りない
+// パス群のカウンタを m_XxxPasses->Get...() で読むため、前方宣言では足りない
+#include "../Passes/GeometryPasses.h"
 #include "../Passes/ShadowPasses.h"
 #include "RenderDumpService.h"
 
@@ -1072,7 +1073,7 @@ namespace Kurenai
             std::snprintf(
                 modelCullRegionText, sizeof(modelCullRegionText),
                 "  モデル単位GPU発行(%s): G-Buffer %u+%u / プリパス不透明 %u+%u / プリパスカットアウト %u+%u",
-                m_ModelCullIndirectActiveLastFrame ? "間接描画" : "計数のみ",
+                m_GeometryPasses->WasModelCullIndirectActiveLastFrame() ? "間接描画" : "計数のみ",
                 m_ModelCullRegionIssued[kModelCullRegionGBuffer],
                 m_ModelCullRegionIssued[kModelCullRegionGBufferMirrored],
                 m_ModelCullRegionIssued[kModelCullRegionPrepassOpaque],
@@ -1089,7 +1090,7 @@ namespace Kurenai
                 modelCullPathText, sizeof(modelCullPathText),
                 "  Hi-Zの出どころ: %s / 判定ディスパッチ: プリパスぶん %u + G-Bufferぶん %u",
                 m_HiZFromDepthPrepassLastFrame ? "深度プリパス(今フレーム)" : "G-Bufferの後(前フレーム)",
-                m_ModelCullDispatchCounts[0], m_ModelCullDispatchCounts[1]);
+                m_GeometryPasses->GetModelCullDispatchCount(0), m_GeometryPasses->GetModelCullDispatchCount(1));
             Core::Logger::Info("Perf", modelCullPathText);
 
             if (m_ModelCullTested != m_ModelCullComparedCandidateCount ||

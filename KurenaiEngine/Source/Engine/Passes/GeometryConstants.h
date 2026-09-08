@@ -6,6 +6,7 @@
 #include <DirectXMath.h>
 
 #include "RHI/IRHIBuffer.h"
+#include "RHI/IRHICommandList.h"
 
 // Hi-Z とモデル単位GPUカリングの、C++側の cbuffer の写しと候補レコード(段階6)。
 //
@@ -113,6 +114,27 @@ namespace Kurenai::Passes
         // 【ObjectConstantsの中身はここに持たない】GPUへ載せる直前(ModelCullパスの中)で作る。
         // 引数に書き込むのは定数バッファのリングスロットのGPUアドレスで、それは
         // UpdateBufferを呼んだ後にしか分からないため
+        // ModelCull.hlsl の struct ModelCullInstance と1対1で対応(48バイト)。
+        // **構造化バッファは詰めて並ぶ**ので、float3の直後にuintが来る並びをそのまま守る
+        struct GpuModelCullInstance
+        {
+            float BoundsMin[3];
+            uint32_t GroupCount;
+            float BoundsMax[3];
+            // 出力先の区画番号(= PSO。kModelCullRegion* を参照)
+            uint32_t RegionIndex;
+            // このドローが使うObjectConstantsのGPU仮想アドレス([0]=下位32bit, [1]=上位32bit)
+            uint32_t CbvAddress[2];
+            uint32_t Padding[2];
+        };
+        static_assert(sizeof(GpuModelCullInstance) == 48, "ModelCull.hlslのModelCullInstanceと一致していない");
+        // 区画1つぶんのバイト数。区画の境目も8バイト境界に載せたいので256へ切り上げる
+        inline uint32_t ComputeModelCullRegionStride(uint32_t capacity)
+        {
+            const uint32_t bytes = RHI::IRHICommandList::kDispatchMeshIndirectArgStride * capacity;
+            return (bytes + 255u) & ~255u;
+        }
+
         struct ModelCullDrawCandidate
         {
             const Assets::ModelInstance* Instance;

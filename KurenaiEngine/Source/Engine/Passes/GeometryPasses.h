@@ -67,8 +67,75 @@ namespace Kurenai
                 RHI::IRHIDevice& device, RHI::Format emissiveFormat,
                 const std::vector<RHI::InputElementDesc>& modelInputLayout);
 
+            void CreateModelCullResources(RHI::IRHIDevice& device, const std::wstring& shaderDirectory);
+            // 生成に失敗したときに呼ぶ。カリングは無効のままラスタ経路で動く
+            void ResetModelCullResources();
+            // 候補数に足りる大きさのバッファを用意する。**足りていれば何もしない**。
+            // 失敗しても致命的ではない(このフレームはGPUカリングを使わないだけ)
+            void EnsureModelCullCapacity(RHI::IRHIDevice& device, uint32_t candidateCount);
+            // 間接描画で1区画ぶんを発行する。区画が空、またはPSOが無ければ何もせずfalseを返す。
+            // currentPipelineState は呼び出し側のPSOキャッシュで、切り替えたら書き換える
+            bool IssueModelCullIndirect(
+                RHI::IRHICommandList* cmd, uint32_t region, RHI::IRHIPipelineState* pipelineState,
+                RHI::IRHIPipelineState*& currentPipelineState, RHI::IRHIBuffer* frameConstantBuffer,
+                RHI::IRHISamplerSet* materialSamplers);
+
+            // 【publicにしてある】GPUカリングの結果を読み戻すのはエンジンのRender()で、
+            // そこが「今フレームCPUが何を数えたか」を比較の相手として要る
+            uint32_t GetModelCullCandidateCount() const { return m_ModelCullCandidateCount; }
+            uint32_t GetModelCullPrepassCandidateCount() const { return m_ModelCullPrepassCandidateCount; }
+            uint32_t GetModelCullCpuFrustumCulled() const { return m_ModelCullCpuFrustumCulled; }
+            // 読み戻した値をログへ出すのは Diagnostics/RenderDumpService.cpp で、
+            // 「どの経路で描いたか」と「判定を何件ずつに分けたか」を添える
+            bool WasModelCullIndirectActiveLastFrame() const { return m_ModelCullIndirectActiveLastFrame; }
+            uint32_t GetModelCullDispatchCount(uint32_t index) const { return m_ModelCullDispatchCounts[index]; }
+
         private:
             KurenaiEngine3D& m_Engine;
+
+            // モデル単位のGPUカリング(ModelCull.hlsl)。増幅シェーダーへ渡す候補を
+            // コンピュートで間引き、生き残りだけをExecuteIndirectで描く
+            std::unique_ptr<RHI::IRHIShader> m_ModelCullComputeShader;
+            std::unique_ptr<RHI::IRHIPipelineState> m_ModelCullPipelineState;
+            std::unique_ptr<RHI::IRHIBuffer> m_ModelCullConstantBuffer;
+            // 候補の配列。毎フレームCPUから書き直すのでStructuredReadOnly
+            std::unique_ptr<RHI::IRHIBuffer> m_ModelCullInstanceBuffer;
+            // [判定, 視錐台で間引き, オクルージョンで間引き, 生き残り] + 区画ごとの発行数。
+            // 読み戻すのは KurenaiEngine3D::Render()(受け皿のリングはそちらが持つ)。
+            //
+            // 【前の4つはモデル数】数えるのはG-Bufferぶんの候補だけで、そこは1モデル1件になる
+            // (m_ModelCullPrepassCandidateCount のコメント参照)。深度プリパスぶんも数えると
+            // 1モデルを2回数えてしまい、CPU側の判定と単位が合わなくなる
+            std::unique_ptr<RHI::IRHIBuffer> m_ModelCullCounterBuffer;
+            // ExecuteIndirectへそのまま渡すバッファ。先頭に区画ごとの発行数が並び、
+            // kModelCullArgsBaseOffset から先が区画ごとの引数配列
+            std::unique_ptr<RHI::IRHIBuffer> m_ModelCullDrawArgsBuffer;
+            // 区画1つぶんのバイト数(ComputeModelCullRegionStride)。描画パスが
+            // 自分の区画の先頭オフセットを求めるのに使う
+            uint32_t m_ModelCullRegionStride = 0;
+            // 区画ごとの候補数。ExecuteIndirectへ渡すmaxCommandCount(GPUが書く発行数の上限)
+            uint32_t m_ModelCullRegionCandidates[kModelCullRegionCount]{};
+            // GPUへ載せる直前の候補配列。毎フレームの確保を避けるため使い回す
+            std::vector<GpuModelCullInstance> m_ModelCullUploadScratch;
+            // m_ModelCullInstanceBuffer / m_ModelCullDrawArgsBuffer が収まる候補数。
+            // 1インスタンスがLODのクロスディザで最大2件の候補を出すため、インスタンス数の2倍で確保する
+            uint32_t m_ModelCullCapacity = 0;
+            // このフレームにCPUが積んだ候補数(プリパスぶん + G-Bufferぶん)
+            uint32_t m_ModelCullCandidateCount = 0;
+            // そのうち深度プリパスぶんの数。候補配列の前半を占め、G-Bufferぶんが後半に続く。
+            //
+            // 【この境目が2つの役目を持つ】判定を2回に分けるときの区切りであり、
+            // 統計を数え始める位置でもある。**統計はG-Bufferぶんだけで数える** ――
+            // 両方数えると1モデルを2回数え、CPU側の数と単位が合わなくなる
+            uint32_t m_ModelCullPrepassCandidateCount = 0;
+            // 同じフレームでCPU側が視錐台で間引いた数。GPUの「視錐台で間引き」と突き合わせる。
+            // 突き合わせのためにこの値を遅らせて積むリングは KurenaiEngine3D 側にある
+            // (GPUの数値が2フレーム遅れて返るため)
+            uint32_t m_ModelCullCpuFrustumCulled = 0;
+            // 判定を2回に分けたときの、それぞれが受け持った候補数(プリパスぶん / G-Bufferぶん)
+            uint32_t m_ModelCullDispatchCounts[2]{};
+            // 上の値がどの経路のものか。ログで「間接描画で描いた」と「数えただけ」を区別する
+            bool m_ModelCullIndirectActiveLastFrame = false;
 
             // G-Bufferパス。頂点シェーダーは水面パスとも共有する
             std::unique_ptr<RHI::IRHIShader> m_GBufferVertexShader;

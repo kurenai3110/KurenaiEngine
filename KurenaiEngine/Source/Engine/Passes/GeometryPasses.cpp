@@ -266,6 +266,130 @@ namespace Kurenai::Passes
         }
     }
 
+    void GeometryPasses::CreateModelCullResources(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
+    {
+        RHI::ShaderDesc modelCullCsDesc;
+        modelCullCsDesc.Stage = RHI::ShaderStage::Compute;
+        modelCullCsDesc.FilePath = shaderDirectory + L"ModelCull.kshader";
+        modelCullCsDesc.EntryPoint = "CSMain";
+        m_ModelCullComputeShader = device.CreateShader(modelCullCsDesc);
+        m_ModelCullPipelineState =
+            device.CreateComputePipelineState({ m_ModelCullComputeShader.get() });
+
+        RHI::BufferDesc modelCullConstantDesc;
+        modelCullConstantDesc.Usage = RHI::BufferUsage::Constant;
+        modelCullConstantDesc.SizeInBytes = sizeof(ModelCullConstants);
+        m_ModelCullConstantBuffer = device.CreateBuffer(modelCullConstantDesc);
+
+        RHI::BufferDesc modelCullCounterDesc;
+        modelCullCounterDesc.Usage = RHI::BufferUsage::Structured;
+        modelCullCounterDesc.SizeInBytes =
+            static_cast<uint32_t>(sizeof(uint32_t)) * kModelCullCounterCount;
+        modelCullCounterDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+        m_ModelCullCounterBuffer = device.CreateBuffer(modelCullCounterDesc);
+    }
+
+    void GeometryPasses::ResetModelCullResources()
+    {
+        m_ModelCullComputeShader.reset();
+        m_ModelCullPipelineState.reset();
+        m_ModelCullConstantBuffer.reset();
+        m_ModelCullCounterBuffer.reset();
+    }
+
+    void GeometryPasses::EnsureModelCullCapacity(RHI::IRHIDevice& device, uint32_t candidateCount)
+    {
+        if (candidateCount == 0 || !m_ModelCullPipelineState)
+        {
+            return;
+        }
+        if (m_ModelCullInstanceBuffer && m_ModelCullDrawArgsBuffer && candidateCount <= m_ModelCullCapacity)
+        {
+            return;
+        }
+
+        // 作り直しの頻度を下げるため、必要数ぴったりではなく少し余裕を持たせる。
+        // シーン切り替えとストリーミングで候補数は増減する
+        const uint32_t capacity = std::max<uint32_t>(64u, candidateCount + candidateCount / 4u);
+
+        try
+        {
+            // 候補の配列。毎フレームCPUから書き直すのでStructuredReadOnly。
+            // 1フレームに1回しか書かないためMaxUpdatesPerFrameは既定のままでよい
+            RHI::BufferDesc instanceDesc;
+            instanceDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
+            instanceDesc.SizeInBytes = static_cast<uint32_t>(sizeof(GpuModelCullInstance)) * capacity;
+            instanceDesc.StrideInBytes = static_cast<uint32_t>(sizeof(GpuModelCullInstance));
+            instanceDesc.MaxUpdatesPerFrame = 1;
+            auto instanceBuffer = device.CreateBuffer(instanceDesc);
+
+            // 生き残りの DispatchMesh 引数。そのままExecuteIndirectへ渡すのでIndirectArgs。
+            //
+            // 【区画ごとに配列を分ける】PSOはExecuteIndirectの引数では切り替えられないため、
+            // ミラーリングの有無・プリパスの不透明/カットアウトを別の配列へ詰め、
+            // PSOごとに1回ずつ発行する。
+            // 先頭のkModelCullArgsBaseOffsetバイトは区画ごとの発行数(uint)が占める
+            RHI::BufferDesc drawArgsDesc;
+            drawArgsDesc.Usage = RHI::BufferUsage::IndirectArgs;
+            drawArgsDesc.SizeInBytes =
+                kModelCullArgsBaseOffset + ComputeModelCullRegionStride(capacity) * kModelCullRegionCount;
+            drawArgsDesc.StrideInBytes = RHI::IRHICommandList::kDispatchMeshIndirectArgStride;
+            auto drawArgsBuffer = device.CreateBuffer(drawArgsDesc);
+
+            // 【作り終えてから差し替える】途中で例外が出たときに、古いバッファを
+            // 手放した状態で戻ってしまうのを避ける
+            m_ModelCullInstanceBuffer = std::move(instanceBuffer);
+            m_ModelCullDrawArgsBuffer = std::move(drawArgsBuffer);
+            m_ModelCullCapacity = capacity;
+            m_ModelCullRegionStride = ComputeModelCullRegionStride(capacity);
+        }
+        catch (const std::exception& e)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                std::string("モデル単位のGPUカリングのバッファを作れませんでした(この機能を止めます): ") + e.what());
+            m_ModelCullInstanceBuffer.reset();
+            m_ModelCullDrawArgsBuffer.reset();
+            m_ModelCullCapacity = 0;
+            m_ModelCullRegionStride = 0;
+        }
+    }
+
+    bool GeometryPasses::IssueModelCullIndirect(
+        RHI::IRHICommandList* cmd, uint32_t region, RHI::IRHIPipelineState* pipelineState,
+        RHI::IRHIPipelineState*& currentPipelineState, RHI::IRHIBuffer* frameConstantBuffer,
+        RHI::IRHISamplerSet* materialSamplers)
+    {
+        if (!cmd || region >= kModelCullRegionCount || !pipelineState || !m_ModelCullDrawArgsBuffer)
+        {
+            return false;
+        }
+        // GPUが書く発行数の上限。候補が1件も無い区画はExecuteIndirectごと省く
+        const uint32_t maxCommandCount = m_ModelCullRegionCandidates[region];
+        if (maxCommandCount == 0)
+        {
+            return false;
+        }
+
+        if (pipelineState != currentPipelineState)
+        {
+            cmd->SetPipelineState(pipelineState);
+            cmd->SetConstantBuffer(0, frameConstantBuffer);
+            cmd->SetSamplerSet(materialSamplers);
+            currentPipelineState = pipelineState;
+        }
+
+        // 【b1(ObjectConstants)はここでは張らない】コマンドシグネチャがドローごとに
+        // 差し替える。ここで張っても最初のドローで上書きされるだけで、意味が無いどころか
+        // 「張ってあるから大丈夫」という誤解の元になる
+        cmd->DispatchMeshIndirect(
+            m_ModelCullDrawArgsBuffer.get(),
+            kModelCullArgsBaseOffset + region * m_ModelCullRegionStride,
+            maxCommandCount,
+            region * static_cast<uint32_t>(sizeof(uint32_t)));
+        return true;
+    }
+
     void GeometryPasses::Register(
         Core::RenderGraph& graph,
         const Rendering::RenderFrameContext& frame,
@@ -347,7 +471,7 @@ namespace Kurenai::Passes
         // 【Hi-Zは前フレームのもの】Hi-Zパスの登録はG-Bufferより後なので、ここが読むのは
         // 前フレームに書かれた内容になる。カメラ移動ぶんAABBを膨らませて視差を吸収する
         const bool modelCullGpuActive = frame.Settings.Geometry.ModelCullGpuEnabled && meshletPathActive
-            && m_Engine.m_ModelCullPipelineState && m_Engine.m_ModelCullCounterBuffer && !m_Engine.m_Scene.Instances.empty();
+            && m_ModelCullPipelineState && m_ModelCullCounterBuffer && !m_Engine.m_Scene.Instances.empty();
 
         // hiZFromDepthPrepass = Hi-Zを**深度プリパスの深度から**作るか(宣言は上流にある)。
         // 作れるなら、G-Bufferの判定は今フレームのHi-Zで行える ――
@@ -406,10 +530,10 @@ namespace Kurenai::Passes
         m_ModelCullDraws.clear();
         std::vector<ModelCullDrawCandidate>& modelCullDraws = m_ModelCullDraws;
         std::vector<ModelCullDrawCandidate> modelCullGBufferDraws;
-        std::fill(std::begin(m_Engine.m_ModelCullRegionCandidates), std::end(m_Engine.m_ModelCullRegionCandidates), 0u);
-        m_Engine.m_ModelCullCandidateCount = 0;
-        m_Engine.m_ModelCullPrepassCandidateCount = 0;
-        m_Engine.m_ModelCullCpuFrustumCulled = 0;
+        std::fill(std::begin(m_ModelCullRegionCandidates), std::end(m_ModelCullRegionCandidates), 0u);
+        m_ModelCullCandidateCount = 0;
+        m_ModelCullPrepassCandidateCount = 0;
+        m_ModelCullCpuFrustumCulled = 0;
         if (modelCullGpuActive)
         {
             // 突き合わせ相手のCPU側の判定。G-Bufferのループが使うものと同じ錐台
@@ -474,12 +598,12 @@ namespace Kurenai::Passes
                         candidate.CountCullStats = countCullStats;
                         candidate.OcclusionMode = occlusionMode;
                         list.push_back(candidate);
-                        ++m_Engine.m_ModelCullRegionCandidates[region];
+                        ++m_ModelCullRegionCandidates[region];
                         // 【CPU側の間引き数もG-Bufferぶんだけ数える】GPU側の統計と単位を揃えるため。
                         // 両方数えると1モデルを2回数え、モデル数の2倍という比べにくい数になる
                         if (countCullStats && !cpuVisible)
                         {
-                            ++m_Engine.m_ModelCullCpuFrustumCulled;
+                            ++m_ModelCullCpuFrustumCulled;
                         }
                     };
 
@@ -519,16 +643,16 @@ namespace Kurenai::Passes
                 [](const Rendering::InstanceDrawUnit&, const Assets::Model&, const Assets::Mesh&, float) { return true; });
 
             // プリパスぶんを前半、G-Bufferぶんを後半に置く
-            m_Engine.m_ModelCullPrepassCandidateCount = static_cast<uint32_t>(modelCullDraws.size());
+            m_ModelCullPrepassCandidateCount = static_cast<uint32_t>(modelCullDraws.size());
             modelCullDraws.insert(
                 modelCullDraws.end(), modelCullGBufferDraws.begin(), modelCullGBufferDraws.end());
-            m_Engine.m_ModelCullCandidateCount = static_cast<uint32_t>(modelCullDraws.size());
-            m_Engine.EnsureModelCullCapacity(m_Engine.m_ModelCullCandidateCount);
+            m_ModelCullCandidateCount = static_cast<uint32_t>(modelCullDraws.size());
+            EnsureModelCullCapacity(*m_Engine.GetDevice(), m_ModelCullCandidateCount);
         }
 
         // ここまで来て初めてバッファが揃っているかが分かる(容量確保は失敗しうる)
-        const bool modelCullReady = modelCullGpuActive && m_Engine.m_ModelCullCandidateCount > 0
-            && m_Engine.m_ModelCullInstanceBuffer && m_Engine.m_ModelCullDrawArgsBuffer;
+        const bool modelCullReady = modelCullGpuActive && m_ModelCullCandidateCount > 0
+            && m_ModelCullInstanceBuffer && m_ModelCullDrawArgsBuffer;
         // 【ブラックボードへ載せる】graph.Execute() の後で走るカウンタの読み戻しが、
         // 「このフレームは間接描画の候補が揃っていたか」を同じ判断で知る必要がある
         bb.ModelCullReady = modelCullReady;
@@ -537,13 +661,13 @@ namespace Kurenai::Passes
         const bool modelCullIndirectActive =
             modelCullReady && frame.Settings.Geometry.ModelCullIndirectEnabled &&
             frame.Capabilities.IndirectDispatchMeshAvailable;
-        m_Engine.m_ModelCullIndirectActiveLastFrame = modelCullIndirectActive;
+        m_ModelCullIndirectActiveLastFrame = modelCullIndirectActive;
         m_Engine.m_HiZFromDepthPrepassLastFrame = hiZFromDepthPrepass;
-        m_Engine.m_ModelCullDispatchCounts[0] = hiZFromDepthPrepass
-            ? m_Engine.m_ModelCullPrepassCandidateCount
-            : m_Engine.m_ModelCullCandidateCount;
-        m_Engine.m_ModelCullDispatchCounts[1] = hiZFromDepthPrepass
-            ? (m_Engine.m_ModelCullCandidateCount - m_Engine.m_ModelCullPrepassCandidateCount)
+        m_ModelCullDispatchCounts[0] = hiZFromDepthPrepass
+            ? m_ModelCullPrepassCandidateCount
+            : m_ModelCullCandidateCount;
+        m_ModelCullDispatchCounts[1] = hiZFromDepthPrepass
+            ? (m_ModelCullCandidateCount - m_ModelCullPrepassCandidateCount)
             : 0u;
 
         // 候補配列のうち [beginIndex, beginIndex + count) だけを判定するパスを1つ登録する。
@@ -561,14 +685,14 @@ namespace Kurenai::Passes
             {
                 return;
             }
-            const uint32_t regionStride = m_Engine.m_ModelCullRegionStride;
-            const uint32_t statsBeginIndex = m_Engine.m_ModelCullPrepassCandidateCount;
+            const uint32_t regionStride = m_ModelCullRegionStride;
+            const uint32_t statsBeginIndex = m_ModelCullPrepassCandidateCount;
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = std::move(passName),
                 // Hi-Zを読む。前フレームのものを読む側では、それより前に書き手がいないので
                 // 辺は張られない(RenderGraphのReadsは登録順で解決する)
                 .Reads = { targets->HiZTexture.get() },
-                .BufferWrites = { m_Engine.m_ModelCullCounterBuffer.get(), m_Engine.m_ModelCullDrawArgsBuffer.get() },
+                .BufferWrites = { m_ModelCullCounterBuffer.get(), m_ModelCullDrawArgsBuffer.get() },
                 .Execute = [this, targets, meshletLOD, taaPrevViewProj, ambientOcclusionSettings, emissiveLightSettings, beginIndex, count, initializeBuffers, useCurrentFrameHiZ, occlusionEnabled, regionStride, statsBeginIndex, cameraMoveDistance, modelCullIndirectActive, &viewProj, &modelCullDraws, renderWidth, renderHeight, objectConstantBuffer](RHI::IRHICommandList* cmd)
                 {
                     if (initializeBuffers)
@@ -584,11 +708,11 @@ namespace Kurenai::Passes
                         // 【後半(G-Bufferぶん)もここで書く】2回目のディスパッチのぶんも含めて
                         // 一度に載せる。リングのスロットは上書きされない限り生き続けるので、
                         // 使うのが後のパスでも構わない
-                        m_Engine.m_ModelCullUploadScratch.clear();
-                        m_Engine.m_ModelCullUploadScratch.reserve(modelCullDraws.size());
+                        m_ModelCullUploadScratch.clear();
+                        m_ModelCullUploadScratch.reserve(modelCullDraws.size());
                         for (const ModelCullDrawCandidate& draw : modelCullDraws)
                         {
-                            KurenaiEngine3D::GpuModelCullInstance candidate{};
+                            GpuModelCullInstance candidate{};
                             candidate.BoundsMin[0] = draw.Instance->WorldBoundsMin[0];
                             candidate.BoundsMin[1] = draw.Instance->WorldBoundsMin[1];
                             candidate.BoundsMin[2] = draw.Instance->WorldBoundsMin[2];
@@ -616,20 +740,20 @@ namespace Kurenai::Passes
                                 }
                             }
 
-                            m_Engine.m_ModelCullUploadScratch.push_back(candidate);
+                            m_ModelCullUploadScratch.push_back(candidate);
                         }
                         cmd->UpdateBuffer(
-                            m_Engine.m_ModelCullInstanceBuffer.get(), m_Engine.m_ModelCullUploadScratch.data(),
+                            m_ModelCullInstanceBuffer.get(), m_ModelCullUploadScratch.data(),
                             static_cast<uint32_t>(
-                                sizeof(KurenaiEngine3D::GpuModelCullInstance) * m_Engine.m_ModelCullUploadScratch.size()));
+                                sizeof(GpuModelCullInstance) * m_ModelCullUploadScratch.size()));
 
                         // 加算しかしないので毎フレーム0へ戻す。生き残りを詰める位置も
                         // このカウンタで取るため、戻さないと2フレーム目以降が範囲外へ書く
-                        cmd->ClearUnorderedAccessBufferUint(m_Engine.m_ModelCullCounterBuffer.get(), 0);
+                        cmd->ClearUnorderedAccessBufferUint(m_ModelCullCounterBuffer.get(), 0);
                         // 引数バッファも同じ理由で戻す。**先頭の発行数だけでなく全体を0にする** ――
                         // 前フレームの引数が残っていると、件数が減ったときに古い引数が
                         // 範囲内に居座り、そのぶんが二重に描かれる
-                        cmd->ClearUnorderedAccessBufferUint(m_Engine.m_ModelCullDrawArgsBuffer.get(), 0);
+                        cmd->ClearUnorderedAccessBufferUint(m_ModelCullDrawArgsBuffer.get(), 0);
                     }
 
                     if (count == 0)
@@ -662,14 +786,14 @@ namespace Kurenai::Passes
                     cullConstants.CullExpandParams = {
                         useCurrentFrameHiZ ? 0.0f : cameraMoveDistance, 0.0f, 0.0f, 0.0f
                     };
-                    cmd->UpdateBuffer(m_Engine.m_ModelCullConstantBuffer.get(), &cullConstants, sizeof(cullConstants));
+                    cmd->UpdateBuffer(m_ModelCullConstantBuffer.get(), &cullConstants, sizeof(cullConstants));
 
-                    cmd->SetComputePipelineState(m_Engine.m_ModelCullPipelineState.get());
-                    cmd->SetComputeConstantBuffer(0, m_Engine.m_ModelCullConstantBuffer.get());
-                    cmd->SetComputeShaderResourceBuffer(0, m_Engine.m_ModelCullInstanceBuffer.get());
+                    cmd->SetComputePipelineState(m_ModelCullPipelineState.get());
+                    cmd->SetComputeConstantBuffer(0, m_ModelCullConstantBuffer.get());
+                    cmd->SetComputeShaderResourceBuffer(0, m_ModelCullInstanceBuffer.get());
                     cmd->SetComputeTexture(1, targets->HiZTexture.get());
-                    cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_ModelCullCounterBuffer.get());
-                    cmd->SetComputeUnorderedAccessBuffer(1, m_Engine.m_ModelCullDrawArgsBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, m_ModelCullCounterBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(1, m_ModelCullDrawArgsBuffer.get());
 
                     cmd->Dispatch(
                         (count + ShaderInterop::kModelCullGroupSize - 1) / ShaderInterop::kModelCullGroupSize,
@@ -731,7 +855,7 @@ namespace Kurenai::Passes
         // 読めるHi-Zは前フレームのものなので、保守的に膨らませる従来の経路のまま
         addModelCullPass(
             "ModelCull", 0u,
-            hiZFromDepthPrepass ? m_Engine.m_ModelCullPrepassCandidateCount : m_Engine.m_ModelCullCandidateCount,
+            hiZFromDepthPrepass ? m_ModelCullPrepassCandidateCount : m_ModelCullCandidateCount,
             /*initializeBuffers=*/true, /*useCurrentFrameHiZ=*/false, occlusionPrevFrameEnabled);
 
         if (depthPrepassRuns)
@@ -744,7 +868,7 @@ namespace Kurenai::Passes
                 // レンダーターゲットは持たない(深度だけを書く)
                 .DepthTarget = targets->GBufferDepth.get(),
                 // 間接描画の引数(直前のModelCullパスが書いたもの)
-                .BufferReads = { m_Engine.m_ModelCullDrawArgsBuffer.get() },
+                .BufferReads = { m_ModelCullDrawArgsBuffer.get() },
                 .Execute = [this, targets, modelInstanceBuffer, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, gbufferViewport, &viewProj, modelCullIndirectActive, occlusionCullingActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
                 {
                     cmd->SetViewport(gbufferViewport);
@@ -772,27 +896,27 @@ namespace Kurenai::Passes
                     // 後続のCPUループがGPUの実行と重なる
                     if (modelCullIndirectActive)
                     {
-                        if (m_Engine.IssueModelCullIndirect(
+                        if (IssueModelCullIndirect(
                                 cmd, kModelCullRegionPrepassOpaque, m_DepthPrepassMeshletPipelineState.get(),
-                                currentPipelineState))
+                                currentPipelineState, frameConstantBuffer, materialSamplers))
                         {
                             ++m_Engine.m_DrawCallsDepthPrepass;
                         }
-                        if (m_Engine.IssueModelCullIndirect(
+                        if (IssueModelCullIndirect(
                                 cmd, kModelCullRegionPrepassOpaqueMirrored,
-                                m_DepthPrepassMeshletPipelineStateMirrored.get(), currentPipelineState))
+                                m_DepthPrepassMeshletPipelineStateMirrored.get(), currentPipelineState, frameConstantBuffer, materialSamplers))
                         {
                             ++m_Engine.m_DrawCallsDepthPrepass;
                         }
-                        if (m_Engine.IssueModelCullIndirect(
+                        if (IssueModelCullIndirect(
                                 cmd, kModelCullRegionPrepassCutout,
-                                m_DepthPrepassMeshletCutoutPipelineState.get(), currentPipelineState))
+                                m_DepthPrepassMeshletCutoutPipelineState.get(), currentPipelineState, frameConstantBuffer, materialSamplers))
                         {
                             ++m_Engine.m_DrawCallsDepthPrepass;
                         }
-                        if (m_Engine.IssueModelCullIndirect(
+                        if (IssueModelCullIndirect(
                                 cmd, kModelCullRegionPrepassCutoutMirrored,
-                                m_DepthPrepassMeshletCutoutPipelineStateMirrored.get(), currentPipelineState))
+                                m_DepthPrepassMeshletCutoutPipelineStateMirrored.get(), currentPipelineState, frameConstantBuffer, materialSamplers))
                         {
                             ++m_Engine.m_DrawCallsDepthPrepass;
                         }
@@ -963,8 +1087,8 @@ namespace Kurenai::Passes
         {
             addHiZPass();
             addModelCullPass(
-                "ModelCullGBuffer", m_Engine.m_ModelCullPrepassCandidateCount,
-                m_Engine.m_ModelCullCandidateCount - m_Engine.m_ModelCullPrepassCandidateCount,
+                "ModelCullGBuffer", m_ModelCullPrepassCandidateCount,
+                m_ModelCullCandidateCount - m_ModelCullPrepassCandidateCount,
                 /*initializeBuffers=*/false, /*useCurrentFrameHiZ=*/true, occlusionCullingActive);
         }
 
@@ -988,7 +1112,7 @@ namespace Kurenai::Passes
                                targets->GBufferEmissive.get(), targets->GBufferVelocity.get(), targets->GBufferBentNormal.get() },
             .DepthTarget = targets->GBufferDepth.get(),
             // 間接描画の引数を読む(ModelCullパスが書いたもの)
-            .BufferReads = { m_Engine.m_ModelCullDrawArgsBuffer.get() },
+            .BufferReads = { m_ModelCullDrawArgsBuffer.get() },
             .Execute = [this, targets, modelInstanceBuffer, meshletLOD, ambientOcclusionSettings, emissiveLightSettings, geometrySettings, gbufferViewport, depthPrepassRuns, &viewProj, occlusionCullingActive, meshletCullStatsActive, modelCullIndirectActive, frameConstantBuffer, objectConstantBuffer, materialSamplers](RHI::IRHICommandList* cmd)
             {
                 // カリング統計のカウンタを0へ戻す。増幅シェーダーは加算しかしないので、
@@ -1097,19 +1221,19 @@ namespace Kurenai::Passes
                 if (modelCullIndirectActive)
                 {
                     const bool meshletDebug = geometrySettings.MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
-                    if (m_Engine.IssueModelCullIndirect(
+                    if (IssueModelCullIndirect(
                             cmd, kModelCullRegionGBuffer,
                             meshletDebug ? m_GBufferMeshletDebugPipelineState.get()
                                          : m_GBufferMeshletPipelineState.get(),
-                            currentPipelineState))
+                            currentPipelineState, frameConstantBuffer, materialSamplers))
                     {
                         ++m_Engine.m_DrawCallsGBuffer;
                     }
-                    if (m_Engine.IssueModelCullIndirect(
+                    if (IssueModelCullIndirect(
                             cmd, kModelCullRegionGBufferMirrored,
                             meshletDebug ? m_GBufferMeshletDebugPipelineStateMirrored.get()
                                          : m_GBufferMeshletPipelineStateMirrored.get(),
-                            currentPipelineState))
+                            currentPipelineState, frameConstantBuffer, materialSamplers))
                     {
                         ++m_Engine.m_DrawCallsGBuffer;
                     }
@@ -1244,11 +1368,11 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "ModelCullReadback",
-                .BufferReads = { m_Engine.m_ModelCullCounterBuffer.get() },
+                .BufferReads = { m_ModelCullCounterBuffer.get() },
                 .Execute = [this](RHI::IRHICommandList* cmd)
                 {
                     cmd->CopyBufferToReadback(
-                        m_Engine.m_ModelCullReadback[m_Engine.m_ModelCullRingIndex].get(), m_Engine.m_ModelCullCounterBuffer.get(),
+                        m_Engine.m_ModelCullReadback[m_Engine.m_ModelCullRingIndex].get(), m_ModelCullCounterBuffer.get(),
                         static_cast<uint32_t>(sizeof(uint32_t)) * kModelCullCounterCount);
                 },
             });
