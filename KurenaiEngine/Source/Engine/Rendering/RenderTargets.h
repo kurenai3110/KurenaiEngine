@@ -167,6 +167,41 @@ namespace Kurenai::Rendering
         // 宣言しているリソースを未バインドのままDrawできない)
         std::unique_ptr<RHI::IRHIBuffer> MegaLightsAccumBuffer;
 
+        // 確率的サンプリングの作業バッファ一式。すべて解像度に依存する。
+        // 【なぜここが持つか】書くのも読むのもMegaLightsPassesだけだが、
+        // 上のMegaLightsTexture等と同じくCreateRenderTargetsが解像度に追従して作り直す。
+        // 加えてKurenaiEngine3Dが実行可否の判定でリザーバと履歴のnullptrを見る。
+        //
+        // 1画素につき1リザーバ(16バイト)。MegaLightsCommon.hlsli の MegaLightsReservoir と
+        // 一致させること。空間再利用は「読みながら同じバッファへ書けない」(近傍を読むので
+        // 競合する)ため、出力先を別に2本持つ
+        std::unique_ptr<RHI::IRHIBuffer> MegaLightsReservoirBuffer;
+        std::unique_ptr<RHI::IRHIBuffer> MegaLightsReservoirSpatialBuffer;
+        // 空間再利用を2回以上回すときの ping-pong の相方
+        std::unique_ptr<RHI::IRHIBuffer> MegaLightsReservoirSpatialBuffer2;
+        // 画素ごとの「遮蔽が確定した灯」のキャッシュ(uint。0xFFFFFFFFで無し)。
+        // 殺しの持ち回りより寿命が長く、影の縁の暗いフリンジを消すのに要る
+        std::unique_ptr<RHI::IRHIBuffer> MegaLightsBlockedLightBuffer;
+        // 時間再利用の履歴。**2本のping-pongにするのは、RenderGraphがWARの辺を
+        // 張らないため**。1本で済ませると「今フレームのTemporalが読んだ直後に
+        // 同じバッファへ書く」形になり、条件分岐でパスが1つ消えた瞬間に静かに壊れる
+        std::unique_ptr<RHI::IRHIBuffer> MegaLightsReservoirHistory[2];
+        // 履歴の幾何(前フレームの法線・線形深度・材質)。
+        // 【なぜ専用に持つのか】G-Bufferは毎フレーム上書きされ、前フレームの中身が
+        // どこにも残らない。再投影先が「同じ面か」を判定するには前フレームの幾何が要る。
+        // 1画素12バイト(法線oct 4 + View空間Z 4 + 材質 4)。
+        // MegaLightsCommon.hlsli の MegaLightsHistoryGuide とストライドを一致させること
+        std::unique_ptr<RHI::IRHIBuffer> MegaLightsHistoryGuide[2];
+
+        // デノイザの作業用テクスチャ。整数フォーマットが無いRHIなのですべてfloatで持つ。
+        // 【履歴もping-pongにする】RenderGraphはWARの辺を張らないので、
+        // 読む側と書く側が同じだと条件分岐でパスが消えた瞬間に静かに壊れる
+        std::unique_ptr<RHI::IRHITexture> MegaLightsDenoiseHistory[2];
+        std::unique_ptr<RHI::IRHITexture> MegaLightsDenoiseMoments[2];
+        // à-trous のping-pong用。段ごとに入れ替える
+        std::unique_ptr<RHI::IRHITexture> MegaLightsDenoisePing[2];
+        std::unique_ptr<RHI::IRHITexture> MegaLightsDenoiseMomentPing[2];
+
         // G-Buffer の生成は元の位置ごとに3つへ分ける。間に他のテクスチャ生成があるため、
         // 順序を変えるとDX12のディスクリプタ枠の割り当て順が変わり、意味の無い差分になる。
         // 呼び出し元のtry内から呼ぶこと。確保失敗時のHDR→Legacy8bitフォールバックは
@@ -211,5 +246,11 @@ namespace Kurenai::Rendering
         void CreateMegaLightsDenoised(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         // 蓄積バッファ。elementCountは対応環境なら width*height、非対応なら1(ダミー)
         void CreateMegaLightsAccum(RHI::IRHIDevice& device, uint32_t elementCount);
+        // 確率的サンプリングのリザーバ一式。samplesPerPixel は1画素あたりの標本数で、
+        // **定数バッファへ渡す値と必ず一致させること**(食い違うと確保外へ書く)
+        void CreateMegaLightsReservoirs(
+            RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t samplesPerPixel);
+        void CreateMegaLightsHistoryGuide(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+        void CreateMegaLightsDenoiseWork(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
     };
 }

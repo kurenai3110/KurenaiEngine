@@ -25,6 +25,49 @@ namespace Kurenai::Passes
         using ShaderInterop::MegaLightsStochasticConstants;
     }
 
+    void MegaLightsPasses::AdvanceHistory(bool temporalRan)
+    {
+        if (temporalRan)
+        {
+            m_MegaLightsHistoryIndex ^= 1u;
+            // 【1フレーム走ってから有効にする】書いた側を次フレームが読むので、
+            // 反転したあとに立てる。立てるのが早いと未初期化の内容を履歴として読む
+            m_MegaLightsHistoryValid = true;
+        }
+        else
+        {
+            // 走らなかったフレームを挟むと履歴が途切れる(中身が古い or 未初期化)
+            m_MegaLightsHistoryValid = false;
+        }
+    }
+
+    void MegaLightsPasses::AdvanceDenoiseHistory(bool denoiseRan)
+    {
+        if (denoiseRan)
+        {
+            m_MegaLightsDenoiseHistoryIndex ^= 1u;
+            m_MegaLightsDenoiseHistoryValid = true;
+        }
+        else
+        {
+            // 走らなかったフレームを挟むと履歴が途切れる(中身が古い)
+            m_MegaLightsDenoiseHistoryValid = false;
+        }
+    }
+
+    void MegaLightsPasses::ResetAccumulation()
+    {
+        // 解像度が変わると添字の意味が変わるので、蓄積も書き出しも必ず取り直す。
+        // 【書き出し済みフラグも戻すこと】起動直後は既定解像度から実際のウィンドウサイズへ
+        // 切り替わる。戻さないと、切り替わる前の低解像度のまま1回書き出して終わってしまう
+        m_MegaLightsAccumFrames = 0;
+        m_MegaLightsAccumWarmupFrames = 0;
+        m_MegaLightsDumpIssued = false;
+        m_MegaLightsDumpDone = false;
+        m_MegaLightsDumpCopyFrame = 0;
+        m_MegaLightsAccumReadback.reset();
+    }
+
     void MegaLightsPasses::CreateLightCullingPipelineState(
         RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
     {
@@ -320,7 +363,7 @@ namespace Kurenai::Passes
                     // (単調増加していればよく、ジッターの位相とは無関係)
                     poolConstants.PoolParams =
                     {
-                        m_Engine.m_TAAFrameIndex,
+                        m_Engine.GetTAAFrameIndex(),
                         megaLightsTileOffset.x,
                         megaLightsTileOffset.y,
                         0u,
@@ -356,14 +399,14 @@ namespace Kurenai::Passes
         // 【フレーム単位の1変数に閉じること】画素やタイルごとに切り替えると境界で
         // 二重計上し、静止画では見えない。DX11/非DXR は ShouldRunMegaLights() が偽なので
         // 自動的に段階1のプロキシへ落ちる ―― 分岐を追加で書かない
-        const bool meshLightsActive = m_Engine.m_MeshLightsEnabled && m_Engine.m_MeshLightScene.IsValid();
+        const bool meshLightsActive = m_Engine.IsMeshLightsEnabled() && m_Engine.GetMeshLightScene().IsValid();
         const uint32_t meshLightTriangleCount =
-            meshLightsActive ? m_Engine.m_MeshLightScene.GetTriangleCount() : 0u;
+            meshLightsActive ? m_Engine.GetMeshLightScene().GetTriangleCount() : 0u;
         // t8 に張る三角形テーブル。無効なフレームでも何かを張る必要がある
         // (DX12はPSO切替でルート引数が無効化されるため)。読まれないダミーとして
         // ライトリストを張る ―― 三角形数0なのでループが1周も回らない
         RHI::IRHIBuffer* const meshLightBufferForBinding =
-            meshLightsActive ? m_Engine.m_MeshLightScene.GetTriangleBuffer() : lightBuffer;
+            meshLightsActive ? m_Engine.GetMeshLightScene().GetTriangleBuffer() : lightBuffer;
 
         if (megaLightsRuns && frame.Settings.MegaLights.Mode == MegaLightsMode::Reference)
         {
@@ -394,7 +437,7 @@ namespace Kurenai::Passes
                     };
                     // 球光源のサンプル列を毎フレーム回す種。確率的サンプリング側と同じ
                     // フレーム番号を使う(あちらは Params1.w)
-                    megaLightsConstants.Params1 = { m_Engine.m_TAAFrameIndex, meshLightTriangleCount, 0u, 0u };
+                    megaLightsConstants.Params1 = { m_Engine.GetTAAFrameIndex(), meshLightTriangleCount, 0u, 0u };
                     // 段階1が MakeGPULightFromEmissiveProxy で毎フレーム掛けているのと同じ倍率。
                     // これで ImGui の「自発光の強度」がメッシュライトにもライブに効く
                     // y は影響半径の伸縮。半径は倍率1で焼いてあり、段階1の Range は
@@ -477,7 +520,7 @@ namespace Kurenai::Passes
                     kLightTileSize,
                     // 候補プールを書いたときと同じKでなければならない(上のTileParams.wと同値)
                     static_cast<uint32_t>(megaLightsSettings.TilePoolCapacity),
-                    m_Engine.m_TAAFrameIndex,
+                    m_Engine.GetTAAFrameIndex(),
                 };
                 stochasticConstants.Params2 =
                 {
@@ -525,8 +568,8 @@ namespace Kurenai::Passes
                 // 遮蔽の確定した灯のキャッシュを信用してよいかの判定にだけ使う。
                 // **陽性対照では切る**(履歴に依存すると手法2との画素単位の一致が崩れる)
                 const bool historyUsable = megaLightsQuadShared
-                                               ? (m_Engine.m_MegaLightsHistoryValid && megaLightsSettings.BlockedCacheEnabled)
-                                               : m_Engine.m_MegaLightsHistoryValid;
+                                               ? (m_MegaLightsHistoryValid && megaLightsSettings.BlockedCacheEnabled)
+                                               : m_MegaLightsHistoryValid;
                 stochasticConstants.Params4 = {
                     historyUsable ? 1u : 0u,
                     spatialIteration,
@@ -565,11 +608,11 @@ namespace Kurenai::Passes
             // ここから生まれている。1画素1レイという予算はこれを外して初めて成り立つ
             const bool temporalRuns = !megaLightsQuadShared && frame.Settings.MegaLights.TemporalEnabled &&
                                       m_MegaLightsTemporalPipelineState &&
-                                      m_Engine.m_MegaLightsReservoirHistory[0] && m_Engine.m_MegaLightsHistoryGuide[0];
+                                      targets->MegaLightsReservoirHistory[0] && targets->MegaLightsHistoryGuide[0];
             const bool spatialRuns = !megaLightsQuadShared && frame.Settings.MegaLights.SpatialEnabled &&
                                      m_MegaLightsSpatialPipelineState &&
-                                     m_Engine.m_MegaLightsReservoirSpatialBuffer &&
-                                     m_Engine.m_MegaLightsReservoirSpatialBuffer2 && frame.Settings.MegaLights.SpatialNeighborCount > 0;
+                                     targets->MegaLightsReservoirSpatialBuffer &&
+                                     targets->MegaLightsReservoirSpatialBuffer2 && frame.Settings.MegaLights.SpatialNeighborCount > 0;
             // 反復回数。ping-pongのバッファと定数バッファの本数で上限が決まる。
             // 【時間再利用を切っているときは1回に落とす】不偏化の分母(Z)の可視性込みの
             // 判定は「生きているリザーバはこのフレーム・この画素で可視」という不変条件に
@@ -589,12 +632,12 @@ namespace Kurenai::Passes
             }
             // 最後の反復が書いた側をシェードが読む
             RHI::IRHIBuffer* const spatialPingPong[kMegaLightsMaxSpatialIterations] = {
-                m_Engine.m_MegaLightsReservoirSpatialBuffer.get(), m_Engine.m_MegaLightsReservoirSpatialBuffer2.get()
+                targets->MegaLightsReservoirSpatialBuffer.get(), targets->MegaLightsReservoirSpatialBuffer2.get()
             };
 
             // ping-pong。今フレームが書く側と、前フレームが書いた側
-            const uint32_t historyWriteIndex = m_Engine.m_MegaLightsHistoryIndex;
-            const uint32_t historyReadIndex = m_Engine.m_MegaLightsHistoryIndex ^ 1u;
+            const uint32_t historyWriteIndex = m_MegaLightsHistoryIndex;
+            const uint32_t historyReadIndex = m_MegaLightsHistoryIndex ^ 1u;
 
             // 【履歴は時間再利用の出力に取る ―― 空間再利用の出力を履歴へ戻してはいけない】
             // 一度、計画(1-3節)どおり「時間→空間の結果を履歴にする」形へ変えたところ、
@@ -602,10 +645,10 @@ namespace Kurenai::Passes
             // サンプルが混ざる正帰還ループができ、Wが往復のたびに複利で増幅されるため。
             // 空間再利用はフレーム内で完結させ、履歴には時間再利用の出力だけを入れる
             RHI::IRHIBuffer* const temporalOutputBuffer =
-                temporalRuns ? m_Engine.m_MegaLightsReservoirHistory[historyWriteIndex].get() : nullptr;
+                temporalRuns ? targets->MegaLightsReservoirHistory[historyWriteIndex].get() : nullptr;
             // 空間再利用の入力 = 時間再利用を挟んだならその出力、挟まないならInitialの出力
             RHI::IRHIBuffer* const reuseInputBuffer =
-                temporalRuns ? temporalOutputBuffer : m_Engine.m_MegaLightsReservoirBuffer.get();
+                temporalRuns ? temporalOutputBuffer : targets->MegaLightsReservoirBuffer.get();
             RHI::IRHIBuffer* const shadeReservoirBuffer =
                 spatialRuns ? spatialPingPong[(spatialIterations - 1u) % kMegaLightsMaxSpatialIterations]
                             : reuseInputBuffer;
@@ -618,7 +661,7 @@ namespace Kurenai::Passes
                     brdfLUTTexture,
                 },
                 .BufferReads = { lightBuffer, tilePoolBufferForBinding },
-                .BufferWrites = { m_Engine.m_MegaLightsReservoirBuffer.get(), m_Engine.m_MegaLightsBlockedLightBuffer.get() },
+                .BufferWrites = { targets->MegaLightsReservoirBuffer.get(), targets->MegaLightsBlockedLightBuffer.get() },
                 .Execute = [this, targets, lightBuffer, raytracingScene, brdfLUTTexture, tilePoolBufferForBinding, updateStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     updateStochasticConstants(cmd);
@@ -639,8 +682,8 @@ namespace Kurenai::Passes
                     cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
                     cmd->SetComputeShaderResourceBuffer(7, tilePoolBufferForBinding);
 
-                    cmd->SetComputeUnorderedAccessBuffer(0, m_Engine.m_MegaLightsReservoirBuffer.get());
-                    cmd->SetComputeUnorderedAccessBuffer(1, m_Engine.m_MegaLightsBlockedLightBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(0, targets->MegaLightsReservoirBuffer.get());
+                    cmd->SetComputeUnorderedAccessBuffer(1, targets->MegaLightsBlockedLightBuffer.get());
                     cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
@@ -660,11 +703,11 @@ namespace Kurenai::Passes
                     // 【読むのは前フレームが書いた側】今フレームが書くのはもう片方なので、
                     // 同じバッファへの読み書きが同一フレーム内で起きない(WARが生じない)。
                     // RenderGraphはWARの辺を張らないので、これは構造で守るしかない
-                    .BufferReads = { lightBuffer, m_Engine.m_MegaLightsReservoirBuffer.get(),
-                                     m_Engine.m_MegaLightsReservoirHistory[historyReadIndex].get(),
-                                     m_Engine.m_MegaLightsHistoryGuide[historyReadIndex].get() },
-                    .BufferWrites = { m_Engine.m_MegaLightsReservoirHistory[historyWriteIndex].get(),
-                                      m_Engine.m_MegaLightsHistoryGuide[historyWriteIndex].get() },
+                    .BufferReads = { lightBuffer, targets->MegaLightsReservoirBuffer.get(),
+                                     targets->MegaLightsReservoirHistory[historyReadIndex].get(),
+                                     targets->MegaLightsHistoryGuide[historyReadIndex].get() },
+                    .BufferWrites = { targets->MegaLightsReservoirHistory[historyWriteIndex].get(),
+                                      targets->MegaLightsHistoryGuide[historyWriteIndex].get() },
                     .Execute = [this, targets, lightBuffer, raytracingScene, brdfLUTTexture, historyReadIndex, historyWriteIndex, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
                         // 定数はInitial側で更新済み(中身はフレーム内で不変)
@@ -684,16 +727,16 @@ namespace Kurenai::Passes
                         cmd->SetComputeTexture(4, targets->GBufferMaterial.get());
                         cmd->SetComputeTexture(5, brdfLUTTexture);
                         cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
-                        cmd->SetComputeShaderResourceBuffer(7, m_Engine.m_MegaLightsReservoirBuffer.get());
+                        cmd->SetComputeShaderResourceBuffer(7, targets->MegaLightsReservoirBuffer.get());
                         cmd->SetComputeShaderResourceBuffer(
-                            8, m_Engine.m_MegaLightsReservoirHistory[historyReadIndex].get());
-                        cmd->SetComputeShaderResourceBuffer(9, m_Engine.m_MegaLightsHistoryGuide[historyReadIndex].get());
+                            8, targets->MegaLightsReservoirHistory[historyReadIndex].get());
+                        cmd->SetComputeShaderResourceBuffer(9, targets->MegaLightsHistoryGuide[historyReadIndex].get());
                         // 再投影はTAAとまったく同じ引き方をする(historyUv = uv - velocity)
                         cmd->SetComputeTexture(10, targets->GBufferVelocity.get());
 
                         cmd->SetComputeUnorderedAccessBuffer(
-                            0, m_Engine.m_MegaLightsReservoirHistory[historyWriteIndex].get());
-                        cmd->SetComputeUnorderedAccessBuffer(1, m_Engine.m_MegaLightsHistoryGuide[historyWriteIndex].get());
+                            0, targets->MegaLightsReservoirHistory[historyWriteIndex].get());
+                        cmd->SetComputeUnorderedAccessBuffer(1, targets->MegaLightsHistoryGuide[historyWriteIndex].get());
                         cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                     },
                 });
@@ -725,7 +768,7 @@ namespace Kurenai::Passes
                     // 入力は「時間再利用を挟んだならその出力、挟まないならInitialの出力」。
                     // 初期リザーバ(今フレームの殺しの持ち回り)も自画素の遮蔽の確定情報として読む
                     .BufferReads = { lightBuffer, spatialInput, targets->MegaLightsTilePoolBuffer.get(),
-                                     m_Engine.m_MegaLightsReservoirBuffer.get(), m_Engine.m_MegaLightsBlockedLightBuffer.get() },
+                                     targets->MegaLightsReservoirBuffer.get(), targets->MegaLightsBlockedLightBuffer.get() },
                     .BufferWrites = { spatialOutput },
                     .Execute = [this, targets, lightBuffer, raytracingScene, brdfLUTTexture, spatialInput, spatialOutput, spatialConstants, spatialIteration, buildStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
@@ -757,9 +800,9 @@ namespace Kurenai::Passes
                         cmd->SetComputeShaderResourceBuffer(8, targets->MegaLightsTilePoolBuffer.get());
                         // 今フレームの初期リザーバ。殺しの持ち回り(=自画素の遮蔽の確定情報)を
                         // 選択から外すのに使う
-                        cmd->SetComputeShaderResourceBuffer(9, m_Engine.m_MegaLightsReservoirBuffer.get());
+                        cmd->SetComputeShaderResourceBuffer(9, targets->MegaLightsReservoirBuffer.get());
                         // 遮蔽が確定した灯のキャッシュ
-                        cmd->SetComputeShaderResourceBuffer(10, m_Engine.m_MegaLightsBlockedLightBuffer.get());
+                        cmd->SetComputeShaderResourceBuffer(10, targets->MegaLightsBlockedLightBuffer.get());
 
                         cmd->SetComputeUnorderedAccessBuffer(0, spatialOutput);
                         cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
@@ -777,7 +820,7 @@ namespace Kurenai::Passes
                 // デノイザが「前フレームの幾何」を引くためのガイドを書く者がいなくなる。
                 // 書かないと動く細い形状でデノイザの履歴が構造的に必ず棄却される
                 // (docs/ImplementationDetail.md 61.7g.6)
-                RHI::IRHIBuffer* const guideWriteBuffer = m_Engine.m_MegaLightsHistoryGuide[historyWriteIndex].get();
+                RHI::IRHIBuffer* const guideWriteBuffer = targets->MegaLightsHistoryGuide[historyWriteIndex].get();
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "MegaLightsResolve",
                     .Reads =
@@ -786,7 +829,7 @@ namespace Kurenai::Passes
                         targets->GBufferDepth.get(), brdfLUTTexture,
                     },
                     .Writes = { targets->MegaLightsTexture.get() },
-                    .BufferReads = { lightBuffer, m_Engine.m_MegaLightsReservoirBuffer.get() },
+                    .BufferReads = { lightBuffer, targets->MegaLightsReservoirBuffer.get() },
                     .BufferWrites = { guideWriteBuffer },
                     .Execute = [this, targets, lightBuffer, brdfLUTTexture, guideWriteBuffer, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
@@ -805,7 +848,7 @@ namespace Kurenai::Passes
                         cmd->SetComputeTexture(4, targets->GBufferMaterial.get());
                         cmd->SetComputeTexture(5, brdfLUTTexture);
                         cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
-                        cmd->SetComputeShaderResourceBuffer(7, m_Engine.m_MegaLightsReservoirBuffer.get());
+                        cmd->SetComputeShaderResourceBuffer(7, targets->MegaLightsReservoirBuffer.get());
 
                         cmd->SetComputeUnorderedAccessTexture(0, targets->MegaLightsTexture.get());
                         cmd->SetComputeUnorderedAccessBuffer(1, guideWriteBuffer);
@@ -864,7 +907,7 @@ namespace Kurenai::Passes
         bb.MegaLightsDenoiseRuns = megaLightsDenoiseRuns;
         if (megaLightsDenoiseRuns)
         {
-            const uint32_t denoiseWrite = m_Engine.m_MegaLightsDenoiseHistoryIndex;
+            const uint32_t denoiseWrite = m_MegaLightsDenoiseHistoryIndex;
             const uint32_t denoiseRead = denoiseWrite ^ 1u;
             // 履歴の妥当性判定に「前フレームの幾何」を使えるか。ガイドを毎フレーム全画素へ
             // 書いているのは、手法2では時間再利用、手法3では Resolve。
@@ -874,11 +917,11 @@ namespace Kurenai::Passes
                     ? (m_MegaLightsResolvePipelineState != nullptr)
                     : (frame.Settings.MegaLights.TemporalEnabled && m_MegaLightsTemporalPipelineState != nullptr);
             const bool denoiseGuideValid =
-                denoiseGuideWritten && m_Engine.m_MegaLightsHistoryGuide[0] && m_Engine.m_MegaLightsHistoryValid;
+                denoiseGuideWritten && targets->MegaLightsHistoryGuide[0] && m_MegaLightsHistoryValid;
             // 【読むのは前フレームが書いた側】今フレームの時間再利用はもう片方へ書いている
             RHI::IRHIBuffer* const denoiseGuideBuffer =
-                m_Engine.m_MegaLightsHistoryGuide[m_Engine.m_MegaLightsHistoryIndex ^ 1u]
-                    ? m_Engine.m_MegaLightsHistoryGuide[m_Engine.m_MegaLightsHistoryIndex ^ 1u].get()
+                targets->MegaLightsHistoryGuide[m_MegaLightsHistoryIndex ^ 1u]
+                    ? targets->MegaLightsHistoryGuide[m_MegaLightsHistoryIndex ^ 1u].get()
                     : nullptr;
             const std::vector<RHI::IRHIBuffer*> denoiseGuideReads =
                 denoiseGuideBuffer ? std::vector<RHI::IRHIBuffer*>{ denoiseGuideBuffer }
@@ -890,7 +933,7 @@ namespace Kurenai::Passes
             {
                 Passes::MegaLightsDenoiseConstants denoiseConstants{};
                 denoiseConstants.Params0 = {
-                    renderWidth, renderHeight, m_Engine.m_MegaLightsDenoiseHistoryValid ? 1u : 0u, pass
+                    renderWidth, renderHeight, m_MegaLightsDenoiseHistoryValid ? 1u : 0u, pass
                 };
                 // 時間累積の上限は手法ごとに別の変数を持つ。手法3にはリザーバの履歴が
                 // 無く、デノイザだけが時間方向の記憶なので長くしてある(EngineDefaults.h)
@@ -944,14 +987,14 @@ namespace Kurenai::Passes
                 {
                     targets->MegaLightsTexture.get(), targets->GBufferAlbedo.get(), targets->GBufferNormal.get(),
                     targets->GBufferMaterial.get(), targets->GBufferDepth.get(), targets->GBufferVelocity.get(),
-                    m_Engine.m_MegaLightsDenoiseHistory[denoiseRead].get(),
-                    m_Engine.m_MegaLightsDenoiseMoments[denoiseRead].get(),
+                    targets->MegaLightsDenoiseHistory[denoiseRead].get(),
+                    targets->MegaLightsDenoiseMoments[denoiseRead].get(),
                 },
                 .Writes =
                 {
-                    m_Engine.m_MegaLightsDenoisePing[0].get(), m_Engine.m_MegaLightsDenoiseMomentPing[0].get(),
-                    m_Engine.m_MegaLightsDenoiseHistory[denoiseWrite].get(),
-                    m_Engine.m_MegaLightsDenoiseMoments[denoiseWrite].get(),
+                    targets->MegaLightsDenoisePing[0].get(), targets->MegaLightsDenoiseMomentPing[0].get(),
+                    targets->MegaLightsDenoiseHistory[denoiseWrite].get(),
+                    targets->MegaLightsDenoiseMoments[denoiseWrite].get(),
                 },
                 // 前フレームの幾何は「前フレームが書いた側」なので今フレームに書き手はいない。
                 // 辺は張れないが、ping-pongで別バッファになっているので衝突しない
@@ -964,12 +1007,12 @@ namespace Kurenai::Passes
                     cmd->SetComputeTexture(6, targets->MegaLightsTexture.get());
                     // 【読むのは前フレームが書いた側】今フレームはもう片方へ書くので
                     // 同一フレーム内でのWARが生じない(RenderGraphはWARの辺を張らない)
-                    cmd->SetComputeTexture(7, m_Engine.m_MegaLightsDenoiseHistory[denoiseRead].get());
-                    cmd->SetComputeTexture(8, m_Engine.m_MegaLightsDenoiseMoments[denoiseRead].get());
-                    cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_MegaLightsDenoisePing[0].get());
-                    cmd->SetComputeUnorderedAccessTexture(1, m_Engine.m_MegaLightsDenoiseMomentPing[0].get());
-                    cmd->SetComputeUnorderedAccessTexture(2, m_Engine.m_MegaLightsDenoiseHistory[denoiseWrite].get());
-                    cmd->SetComputeUnorderedAccessTexture(3, m_Engine.m_MegaLightsDenoiseMoments[denoiseWrite].get());
+                    cmd->SetComputeTexture(7, targets->MegaLightsDenoiseHistory[denoiseRead].get());
+                    cmd->SetComputeTexture(8, targets->MegaLightsDenoiseMoments[denoiseRead].get());
+                    cmd->SetComputeUnorderedAccessTexture(0, targets->MegaLightsDenoisePing[0].get());
+                    cmd->SetComputeUnorderedAccessTexture(1, targets->MegaLightsDenoiseMomentPing[0].get());
+                    cmd->SetComputeUnorderedAccessTexture(2, targets->MegaLightsDenoiseHistory[denoiseWrite].get());
+                    cmd->SetComputeUnorderedAccessTexture(3, targets->MegaLightsDenoiseMoments[denoiseWrite].get());
                     cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
@@ -984,31 +1027,31 @@ namespace Kurenai::Passes
                     .Name = "MegaLightsDenoiseAtrous",
                     .Reads =
                     {
-                        m_Engine.m_MegaLightsDenoisePing[atrousSrc].get(),
-                        m_Engine.m_MegaLightsDenoiseMomentPing[atrousSrc].get(),
+                        targets->MegaLightsDenoisePing[atrousSrc].get(),
+                        targets->MegaLightsDenoiseMomentPing[atrousSrc].get(),
                         targets->GBufferNormal.get(), targets->GBufferDepth.get(), targets->GBufferAlbedo.get(),
                         targets->GBufferMaterial.get(), targets->GBufferVelocity.get(),
                     },
                     .Writes =
                     {
-                        m_Engine.m_MegaLightsDenoisePing[atrousDst].get(),
-                        m_Engine.m_MegaLightsDenoiseMomentPing[atrousDst].get(),
+                        targets->MegaLightsDenoisePing[atrousDst].get(),
+                        targets->MegaLightsDenoiseMomentPing[atrousDst].get(),
                     },
-                    .Execute = [this, atrousSrc, atrousDst, atrousPass, atrousStep, updateDenoiseConstants, bindDenoiseCommon, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
+                    .Execute = [this, targets, atrousSrc, atrousDst, atrousPass, atrousStep, updateDenoiseConstants, bindDenoiseCommon, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                     {
                         updateDenoiseConstants(cmd, static_cast<uint32_t>(atrousPass + 1), atrousStep);
                         cmd->SetComputePipelineState(m_MegaLightsDenoiseAtrousPSO.get());
                         bindDenoiseCommon(cmd);
-                        cmd->SetComputeTexture(6, m_Engine.m_MegaLightsDenoisePing[atrousSrc].get());
+                        cmd->SetComputeTexture(6, targets->MegaLightsDenoisePing[atrousSrc].get());
                         // t7は使わないが、DX12は宣言したリソースを全部束縛しないと壊れる
-                        cmd->SetComputeTexture(7, m_Engine.m_MegaLightsDenoisePing[atrousSrc].get());
-                        cmd->SetComputeTexture(8, m_Engine.m_MegaLightsDenoiseMomentPing[atrousSrc].get());
-                        cmd->SetComputeUnorderedAccessTexture(0, m_Engine.m_MegaLightsDenoisePing[atrousDst].get());
+                        cmd->SetComputeTexture(7, targets->MegaLightsDenoisePing[atrousSrc].get());
+                        cmd->SetComputeTexture(8, targets->MegaLightsDenoiseMomentPing[atrousSrc].get());
+                        cmd->SetComputeUnorderedAccessTexture(0, targets->MegaLightsDenoisePing[atrousDst].get());
                         cmd->SetComputeUnorderedAccessTexture(
-                            1, m_Engine.m_MegaLightsDenoiseMomentPing[atrousDst].get());
-                        cmd->SetComputeUnorderedAccessTexture(2, m_Engine.m_MegaLightsDenoisePing[atrousDst].get());
+                            1, targets->MegaLightsDenoiseMomentPing[atrousDst].get());
+                        cmd->SetComputeUnorderedAccessTexture(2, targets->MegaLightsDenoisePing[atrousDst].get());
                         cmd->SetComputeUnorderedAccessTexture(
-                            3, m_Engine.m_MegaLightsDenoiseMomentPing[atrousDst].get());
+                            3, targets->MegaLightsDenoiseMomentPing[atrousDst].get());
                         cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                     },
                 });
@@ -1020,8 +1063,8 @@ namespace Kurenai::Passes
                 .Name = "MegaLightsDenoiseRemodulate",
                 .Reads =
                 {
-                    m_Engine.m_MegaLightsDenoisePing[denoiseFinalSrc].get(),
-                    m_Engine.m_MegaLightsDenoiseMomentPing[denoiseFinalSrc].get(),
+                    targets->MegaLightsDenoisePing[denoiseFinalSrc].get(),
+                    targets->MegaLightsDenoiseMomentPing[denoiseFinalSrc].get(),
                     targets->GBufferAlbedo.get(), targets->GBufferMaterial.get(), targets->GBufferDepth.get(),
                     targets->GBufferNormal.get(), targets->GBufferVelocity.get(),
                 },
@@ -1031,9 +1074,9 @@ namespace Kurenai::Passes
                     updateDenoiseConstants(cmd, 0u, 1.0f);
                     cmd->SetComputePipelineState(m_MegaLightsDenoiseRemodulatePSO.get());
                     bindDenoiseCommon(cmd);
-                    cmd->SetComputeTexture(6, m_Engine.m_MegaLightsDenoisePing[denoiseFinalSrc].get());
-                    cmd->SetComputeTexture(7, m_Engine.m_MegaLightsDenoisePing[denoiseFinalSrc].get());
-                    cmd->SetComputeTexture(8, m_Engine.m_MegaLightsDenoiseMomentPing[denoiseFinalSrc].get());
+                    cmd->SetComputeTexture(6, targets->MegaLightsDenoisePing[denoiseFinalSrc].get());
+                    cmd->SetComputeTexture(7, targets->MegaLightsDenoisePing[denoiseFinalSrc].get());
+                    cmd->SetComputeTexture(8, targets->MegaLightsDenoiseMomentPing[denoiseFinalSrc].get());
                     cmd->SetComputeUnorderedAccessTexture(0, targets->MegaLightsDenoisedTexture.get());
                     cmd->SetComputeUnorderedAccessTexture(1, targets->MegaLightsDenoisedTexture.get());
                     cmd->SetComputeUnorderedAccessTexture(2, targets->MegaLightsDenoisedTexture.get());
@@ -1052,15 +1095,15 @@ namespace Kurenai::Passes
         //     トーンマップ後の8bitをN枚平均しても、トーンマップが凹関数なので
         //     「偏りが無くてもノイズがあるだけで平均が低く出る」。線形で足す場所がここに要る ---
         // 整定を待ってから足し始める(内部解像度の切り替えとストリーミングが片付くまで)
-        ++m_Engine.m_MegaLightsAccumWarmupFrames;
+        ++m_MegaLightsAccumWarmupFrames;
         const bool megaLightsAccumRuns = megaLightsRuns && frame.Settings.MegaLights.AccumTargetFrames > 0 &&
                                          m_MegaLightsAccumPipelineState && targets->MegaLightsAccumBuffer &&
-                                         m_Engine.m_MegaLightsAccumWarmupFrames > kMegaLightsAccumWarmup &&
-                                         m_Engine.m_MegaLightsAccumFrames < static_cast<uint32_t>(frame.Settings.MegaLights.AccumTargetFrames);
+                                         m_MegaLightsAccumWarmupFrames > kMegaLightsAccumWarmup &&
+                                         m_MegaLightsAccumFrames < static_cast<uint32_t>(frame.Settings.MegaLights.AccumTargetFrames);
         if (megaLightsAccumRuns)
         {
             // 最初の1枚は「足す」ではなく「代入する」。RHIにバッファのクリアが無いため
-            const uint32_t accumReset = (m_Engine.m_MegaLightsAccumFrames == 0u) ? 1u : 0u;
+            const uint32_t accumReset = (m_MegaLightsAccumFrames == 0u) ? 1u : 0u;
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLightsAccum",
                 // 【計測はデノイズ後の絵を測る】デノイザを通したフレームはその出力を読む。
@@ -1082,26 +1125,26 @@ namespace Kurenai::Passes
                     cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
-            ++m_Engine.m_MegaLightsAccumFrames;
+            ++m_MegaLightsAccumFrames;
         }
 
         // 【この位置で publish すること】上の if の中で増えたぶんを含めた値を、
         // 後続の PresentPass が Mode 22 の除数として読む。増える前に配ると1つ古くなる
-        bb.MegaLightsAccumFrames = m_Engine.m_MegaLightsAccumFrames;
+        bb.MegaLightsAccumFrames = m_MegaLightsAccumFrames;
 
         // --- 蓄積し終えた平均を生データで書き出す(計測専用) ---
         // 画面キャプチャは8bit・トーンマップ後で、丸めだけでRMSEに0.29階調の下限が生まれる。
         // 「平均が真値へ 1/√N で寄るか」はその下限に隠れて読めないので、線形のまま取り出す
-        if (!m_Engine.m_MegaLightsDumpPath.empty() && !m_Engine.m_MegaLightsDumpDone && targets->MegaLightsAccumBuffer &&
+        if (!m_MegaLightsDumpPath.empty() && !m_MegaLightsDumpDone && targets->MegaLightsAccumBuffer &&
             frame.Settings.MegaLights.AccumTargetFrames > 0 &&
-            m_Engine.m_MegaLightsAccumFrames >= static_cast<uint32_t>(frame.Settings.MegaLights.AccumTargetFrames))
+            m_MegaLightsAccumFrames >= static_cast<uint32_t>(frame.Settings.MegaLights.AccumTargetFrames))
         {
             const uint32_t accumBytes =
                 static_cast<uint32_t>(sizeof(float) * 4) * renderWidth * renderHeight;
 
-            if (!m_Engine.m_MegaLightsDumpIssued)
+            if (!m_MegaLightsDumpIssued)
             {
-                if (!m_Engine.m_MegaLightsAccumReadback)
+                if (!m_MegaLightsAccumReadback)
                 {
                     try
                     {
@@ -1109,18 +1152,18 @@ namespace Kurenai::Passes
                         readbackDesc.Usage = RHI::BufferUsage::Readback;
                         readbackDesc.SizeInBytes = accumBytes;
                         readbackDesc.StrideInBytes = static_cast<uint32_t>(sizeof(float) * 4);
-                        m_Engine.m_MegaLightsAccumReadback = frame.Device->CreateBuffer(readbackDesc);
+                        m_MegaLightsAccumReadback = frame.Device->CreateBuffer(readbackDesc);
                     }
                     catch (const std::exception& e)
                     {
                         Core::Logger::Error(
                             "KurenaiEngine3D",
                             std::string("MegaLightsの蓄積平均の読み戻しバッファを作れませんでした: ") + e.what());
-                        m_Engine.m_MegaLightsDumpDone = true; // 何度も試さない
+                        m_MegaLightsDumpDone = true; // 何度も試さない
                     }
                 }
 
-                if (m_Engine.m_MegaLightsAccumReadback)
+                if (m_MegaLightsAccumReadback)
                 {
                     graph.AddPass(Core::RenderGraphPassDesc{
                         .Name = "MegaLightsDump",
@@ -1128,41 +1171,41 @@ namespace Kurenai::Passes
                         .Execute = [this, targets, accumBytes](RHI::IRHICommandList* cmd)
                         {
                             cmd->CopyBufferToReadback(
-                                m_Engine.m_MegaLightsAccumReadback.get(), targets->MegaLightsAccumBuffer.get(), accumBytes);
+                                m_MegaLightsAccumReadback.get(), targets->MegaLightsAccumBuffer.get(), accumBytes);
                         },
                     });
-                    m_Engine.m_MegaLightsDumpIssued = true;
-                    m_Engine.m_MegaLightsDumpCopyFrame = m_Engine.m_TAAFrameIndex;
+                    m_MegaLightsDumpIssued = true;
+                    m_MegaLightsDumpCopyFrame = m_Engine.GetTAAFrameIndex();
                 }
             }
             // GPUの実行はCPUより数フレーム遅れる。積んだ直後に読むと未完了の内容を掴む
-            else if (m_Engine.m_TAAFrameIndex - m_Engine.m_MegaLightsDumpCopyFrame >= 5u)
+            else if (m_Engine.GetTAAFrameIndex() - m_MegaLightsDumpCopyFrame >= 5u)
             {
                 std::vector<float> host(static_cast<size_t>(renderWidth) * renderHeight * 4u);
-                if (m_Engine.m_MegaLightsAccumReadback->ReadbackData(host.data(), accumBytes))
+                if (m_MegaLightsAccumReadback->ReadbackData(host.data(), accumBytes))
                 {
-                    std::ofstream file(m_Engine.m_MegaLightsDumpPath, std::ios::binary | std::ios::trunc);
+                    std::ofstream file(m_MegaLightsDumpPath, std::ios::binary | std::ios::trunc);
                     if (file)
                     {
                         // 形式: 'K','M','L','A' / 幅 / 高さ / 足したフレーム数 / 予約 / float4 × 画素数
                         const char magic[4] = { 'K', 'M', 'L', 'A' };
-                        const uint32_t header[4] = { renderWidth, renderHeight, m_Engine.m_MegaLightsAccumFrames, 0u };
+                        const uint32_t header[4] = { renderWidth, renderHeight, m_MegaLightsAccumFrames, 0u };
                         file.write(magic, sizeof(magic));
                         file.write(reinterpret_cast<const char*>(header), sizeof(header));
                         file.write(reinterpret_cast<const char*>(host.data()),
                                    static_cast<std::streamsize>(accumBytes));
                         Core::Logger::Info(
                             "KurenaiEngine3D",
-                            "MegaLightsの蓄積平均を書き出しました: " + Core::WideToUtf8(m_Engine.m_MegaLightsDumpPath) +
+                            "MegaLightsの蓄積平均を書き出しました: " + Core::WideToUtf8(m_MegaLightsDumpPath) +
                                 " (" + std::to_string(renderWidth) + "x" + std::to_string(renderHeight) +
-                                ", " + std::to_string(m_Engine.m_MegaLightsAccumFrames) + "フレームぶん)");
+                                ", " + std::to_string(m_MegaLightsAccumFrames) + "フレームぶん)");
                     }
                     else
                     {
                         Core::Logger::Error(
                             "KurenaiEngine3D",
                             "MegaLightsの蓄積平均を書き出せませんでした(ファイルを開けない): " +
-                                Core::WideToUtf8(m_Engine.m_MegaLightsDumpPath));
+                                Core::WideToUtf8(m_MegaLightsDumpPath));
                     }
                 }
                 else
@@ -1170,7 +1213,7 @@ namespace Kurenai::Passes
                     Core::Logger::Error(
                         "KurenaiEngine3D", "MegaLightsの蓄積平均の読み戻しに失敗しました");
                 }
-                m_Engine.m_MegaLightsDumpDone = true;
+                m_MegaLightsDumpDone = true;
             }
         }
     }

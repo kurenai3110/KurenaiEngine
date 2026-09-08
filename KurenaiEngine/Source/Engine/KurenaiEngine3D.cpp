@@ -1463,7 +1463,7 @@ namespace Kurenai
         {
             return m_MegaLightsPasses->HasCommonPipelineStates() && m_MegaLightsPasses->HasShadePipelineState() &&
                    m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
-                   m_MegaLightsReservoirBuffer != nullptr;
+                   m_RenderTargets.MegaLightsReservoirBuffer != nullptr;
         }
         if (m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared)
         {
@@ -1471,7 +1471,8 @@ namespace Kurenai
             // 履歴バッファや空間再利用のping-pongが無くても走れる
             return m_MegaLightsPasses->HasCommonPipelineStates() && m_MegaLightsPasses->HasResolvePipelineState() &&
                    m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
-                   m_MegaLightsReservoirBuffer != nullptr && m_MegaLightsHistoryGuide[0] != nullptr;
+                   m_RenderTargets.MegaLightsReservoirBuffer != nullptr &&
+                   m_RenderTargets.MegaLightsHistoryGuide[0] != nullptr;
         }
         return m_MegaLightsPasses->HasReferencePipelineState();
     }
@@ -1675,7 +1676,7 @@ namespace Kurenai
         m_MegaLightsSettings.AccumTargetFrames = frames;
         // 枚数を変えたら取り直す。途中まで足した状態に継ぎ足すと、
         // 「何サンプルの平均か」が分からなくなる
-        m_MegaLightsAccumFrames = 0;
+        m_MegaLightsPasses->ResetAccumFrames();
         Core::Logger::Info(
             "KurenaiEngine3D", "MegaLightsの蓄積フレーム数を設定しました: " + std::to_string(frames));
     }
@@ -1906,7 +1907,7 @@ namespace Kurenai
         {
             m_MegaLightsSettings.DenoiseEnabled = (enabled != 0);
             // 切り替えた瞬間の履歴は今の設定で作られたものではないので捨てる
-            m_MegaLightsDenoiseHistoryValid = false;
+            m_MegaLightsPasses->InvalidateDenoiseHistory();
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 std::string("MegaLightsのデノイザを") + (m_MegaLightsSettings.DenoiseEnabled ? "有効" : "無効") +
@@ -1954,7 +1955,7 @@ namespace Kurenai
         {
             m_MegaLightsSettings.TemporalEnabled = (enabled != 0);
             // 切り替えた瞬間の履歴は今の設定で作られたものではないので捨てる
-            m_MegaLightsHistoryValid = false;
+            m_MegaLightsPasses->InvalidateHistory();
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 std::string("MegaLightsの時間再利用を") + (m_MegaLightsSettings.TemporalEnabled ? "有効" : "無効") +
@@ -2118,14 +2119,11 @@ namespace Kurenai
     {
         if (path == nullptr || path[0] == L'\0')
         {
-            m_MegaLightsDumpPath.clear();
+            m_MegaLightsPasses->ClearDumpPath();
             return;
         }
 
-        m_MegaLightsDumpPath = path;
-        m_MegaLightsDumpIssued = false;
-        m_MegaLightsDumpDone = false;
-        m_MegaLightsDumpCopyFrame = 0;
+        m_MegaLightsPasses->SetDumpPath(path);
         Core::Logger::Info(
             "KurenaiEngine3D", "MegaLightsの蓄積平均の書き出し先を設定しました: " + Core::WideToUtf8(path));
     }
@@ -2739,71 +2737,27 @@ namespace Kurenai
                 // **確保 >= 実際に使う本数** が常に成り立つ
                 m_MegaLightsAllocatedSamplesPerPixel =
                     std::clamp(m_MegaLightsSettings.QuadSamplesPerPixel, 1, kMegaLightsMaxSamplesPerPixel);
-                RHI::BufferDesc reservoirBufferDesc;
-                reservoirBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
-                reservoirBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 4) * width * height *
-                                                  static_cast<uint32_t>(m_MegaLightsAllocatedSamplesPerPixel);
-                reservoirBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 4);
-                m_MegaLightsReservoirBuffer = m_Device->CreateBuffer(reservoirBufferDesc);
-
-                // 画素ごとの「遮蔽が確定した灯」のキャッシュ(uint。0xFFFFFFFFで無し)。
-                // 殺しの持ち回りより寿命が長く、影の縁の暗いフリンジを消すのに要る
-                // (MegaLightsInitialSample.hlsl の BlockedLights のコメント)
-                RHI::BufferDesc blockedBufferDesc;
-                blockedBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
-                blockedBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * width * height;
-                blockedBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
-                m_MegaLightsBlockedLightBuffer = m_Device->CreateBuffer(blockedBufferDesc);
-                // 空間再利用の出力先。近傍を読むので入力と同じバッファへは書けない。
-                // 2回以上回すときは2本を ping-pong する
-                m_MegaLightsReservoirSpatialBuffer = m_Device->CreateBuffer(reservoirBufferDesc);
-                m_MegaLightsReservoirSpatialBuffer2 = m_Device->CreateBuffer(reservoirBufferDesc);
-
-                // 時間再利用の履歴。**2本のping-pongにするのは、RenderGraphがWARの辺を
-                // 張らないため**。1本で済ませると「今フレームのTemporalが読んだ直後に
-                // 同じバッファへ書く」形になり、条件分岐でパスが1つ消えた瞬間に静かに壊れる。
-                // 2本なら全ての辺がRAWで張れる(前フレームが書いた側を読み、今フレームは
-                // もう片方へ書く)
-                for (auto& buffer : m_MegaLightsReservoirHistory)
-                {
-                    buffer = m_Device->CreateBuffer(reservoirBufferDesc);
-                }
+                m_RenderTargets.CreateMegaLightsReservoirs(
+                    *m_Device, width, height, static_cast<uint32_t>(m_MegaLightsAllocatedSamplesPerPixel));
 
                 // 履歴の幾何(前フレームの法線・線形深度・材質)。
                 // 【なぜ専用に持つのか】G-Bufferは毎フレーム上書きされ、前フレームの写しは
                 // どこにも残らない。再投影先が「同じ面か」を判定するには前フレームの幾何が要る。
                 // 1画素12バイト(法線oct 4 + View空間Z 4 + 材質 4)。
                 // MegaLightsCommon.hlsli の MegaLightsHistoryGuide とストライドを一致させること
-                RHI::BufferDesc guideBufferDesc;
-                guideBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
-                guideBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 3) * width * height;
-                guideBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 3);
-                for (auto& buffer : m_MegaLightsHistoryGuide)
-                {
-                    buffer = m_Device->CreateBuffer(guideBufferDesc);
-                }
+                m_RenderTargets.CreateMegaLightsHistoryGuide(*m_Device, width, height);
                 // 【履歴を無効にする】解像度が変わると添字の意味が変わり、前フレームの内容は
                 // 別の画素のものになる。RHIにバッファのクリアが無いので、初回は
                 // シェーダ側で「履歴を使わない」と判断させる
-                m_MegaLightsHistoryValid = false;
+                m_MegaLightsPasses->InvalidateHistory();
                 // デノイザの作業用テクスチャ。整数フォーマットが無いRHIなのですべてfloat。
                 // 【履歴もping-pongにする】RenderGraphはWARの辺を張らないので、
                 // 読む側と書く側が同じだと条件分岐でパスが消えた瞬間に静かに壊れる
-                for (int denoiseIndex = 0; denoiseIndex < 2; ++denoiseIndex)
-                {
-                    m_MegaLightsDenoiseHistory[denoiseIndex] =
-                        m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
-                    m_MegaLightsDenoiseMoments[denoiseIndex] =
-                        m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
-                    m_MegaLightsDenoisePing[denoiseIndex] =
-                        m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
-                    m_MegaLightsDenoiseMomentPing[denoiseIndex] =
-                        m_Device->CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
-                }
+                m_RenderTargets.CreateMegaLightsDenoiseWork(*m_Device, width, height);
                 m_RenderTargets.CreateMegaLightsDenoised(*m_Device, width, height);
                 // 解像度が変わると履歴の添字の意味が変わる。バッファのクリアが無いRHIなので、
                 // シェーダ側へ「履歴を読むな」と伝える
-                m_MegaLightsDenoiseHistoryValid = false;
+                m_MegaLightsPasses->InvalidateDenoiseHistory();
             }
 
             // MegaLightsの蓄積バッファ(計測専用)。1画素につきfloat4。
@@ -2817,12 +2771,7 @@ namespace Kurenai
             // 解像度が変わると添字の意味が変わるので、蓄積も書き出しも必ず取り直す。
             // 【書き出し済みフラグも戻すこと】起動直後は既定解像度から実際のウィンドウサイズへ
             // 切り替わる。戻さないと、切り替わる前の低解像度のまま1回書き出して終わってしまう
-            m_MegaLightsAccumFrames = 0;
-            m_MegaLightsAccumWarmupFrames = 0;
-            m_MegaLightsDumpIssued = false;
-            m_MegaLightsDumpDone = false;
-            m_MegaLightsDumpCopyFrame = 0;
-            m_MegaLightsAccumReadback.reset();
+            m_MegaLightsPasses->ResetAccumulation();
             m_LightTileOverflowLogged = false;
 
             // ブルームのピラミッド。第0段が半解像度で、以降1段ごとに半分になる。
@@ -4303,7 +4252,7 @@ namespace Kurenai
         // 蓄積ダンプは総和を書くので、Nを変えた2本の差が1フレームぶんになる ――
         // これで追従の時間変化を、フレームごとのGPU読み戻し無しで測れる
         if (m_MegaLightsSettings.PerturbMode != 0 && !m_MegaLightsPerturbApplied && m_MegaLightsSettings.AccumTargetFrames > 0 &&
-            m_MegaLightsAccumWarmupFrames >= kMegaLightsAccumWarmup)
+            m_MegaLightsPasses->GetAccumWarmupFrames() >= kMegaLightsAccumWarmup)
         {
             m_MegaLightsPerturbApplied = true;
             if (m_MegaLightsSettings.PerturbMode == 1)
@@ -5853,26 +5802,15 @@ namespace Kurenai
         {
             const bool temporalRan = ShouldRunMegaLights() && m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic &&
                                      m_MegaLightsSettings.TemporalEnabled && m_MegaLightsPasses->HasTemporalPipelineState() &&
-                                     m_MegaLightsReservoirHistory[0] && m_MegaLightsHistoryGuide[0];
+                                     m_RenderTargets.MegaLightsReservoirHistory[0] && m_RenderTargets.MegaLightsHistoryGuide[0];
             // 【手法3もガイドを書くので同じ反転が要る】あちらは時間再利用を持たないが、
             // デノイザが読む「前フレームの幾何」を Resolve が書いている。反転しないと
             // 同じフレームで書いた側を読むことになり、比べたい「別のフレームの同じ点」に
             // ならない(そのうえ RenderGraph は WAR の辺を張らないので競合する)
             const bool quadGuideRan = ShouldRunMegaLights() &&
                                       m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared &&
-                                      m_MegaLightsPasses->HasResolvePipelineState() && m_MegaLightsHistoryGuide[0];
-            if (temporalRan || quadGuideRan)
-            {
-                m_MegaLightsHistoryIndex ^= 1u;
-                // 【1フレーム走ってから有効にする】書いた側を次フレームが読むので、
-                // 反転したあとに立てる。立てるのが早いと未初期化の内容を履歴として読む
-                m_MegaLightsHistoryValid = true;
-            }
-            else
-            {
-                // 走らなかったフレームを挟むと履歴が途切れる(中身が古い or 未初期化)
-                m_MegaLightsHistoryValid = false;
-            }
+                                      m_MegaLightsPasses->HasResolvePipelineState() && m_RenderTargets.MegaLightsHistoryGuide[0];
+            m_MegaLightsPasses->AdvanceHistory(temporalRan || quadGuideRan);
             // 露出はパスの有無に関わらず記録する(次に走ったときの比較の基準になる)
             m_MegaLightsPrevEffectiveExposureEV100 = m_EffectiveExposureEV100;
 
@@ -5885,16 +5823,7 @@ namespace Kurenai
                                      m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared) &&
                                     m_MegaLightsSettings.DenoiseEnabled && m_MegaLightsPasses->HasDenoisePipelineStates() &&
                                     m_RenderTargets.MegaLightsDenoisedTexture != nullptr;
-            if (denoiseRan)
-            {
-                m_MegaLightsDenoiseHistoryIndex ^= 1u;
-                m_MegaLightsDenoiseHistoryValid = true;
-            }
-            else
-            {
-                // 走らなかったフレームを挟むと履歴が途切れる(中身が古い)
-                m_MegaLightsDenoiseHistoryValid = false;
-            }
+            m_MegaLightsPasses->AdvanceDenoiseHistory(denoiseRan);
         }
 
         if (m_PostProcessSettings.TAAEnabled)

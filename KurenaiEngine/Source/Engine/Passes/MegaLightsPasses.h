@@ -64,8 +64,64 @@ namespace Kurenai
             bool HasTemporalPipelineState() const { return m_MegaLightsTemporalPipelineState != nullptr; }
             bool HasDenoisePipelineStates() const { return m_MegaLightsDenoiseTemporalPSO != nullptr; }
 
+            // 履歴の反転と有効化。**Render()の末尾から呼ぶこと** ―― 書いた側を次フレームが
+            // 読むので、反転したあとに有効化する。早く立てると未初期化の内容を履歴として読む
+            void AdvanceHistory(bool temporalRan);
+            void AdvanceDenoiseHistory(bool denoiseRan);
+            // 解像度が変わると添字の意味が変わる。バッファのクリアが無いRHIなので、
+            // シェーダ側へ「履歴を読むな」と伝えるために倒す
+            void InvalidateHistory() { m_MegaLightsHistoryValid = false; }
+            void InvalidateDenoiseHistory() { m_MegaLightsDenoiseHistoryValid = false; }
+            // 蓄積と書き出しを取り直す。解像度が変わったときに呼ぶ
+            void ResetAccumulation();
+            // 書き出し先。空なら書き出さない
+            void SetDumpPath(const std::wstring& path) { m_MegaLightsDumpPath = path; }
+            void ClearDumpPath() { m_MegaLightsDumpPath.clear(); }
+            // 蓄積の枚数を変えたときに取り直す。途中まで足した状態に継ぎ足すと
+            // 「何サンプルの平均か」が分からなくなる
+            void ResetAccumFrames() { m_MegaLightsAccumFrames = 0; }
+            // 整定待ちが済んだか。摂動を効かせる判定にエンジンが使う
+            uint32_t GetAccumWarmupFrames() const { return m_MegaLightsAccumWarmupFrames; }
+
         private:
             KurenaiEngine3D& m_Engine;
+
+            // 時間再利用の履歴の書き込み先(RenderTargets::MegaLightsReservoirHistory の添字)。
+            // もう一方が前フレームの結果。Render()の末尾で反転する
+            uint32_t m_MegaLightsHistoryIndex = 0u;
+            // 履歴の中身が今の解像度・今のシーンのものとして使えるか。
+            // バッファのクリアが無いRHIなので、無効な間はシェーダへ「履歴を読むな」と伝える
+            bool m_MegaLightsHistoryValid = false;
+            // デノイザの履歴の書き込み先と有効性。
+            // 【時間再利用の有無には依存しない】デノイザは「出た色」をならすもので、
+            // リザーバを混ぜる時間再利用とは独立に効く
+            uint32_t m_MegaLightsDenoiseHistoryIndex = 0u;
+            bool m_MegaLightsDenoiseHistoryValid = false;
+
+            // --- 蓄積平均(計測専用) ---
+            // これまでに足したフレーム数。表示側はこれで割る
+            uint32_t m_MegaLightsAccumFrames = 0;
+            // レンダーターゲットを作り直してから何フレーム経ったか。
+            //
+            // 【整定を待たずに足し始めると測定そのものが壊れる】起動直後はモデルとテクスチャが
+            // ストリーミングで入ってくる途中で、シーンがRenderResolutionを持つ場合は内部解像度も
+            // 既定値(1920x1080)から切り替わる。その間の絵を混ぜて平均すると、**別のシーンの平均**を
+            // 測ることになる。実際に、待たずに書き出したときは当時の既定1280x720のまま吐き出された
+            uint32_t m_MegaLightsAccumWarmupFrames = 0;
+            // 蓄積し終えた平均をこのパスへ生データで書き出す(空なら書き出さない)。
+            //
+            // 【なぜ画面キャプチャでは足りないのか】画面から採れるのは8bitで、しかも
+            // トーンマップを通っている。ここで測りたいのは「平均が真値へ 1/√N で寄るか」で、
+            // 8bitの丸めだけでRMSEに0.29階調の下限が生まれ、その下限に隠れて比が読めなくなる。
+            // 物差しの分解能が足りないまま「1/√Nで落ちていない」と読むと、原因を取り違える
+            std::wstring m_MegaLightsDumpPath;
+            bool m_MegaLightsDumpIssued = false;
+            bool m_MegaLightsDumpDone = false;
+            // コピーを積んだフレーム番号(0なら未発行)。GPUの実行はCPUより数フレーム遅れるので、
+            // 積んだ直後に読んではいけない(IRHICommandList::CopyBufferToReadback のコメント)
+            uint32_t m_MegaLightsDumpCopyFrame = 0;
+            // 読み戻しの受け皿
+            std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsAccumReadback;
 
             // タイルライトカリング(タイルごとに届くライトのインデックスリストを作る)。
             // ライトグリッド本体は解像度に依存するため RenderTargets::LightTileBuffer が持つ

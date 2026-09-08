@@ -196,6 +196,69 @@ namespace Kurenai::Rendering
         MegaLightsAccumBuffer = device.CreateBuffer(accumBufferDesc);
     }
 
+    void RenderTargets::CreateMegaLightsReservoirs(
+        RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t samplesPerPixel)
+    {
+        RHI::BufferDesc reservoirBufferDesc;
+        reservoirBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+        reservoirBufferDesc.SizeInBytes =
+            static_cast<uint32_t>(sizeof(uint32_t) * 4) * width * height * samplesPerPixel;
+        reservoirBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 4);
+        MegaLightsReservoirBuffer = device.CreateBuffer(reservoirBufferDesc);
+
+        // 画素ごとの「遮蔽が確定した灯」のキャッシュ(uint。0xFFFFFFFFで無し)。
+        // 殺しの持ち回りより寿命が長く、影の縁の暗いフリンジを消すのに要る
+        // (MegaLightsInitialSample.hlsl の BlockedLights のコメント)
+        RHI::BufferDesc blockedBufferDesc;
+        blockedBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+        blockedBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * width * height;
+        blockedBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+        MegaLightsBlockedLightBuffer = device.CreateBuffer(blockedBufferDesc);
+        // 空間再利用の出力先。近傍を読むので入力と同じバッファへは書けない。
+        // 2回以上回すときは2本を ping-pong する
+        MegaLightsReservoirSpatialBuffer = device.CreateBuffer(reservoirBufferDesc);
+        MegaLightsReservoirSpatialBuffer2 = device.CreateBuffer(reservoirBufferDesc);
+
+        // 時間再利用の履歴。**2本のping-pongにするのは、RenderGraphがWARの辺を
+        // 張らないため**。1本で済ませると「今フレームのTemporalが読んだ直後に
+        // 同じバッファへ書く」形になり、条件分岐でパスが1つ消えた瞬間に静かに壊れる。
+        // 2本なら全ての辺がRAWで張れる(前フレームが書いた側を読み、今フレームは
+        // もう片方へ書く)
+        for (auto& buffer : MegaLightsReservoirHistory)
+        {
+            buffer = device.CreateBuffer(reservoirBufferDesc);
+        }
+    }
+
+    void RenderTargets::CreateMegaLightsHistoryGuide(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        // 1画素12バイト(法線oct 4 + View空間Z 4 + 材質 4)。
+        // MegaLightsCommon.hlsli の MegaLightsHistoryGuide とストライドを一致させること
+        RHI::BufferDesc guideBufferDesc;
+        guideBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+        guideBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 3) * width * height;
+        guideBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t) * 3);
+        for (auto& buffer : MegaLightsHistoryGuide)
+        {
+            buffer = device.CreateBuffer(guideBufferDesc);
+        }
+    }
+
+    void RenderTargets::CreateMegaLightsDenoiseWork(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        for (int denoiseIndex = 0; denoiseIndex < 2; ++denoiseIndex)
+        {
+            MegaLightsDenoiseHistory[denoiseIndex] =
+                device.CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+            MegaLightsDenoiseMoments[denoiseIndex] =
+                device.CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+            MegaLightsDenoisePing[denoiseIndex] =
+                device.CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+            MegaLightsDenoiseMomentPing[denoiseIndex] =
+                device.CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+        }
+    }
+
     void RenderTargets::ResetSoftwareRasterOutputs()
     {
         SoftwareRasterColor.reset();

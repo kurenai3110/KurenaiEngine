@@ -127,7 +127,6 @@ namespace Kurenai
         // 切り出したパス群は、まだエンジンのprivate(PSO・定数バッファ・統計カウンタ)を
         // m_Engine越しに触る。所有権を群へ移し終えたらこのfriendは外す(段階6)
         friend class Passes::GeometryPasses;
-        friend class Passes::MegaLightsPasses;
 
         // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
         //   実行時に「システム」パネルからも変更できる)。
@@ -1254,37 +1253,9 @@ namespace Kurenai
 
         // 出所は Passes/MegaLightsConstants.h(移行中の別名)
         static constexpr uint32_t kMegaLightsMaxSpatialIterations = Passes::kMegaLightsMaxSpatialIterations;
-        // 1画素につき1リザーバ(16バイト)。MegaLightsCommon.hlsli の MegaLightsReservoir と
-        // 一致させること。解像度に依存するためCreateRenderTargetsで作り直す。
-        // 空間再利用は「読みながら同じバッファへ書けない」(近傍を読むので競合する)ため2本持つ
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirBuffer;
-        // 画素ごとの「遮蔽が確定した灯」のキャッシュ(影の縁の暗いフリンジ対策)
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsBlockedLightBuffer;
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirSpatialBuffer;
-        // 空間再利用を2回以上回すときの ping-pong の相方。
-        // 近傍を読むので入力と同じバッファへは書けず、反復のたびに交互に使う
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirSpatialBuffer2;
-        // 時間再利用の履歴リザーバと履歴の幾何。**ping-pongにするのはWAR回避のため**
-        // (RenderGraphは前方走査でRAWの辺しか張らない。詳細は生成箇所のコメント)
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsReservoirHistory[2];
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsHistoryGuide[2];
-        // --- デノイザ(段階5) ---
-        // 【時空間再利用とは別物】あちらはリザーバ(どの灯を選ぶか)を混ぜ、こちらは出た色を
-        // 空間・時間へならす。TAAの手前でノイズを落とすためのもの
-        // 時間累積の履歴(rgb=復調済みの色)とモーメント。どちらもping-pong。
-        // **RenderGraphがWARの辺を張らない**ので、読む側と書く側を必ず別にする
-        std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoiseHistory[2];
-        std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoiseMoments[2];
-        // à-trous のping-pong用。段ごとに入れ替える
-        std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoisePing[2];
-        std::unique_ptr<RHI::IRHITexture> m_MegaLightsDenoiseMomentPing[2];
-        // 復調を戻した最終出力は、持ち主をRenderTargets::MegaLightsDenoisedTextureへ移した
-        uint32_t m_MegaLightsDenoiseHistoryIndex = 0u;
-        bool m_MegaLightsDenoiseHistoryValid = false;
-        uint32_t m_MegaLightsHistoryIndex = 0u;
-        // 履歴の中身が今の解像度・今のシーンのものとして使えるか。
-        // バッファのクリアが無いRHIなので、無効な間はシェーダへ「履歴を読むな」と伝える
-        bool m_MegaLightsHistoryValid = false;
+        // 履歴・デノイザの作業バッファは RenderTargets、その添字と有効性は
+        // Passes/MegaLightsPasses が持つ
+
         // 前フレームの実効プリ露出EV100。
         // 【補正には使っていない】リザーバのWは露出に対して不変(比なので約分される)と
         // 実測で確かめた ―― TAAのm_TAAPrevEffectiveExposureEV100と違い、掛ける係数は1。
@@ -1309,32 +1280,11 @@ namespace Kurenai
         // 画面キャプチャで得られるのはトーンマップ後の8bitで、トーンマップは凹関数のため
         // **偏りがゼロでもノイズがあるだけで平均が低く出る**。スクリーンショットをN枚平均しても
         // 検証にならないので、線形空間で足す場所をエンジン側に持つ
-        // 蓄積バッファは、持ち主をRenderTargets::MegaLightsAccumBufferへ移した
-        // これまでに足したフレーム数。表示側はこれで割る
-        uint32_t m_MegaLightsAccumFrames = 0;
-        // レンダーターゲットを作り直してから何フレーム経ったか。
-        //
-        // 【整定を待たずに足し始めると測定そのものが壊れる】起動直後はモデルとテクスチャが
-        // ストリーミングで入ってくる途中で、シーンがRenderResolutionを持つ場合は内部解像度も
-        // 既定値(1920x1080)から切り替わる。その間の絵を混ぜて平均すると、**別のシーンの平均**を
-        // 測ることになる。実際に、待たずに書き出したときは当時の既定1280x720のまま吐き出された
-        uint32_t m_MegaLightsAccumWarmupFrames = 0;
+        // 蓄積バッファは RenderTargets::MegaLightsAccumBuffer、進行状態は Passes/MegaLightsPasses が持つ
         // 何フレーム待ってから足し始めるか。小さなシーンの読み込みとリサイズが片付く目安
         // 出所は Passes/MegaLightsConstants.h(移行中の別名)
         static constexpr uint32_t kMegaLightsAccumWarmup = Passes::kMegaLightsAccumWarmup;
-        // 蓄積し終えた平均をこのパスへ生データで書き出す(空なら書き出さない)。
-        //
-        // 【なぜ画面キャプチャでは足りないのか】画面から採れるのは8bitで、しかも
-        // トーンマップを通っている。ここで測りたいのは「平均が真値へ 1/√N で寄るか」で、
-        // 8bitの丸めだけでRMSEに0.29階調の下限が生まれ、その下限に隠れて比が読めなくなる。
-        // 物差しの分解能が足りないまま「1/√Nで落ちていない」と読むと、原因を取り違える
-        std::wstring m_MegaLightsDumpPath;
-        std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsAccumReadback;
-        // コピーを積んだフレーム番号(0なら未発行)。GPUの実行はCPUより数フレーム遅れるので、
-        // 積んだ直後に読んではいけない(IRHICommandList::CopyBufferToReadback のコメント)
-        uint32_t m_MegaLightsDumpCopyFrame = 0;
-        bool m_MegaLightsDumpIssued = false;
-        bool m_MegaLightsDumpDone = false;
+
         // --- GPU計測の書き出し(計測専用) ---
         std::wstring m_PerfDumpPath;
         int32_t m_PerfDumpTargetFrames = 0;
@@ -1398,7 +1348,7 @@ namespace Kurenai
         {
             // 受け皿。m_DeviceはKurenaiEngineBase(基底)のメンバで、派生クラスのメンバは
             // 基底より先に破棄されるため、デバイスより後に解放される心配は無い
-            // (m_MegaLightsAccumReadbackが同じ場所に置かれているのと同じ理由)
+            // (MegaLightsの読み戻しも同じ理由で Passes::MegaLightsPasses のメンバに置いてある)
             std::unique_ptr<RHI::IRHITexture> Readback;
             // 【寸法は積むときに控える】あとで引き直すと、その間のリサイズで
             // 受け皿の中身と食い違う値をヘッダへ書いてしまう
@@ -1521,6 +1471,13 @@ namespace Kurenai
         std::atomic<bool> m_TAAHistoryValid{ false };
         // ジッターのサンプル列を進めるフレーム番号(Halton列の添字に使う)
         uint32_t m_TAAFrameIndex = 0;
+    public:
+        // 【publicにしてある】ジッターの添字・ダンプの発火・作り直し予約の基準に使う
+        // エンジンのフレーム番号。Passes::MegaLightsPasses がタイル格子のジッターと
+        // 蓄積の書き出し待ちに読む。**進めるのはRender()だけ**なので公開しても持ち主は変わらない
+        uint32_t GetTAAFrameIndex() const { return m_TAAFrameIndex; }
+
+    private:
         // 前フレームのビュー射影行列(ジッター済み・転置済み=シェーダへ渡す形のまま)。
         // Renderスレッドのみが読み書きするため追加の排他は不要。
         // 履歴テクスチャの有効性(m_TAAHistoryValid)とは意図的に別管理にしている。シーン切り替えや
@@ -2237,6 +2194,13 @@ namespace Kurenai
         Rendering::SceneGPUResources m_SceneGPUResources;
         // メッシュライトの三角形テーブル(段階2)。段階1のプロキシと同じ集合から作られる
         Assets::MeshLightScene m_MeshLightScene;
+    public:
+        // 【publicにしてある】シーン読み込みが構築し、Passes::MegaLightsPasses が
+        // 三角形の数とバッファを引くために読むだけ
+        const Assets::MeshLightScene& GetMeshLightScene() const { return m_MeshLightScene; }
+        bool IsMeshLightsEnabled() const { return m_MeshLightsEnabled; }
+
+    private:
         // テクスチャの常駐ミップ制御。自前のワーカースレッドを持ち、そこがm_Sceneの
         // IRHITexture*を掴む。
         //
