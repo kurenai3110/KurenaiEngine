@@ -18,6 +18,7 @@
 #include "Diagnostics/CullStatsReadback.h"
 #include "Diagnostics/FrameStatsLogger.h"
 #include "Diagnostics/RenderDumpServiceState.h"
+#include "Diagnostics/ScheduledRecreationQueue.h"
 #include "GI/DDGIGrid.h"
 #include "Settings/EngineSettings.h"
 #include "DroneShow.h"
@@ -131,7 +132,7 @@ namespace Kurenai
     // シャドウマッピング、SSAO/SSIL(間接光)、SSR(反射)、ImGuiによる各種設定パネル、
     // 複数シーンの切り替えまでを内包した完結型のレンダラー。
     // 構築してRun()を呼ぶだけでウィンドウが開き、終了するまでブロックする
-    class KURENAI_3D_API KurenaiEngine3D : public KurenaiEngineBase
+    class KURENAI_3D_API KurenaiEngine3D : public KurenaiEngineBase, public Diagnostics::IRecreationTarget
     {
     public:
         // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
@@ -343,7 +344,10 @@ namespace Kurenai
         // 複数回呼べば1回の起動で複数の経路を順に踏む(GUIの起動は共有資源なので、
         // 1回の起動で必要な経路が全部通る形にすること)。
         // 種別と各フィールドの意味は Diagnostics/ScheduledRecreation.h を見ること
-        void AddScheduledRecreation(const ScheduledRecreation& request);
+        void AddScheduledRecreation(const ScheduledRecreation& request)
+        {
+            m_Recreations.Add(request);
+        }
 
         // TAAの有無を起動時に上書きするのは SetTAAEnabled(上で宣言済み)。
         // ダンプの比較では、まずこれを切って再現性の下限をゼロにする ――
@@ -424,7 +428,7 @@ namespace Kurenai
         // シーン切り替えを要求する(ScenePanel = Renderスレッドから呼ばれる)。
         // 実際の読み込みはLoaderスレッドが行うため即座に戻る。
         // 読み込み中に再度要求された場合は新しい要求で上書きされる(最後の要求が勝つ)
-        void RequestSceneLoad(size_t sceneIndex);
+        void RequestSceneLoad(size_t sceneIndex) override;
         // 平面反射の反射解像度の倍率変更を要求する(RenderingPanel = Renderスレッドから呼ばれる)。
         // RequestRenderResolutionと同じ方式(要求を記録するだけにしてRender()の先頭でまとめて反映)
         void RequestPlanarReflectionResolutionScale(float scale);
@@ -1245,16 +1249,6 @@ namespace Kurenai
         // 【定義はDiagnostics/RenderDumpService.cppにある】LogFrameStatsIfDueと同じ翻訳単位
         void AccumulatePerfDump();
 
-        // --- 作り直し経路の予約(検証専用。AddScheduledRecreation) ---
-        // 発火済みのものはFiredを立てて二度と撃たない。フレームが飛んでも取りこぼさないよう、
-        // 「>= Frameの最初のフレーム」で撃つ。
-        struct ScheduledRecreationSlot
-        {
-            ScheduledRecreation Request;
-            bool Fired = false;
-        };
-        std::vector<ScheduledRecreationSlot> m_ScheduledRecreations;
-
         // --- 中間レンダーターゲットの生値ダンプ(検証専用。AddTextureDump) ---
         // 名前 -> テクスチャ の対応表。CreateRenderTargetsでテクスチャを増やしたら
         // BuildDumpableTextureTableにも足すこと(表の実体はそちらのコメントを参照)
@@ -1266,6 +1260,20 @@ namespace Kurenai
         // ダンプとパスマニフェストの状態と処理。**表は毎回作り直して渡すこと**
         // (理由は Diagnostics/RenderDumpServiceState.h)
         Diagnostics::RenderDumpService m_DumpService;
+        // 作り直し経路の予約。下の IRecreationTarget の4本を通してエンジンを呼び返す
+        Diagnostics::ScheduledRecreationQueue m_Recreations;
+
+        // --- Diagnostics::IRecreationTarget ---
+        void RequestUpscaleSettings(bool enabled, uint32_t outputWidth, uint32_t outputHeight) override
+        {
+            RequestUpscaleSettings(enabled, m_Settings.PostProcess.UpscaleQuality, outputWidth, outputHeight);
+        }
+        void RequestBufferPrecision(BufferPrecision precision) override
+        {
+            m_Settings.System.Precision = precision;
+            m_BufferPrecisionDirty = true;
+        }
+        const std::vector<std::wstring>& GetSceneFilePaths() const override { return m_SceneFilePaths; }
 
         // 読み戻しとファイル書き出し。graph.Execute()の後にRender()から呼ぶ
         void ResolveTextureDumps();
@@ -1285,8 +1293,6 @@ namespace Kurenai
     private:
 
 
-        // ダンプの発行(コピーを積む)と、読み戻し・ファイル書き出し。Render()から呼ぶ
-        void ApplyScheduledRecreations();
 
     public:
         // 【publicにしてある】積む位置がPresentより前と決まっているためPasses::PresentPassが

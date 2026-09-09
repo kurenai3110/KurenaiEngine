@@ -79,7 +79,7 @@ namespace Kurenai
 
         // ここでは要求だけを積み、実際の作り直しは従来どおり後段のUpdateSceneStreamingと
         // バッファ精度/解像度の作り直しブロックへ集約する。作り直しの契機を散らさないためこの位置に置く。
-        ApplyScheduledRecreations();
+        m_Recreations.Apply(*this, m_TAAFrameIndex);
 
         // Loaderスレッドが出来上がったシーンを置いていれば取り込み、保留中の切り替え要求があれば発注する。
         // 旧シーンの破棄(WaitForGPUIdleを伴う)もここで行うため、このフレームのGPUコマンドを

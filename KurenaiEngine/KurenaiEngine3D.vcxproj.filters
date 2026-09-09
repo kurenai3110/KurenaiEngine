@@ -201,6 +201,9 @@
     <ClCompile Include="Source\Engine\Diagnostics\RenderDumpServiceState.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Engine\Diagnostics\ScheduledRecreationQueue.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
     <ClCompile Include="Source\Engine\GI\DDGISystem.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>
