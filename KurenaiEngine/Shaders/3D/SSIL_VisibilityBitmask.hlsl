@@ -19,7 +19,7 @@
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 static const float HALF_PI = 1.57079632679f;
 static const uint kSectorCount = 32u;
 

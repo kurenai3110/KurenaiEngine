@@ -24,7 +24,7 @@
 
 #include "Sky.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
 // 反射プローブの環境ソースと鏡面IBLの重み。SSR.hlslが同じ定義を共有する(20章)。
 // ReflectionProbe.hlsliはSamplers.hlsliのMaterialSamplerとFrameConstantsの

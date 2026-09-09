@@ -25,7 +25,7 @@
 // 履歴の妥当性判定に使う。リソースは宣言していないヘッダなので取り込んでも束縛は増えない
 #include "MegaLightsCommon.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
 #include "ShaderInterop/FrameConstants.hlsli"
 

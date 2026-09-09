@@ -20,7 +20,7 @@
 // (Karis 2013, "Real Shading in Unreal Engine 4")に従いV=N=Rと仮定する(視線依存の歪みが出るが
 // 実用上十分な近似として広く使われている)
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
 #include "Samplers.hlsli"
 

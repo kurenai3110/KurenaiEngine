@@ -39,7 +39,7 @@
 // エネルギー補正の前提になるため、DirectLighting.hlsl と定義を共有する
 #include "SpecularEnergy.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
 #include "ShaderInterop/FrameConstants.hlsli"
 

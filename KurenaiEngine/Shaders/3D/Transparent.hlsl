@@ -22,7 +22,7 @@
 // このシェーダーでも、BRDF積分LUT(BRDFLUT.hlsl)と同じ可視性項を使う必要があるため共有する
 #include "SpecularEnergy.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
 // 反射プローブ(19章)の環境ソースと鏡面IBLの重み。DeferredLighting.hlsl・SSR.hlslと同じ定義を
 // 共有する。空きスロットが違うだけでレジスタ番号は各シェーダーが決める(ReflectionProbe.hlsli冒頭)。

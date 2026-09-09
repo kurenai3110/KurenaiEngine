@@ -10,7 +10,7 @@
 // 使う必要があるため、SpecularEnergy.hlsliの共有定義を用いる(そこにkの選定理由を記載)
 #include "SpecularEnergy.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 static const uint kSampleCount = 1024;
 
 // パス1(CSMain)の出力先。A(スケール)とB(バイアス)だけを持つ中間テクスチャ

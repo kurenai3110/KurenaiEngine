@@ -6,7 +6,7 @@
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 // 定数バッファに確保するカーネルの最大数。実際に回す段数はParams.wで実行時に渡す
 // (品質プリセットから振れるようにするため。C++側のkSSAOKernelSizeMaxと一致させること)
 static const int kSSAOKernelSizeMax = 16;

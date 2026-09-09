@@ -50,7 +50,7 @@
 #define KURENAI_SKYVIEW_REGISTER t15
 #include "Sky.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
 #include "ShaderInterop/FrameConstants.hlsli"
 
