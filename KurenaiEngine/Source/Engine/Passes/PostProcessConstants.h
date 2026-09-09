@@ -236,13 +236,13 @@ namespace Kurenai::Passes
             DirectX::XMFLOAT4X4 PrevViewProj; // 前フレームのジッター済みVP
             DirectX::XMFLOAT4 JitterUv;       // xy=今フレームのジッター(UV単位), zw=前フレーム
             DirectX::XMFLOAT4 ScreenParams;   // xy=レンダー解像度, zw=その逆数
-            // x: 今フレームの色を混ぜる割合(m_PostProcessSettings.TAABlendWeight)
-            // y: 近傍クリップのボックス幅(標準偏差の何倍か。m_PostProcessSettings.TAAClipGamma)
+            // x: 今フレームの色を混ぜる割合(m_Settings.PostProcess.TAABlendWeight)
+            // y: 近傍クリップのボックス幅(標準偏差の何倍か。m_Settings.PostProcess.TAAClipGamma)
             // z: 履歴が使えるか(0=使えない。TAA.hlslは履歴をサンプルすらしない)
             // w: プリ露出の変化を打ち消す倍率(今フレームの露出 / 前フレームの露出)
             DirectX::XMFLOAT4 Params0;
             // x: 近傍クリップの方式(TAAClipMode)
-            // y: 静止時のちらつき抑制の強さ(m_PostProcessSettings.TAAAntiFlicker)。zwは未使用
+            // y: 静止時のちらつき抑制の強さ(m_Settings.PostProcess.TAAAntiFlicker)。zwは未使用
             DirectX::XMFLOAT4 Params1;
         };
         // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は

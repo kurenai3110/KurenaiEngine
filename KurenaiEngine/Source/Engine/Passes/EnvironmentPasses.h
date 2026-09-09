@@ -125,7 +125,7 @@ namespace Kurenai
             std::unique_ptr<RHI::IRHIShader> m_IrradianceComputeShader;
             std::unique_ptr<RHI::IRHIPipelineState> m_IrradiancePipelineState;
             // 拡散イラディアンスの球面調和関数(SH L2)経路。CSIrradianceの高速な代替で、
-            // m_IBLSettings.UseSHIrradianceでA/B比較できるようトグルにしてある。
+            // m_Settings.IBL.UseSHIrradianceでA/B比較できるようトグルにしてある。
             // 詳細はIBLConvolve.hlsl冒頭のコメントとdocs/Architecture.htmlを参照
             std::unique_ptr<RHI::IRHIShader> m_ProjectSHComputeShader;
             std::unique_ptr<RHI::IRHIPipelineState> m_ProjectSHPipelineState;

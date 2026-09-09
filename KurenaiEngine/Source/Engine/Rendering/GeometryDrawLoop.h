@@ -200,7 +200,7 @@ namespace Kurenai
                     // 落ちて物が消える
                     if (desc.Frustum && !unit.IsBatch()
                         && !Rendering::IsMeshVisibleWithStats(
-                            desc.MeshCulling && m_GeometrySettings.MeshCullingEnabled, *desc.Frustum,
+                            desc.MeshCulling && m_Settings.Geometry.MeshCullingEnabled, *desc.Frustum,
                             instance, lodModel, mesh, m_MeshCullTested, m_MeshCullCulled))
                     {
                         continue;

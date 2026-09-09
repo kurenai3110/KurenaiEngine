@@ -436,7 +436,7 @@ namespace Kurenai::Passes
             // Realtimeから切り替えた直後に不要なフルベイクが1回走る
             m_ProbeBakeSignature = frame.ProbeBakeSignature;
             // 露出の換算倍率も追随させる。1ステップずつ焼くため厳密には面・ミップごとに焼いた
-            // 露出が違うが、実効プリ露出の変化は毎秒2倍程度(m_PostProcessSettings.EffectiveExposureAdaptSpeed)なので
+            // 露出が違うが、実効プリ露出の変化は毎秒2倍程度(m_Settings.PostProcess.EffectiveExposureAdaptSpeed)なので
             // 1周(最大12フレーム)ぶんのずれは数%にとどまり、常時焼き直している以上すぐ解消する
             m_ProbeBakedExposureEV100 = effectiveExposureEV100;
         }

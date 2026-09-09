@@ -46,7 +46,7 @@ namespace Kurenai
         // ここの初期化子は最初のシーンを読むまでの値でしかない
         float CameraSpeed = Defaults::CameraSpeed;
 
-        // 中間バッファの精度構成(m_SystemSettings.Precision)によって変わるフォーマット。
+        // 中間バッファの精度構成(m_Settings.System.Precision)によって変わるフォーマット。
         BufferPrecision Precision = BufferPrecision::HDR;
 
         // 性能ログ(LogFrameStatsIfDue)。プロファイラパネルの表示はその場で消えてしまい後から

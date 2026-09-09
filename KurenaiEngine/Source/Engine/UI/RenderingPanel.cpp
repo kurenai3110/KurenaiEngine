@@ -1574,7 +1574,7 @@ namespace Kurenai::UI
         ImGui::SeparatorText("積雲(低層)");
 
         // このトグルはCloudCoverageスライダーと同じくIBLキューブの明るさ(平均透過率)に効く
-        // (m_CloudSettings.Enabled=falseのときComputeCloudAverageTransmittanceは常に1.0を返す)。
+        // (m_Settings.Cloud.Enabled=falseのときComputeCloudAverageTransmittanceは常に1.0を返す)。
         // 立てないと、無効にした直後もIBLが「有効だったときの暗さ」のまま次の自然な再ベイク
         // (太陽が動く・露出が変わる等)まで取り残されてしまうため、被覆率スライダーと同じ扱いにする
         if (CheckboxEx(
@@ -1594,7 +1594,7 @@ namespace Kurenai::UI
         // 変わったときだけ手続き空の再ベイクを要求する。他のつまみ(高度・UVスケール・密度・風・
         // 位相関数)は背景・水面反射の見た目にしか影響せずキューブの中身(IBLベイク結果)には
         // 影響しないため、ここでm_SkyBakeDirtyを立てると無関係な再ベイク(空生成6回+
-        // プリフィルタ36回のディスパッチ)が余計に走ってしまう(m_SkySettings.ProceduralEnabledトグルと
+        // プリフィルタ36回のディスパッチ)が余計に走ってしまう(m_Settings.Sky.ProceduralEnabledトグルと
         // 同じ判断基準)
         if (SliderFloatEx(
                 "被覆率###CloudCoverage", &m_Engine.GetCloudSettings().Coverage, 0.0f, 1.0f, Defaults::CloudCoverage, "%.2f", 0,

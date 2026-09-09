@@ -465,7 +465,7 @@ namespace Kurenai::Passes
                         else
                         {
                             // UIやプリセットで段数が変わったらカーネルを作り直す。
-                            // 先頭N本を流用してはいけない理由はm_AmbientOcclusionSettings.SSAOKernelSizeのコメント参照。
+                            // 先頭N本を流用してはいけない理由はm_Settings.AmbientOcclusion.SSAOKernelSizeのコメント参照。
                             // 生成は16回のRNGだけなので毎フレーム比較しても問題にならない
                             const uint32_t kernelSize =
                                 std::clamp(ambientOcclusionSettings.SSAOKernelSize, 1u, Passes::kSSAOKernelSizeMax);

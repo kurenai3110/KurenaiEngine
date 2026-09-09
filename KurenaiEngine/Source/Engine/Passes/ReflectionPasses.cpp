@@ -401,7 +401,7 @@ namespace Kurenai::Passes
                 .Execute = [this, gi, targets, cloudDetailNoiseTexture, cloudShapeNoiseTexture, cloudWeatherNoiseTexture, skyParametersBuffer, skyViewLUT, brdfLUTTexture, prefilteredEnvTexture, reflectionSettings, waterSettings, gbufferViewport, activeAOTexture, usingProceduralSky, planarReflectionPassRuns, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     // 水面の解析空フォールバック。手続き空が無効(.ksceneがDDSスカイボックスを
-                    // 明示するシーン)なときは、m_WaterSettings.AnalyticSkyReflectionの値に関わらず必ず0にする
+                    // 明示するシーン)なときは、m_Settings.Water.AnalyticSkyReflectionの値に関わらず必ず0にする
                     // ――DDSは任意の絵でPerezモデルとは無関係なため、SSR.hlsl側のSkyColorで
                     // 解析評価してはいけない(usingProceduralSkyはRender()前半で既に確定済み。
                     // DeferredLighting.hlsl向けのconstants.SkyParams.y代入と同じ判断)

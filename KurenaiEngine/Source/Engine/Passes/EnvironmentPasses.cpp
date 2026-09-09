@@ -182,7 +182,7 @@ namespace Kurenai::Passes
     void EnvironmentPasses::CreateSHResources(RHI::IRHIDevice& device, const std::wstring& shaderDirectory)
     {
         // 拡散イラディアンスの球面調和関数(SH L2)経路。CSIrradianceの
-        // 高速な代替で、A/B比較用にトグルで切り替える(m_IBLSettings.UseSHIrradiance、既定false)。
+        // 高速な代替で、A/B比較用にトグルで切り替える(m_Settings.IBL.UseSHIrradiance、既定false)。
         // 詳細はIBLConvolve.hlsl冒頭のコメント参照
         RHI::ShaderDesc projectShCsDesc;
         projectShCsDesc.Stage = RHI::ShaderStage::Compute;
@@ -661,7 +661,7 @@ namespace Kurenai::Passes
                     // 拡散イラディアンス(本物のTextureCube、32x32x6面)。HLSLはリソースを動的に
                     // スライス選択できないため、面ごとに1回ずつディスパッチする。
                     //
-                    // m_IBLSettings.UseSHIrradianceでCSIrradiance(総当たり積分、約9,750万
+                    // m_Settings.IBL.UseSHIrradianceでCSIrradiance(総当たり積分、約9,750万
                     // サンプル)とSH L2経路(CSProjectSH→CSProjectSHFinal→CSEvaluateSH、
                     // 射影は24,576テクセルを1回ずつ読むだけ)を切り替えられる。
                     // 出力(IBLResources::IrradianceTexture)の形・規約はどちらの経路でも完全に同一

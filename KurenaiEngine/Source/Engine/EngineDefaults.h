@@ -116,7 +116,7 @@ namespace Kurenai::Defaults
 
     // --- 水面 ---
     // .ksceneの[Water]セクションが無い場合の既定値。[Water]がある場合はScene::WaterWaveScale等が
-    // これらの値をリテラル複製した既定値で初期化され、そちらがKurenaiEngine3D::m_WaterSettings.WaveScale等を
+    // これらの値をリテラル複製した既定値で初期化され、そちらがKurenaiEngine3D::m_Settings.Water.WaveScale等を
     // 上書きする(Scene.hのコメント参照)。ここの値自体は.kscene側のコメントに残した暫定値の流用
     inline constexpr float WaterWaveScale = 12.0f;
     inline constexpr float WaterWaveSpeed = 0.03f;
@@ -131,7 +131,7 @@ namespace Kurenai::Defaults
     // プリフィルタでは雲の輪郭が色斑に潰れる。既定でONにしてあるのは、
     // 解析評価のほうが情報を落とさない上位互換だから。
     // 手続き空が無効なシーンでは実際には効かない
-    // (KurenaiEngine3D::m_WaterSettings.AnalyticSkyReflectionのコメント参照)
+    // (KurenaiEngine3D::m_Settings.Water.AnalyticSkyReflectionのコメント参照)
     inline constexpr bool WaterAnalyticSkyReflection = true;
 
     // --- 平面反射(水面への鏡像描画) ---
@@ -208,7 +208,7 @@ namespace Kurenai::Defaults
     // 場所ごとの縦プロファイル(層雲・積雲・雄大積雲)の選択を空全体でどちらへ寄せるかを決める。
     // 0.5は「値ノイズの平均が0.5なので、そのまま3種が均等に散らばる」という中立点
     inline constexpr float CloudTypeBias = 0.5f;
-    // シーンに依存しないUIつまみ(m_WaterSettings.TimeFrozenと同じ位置づけ)。
+    // シーンに依存しないUIつまみ(m_Settings.Water.TimeFrozenと同じ位置づけ)。
     // 積雲・巻雲の両方に効く(片方だけ凍結できるとA/B比較の対照が取れなくなるため)
     inline constexpr bool CloudTimeFrozen = false;
     // 積雲のボリュームレイマーチの段数(1〜32)。上限の意味は
@@ -252,7 +252,7 @@ namespace Kurenai::Defaults
 
     // --- 大気遠近(height fog / aerial perspective) ---
     // 以下の数値はいずれも見た目からの調整値であり、物理的な導出や実測値ではない
-    // (親セッション側の実機確認で調整可能。KurenaiEngine3D::m_FogSettings.Density等のコメント参照)
+    // (親セッション側の実機確認で調整可能。KurenaiEngine3D::m_Settings.Fog.Density等のコメント参照)
     inline constexpr bool FogEnabled = true;
     // 基準高度(FogRefHeight)での消散係数[1/m]。
     // 【この値の根拠】消散係数は気象学的視程Vと Koschmieder の関係 sigma = 3.912 / V で結び付く

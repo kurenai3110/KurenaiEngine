@@ -118,7 +118,7 @@ namespace Kurenai
         // 【月と夜空の比が夜の影の見え方を決める】影の濃さは「平行光(月) : 環境光(夜空)」の比で
         // 決まる。物理値の0.25:0.05は5:1で、影は十分な濃さを持つ。この比を保ったまま
         // 表示上の明るさだけを調整したい場合は、照度ではなく自動露出の
-        // m_PostProcessSettings.AutoExposureNightRolloffEV(夜の露出切り詰め量)を動かすこと
+        // m_Settings.PostProcess.AutoExposureNightRolloffEV(夜の露出切り詰め量)を動かすこと
         constexpr float kMoonSkyIlluminanceLux = 0.05f;
         // 星明かりだけの夜空の照度[lx]。月が地平線下にあるときの下限になる。
         // 月の位置は手動指定なので「月の出ていない夜」もスライダー一つで作れる。
@@ -407,9 +407,9 @@ namespace Kurenai
         // ここを揃えておかないと、UIで初めて超解像を有効にした瞬間に
         // 出力解像度が既定値(1920x1080)へ飛んでしまう。
         // 【初期化子リストではなくここで代入する】メンバ変数の中のフィールドは
-        // 初期化子リストへ書けない(m_PostProcessSettings 自体の既定値が先に入る)
-        m_PostProcessSettings.UpscaleOutputWidth = std::max(1u, renderWidth);
-        m_PostProcessSettings.UpscaleOutputHeight = std::max(1u, renderHeight);
+        // 初期化子リストへ書けない(m_Settings.PostProcess 自体の既定値が先に入る)
+        m_Settings.PostProcess.UpscaleOutputWidth = std::max(1u, renderWidth);
+        m_Settings.PostProcess.UpscaleOutputHeight = std::max(1u, renderHeight);
 
         m_ImGuiBackend = m_Device->CreateImGuiBackend(m_Window->GetHandle());
         m_GPUProfiler = m_Device->CreateGPUProfiler();
@@ -489,7 +489,7 @@ namespace Kurenai
         // フォーマットがバッファ精度に依存するため、この関数の末尾で
         // CreatePrecisionDependentPipelineStates()がまとめて作る
         m_LightingPasses->CreateAOResources(
-            *m_Device, shaderDirectory, m_AmbientOcclusionSettings.SSAOKernelSize);
+            *m_Device, shaderDirectory, m_Settings.AmbientOcclusion.SSAOKernelSize);
 
         // AO/GI無効時はこの常に黒・不透明(遮蔽なし=a:1、間接光なし=rgb:0)のテクスチャをライティングパスに渡す
         m_AODisabledTexture = m_Device->CreateSolidColorTexture(0, 0, 0, 255);
@@ -751,7 +751,7 @@ namespace Kurenai
 
             // レイトレーシングが使える環境ではDDGIのレイ取得も既定でDXRにする。
             // 更新コストが下がり、カメラから遠いプローブにも影が落ちるようになるため
-            m_DDGISettings.RayMode = DDGISettings::DDGIRayModeForCapability(m_RenderCapabilities.DDGIRaytracedTraceAvailable);
+            m_Settings.DDGI.RayMode = DDGISettings::DDGIRayModeForCapability(m_RenderCapabilities.DDGIRaytracedTraceAvailable);
 
             Core::Logger::Info(
                 "KurenaiEngine3D",
@@ -1010,7 +1010,7 @@ namespace Kurenai
         m_PresentPass->CreateConstantBuffer(*m_Device);
 
         // レンダーターゲットを先に作る。CreateRenderTargetsはHDRフォーマットの作成に失敗した場合に
-        // m_SystemSettings.PrecisionをLegacy8bitへ落とすフォールバックを持つため、PSOはその結果が
+        // m_Settings.System.PrecisionをLegacy8bitへ落とすフォールバックを持つため、PSOはその結果が
         // 確定した後に作らなければフォーマットがずれる
         CreateRenderTargets(m_RenderWidth, m_RenderHeight);
         // 平面反射専用のレンダーターゲットも、レンダー解像度が確定したこのタイミングで作る
@@ -1052,7 +1052,7 @@ namespace Kurenai
     {
         // Emissive: 1.0でクリップされると照明器具がHDRな輝度を持てず、ブルームが成立しない。
         // アルファを使わないためR11G11B10_Floatで足りる(帯域はR16G16B16A16_Floatの半分)
-        return m_SystemSettings.Precision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
+        return m_Settings.System.Precision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
                                                                 : RHI::Format::R11G11B10_Float;
     }
 
@@ -1061,7 +1061,7 @@ namespace Kurenai
         // AO/GIバッファ: rgb=間接拡散光(HDR)、a=遮蔽率。間接光は暗い室内では0.02〜0.1に収まり、
         // UNorm8ではコード5〜26の約20階調しか使えずポスタリゼーションする。
         // aに遮蔽率を持つためアルファ付きのR16G16B16A16_Floatを使う
-        return m_SystemSettings.Precision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
+        return m_Settings.System.Precision == BufferPrecision::Legacy8bit ? RHI::Format::R8G8B8A8_UNorm
                                                                 : RHI::Format::R16G16B16A16_Float;
     }
 
@@ -1084,31 +1084,31 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunRaytracedReflection() const
     {
-        return m_ReflectionSettings.Mode == ReflectionMode::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
+        return m_Settings.Reflection.Mode == ReflectionMode::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
                m_ReflectionPasses->HasRaytracedPipelineState() && m_RenderTargets.RTReflectionTexture != nullptr;
     }
 
     bool KurenaiEngine3D::ShouldRunRaytracedShadow() const
     {
-        return m_ShadowSettings.Mode == ShadowMode::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
+        return m_Settings.Shadow.Mode == ShadowMode::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
                m_ShadowPasses->HasRaytracedPipelineState() && m_RenderTargets.RTShadowTexture != nullptr;
     }
 
     bool KurenaiEngine3D::ShouldRunMegaLights() const
     {
-        if (m_MegaLightsSettings.Mode == MegaLightsMode::Off || !m_SceneGPUResources.RaytracingScene.IsValid() || m_RenderTargets.MegaLightsTexture == nullptr)
+        if (m_Settings.MegaLights.Mode == MegaLightsMode::Off || !m_SceneGPUResources.RaytracingScene.IsValid() || m_RenderTargets.MegaLightsTexture == nullptr)
         {
             return false;
         }
         // 手法ごとに必要なパイプラインが違う。確率的サンプリングもクアッド共有も
         // 候補プールと初期RIS(リザーバ)を共有し、そのあとの段だけが違う
-        if (m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic)
+        if (m_Settings.MegaLights.Mode == MegaLightsMode::Stochastic)
         {
             return m_MegaLightsPasses->HasCommonPipelineStates() && m_MegaLightsPasses->HasShadePipelineState() &&
                    m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
                    m_RenderTargets.MegaLightsReservoirBuffer != nullptr;
         }
-        if (m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared)
+        if (m_Settings.MegaLights.Mode == MegaLightsMode::QuadShared)
         {
             // Shade ではなく Resolve が色を書く。時間・空間再利用は使わないので、
             // 履歴バッファや空間再利用のping-pongが無くても走れる
@@ -1122,13 +1122,13 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunLightCulling() const
     {
-        if (!m_GeometrySettings.LightCullingEnabled)
+        if (!m_Settings.Geometry.LightCullingEnabled)
         {
             return false;
         }
         // ライトグリッドのデバッグ表示は、MegaLightsが走っていてもグリッドそのものを見せるものなので
         // 実行が要る。**ここを落とすと表示が前フレームの残骸か未初期化の中身になる**
-        if (m_DebugViewSettings.View == DebugView::LightTiles)
+        if (m_Settings.DebugView.View == DebugView::LightTiles)
         {
             return true;
         }
@@ -1141,7 +1141,7 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunRaytracedAO() const
     {
-        return m_AmbientOcclusionSettings.Technique == AOTechnique::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
+        return m_Settings.AmbientOcclusion.Technique == AOTechnique::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
                m_LightingPasses->HasRaytracedPipelineState() && m_RenderTargets.RTAORawTexture != nullptr &&
                m_RenderTargets.RTAOTexture != nullptr;
     }
@@ -1158,7 +1158,7 @@ namespace Kurenai
             return;
         }
 
-        m_DebugViewSettings.View = static_cast<DebugView>(index);
+        m_Settings.DebugView.View = static_cast<DebugView>(index);
         Core::Logger::Info("KurenaiEngine3D", "デバッグ表示を番号で選択しました: " + std::to_string(index));
     }
 
@@ -1166,7 +1166,7 @@ namespace Kurenai
     {
         // 【プロキシが1つも無いなら抑止しない】発光面を光源にしていないのに
         // DDGIから自発光だけ抜くと、その面の照明が丸ごと落ちる
-        return m_EmissiveLightSettings.LightsEnabled && !m_EmissiveLightSettings.LightsDoubleCountGI && !m_EmissiveProxies.empty();
+        return m_Settings.EmissiveLight.LightsEnabled && !m_Settings.EmissiveLight.LightsDoubleCountGI && !m_EmissiveProxies.empty();
     }
 
     void KurenaiEngine3D::SetEmissiveLights(int enabled, float cutoffIrradiance, int maxCount, int doubleCountGI)
@@ -1174,22 +1174,22 @@ namespace Kurenai
         // 負は「既定のまま」。しきい値だけ差し替えたいときに状態を巻き添えで倒さないため
         if (enabled >= 0)
         {
-            m_EmissiveLightSettings.LightsEnabled = (enabled > 0);
+            m_Settings.EmissiveLight.LightsEnabled = (enabled > 0);
         }
         // 0以下は「既定のまま」。OverrideMegaLightsの負値と同じ約束にしてある
         bool cutoffChanged = false;
         if (cutoffIrradiance > 0.0f)
         {
-            cutoffChanged = (m_EmissiveLightSettings.LightsCutoffIrradiance != cutoffIrradiance);
-            m_EmissiveLightSettings.LightsCutoffIrradiance = cutoffIrradiance;
+            cutoffChanged = (m_Settings.EmissiveLight.LightsCutoffIrradiance != cutoffIrradiance);
+            m_Settings.EmissiveLight.LightsCutoffIrradiance = cutoffIrradiance;
         }
         if (maxCount > 0)
         {
-            m_EmissiveLightSettings.LightsMaxCount = maxCount;
+            m_Settings.EmissiveLight.LightsMaxCount = maxCount;
         }
         if (doubleCountGI >= 0)
         {
-            m_EmissiveLightSettings.LightsDoubleCountGI = (doubleCountGI > 0);
+            m_Settings.EmissiveLight.LightsDoubleCountGI = (doubleCountGI > 0);
         }
         // 【三角形テーブルを焼き直す】メッシュライトの影響半径は読み込み時に焼くので、
         // τを変えても焼き直さないと**つまみが静かに効かない**。シーンの読み込みは
@@ -1197,16 +1197,16 @@ namespace Kurenai
         // (実際に踏んだ。τを100分の1にしてもダンプがバイト完全一致した)
         if (cutoffChanged && m_Device && !m_Scene.Instances.empty())
         {
-            m_MeshLightScene.Build(*m_Device, m_Scene, m_EmissiveLightSettings.LightsCutoffIrradiance);
+            m_MeshLightScene.Build(*m_Device, m_Scene, m_Settings.EmissiveLight.LightsCutoffIrradiance);
         }
 
         // 上限の警告は設定を変えたら出し直す(τを上げてRangeを縮めた結果を見たいため)
         m_EmissiveLightsCapLogged = false;
         Core::Logger::Info(
             "KurenaiEngine3D",
-            std::string("エミッシブ光源: ") + (m_EmissiveLightSettings.LightsEnabled ? "有効" : "無効") +
-                " / 打ち切り照度 " + std::to_string(m_EmissiveLightSettings.LightsCutoffIrradiance) + " / 上限 " +
-                std::to_string(m_EmissiveLightSettings.LightsMaxCount) + "個 / プロキシ " +
+            std::string("エミッシブ光源: ") + (m_Settings.EmissiveLight.LightsEnabled ? "有効" : "無効") +
+                " / 打ち切り照度 " + std::to_string(m_Settings.EmissiveLight.LightsCutoffIrradiance) + " / 上限 " +
+                std::to_string(m_Settings.EmissiveLight.LightsMaxCount) + "個 / プロキシ " +
                 std::to_string(m_EmissiveProxies.size()) + "個 / DDGIの自発光 " +
                 (ShouldSuppressEmissiveForGI() ? "抑止" : "そのまま(二重計上)"));
     }
@@ -1226,7 +1226,7 @@ namespace Kurenai
         std::string note;
         if (m_MeshLightsEnabled)
         {
-            if (!m_EmissiveLightSettings.LightsEnabled)
+            if (!m_Settings.EmissiveLight.LightsEnabled)
             {
                 note = " ※エミッシブ光源が無効なので三角形は出ない";
             }
@@ -1251,12 +1251,12 @@ namespace Kurenai
         {
             return;
         }
-        m_EmissiveLightSettings.Intensity = intensity;
+        m_Settings.EmissiveLight.Intensity = intensity;
         // 倍率を変えるとRangeも変わる(強さから解いているため)。上限の警告を出し直す
         m_EmissiveLightsCapLogged = false;
         m_EmissiveLightsValuesLogged = false;
         Core::Logger::Info(
-            "KurenaiEngine3D", "自発光の強度: " + std::to_string(m_EmissiveLightSettings.Intensity) + "倍");
+            "KurenaiEngine3D", "自発光の強度: " + std::to_string(m_Settings.EmissiveLight.Intensity) + "倍");
     }
 
     void KurenaiEngine3D::OverrideMegaLights(int mode, int shadowRayCount, int sampleCount)
@@ -1273,11 +1273,11 @@ namespace Kurenai
         // 負の値は「既定のまま」。本数側と同じ約束にしてある
         else if (mode >= 0)
         {
-            m_MegaLightsSettings.Mode = static_cast<MegaLightsMode>(mode);
+            m_Settings.MegaLights.Mode = static_cast<MegaLightsMode>(mode);
             Core::Logger::Info(
                 "KurenaiEngine3D", "MegaLightsの手法を番号で選択しました: " + std::to_string(mode));
 
-            if (m_MegaLightsSettings.Mode != MegaLightsMode::Off && !m_RenderCapabilities.RaytracingAvailable)
+            if (m_Settings.MegaLights.Mode != MegaLightsMode::Off && !m_RenderCapabilities.RaytracingAvailable)
             {
                 // 黙って何も起きないと「効かないバグ」に見えるので、必ず理由を残す
                 Core::Logger::Warning(
@@ -1290,7 +1290,7 @@ namespace Kurenai
         // 負の値は「既定のまま」。0は恒等テストとして意味のある値なので弾かない
         if (shadowRayCount >= 0)
         {
-            m_MegaLightsSettings.ShadowRayCount = shadowRayCount;
+            m_Settings.MegaLights.ShadowRayCount = shadowRayCount;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsの1灯あたりの影レイ本数を設定しました: " + std::to_string(shadowRayCount));
@@ -1299,7 +1299,7 @@ namespace Kurenai
         // RISのM。0以下は意味を成さないので1以上に丸める
         if (sampleCount > 0)
         {
-            m_MegaLightsSettings.SampleCount = sampleCount;
+            m_Settings.MegaLights.SampleCount = sampleCount;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsの初期候補数Mを設定しました: " + std::to_string(sampleCount));
@@ -1316,7 +1316,7 @@ namespace Kurenai
             return;
         }
 
-        m_MegaLightsSettings.AccumTargetFrames = frames;
+        m_Settings.MegaLights.AccumTargetFrames = frames;
         // 枚数を変えたら取り直す。途中まで足した状態に継ぎ足すと、
         // 「何サンプルの平均か」が分からなくなる
         m_MegaLightsPasses->ResetAccumFrames();
@@ -1328,41 +1328,41 @@ namespace Kurenai
     {
         if (enabled >= 0)
         {
-            m_MegaLightsSettings.SpatialEnabled = (enabled != 0);
+            m_Settings.MegaLights.SpatialEnabled = (enabled != 0);
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsの空間再利用を") + (m_MegaLightsSettings.SpatialEnabled ? "有効" : "無効") +
+                std::string("MegaLightsの空間再利用を") + (m_Settings.MegaLights.SpatialEnabled ? "有効" : "無効") +
                     "にしました");
         }
         // 0は「近傍を借りない」= 実質無効として意味があるので弾かない
         if (neighborCount >= 0)
         {
-            m_MegaLightsSettings.SpatialNeighborCount = neighborCount;
+            m_Settings.MegaLights.SpatialNeighborCount = neighborCount;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsの空間再利用で借りる近傍の数を設定しました: " + std::to_string(neighborCount));
         }
         if (radius > 0)
         {
-            m_MegaLightsSettings.SpatialRadius = radius;
+            m_Settings.MegaLights.SpatialRadius = radius;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsの空間再利用の半径を設定しました: " + std::to_string(radius));
         }
         if (useMIS >= 0)
         {
-            m_MegaLightsSettings.SpatialMIS = (useMIS != 0);
+            m_Settings.MegaLights.SpatialMIS = (useMIS != 0);
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 std::string("MegaLightsの空間再利用の結合を") +
-                    (m_MegaLightsSettings.SpatialMIS ? "生成化バランスヒューリスティック" : "confidence重み") +
+                    (m_Settings.MegaLights.SpatialMIS ? "生成化バランスヒューリスティック" : "confidence重み") +
                     "にしました");
         }
     }
 
     void KurenaiEngine3D::SetAutoExposureEnabled(bool enabled)
     {
-        m_PostProcessSettings.AutoExposureEnabled = enabled;
+        m_Settings.PostProcess.AutoExposureEnabled = enabled;
         Core::Logger::Info(
             "KurenaiEngine3D",
             std::string("自動露出を起動オプションで設定しました: ") + (enabled ? "有効" : "無効"));
@@ -1370,7 +1370,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetOcclusionCullingEnabled(bool enabled)
     {
-        m_GeometrySettings.OcclusionCullingEnabled = enabled;
+        m_Settings.Geometry.OcclusionCullingEnabled = enabled;
         Core::Logger::Info(
             "KurenaiEngine3D",
             std::string("Hi-Zオクルージョンカリングを起動オプションで設定しました: ")
@@ -1379,7 +1379,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetMeshletRenderingEnabled(bool enabled)
     {
-        m_GeometrySettings.MeshletRenderingEnabled = enabled;
+        m_Settings.Geometry.MeshletRenderingEnabled = enabled;
         Core::Logger::Info(
             "KurenaiEngine3D",
             std::string("メッシュレット描画を起動オプションで設定しました: ")
@@ -1388,7 +1388,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetTAAEnabled(bool enabled)
     {
-        m_PostProcessSettings.TAAEnabled = enabled;
+        m_Settings.PostProcess.TAAEnabled = enabled;
         Core::Logger::Info(
             "KurenaiEngine3D",
             std::string("TAAを起動オプションで設定しました: ") + (enabled ? "有効" : "無効"));
@@ -1401,19 +1401,19 @@ namespace Kurenai
             Core::Logger::Error("KurenaiEngine3D", "SetAOTechnique: 不正な値です: " + std::to_string(technique));
             return;
         }
-        m_AmbientOcclusionSettings.Technique = static_cast<AOTechnique>(technique);
+        m_Settings.AmbientOcclusion.Technique = static_cast<AOTechnique>(technique);
         Core::Logger::Info("KurenaiEngine3D", "AO手法を設定しました: " + std::to_string(technique));
     }
 
     void KurenaiEngine3D::SetSoftwareRasterEnabled(bool enabled)
     {
-        m_GeometrySettings.SoftwareRasterEnabled = enabled;
+        m_Settings.Geometry.SoftwareRasterEnabled = enabled;
         Core::Logger::Info("KurenaiEngine3D", std::string("ソフトウェアラスタライザを設定しました: ") + (enabled ? "有効" : "無効"));
     }
 
     void KurenaiEngine3D::SetDDGIHalfResolutionEnabled(bool enabled)
     {
-        m_DDGISettings.HalfResolution = enabled;
+        m_Settings.DDGI.HalfResolution = enabled;
         Core::Logger::Info("KurenaiEngine3D", std::string("DDGI半解像度を設定しました: ") + (enabled ? "有効" : "無効"));
     }
 
@@ -1424,14 +1424,14 @@ namespace Kurenai
             Core::Logger::Error("KurenaiEngine3D", "SetProbeUpdateMode: 不正な値です: " + std::to_string(mode));
             return;
         }
-        m_ReflectionProbeSettings.UpdateMode = static_cast<ProbeUpdateMode>(mode);
+        m_Settings.ReflectionProbe.UpdateMode = static_cast<ProbeUpdateMode>(mode);
         Core::Logger::Info("KurenaiEngine3D", "反射プローブ更新モードを設定しました: " + std::to_string(mode));
     }
 
     void KurenaiEngine3D::SetUpscaleEnabled(bool enabled)
     {
         // UI と同じく、現在の品質モードと出力解像度を保ったまま有効状態だけを変える。
-        RequestUpscaleSettings(enabled, m_PostProcessSettings.UpscaleQuality, m_PostProcessSettings.UpscaleOutputWidth, m_PostProcessSettings.UpscaleOutputHeight);
+        RequestUpscaleSettings(enabled, m_Settings.PostProcess.UpscaleQuality, m_Settings.PostProcess.UpscaleOutputWidth, m_Settings.PostProcess.UpscaleOutputHeight);
         Core::Logger::Info("KurenaiEngine3D", std::string("超解像を設定しました: ") + (enabled ? "有効" : "無効"));
     }
 
@@ -1505,7 +1505,7 @@ namespace Kurenai
                 "MegaLightsの空間再利用の反復回数が上限を超えたため頭打ちにしました: " +
                     std::to_string(iterations) + " -> " + std::to_string(clamped));
         }
-        m_MegaLightsSettings.SpatialIterations = clamped;
+        m_Settings.MegaLights.SpatialIterations = clamped;
         Core::Logger::Info(
             "KurenaiEngine3D",
             "MegaLightsの空間再利用の反復回数を設定しました: " + std::to_string(clamped));
@@ -1521,7 +1521,7 @@ namespace Kurenai
                     std::to_string(k));
             return;
         }
-        m_MegaLightsSettings.DenoiseFireflyClamp = k;
+        m_Settings.MegaLights.DenoiseFireflyClamp = k;
         Core::Logger::Info(
             "KurenaiEngine3D",
             "MegaLightsのファイアフライのクランプを設定しました: " + std::to_string(k));
@@ -1537,7 +1537,7 @@ namespace Kurenai
                     std::to_string(sigma));
             return;
         }
-        m_MegaLightsSettings.DenoiseSigmaLuminance = sigma;
+        m_Settings.MegaLights.DenoiseSigmaLuminance = sigma;
         Core::Logger::Info(
             "KurenaiEngine3D",
             "MegaLightsのデノイザのσ(輝度)を設定しました: " + std::to_string(sigma));
@@ -1548,18 +1548,18 @@ namespace Kurenai
         // 負の値・0は「既定のまま」。他のMegaLightsオプションと同じ約束
         if (enabled >= 0)
         {
-            m_MegaLightsSettings.DenoiseEnabled = (enabled != 0);
+            m_Settings.MegaLights.DenoiseEnabled = (enabled != 0);
             // 切り替えた瞬間の履歴は今の設定で作られたものではないので捨てる
             m_MegaLightsPasses->InvalidateDenoiseHistory();
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsのデノイザを") + (m_MegaLightsSettings.DenoiseEnabled ? "有効" : "無効") +
+                std::string("MegaLightsのデノイザを") + (m_Settings.MegaLights.DenoiseEnabled ? "有効" : "無効") +
                     "にしました");
         }
         // 0段は「時間累積だけ」で意味があるので弾かない
         if (atrousPasses >= 0)
         {
-            m_MegaLightsSettings.DenoiseAtrousPasses = atrousPasses;
+            m_Settings.MegaLights.DenoiseAtrousPasses = atrousPasses;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsのデノイザのa-trousの段数を設定しました: " + std::to_string(atrousPasses));
@@ -1568,8 +1568,8 @@ namespace Kurenai
         {
             // 【両方の手法へ入れる】計測用のつまみなので、指定したのに走っている手法の
             // ほうが読まれない、という取りこぼしを作らない
-            m_MegaLightsSettings.DenoiseMaxFrames = maxFrames;
-            m_MegaLightsSettings.QuadDenoiseMaxFrames = maxFrames;
+            m_Settings.MegaLights.DenoiseMaxFrames = maxFrames;
+            m_Settings.MegaLights.QuadDenoiseMaxFrames = maxFrames;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsのデノイザの時間累積の上限を設定しました: " + std::to_string(maxFrames));
@@ -1585,7 +1585,7 @@ namespace Kurenai
                 "MegaLightsの摂動モードが範囲外のため無視します: " + std::to_string(mode) + " (0〜2)");
             return;
         }
-        m_MegaLightsSettings.PerturbMode = mode;
+        m_Settings.MegaLights.PerturbMode = mode;
         m_MegaLightsPerturbApplied = false;
         Core::Logger::Info(
             "KurenaiEngine3D", "MegaLightsの摂動モードを設定しました(検証用): " + std::to_string(mode));
@@ -1596,17 +1596,17 @@ namespace Kurenai
         // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
         if (enabled >= 0)
         {
-            m_MegaLightsSettings.TemporalEnabled = (enabled != 0);
+            m_Settings.MegaLights.TemporalEnabled = (enabled != 0);
             // 切り替えた瞬間の履歴は今の設定で作られたものではないので捨てる
             m_MegaLightsPasses->InvalidateHistory();
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsの時間再利用を") + (m_MegaLightsSettings.TemporalEnabled ? "有効" : "無効") +
+                std::string("MegaLightsの時間再利用を") + (m_Settings.MegaLights.TemporalEnabled ? "有効" : "無効") +
                     "にしました");
         }
         if (mClamp > 0)
         {
-            m_MegaLightsSettings.TemporalMClamp = mClamp;
+            m_Settings.MegaLights.TemporalMClamp = mClamp;
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsの時間再利用のMの上限を設定しました: " + std::to_string(mClamp));
@@ -1618,10 +1618,10 @@ namespace Kurenai
         // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
         if (enabled >= 0)
         {
-            m_MegaLightsSettings.InitialVisibility = (enabled != 0);
+            m_Settings.MegaLights.InitialVisibility = (enabled != 0);
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsの初期可視レイを") + (m_MegaLightsSettings.InitialVisibility ? "有効" : "無効") +
+                std::string("MegaLightsの初期可視レイを") + (m_Settings.MegaLights.InitialVisibility ? "有効" : "無効") +
                     "にしました");
         }
     }
@@ -1631,26 +1631,26 @@ namespace Kurenai
         // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
         if (share >= 0)
         {
-            m_MegaLightsSettings.QuadShareEnabled = (share != 0);
+            m_Settings.MegaLights.QuadShareEnabled = (share != 0);
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsのクアッド共有を") + (m_MegaLightsSettings.QuadShareEnabled ? "有効" : "無効") +
+                std::string("MegaLightsのクアッド共有を") + (m_Settings.MegaLights.QuadShareEnabled ? "有効" : "無効") +
                     "にしました");
         }
         if (stratify >= 0)
         {
-            m_MegaLightsSettings.QuadStratify = (stratify != 0);
+            m_Settings.MegaLights.QuadStratify = (stratify != 0);
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsのクアッド層化を") + (m_MegaLightsSettings.QuadStratify ? "有効" : "無効") +
+                std::string("MegaLightsのクアッド層化を") + (m_Settings.MegaLights.QuadStratify ? "有効" : "無効") +
                     "にしました");
         }
         if (blockedCache >= 0)
         {
-            m_MegaLightsSettings.BlockedCacheEnabled = (blockedCache != 0);
+            m_Settings.MegaLights.BlockedCacheEnabled = (blockedCache != 0);
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                std::string("MegaLightsの遮蔽キャッシュを") + (m_MegaLightsSettings.BlockedCacheEnabled ? "有効" : "無効") +
+                std::string("MegaLightsの遮蔽キャッシュを") + (m_Settings.MegaLights.BlockedCacheEnabled ? "有効" : "無効") +
                     "にしました");
         }
     }
@@ -1670,17 +1670,17 @@ namespace Kurenai
                     " (1〜" + std::to_string(kMegaLightsMaxSamplesPerPixel) + ")");
             return;
         }
-        if (samples == m_MegaLightsSettings.QuadSamplesPerPixel)
+        if (samples == m_Settings.MegaLights.QuadSamplesPerPixel)
         {
             return;
         }
-        m_MegaLightsSettings.QuadSamplesPerPixel = samples;
+        m_Settings.MegaLights.QuadSamplesPerPixel = samples;
         // リザーババッファの大きさが変わる。GPUが参照していない状態で作り直す必要があるので、
         // 解像度変更と同じ「フレームの先頭でまとめて作り直す」経路に乗せる
         m_MegaLightsReservoirDirty = true;
         Core::Logger::Info(
             "KurenaiEngine3D",
-            "MegaLightsのクアッド標本数を " + std::to_string(m_MegaLightsSettings.QuadSamplesPerPixel) +
+            "MegaLightsのクアッド標本数を " + std::to_string(m_Settings.MegaLights.QuadSamplesPerPixel) +
                 " にしました(影レイの本数も同じ数になります)");
     }
 
@@ -1701,14 +1701,14 @@ namespace Kurenai
                     std::to_string(kMegaLightsTilePoolCapacity) + ")");
             return;
         }
-        if (capacity == m_MegaLightsSettings.TilePoolCapacity)
+        if (capacity == m_Settings.MegaLights.TilePoolCapacity)
         {
             return;
         }
-        m_MegaLightsSettings.TilePoolCapacity = capacity;
+        m_Settings.MegaLights.TilePoolCapacity = capacity;
         Core::Logger::Info(
             "KurenaiEngine3D",
-            "MegaLightsの候補プールの容量を " + std::to_string(m_MegaLightsSettings.TilePoolCapacity) +
+            "MegaLightsの候補プールの容量を " + std::to_string(m_Settings.MegaLights.TilePoolCapacity) +
                 " にしました");
     }
 
@@ -1726,17 +1726,17 @@ namespace Kurenai
             }
             else
             {
-                m_MegaLightsSettings.TileJitterMode = mode;
+                m_Settings.MegaLights.TileJitterMode = mode;
             }
         }
 
-        if (m_MegaLightsSettings.TileJitterMode == 1)
+        if (m_Settings.MegaLights.TileJitterMode == 1)
         {
             Core::Logger::Info(
                 "KurenaiEngine3D",
                 "MegaLightsのタイル格子ジッター: 有効 (m_TAAFrameIndexのHalton(2,3)を16段階へ量子化)");
         }
-        else if (m_MegaLightsSettings.TileJitterMode == 2)
+        else if (m_Settings.MegaLights.TileJitterMode == 2)
         {
             Core::Logger::Info(
                 "KurenaiEngine3D", "MegaLightsのタイル格子ジッター: 有効 (検証用オフセット(0,0)固定)");
@@ -1751,11 +1751,11 @@ namespace Kurenai
     {
         // 【手法3以外は必ず1】手法2の時間・空間再利用は「1画素1リザーバ」を前提に
         // 添字を組み立てているので、ここを1より大きくすると別画素の標本を読む
-        if (m_MegaLightsSettings.Mode != MegaLightsMode::QuadShared)
+        if (m_Settings.MegaLights.Mode != MegaLightsMode::QuadShared)
         {
             return 1;
         }
-        return std::clamp(m_MegaLightsSettings.QuadSamplesPerPixel, 1, kMegaLightsMaxSamplesPerPixel);
+        return std::clamp(m_Settings.MegaLights.QuadSamplesPerPixel, 1, kMegaLightsMaxSamplesPerPixel);
     }
 
     void KurenaiEngine3D::SetMegaLightsDumpPath(const wchar_t* path)
@@ -1773,7 +1773,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::ForceDDGIRayModeRaster()
     {
-        m_DDGISettings.RayMode = DDGIRayMode::Raster;
+        m_Settings.DDGI.RayMode = DDGIRayMode::Raster;
         Core::Logger::Info("KurenaiEngine3D", "DDGIのレイ取得をラスタライズへ固定しました(起動オプション)");
     }
 
@@ -1781,13 +1781,13 @@ namespace Kurenai
     {
         if (threshold <= 0.0f)
         {
-            m_DDGISettings.ProbeClassificationEnabled = false;
+            m_Settings.DDGI.ProbeClassificationEnabled = false;
             Core::Logger::Info("KurenaiEngine3D", "DDGIのプローブ分類を無効にしました(起動オプション)");
             return;
         }
 
-        m_DDGISettings.ProbeClassificationEnabled = true;
-        m_DDGISettings.BackfaceThreshold = threshold;
+        m_Settings.DDGI.ProbeClassificationEnabled = true;
+        m_Settings.DDGI.BackfaceThreshold = threshold;
         Core::Logger::Info(
             "KurenaiEngine3D",
             "DDGIのプローブ分類のしきい値を設定しました(起動オプション): " + std::to_string(threshold));
@@ -1830,7 +1830,7 @@ namespace Kurenai
 
     bool KurenaiEngine3D::ShouldRunRaytracedDDGITrace() const
     {
-        return m_DDGISettings.RayMode == DDGIRayMode::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
+        return m_Settings.DDGI.RayMode == DDGIRayMode::Raytraced && m_SceneGPUResources.RaytracingScene.IsValid() &&
                m_DDGIPasses->HasRaytracedTraceResources();
     }
 
@@ -1857,7 +1857,7 @@ namespace Kurenai
             return false;
         }
 
-        return m_GeometrySettings.MeshletRenderingEnabled && m_GeometryPasses->HasMeshletPipelineState();
+        return m_Settings.Geometry.MeshletRenderingEnabled && m_GeometryPasses->HasMeshletPipelineState();
     }
 
     uint32_t KurenaiEngine3D::GetHiZMipLevels() const
@@ -1869,7 +1869,7 @@ namespace Kurenai
         const Assets::Model& model, const Assets::Mesh& mesh)
     {
         return Rendering::IsMeshVisibleWithStats(
-            m_GeometrySettings.MeshCullingEnabled, frustum, instance, model, mesh,
+            m_Settings.Geometry.MeshCullingEnabled, frustum, instance, model, mesh,
             m_MeshCullTested, m_MeshCullCulled);
     }
 
@@ -1895,7 +1895,7 @@ namespace Kurenai
 
     RHI::IRHITexture* KurenaiEngine3D::GetActiveAOTexture() const
     {
-        if (!m_AmbientOcclusionSettings.Enabled)
+        if (!m_Settings.AmbientOcclusion.Enabled)
         {
             return m_AODisabledTexture.get();
         }
@@ -1903,7 +1903,7 @@ namespace Kurenai
         {
             return m_RenderTargets.RTAOTexture.get();
         }
-        if (m_AmbientOcclusionSettings.Technique == AOTechnique::SSILVisibilityBitmask)
+        if (m_Settings.AmbientOcclusion.Technique == AOTechnique::SSILVisibilityBitmask)
         {
             return m_RenderTargets.SSILTexture.get();
         }
@@ -1913,7 +1913,7 @@ namespace Kurenai
 
     RHI::IRHITexture* KurenaiEngine3D::GetActiveAORawTexture() const
     {
-        if (!m_AmbientOcclusionSettings.Enabled)
+        if (!m_Settings.AmbientOcclusion.Enabled)
         {
             return m_AODisabledTexture.get();
         }
@@ -1921,7 +1921,7 @@ namespace Kurenai
         {
             return m_RenderTargets.RTAORawTexture.get();
         }
-        if (m_AmbientOcclusionSettings.Technique == AOTechnique::SSILVisibilityBitmask)
+        if (m_Settings.AmbientOcclusion.Technique == AOTechnique::SSILVisibilityBitmask)
         {
             return m_RenderTargets.SSILRawTexture.get();
         }
@@ -1930,7 +1930,7 @@ namespace Kurenai
 
     RHI::IRHITexture* KurenaiEngine3D::GetActiveReflectionOutput() const
     {
-        if (m_ReflectionSettings.Mode == ReflectionMode::ScreenSpace)
+        if (m_Settings.Reflection.Mode == ReflectionMode::ScreenSpace)
         {
             return m_RenderTargets.SSRTexture.get();
         }
@@ -1962,7 +1962,7 @@ namespace Kurenai
             Core::Logger::Error(
                 "KurenaiEngine3D",
                 std::string("バッファ精度に依存するパイプラインステートの作成に失敗しました (バッファ精度=") +
-                    (m_SystemSettings.Precision == BufferPrecision::Legacy8bit ? "Legacy8bit" : "HDR") + "): " + e.what());
+                    (m_Settings.System.Precision == BufferPrecision::Legacy8bit ? "Legacy8bit" : "HDR") + "): " + e.what());
             throw;
         }
     }
@@ -2015,7 +2015,7 @@ namespace Kurenai
         // .ksceneが[Scene]Skyboxを明示しているシーンは、そのDDSでなければ意味を成さない
         // (White Furnace Testの一様放射輝度キューブマップが該当する)。手続き空で
         // 上書きしてしまうと検証そのものが壊れるため、明示指定があるときは必ずDDSを使う
-        const bool useProcedural = m_SkySettings.ProceduralEnabled && m_Scene.SkyboxPath.empty();
+        const bool useProcedural = m_Settings.Sky.ProceduralEnabled && m_Scene.SkyboxPath.empty();
         return useProcedural ? m_SkyResources.ProceduralSkyTexture.get() : m_SkyboxTexture.get();
     }
 
@@ -2025,24 +2025,24 @@ namespace Kurenai
         // 何が0になるかが揃っていないと、「無効にしたのに焼き直しが走らない」取りこぼしが出る。
         // 対応するのはRender()のconstants.CloudParams0〜3・FogParams0の組み立て箇所
         CloudBakeSignature s;
-        s.CumulusCoverage = m_CloudSettings.Enabled ? m_CloudSettings.Coverage : 0.0f;
-        s.CumulusAltitude = m_CloudSettings.Altitude;
-        s.CumulusUvScale = m_CloudSettings.UvScale;
-        s.CumulusDensity = m_CloudSettings.Density;
-        s.CumulusForwardG = m_CloudSettings.ForwardG;
-        s.CumulusThickness = m_CloudSettings.Volumetric ? m_CloudSettings.Thickness : 0.0f;
-        s.CloudTypeBias = m_CloudSettings.TypeBias;
-        s.CirrusCoverage = m_CloudSettings.CirrusEnabled ? m_CloudSettings.CirrusCoverage : 0.0f;
-        s.CirrusAltitude = m_CloudSettings.CirrusAltitude;
-        s.CirrusUvScale = m_CloudSettings.CirrusUvScale;
-        s.CirrusDensity = m_CloudSettings.CirrusDensity;
-        s.CirrusAnisotropy = m_CloudSettings.CirrusAnisotropy;
-        s.FogSigma0 = m_FogSettings.Density;
-        s.FogScaleHeight = m_FogSettings.ScaleHeight;
-        s.FogRefHeight = m_FogSettings.RefHeight;
+        s.CumulusCoverage = m_Settings.Cloud.Enabled ? m_Settings.Cloud.Coverage : 0.0f;
+        s.CumulusAltitude = m_Settings.Cloud.Altitude;
+        s.CumulusUvScale = m_Settings.Cloud.UvScale;
+        s.CumulusDensity = m_Settings.Cloud.Density;
+        s.CumulusForwardG = m_Settings.Cloud.ForwardG;
+        s.CumulusThickness = m_Settings.Cloud.Volumetric ? m_Settings.Cloud.Thickness : 0.0f;
+        s.CloudTypeBias = m_Settings.Cloud.TypeBias;
+        s.CirrusCoverage = m_Settings.Cloud.CirrusEnabled ? m_Settings.Cloud.CirrusCoverage : 0.0f;
+        s.CirrusAltitude = m_Settings.Cloud.CirrusAltitude;
+        s.CirrusUvScale = m_Settings.Cloud.CirrusUvScale;
+        s.CirrusDensity = m_Settings.Cloud.CirrusDensity;
+        s.CirrusAnisotropy = m_Settings.Cloud.CirrusAnisotropy;
+        s.FogSigma0 = m_Settings.Fog.Density;
+        s.FogScaleHeight = m_Settings.Fog.ScaleHeight;
+        s.FogRefHeight = m_Settings.Fog.RefHeight;
         // 【usingProceduralSkyを掛けない】FrameConstants側のfogEnabledFlagはそれも見るが、
         // この判定自体が手続き空のときにしか走らない(呼び出し元のifを参照)ので同じ値になる
-        s.FogEnabled = (m_FogSettings.Enabled && m_FogSettings.Density > 0.0f) ? 1.0f : 0.0f;
+        s.FogEnabled = (m_Settings.Fog.Enabled && m_Settings.Fog.Density > 0.0f) ? 1.0f : 0.0f;
         return s;
     }
 
@@ -2053,9 +2053,9 @@ namespace Kurenai
             return;
         }
 
-        // 中間バッファのフォーマットはm_SystemSettings.Precisionで切り替える(A/B比較用。BufferPrecision参照)。
+        // 中間バッファのフォーマットはm_Settings.System.Precisionで切り替える(A/B比較用。BufferPrecision参照)。
         // Legacy8bitは「中間バッファをすべてR8G8B8A8_UNorm」にする構成
-        const bool legacyPrecision = (m_SystemSettings.Precision == BufferPrecision::Legacy8bit);
+        const bool legacyPrecision = (m_Settings.System.Precision == BufferPrecision::Legacy8bit);
 
         // Albedoは両構成ともリニアのR8G8B8A8_UNormのままにする。
         // sRGB格納(R8G8B8A8_UNorm_SRGB)にすれば符号点が暗部へ寄り、暗いマテリアルの量子化は
@@ -2094,7 +2094,7 @@ namespace Kurenai
             m_RenderTargets.SkyCloudFogTexture =
                 m_Device->CreateRenderTexture(m_RenderTargets.SkyCloudWidth, m_RenderTargets.SkyCloudHeight, RHI::Format::R32_Float);
             // DDGIの低解像度解決パスの出力(rgb=イラディアンス、a=insideWeight)。雲と同じく1/2解像度。
-            // 【常に確保する】m_DDGISettings.HalfResolutionが無効でもシェーダーのt19には何かを
+            // 【常に確保する】m_Settings.DDGI.HalfResolutionが無効でもシェーダーのt19には何かを
             // バインドしておく必要がある(DX12のディスクリプタテーブルを埋め切るため)。
             // フォーマットを雲と揃えているのも同じ理由 ―― イラディアンスはHDRの物理量で、
             // 8bitでは飽和と量子化がそのまま間接光のバンディングになる
@@ -2144,7 +2144,7 @@ namespace Kurenai
             const uint32_t hiZMipLevels = ComputeMipLevelCount(width, height);
             m_GeometryPasses->SetHiZMipLevels(hiZMipLevels);
             m_RenderTargets.CreateHiZ(*m_Device, width, height, hiZMipLevels);
-            m_DebugViewSettings.HiZDebugMipLevel = 0;
+            m_Settings.DebugView.HiZDebugMipLevel = 0;
             // 作り直した直後の中身は未定義。Hi-Zパスが1回走るまでオクルージョン判定を止める
             m_GeometryPasses->InvalidateHiZ();
 
@@ -2167,7 +2167,7 @@ namespace Kurenai
                 // 定数バッファへ渡す値(MegaLightsSamplesPerPixel())は手法3以外で1になるので、
                 // **確保 >= 実際に使う本数** が常に成り立つ
                 m_MegaLightsAllocatedSamplesPerPixel =
-                    std::clamp(m_MegaLightsSettings.QuadSamplesPerPixel, 1, kMegaLightsMaxSamplesPerPixel);
+                    std::clamp(m_Settings.MegaLights.QuadSamplesPerPixel, 1, kMegaLightsMaxSamplesPerPixel);
                 m_RenderTargets.CreateMegaLightsReservoirs(
                     *m_Device, width, height, static_cast<uint32_t>(m_MegaLightsAllocatedSamplesPerPixel));
 
@@ -2256,7 +2256,7 @@ namespace Kurenai
                 "KurenaiEngine3D",
                 std::string("HDR精度のレンダーターゲット作成に失敗したためLegacy8bit構成へフォールバックします (") +
                     std::to_string(width) + "x" + std::to_string(height) + "): " + e.what());
-            m_SystemSettings.Precision = BufferPrecision::Legacy8bit;
+            m_Settings.System.Precision = BufferPrecision::Legacy8bit;
             CreateRenderTargets(width, height);
             return;
         }
@@ -2287,9 +2287,9 @@ namespace Kurenai
         // 反射解像度 = レンダー解像度 × 倍率。最低でも1x1は確保する
         // (倍率が非常に小さい・レンダー解像度が非常に小さい場合でもテクスチャ作成自体は失敗させない)
         const uint32_t width = std::max(
-            1u, static_cast<uint32_t>(static_cast<float>(m_RenderWidth) * m_ReflectionSettings.PlanarResolutionScale));
+            1u, static_cast<uint32_t>(static_cast<float>(m_RenderWidth) * m_Settings.Reflection.PlanarResolutionScale));
         const uint32_t height = std::max(
-            1u, static_cast<uint32_t>(static_cast<float>(m_RenderHeight) * m_ReflectionSettings.PlanarResolutionScale));
+            1u, static_cast<uint32_t>(static_cast<float>(m_RenderHeight) * m_Settings.Reflection.PlanarResolutionScale));
 
         try
         {
@@ -2404,10 +2404,10 @@ namespace Kurenai
             return;
         }
 
-        m_PostProcessSettings.UpscaleEnabled = enabled;
-        m_PostProcessSettings.UpscaleQuality = mode;
-        m_PostProcessSettings.UpscaleOutputWidth = outputWidth;
-        m_PostProcessSettings.UpscaleOutputHeight = outputHeight;
+        m_Settings.PostProcess.UpscaleEnabled = enabled;
+        m_Settings.PostProcess.UpscaleQuality = mode;
+        m_Settings.PostProcess.UpscaleOutputWidth = outputWidth;
+        m_Settings.PostProcess.UpscaleOutputHeight = outputHeight;
 
         if (enabled)
         {
@@ -2437,7 +2437,7 @@ namespace Kurenai
     void KurenaiEngine3D::CreateUpscaleTargets(uint32_t width, uint32_t height)
     {
         // 無効化された場合は解放だけして戻る
-        if (!m_PostProcessSettings.UpscaleEnabled)
+        if (!m_Settings.PostProcess.UpscaleEnabled)
         {
             m_RenderTargets.ResetUpscale();
             return;
@@ -2450,7 +2450,7 @@ namespace Kurenai
     {
         // テクスチャの確保に失敗している場合にパスを登録すると、バインドするリソースが無いまま
         // Dispatchすることになるため、確保済みであることまで条件に入れる
-        return m_PostProcessSettings.UpscaleEnabled && m_RenderTargets.UpscaleTexture && m_RenderTargets.UpscaleSharpTexture &&
+        return m_Settings.PostProcess.UpscaleEnabled && m_RenderTargets.UpscaleTexture && m_RenderTargets.UpscaleSharpTexture &&
                m_RenderTargets.UpscaleTargetWidth > 0 && m_RenderTargets.UpscaleTargetHeight > 0;
     }
 
@@ -2467,7 +2467,7 @@ namespace Kurenai
             return;
         }
 
-        if (scale == m_ReflectionSettings.PlanarResolutionScale)
+        if (scale == m_Settings.Reflection.PlanarResolutionScale)
         {
             return;
         }
@@ -2487,24 +2487,24 @@ namespace Kurenai
 
         // SSAO/SSILのサンプリング半径はシーンの規模に応じて変わるべきなので、対角線に比例させる
         // (小さすぎる/大きすぎるシーンでも遮蔽表現が破綻しないよう妥当な範囲にクランプする)
-        m_AmbientOcclusionSettings.SSAORadius = std::clamp(diagonal * 0.01f, 0.05f, 2.0f);
-        m_AmbientOcclusionSettings.SSILRadius = m_AmbientOcclusionSettings.SSAORadius;
-        m_AmbientOcclusionSettings.SSILThickness = m_AmbientOcclusionSettings.SSILRadius * 0.2f;
+        m_Settings.AmbientOcclusion.SSAORadius = std::clamp(diagonal * 0.01f, 0.05f, 2.0f);
+        m_Settings.AmbientOcclusion.SSILRadius = m_Settings.AmbientOcclusion.SSAORadius;
+        m_Settings.AmbientOcclusion.SSILThickness = m_Settings.AmbientOcclusion.SSILRadius * 0.2f;
 
         // SSRの最大レイ距離もシーンの規模に応じて変わるべきなので、対角線に比例させる。
         // ヒット判定の厚みはSSAO/SSILと同様、遮蔽・接触判定として妥当な小さい値にする
-        m_ReflectionSettings.SSRMaxDistance = std::clamp(diagonal * 0.5f, 1.0f, 100.0f);
-        m_ReflectionSettings.SSRThickness = m_AmbientOcclusionSettings.SSAORadius * 0.2f;
+        m_Settings.Reflection.SSRMaxDistance = std::clamp(diagonal * 0.5f, 1.0f, 100.0f);
+        m_Settings.Reflection.SSRThickness = m_Settings.AmbientOcclusion.SSAORadius * 0.2f;
 
         // RT反射のレイ距離はSSRより長く取る。SSRは「画面外へ出たら打ち切り」で早々に確信度0へ
         // 落ちるためシーン対角の半分でも足りるが、RTは画面外も追えるので短く切ると
         // 本来映るはずの建物を通り越して空が映ってしまう。シーン対角そのものを上限にする
-        m_ReflectionSettings.RTReflectionMaxDistance = std::clamp(diagonal, 1.0f, 500.0f);
+        m_Settings.Reflection.RTReflectionMaxDistance = std::clamp(diagonal, 1.0f, 500.0f);
 
         // RTAOのレイ距離はSSAO/SSILの半径より長く取る。スクリーンスペース手法は
         // 半径を伸ばすほど画面上のサンプル間隔が粗くなって破綻するが、RTには
         // その制約が無く、部屋の広さ程度まで伸ばしたほうがバウンス光が正しく回る
-        m_AmbientOcclusionSettings.RTAOMaxDistance = std::clamp(diagonal * 0.03f, 0.1f, 10.0f);
+        m_Settings.AmbientOcclusion.RTAOMaxDistance = std::clamp(diagonal * 0.03f, 0.1f, 10.0f);
 
         // カメラの移動速度。.ksceneが[Scene]CameraSpeedを持っていればそれを使い、
         // 無ければシーン対角から決める。
@@ -2513,7 +2513,7 @@ namespace Kurenai
         // それより小さいシーンは従来の5 m/sで既に使いやすいので下限で据え置く
         // (比例だけだとSponza(対角37.1m)が0.54 m/sになり、逆に遅くなる)。
         // 根拠と実測はEngineDefaults.hのCameraSpeed一式のコメントに置いてある
-        m_SystemSettings.CameraSpeed = m_Scene.HasCameraSpeed
+        m_Settings.System.CameraSpeed = m_Scene.HasCameraSpeed
             ? m_Scene.CameraSpeed
             : (std::max)(
                   Defaults::CameraSpeedMin,
@@ -2525,7 +2525,7 @@ namespace Kurenai
         std::snprintf(
             cameraSpeedText, sizeof(cameraSpeedText),
             "カメラ移動速度: %.2f m/s (Shift時 %.2f m/s) [シーン対角 %.1f m / %s]",
-            m_SystemSettings.CameraSpeed, m_SystemSettings.CameraSpeed * Defaults::CameraSpeedShiftMultiplier, diagonal,
+            m_Settings.System.CameraSpeed, m_Settings.System.CameraSpeed * Defaults::CameraSpeedShiftMultiplier, diagonal,
             m_Scene.HasCameraSpeed ? "[Scene]CameraSpeedの指定" : "対角からの自動決定");
         Core::Logger::Info("KurenaiEngine3D", cameraSpeedText);
     }
@@ -2916,28 +2916,28 @@ namespace Kurenai
             m_RenderDeltaTime = renderDeltaTime;
 
             // 昼夜サイクルの自動進行はUpdateスレッドではなくこちら(Renderスレッド)で行う。
-            // m_SkySettings.TimeOfDay/m_SkySettings.TimeAutoAdvance/m_SkySettings.TimeAdvanceSpeedはImGuiパネル(RenderLightingUI、
+            // m_Settings.Sky.TimeOfDay/m_Settings.Sky.TimeAutoAdvance/m_Settings.Sky.TimeAdvanceSpeedはImGuiパネル(RenderLightingUI、
             // Renderスレッドから描画)でも書き換えられるため、両方をRenderスレッド専有にすることで
             // 追加の排他制御なしに済ませられる
-            if (m_SkySettings.TimeAutoAdvance)
+            if (m_Settings.Sky.TimeAutoAdvance)
             {
-                m_SkySettings.TimeOfDay = std::fmod(m_SkySettings.TimeOfDay + m_SkySettings.TimeAdvanceSpeed * renderDeltaTime, 24.0f);
-                if (m_SkySettings.TimeOfDay < 0.0f)
+                m_Settings.Sky.TimeOfDay = std::fmod(m_Settings.Sky.TimeOfDay + m_Settings.Sky.TimeAdvanceSpeed * renderDeltaTime, 24.0f);
+                if (m_Settings.Sky.TimeOfDay < 0.0f)
                 {
-                    m_SkySettings.TimeOfDay += 24.0f;
+                    m_Settings.Sky.TimeOfDay += 24.0f;
                 }
             }
 
             // 水面のスクロール位相。太陽の自動進行とまったく同じ場所・同じ理由
-            // (m_SkySettings.TimeAutoAdvance/m_WaterSettings.TimeFrozenがRenderingパネル(Renderスレッドから描画)でも
+            // (m_Settings.Sky.TimeAutoAdvance/m_Settings.Water.TimeFrozenがRenderingパネル(Renderスレッドから描画)でも
             // 書き換えられるため、両方をRenderスレッド専有にすることで追加の排他制御なしに済ませる)
-            if (!m_WaterSettings.TimeFrozen)
+            if (!m_Settings.Water.TimeFrozen)
             {
-                m_WaterScrollOffset = std::fmod(m_WaterScrollOffset + renderDeltaTime * m_WaterSettings.WaveSpeed, 1.0f);
+                m_WaterScrollOffset = std::fmod(m_WaterScrollOffset + renderDeltaTime * m_Settings.Water.WaveSpeed, 1.0f);
             }
 
             // 雲のスクロール位相。水面とまったく同じ場所・同じ理由でRenderスレッド専有のまま進める。
-            // 【風速の単位について】m_CloudSettings.WindSpeedは実世界の速度[m/s]として持つ(UIで直感的に
+            // 【風速の単位について】m_Settings.Cloud.WindSpeedは実世界の速度[m/s]として持つ(UIで直感的に
             // 扱えるようにするため)。Sky.hlsliのノイズ空間はワールド距離にCloudUvScaleを掛けた
             // ものなので、ノイズ空間上の移動量へ換算するにはここでCloudUvScaleを掛ける必要がある。
             // 【なぜベイクをdirtyにしないのか】風のスクロールはIBLキューブの明るさに一切影響しない
@@ -2945,12 +2945,12 @@ namespace Kurenai
             // 毎フレーム空生成6回+プリフィルタ36回のディスパッチが走ってしまい、判断Aの利点が
             // 丸ごと消える。被覆率のような「キューブの明るさに効く」パラメータだけがdirtyを立てる
             // (RenderingPanel::DrawCloudSection参照)
-            if (!m_CloudSettings.TimeFrozen)
+            if (!m_Settings.Cloud.TimeFrozen)
             {
-                const float windRadians = DirectX::XMConvertToRadians(m_CloudSettings.WindDirectionDegrees);
+                const float windRadians = DirectX::XMConvertToRadians(m_Settings.Cloud.WindDirectionDegrees);
                 const float windDirX = std::cos(windRadians);
                 const float windDirZ = std::sin(windRadians);
-                const float advanceNoiseSpace = m_CloudSettings.WindSpeed * m_CloudSettings.UvScale * renderDeltaTime;
+                const float advanceNoiseSpace = m_Settings.Cloud.WindSpeed * m_Settings.Cloud.UvScale * renderDeltaTime;
                 // Sky.hlsliのkCloudNoisePeriodと同じ値でwrapする(このファイル冒頭近くの
                 // kCloudNoisePeriod定数のコメント参照)
                 m_CloudScrollOffset.x =
@@ -2959,11 +2959,11 @@ namespace Kurenai
                     std::fmod(m_CloudScrollOffset.y + windDirZ * advanceNoiseSpace, kCloudNoisePeriod);
 
                 // 巻雲。積雲とまったく同じ形(kCloudNoisePeriodでstd::fmod)で進める。
-                // 風向はm_CloudSettings.WindDirectionDegreesを積雲と共有し、速度・UVスケールだけ
-                // 巻雲側の値(m_CloudSettings.CirrusWindSpeed/m_CloudSettings.CirrusUvScale)を使う。凍結トグル
-                // (m_CloudSettings.TimeFrozen)も積雲と共有する——片方にしか効かないとA/B比較で
+                // 風向はm_Settings.Cloud.WindDirectionDegreesを積雲と共有し、速度・UVスケールだけ
+                // 巻雲側の値(m_Settings.Cloud.CirrusWindSpeed/m_Settings.Cloud.CirrusUvScale)を使う。凍結トグル
+                // (m_Settings.Cloud.TimeFrozen)も積雲と共有する——片方にしか効かないとA/B比較で
                 // スクロールが揺れる側だけ残ってしまい対照が取れなくなるため
-                const float cirrusAdvanceNoiseSpace = m_CloudSettings.CirrusWindSpeed * m_CloudSettings.CirrusUvScale * renderDeltaTime;
+                const float cirrusAdvanceNoiseSpace = m_Settings.Cloud.CirrusWindSpeed * m_Settings.Cloud.CirrusUvScale * renderDeltaTime;
                 m_CirrusScrollOffset.x =
                     std::fmod(m_CirrusScrollOffset.x + windDirX * cirrusAdvanceNoiseSpace, kCloudNoisePeriod);
                 m_CirrusScrollOffset.y =
@@ -3014,10 +3014,10 @@ namespace Kurenai
             // 固定FPSモード: このフレームの処理(Time of Day更新+Render+Present)が目標フレーム時間
             // より短く終わった場合、余った時間だけ待機して間隔を揃える。CPU/GPU計測(上記)の後に
             // 行うことで、この待機時間自体がプロファイラの計測値に混ざらないようにしている
-            if (m_SystemSettings.FixedFPSEnabled && m_SystemSettings.TargetFPS > 0.0f)
+            if (m_Settings.System.FixedFPSEnabled && m_Settings.System.TargetFPS > 0.0f)
             {
                 const auto targetFrameDuration = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                    std::chrono::duration<double>(1.0 / m_SystemSettings.TargetFPS));
+                    std::chrono::duration<double>(1.0 / m_Settings.System.TargetFPS));
                 const auto frameDeadline = now + targetFrameDuration;
                 if (std::chrono::steady_clock::now() < frameDeadline)
                 {
@@ -3104,11 +3104,11 @@ namespace Kurenai
         // メッセージベースの入力API(IsKeyDown)を使う。GetAsyncKeyStateと異なりウィンドウが
         // フォーカスを失っている間は反応せず、PostMessageによるテスト自動化とも整合する
         //
-        // 【速度は即値ではなくシーンから決まる】m_SystemSettings.CameraSpeedは.ksceneの[Scene]CameraSpeed、
+        // 【速度は即値ではなくシーンから決まる】m_Settings.System.CameraSpeedは.ksceneの[Scene]CameraSpeed、
         // 無ければシーン対角から自動で決まる(ResetSceneDependentParams)。Shiftの倍率は
         // 従来の 20/5 = 4倍をそのまま保つ
         const float moveSpeed =
-            m_SystemSettings.CameraSpeed * (IsKeyDown(VK_SHIFT) ? Defaults::CameraSpeedShiftMultiplier : 1.0f);
+            m_Settings.System.CameraSpeed * (IsKeyDown(VK_SHIFT) ? Defaults::CameraSpeedShiftMultiplier : 1.0f);
         const float moveAmount = moveSpeed * deltaTime;
 
         const DirectX::XMFLOAT3 forward = m_Camera.GetForward();
@@ -3211,7 +3211,7 @@ namespace Kurenai
         UpdateImGuiToggle();
         // 新しいシーンが反映されていれば、その初期カメラとウィンドウタイトルをここで取り込む
         UpdateAppliedSceneHandoff();
-        // 昼夜サイクルの自動進行(m_SkySettings.TimeOfDay)はRenderThreadMain側で行う(RenderThreadMain参照)
+        // 昼夜サイクルの自動進行(m_Settings.Sky.TimeOfDay)はRenderThreadMain側で行う(RenderThreadMain参照)
     }
 
     void KurenaiEngine3D::Render(const FrameState& frameState)
@@ -3240,7 +3240,7 @@ namespace Kurenai
 
         // 太陽・月・空の状態を求める(すべて絶対的な測光量[lx]。露出はまだ掛かっていない)
         const SunLighting sunLighting = ComputeSunLighting(
-            m_SkySettings.TimeOfDay, m_SkySettings.SunAzimuthDegrees, m_SkySettings.MoonAzimuthDegrees, m_SkySettings.MoonElevationDegrees);
+            m_Settings.Sky.TimeOfDay, m_Settings.Sky.SunAzimuthDegrees, m_Settings.Sky.MoonAzimuthDegrees, m_Settings.Sky.MoonElevationDegrees);
 
         UpdateEffectiveExposure(sunLighting.KeyIlluminanceLux);
         ApplyMegaLightsPerturbationIfDue();
@@ -3253,7 +3253,7 @@ namespace Kurenai
         // 実効EV100は夜に最大18段下がる(=バッファ上の値が26万倍明るくなる)ため、
         // ここを1.0に固定していると夜が昼と同じ明るさで出てしまい、
         // 自動露出をオフにしても露出が時刻に追従し続ける状態になる
-        const float manualExposureScale = std::exp2(m_EffectiveExposureEV100 - m_PostProcessSettings.SceneExposureEV100);
+        const float manualExposureScale = std::exp2(m_EffectiveExposureEV100 - m_Settings.PostProcess.SceneExposureEV100);
 
         // 自動露出の測光値を上側で止めるための、構図に依存しない基準EV。
         // キー照度は画面に何が写っていようと変わらないので、

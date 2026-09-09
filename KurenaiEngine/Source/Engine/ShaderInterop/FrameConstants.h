@@ -50,17 +50,17 @@ namespace Kurenai::ShaderInterop
         DirectX::XMFLOAT4X4 View;
         DirectX::XMFLOAT4X4 Proj;
         // 昼夜サイクル用(末尾に追加し、既存シェーダのオフセットは変えない)。rgb=環境光の色
-        // (m_IBLSettings.AmbientScale乗算済み、Render()側のconstants.AmbientColor代入部を参照)、
-        // a=昼度(0=夜,1=昼。m_IBLSettings.AmbientScaleは掛けない)
+        // (m_Settings.IBL.AmbientScale乗算済み、Render()側のconstants.AmbientColor代入部を参照)、
+        // a=昼度(0=夜,1=昼。m_Settings.IBL.AmbientScaleは掛けない)
         DirectX::XMFLOAT4 AmbientColor;
         // M2: カスケード選択・PCSS用(末尾に追加)。xyzw = 各カスケードのView空間far距離
         DirectX::XMFLOAT4 CascadeSplits;
-        // x: PCSSのライトサイズ(m_ShadowSettings.LightSize)。y: IBLプリフィルタ済み鏡面マップの
+        // x: PCSSのライトサイズ(m_Settings.Shadow.LightSize)。y: IBLプリフィルタ済み鏡面マップの
         // 最大ミップレベル(Passes::kIBLPrefilterMipLevels-1、DeferredLighting.hlslがラフネス→ミップの
-        // 変換に使う)。z: IBL強度倍率(m_IBLSettings.Enabled=falseの場合は0.0fを渡し、シェーダ側で
+        // 変換に使う)。z: IBL強度倍率(m_Settings.IBL.Enabled=falseの場合は0.0fを渡し、シェーダ側で
         // EvaluateIBLの代わりに定数色アンビエント(AmbientColor.rgb)へフォールバックする)。
         // w: スペキュラのマルチスキャッタリング・エネルギー補正の方式
-        // (m_ReflectionSettings.SpecularCompensation。0=Off / 1=Linear / 2=Series / 3=Kulla-Conty。
+        // (m_Settings.Reflection.SpecularCompensation。0=Off / 1=Linear / 2=Series / 3=Kulla-Conty。
         // 共有ヘッダーSpecularEnergy.hlsliのKURENAI_SPEC_COMP_*と一致させること。14.9節)
         DirectX::XMFLOAT4 ShadowParams;
         // 半透明パス(Transparent.hlsl)専用。x=t8のライトリストの有効数。DirectLighting.hlslは
@@ -73,8 +73,8 @@ namespace Kurenai::ShaderInterop
         // いるため、roughness=1(α=1)ではGGXインポータンスサンプリングの実効カーネルが
         // コサイン畳み込みへ厳密に退化し、格納値もCSIrradianceと同じE(N)/πになる(14.10節)。
         // 反射プローブの拡散イラディアンスにもまったく同じ規則を適用する(19.7節)。
-        // y: 環境光の拡散倍率(m_IBLSettings.AmbientDiffuseScale)、z: 同じく鏡面倍率
-        // (m_IBLSettings.AmbientSpecularScale)。どちらもIBLの有効/無効に関わらず効く。w: 未使用
+        // y: 環境光の拡散倍率(m_Settings.IBL.AmbientDiffuseScale)、z: 同じく鏡面倍率
+        // (m_Settings.IBL.AmbientSpecularScale)。どちらもIBLの有効/無効に関わらず効く。w: 未使用
         DirectX::XMFLOAT4 IBLParams;
         // 反射プローブ用(末尾に追加)。x=有効プローブ数(0ならプローブを使わずグローバルIBLのみ)、
         // y=影響範囲のデバッグ表示フラグ、z=視差補正の有効フラグ、w=プローブ間ブレンドの有効フラグ。
@@ -159,8 +159,8 @@ namespace Kurenai::ShaderInterop
         // 新しいフィールドは下のTimeParams以降と同じく末尾へ足すこと
         DirectX::XMFLOAT4 OcclusionParams;
         // 水面用(さらに末尾に追加)。x=水面法線マップのスクロール
-        // オフセット(0〜1、CPU側で既にfmod済み)、y=波のスケール倍率(m_WaterSettings.WaveScale)、
-        // z=波の強さ(m_WaterSettings.WaveStrength、0〜1)、w=未使用。Water.hlslのPSMainが読む。
+        // オフセット(0〜1、CPU側で既にfmod済み)、y=波のスケール倍率(m_Settings.Water.WaveScale)、
+        // z=波の強さ(m_Settings.Water.WaveStrength、0〜1)、w=未使用。Water.hlslのPSMainが読む。
         DirectX::XMFLOAT4 TimeParams;
         // 空の解析評価用(さらに末尾に追加)。DeferredLighting.hlslが背景画素で
         // Sky.hlsliのSkyColorを画面解像度で評価するために使う。太陽方向以外の値
@@ -203,8 +203,8 @@ namespace Kurenai::ShaderInterop
         DirectX::XMFLOAT4 CloudParams2;
         // CloudParams3: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
         //               同じ周期でstd::fmod済み。m_CirrusScrollOffset参照)、
-        //               z=fBmのUV(U方向)を伸ばす異方性スケール(m_CloudSettings.CirrusAnisotropy)、
-        //               w=積雲の種類の偏り(m_CloudSettings.TypeBias、C4)。C4より前は未使用だった枠なので
+        //               z=fBmのUV(U方向)を伸ばす異方性スケール(m_Settings.Cloud.CirrusAnisotropy)、
+        //               w=積雲の種類の偏り(m_Settings.Cloud.TypeBias、C4)。C4より前は未使用だった枠なので
         //               FrameConstantsは1バイトも増えていない
         DirectX::XMFLOAT4 CloudParams3;
         // 平面反射(さらに末尾に追加)。xyz=水面平面の法線(現状は常に(0,1,0))、
@@ -246,7 +246,7 @@ namespace Kurenai::ShaderInterop
         // 読むのはGBufferMeshlet.hlslの増幅シェーダーだけ。
         //
         // x=有効フラグ(0で判定そのものを行わない)、y=バウンディング球の半径倍率
-        // (m_GeometrySettings.OcclusionCullRadiusScale)、z=前フレームからのカメラ移動距離[m]、
+        // (m_Settings.Geometry.OcclusionCullRadiusScale)、z=前フレームからのカメラ移動距離[m]、
         // w=Hi-Zのミップ段数(m_HiZMipLevels)。
         //
         // 【xを明示的なフラグにする理由】判定はPrevViewProjで投影するが、プローブ

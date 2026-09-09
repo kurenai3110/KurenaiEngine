@@ -294,43 +294,43 @@ namespace Kurenai
 
         // 太陽と昼夜サイクル。ProbeCapture.hlslは共有のFrameConstantsから太陽の向き・色を読むため、
         // 時刻を動かすと焼き上がりが変わる
-        mixFloat(m_SkySettings.TimeOfDay);
-        mixFloat(m_SkySettings.SunAzimuthDegrees);
-        mixBool(m_SkySettings.SunEnabled);
+        mixFloat(m_Settings.Sky.TimeOfDay);
+        mixFloat(m_Settings.Sky.SunAzimuthDegrees);
+        mixBool(m_Settings.Sky.SunEnabled);
         // 影の手法ではなく「影を落とすかどうか」だけを混ぜる。ProbeCapture.hlslが読むのは
         // 常にカスケードシャドウマップで、そのシャドウマップはRTシャドウ選択時も同じように
         // 描かれるため、CascadedShadowMapとRaytracedでプローブの焼き上がりは変わらない
-        mixBool(m_ShadowSettings.Mode != ShadowMode::Off);
+        mixBool(m_Settings.Shadow.Mode != ShadowMode::Off);
         // DDGIのレイの取得(ラスタライズ / レイトレーシング)と、その影レイの有無。
         //
         // 【混ぜ忘れると「つまみが効かない」型の不具合になる】切り替えても署名が変わらないため
         // 焼き直しが起きず、収束済みで停止しているモードでは絵が一切変わらない。
         // 反射プローブはこの2つの影響を受けないが、署名を共有しているため一緒に焼き直しになる
         // (余分な焼き直しが1回起きるだけで、破綻はしない)
-        mixBool(m_DDGISettings.RayMode == DDGIRayMode::Raytraced);
-        mixBool(m_DDGISettings.SunShadowRayEnabled);
+        mixBool(m_Settings.DDGI.RayMode == DDGIRayMode::Raytraced);
+        mixBool(m_Settings.DDGI.SunShadowRayEnabled);
         // 月は時刻に連動せず手動指定なので、太陽とは別に混ぜる必要がある。太陽が沈むと
         // 平行光源の枠が月へ切り替わり、キャプチャの直接光がそのまま変わる
-        mixFloat(m_SkySettings.MoonAzimuthDegrees);
-        mixFloat(m_SkySettings.MoonElevationDegrees);
+        mixFloat(m_Settings.Sky.MoonAzimuthDegrees);
+        mixFloat(m_Settings.Sky.MoonElevationDegrees);
         // キャプチャ内の環境項はグローバルIBLを引くため、その強度も焼き上がりに影響する。
         // 手続き空か.ksceneのDDSかで空そのものが変わるため、その切り替えも含める。
         // 拡散・鏡面の倍率もProbeCapture.hlslが同じように適用するため署名へ含める
         // (含め忘れると、つまみを動かしてもプローブの中身だけ古い倍率のまま残る)
-        mixFloat(m_IBLSettings.Enabled ? m_IBLSettings.Intensity : 0.0f);
-        mixFloat(m_IBLSettings.AmbientDiffuseScale);
-        mixFloat(m_IBLSettings.AmbientSpecularScale);
-        mixBool(m_SkySettings.ProceduralEnabled);
+        mixFloat(m_Settings.IBL.Enabled ? m_Settings.IBL.Intensity : 0.0f);
+        mixFloat(m_Settings.IBL.AmbientDiffuseScale);
+        mixFloat(m_Settings.IBL.AmbientSpecularScale);
+        mixBool(m_Settings.Sky.ProceduralEnabled);
         // 自発光の強度倍率はキャプチャのエミッシブ項へそのまま乗る
-        mixFloat(m_EmissiveLightSettings.Intensity);
+        mixFloat(m_Settings.EmissiveLight.Intensity);
         // エミッシブ光源(62章)。プロキシはProbeCapture.hlslのライトループ(t8)にも入るので、
         // 有効/無効・打ち切り照度・採用数の上限はどれも焼き上がりを変える。
         // 二重計上の抑止はDDGIのキャプチャから自発光を抜くので、これも焼き上がりを変える。
         // **混ぜ忘れると「つまみが効かない」型の不具合になる**(このすぐ上の注記と同じ)
-        mixBool(m_EmissiveLightSettings.LightsEnabled);
-        mixFloat(m_EmissiveLightSettings.LightsCutoffIrradiance);
-        mixFloat(static_cast<float>(m_EmissiveLightSettings.LightsMaxCount));
-        mixBool(m_EmissiveLightSettings.LightsDoubleCountGI);
+        mixBool(m_Settings.EmissiveLight.LightsEnabled);
+        mixFloat(m_Settings.EmissiveLight.LightsCutoffIrradiance);
+        mixFloat(static_cast<float>(m_Settings.EmissiveLight.LightsMaxCount));
+        mixBool(m_Settings.EmissiveLight.LightsDoubleCountGI);
         // 【上限に当たると採用集合がカメラ依存になる】採用順はカメラからの照度で決まるため、
         // 上の4つだけでは「カメラを動かしただけで焼く光源が変わったのに署名は同じ」になる。
         // 切り捨てが起きていないフレームでは0で固定なので、余分な焼き直しは起きない
@@ -338,9 +338,9 @@ namespace Kurenai
 
         // bent normalによる遮蔽(34章)。ProbeCapture.hlslが同じ分岐を持つため、
         // 含め忘れるとつまみを動かしてもプローブの中身だけ古いまま残る
-        mixBool(m_AmbientOcclusionSettings.BentNormalAOSource);
-        mixFloat(static_cast<float>(m_AmbientOcclusionSettings.SpecularOcclusion));
-        mixBool(m_AmbientOcclusionSettings.MultiBounceAOEnabled);
+        mixBool(m_Settings.AmbientOcclusion.BentNormalAOSource);
+        mixFloat(static_cast<float>(m_Settings.AmbientOcclusion.SpecularOcclusion));
+        mixBool(m_Settings.AmbientOcclusion.MultiBounceAOEnabled);
 
         // ライトは構造体ごとダンプすると詰め物(padding)の未初期化バイトを拾い得るため、
         // 使うフィールドだけを明示的に混ぜる

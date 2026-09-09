@@ -212,7 +212,7 @@ namespace Kurenai::Passes
         // --- DDGIのプローブ更新(22章) ---
         // 反射プローブとまったく同じキャプチャ経路を使い、解像度だけkDDGICaptureSizeへ落とす。
         // 6面×16×16 = 1536テクセルがそのままDDGIの「1536本のレイ」になる。
-        // フルベイクは持たず、初回も含めて常に1フレームm_DDGISettings.ProbesPerFrame個ずつ時間分割で回す
+        // フルベイクは持たず、初回も含めて常に1フレームm_Settings.DDGI.ProbesPerFrame個ずつ時間分割で回す
         // (理由はDDGIPasses.hのm_DDGIWarmingUpのコメント参照)
 
         // プローブ1面ぶんのキャプチャ → スクラッチのキューブ2本(放射輝度・距離)の該当面へコピー。
@@ -509,7 +509,7 @@ namespace Kurenai::Passes
         };
 
         // 焼き上がりに影響する状態が変わったら、停止していた更新を再開する。
-        // 【判定はm_DDGISettings.Enabled等のガードの外に置く】無効な間も署名を追い続けないと、
+        // 【判定はm_Settings.DDGI.Enabled等のガードの外に置く】無効な間も署名を追い続けないと、
         // 無効中に時刻を動かして再度有効にしたとき「署名は同じ」と誤判定して止まったままになる
         if (gi->HasGIVolume && gi->DDGIProbeCount > 0)
         {

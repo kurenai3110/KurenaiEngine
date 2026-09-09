@@ -273,19 +273,19 @@ namespace Kurenai
             switch (request.Kind)
             {
             case ScheduledRecreationKind::RenderResolution:
-                RequestUpscaleSettings(false, m_PostProcessSettings.UpscaleQuality, request.Width, request.Height);
+                RequestUpscaleSettings(false, m_Settings.PostProcess.UpscaleQuality, request.Width, request.Height);
                 Core::Logger::Info(
                     "KurenaiEngine3D", "作り直し予約を発火しました: frame=" + std::to_string(m_TAAFrameIndex) +
                         ", RenderResolution=" + std::to_string(request.Width) + "x" + std::to_string(request.Height));
                 break;
             case ScheduledRecreationKind::UpscaleOutput:
-                RequestUpscaleSettings(true, m_PostProcessSettings.UpscaleQuality, request.Width, request.Height);
+                RequestUpscaleSettings(true, m_Settings.PostProcess.UpscaleQuality, request.Width, request.Height);
                 Core::Logger::Info(
                     "KurenaiEngine3D", "作り直し予約を発火しました: frame=" + std::to_string(m_TAAFrameIndex) +
                         ", UpscaleOutput=" + std::to_string(request.Width) + "x" + std::to_string(request.Height));
                 break;
             case ScheduledRecreationKind::BufferPrecision:
-                m_SystemSettings.Precision = request.Precision;
+                m_Settings.System.Precision = request.Precision;
                 m_BufferPrecisionDirty = true;
                 Core::Logger::Info(
                     "KurenaiEngine3D", "作り直し予約を発火しました: frame=" + std::to_string(m_TAAFrameIndex) +
@@ -801,7 +801,7 @@ namespace Kurenai
     // 1秒に1回に抑えつつ、実行ごとの記録が残るようにしている
     void KurenaiEngine3D::LogFrameStatsIfDue(float renderDeltaTime)
     {
-        if (!m_SystemSettings.FrameStatsLoggingEnabled)
+        if (!m_Settings.System.FrameStatsLoggingEnabled)
         {
             return;
         }

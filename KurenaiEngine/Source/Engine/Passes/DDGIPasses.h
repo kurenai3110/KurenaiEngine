@@ -111,7 +111,7 @@ namespace Kurenai
             // ただし初回だけは「前の値」が存在しないため、一巡目はヒステリシスを使わず上書きする
             // (未初期化のアトラスと混ぜてはいけない)
             bool m_DDGIWarmingUp = true;
-            // 時間分割の進行状態。1フレームにm_DDGISettings.ProbesPerFrame個ずつ順に焼き直す
+            // 時間分割の進行状態。1フレームにm_Settings.DDGI.ProbesPerFrame個ずつ順に焼き直す
             uint32_t m_DDGIUpdateCursor = 0;
             // ヒステリシスを使わず上書きで焼き直す残りプローブ数。
             //

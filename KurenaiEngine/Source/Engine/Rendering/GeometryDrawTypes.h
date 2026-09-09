@@ -83,7 +83,7 @@ namespace Kurenai
             bool UseDrawUnits = true;
             GeometryLODMode LODMode = GeometryLODMode::Fade;
             GeometryMeshFilter MeshFilter = GeometryMeshFilter::Opaque;
-            // メッシュ単位のカリングを行うか。設定(m_GeometrySettings.MeshCullingEnabled)との論理積を取る
+            // メッシュ単位のカリングを行うか。設定(m_Settings.Geometry.MeshCullingEnabled)との論理積を取る
             bool MeshCulling = true;
         };
     }

@@ -18,7 +18,7 @@
 namespace Kurenai::Passes
 {
         // SSAO.hlsl側のkSSAOKernelSizeMaxと一致させる必要がある。
-        // 定数バッファに確保する数であって、実際に回す段数(m_AmbientOcclusionSettings.SSAOKernelSize)ではない
+        // 定数バッファに確保する数であって、実際に回す段数(m_Settings.AmbientOcclusion.SSAOKernelSize)ではない
         constexpr uint32_t kSSAOKernelSizeMax = 16;
 
         struct alignas(16) SSAOConstants

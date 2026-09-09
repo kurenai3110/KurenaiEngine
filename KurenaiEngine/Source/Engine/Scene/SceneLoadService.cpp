@@ -128,7 +128,7 @@ namespace Kurenai
     void KurenaiEngine3D::UpdateSceneHotReloadWatch()
     {
         // 読み込み中・要求が既に積まれている場合は何もしない(多重発注を避ける)
-        if (!m_SystemSettings.SceneAutoReloadEnabled || m_SceneLoadInFlight || m_PendingSceneRequest >= 0)
+        if (!m_Settings.System.SceneAutoReloadEnabled || m_SceneLoadInFlight || m_PendingSceneRequest >= 0)
         {
             return;
         }
@@ -549,7 +549,7 @@ namespace Kurenai
         // 【打ち切り照度は実効値を渡すこと】既定の定数を渡すと -emissivelightscutoff や
         // ImGui の指定が三角形テーブルへ一切届かず、**つまみが静かに効かなくなる**
         // (実際に踏んだ。τを100分の1にしてもダンプがバイト完全一致した)
-        loaded->MeshLightScene.Build(*m_Device, loaded->Scene, m_EmissiveLightSettings.LightsCutoffIrradiance);
+        loaded->MeshLightScene.Build(*m_Device, loaded->Scene, m_Settings.EmissiveLight.LightsCutoffIrradiance);
 
         loaded->Camera = ComputeInitialCamera(loaded->Scene);
         return loaded;
@@ -625,13 +625,13 @@ namespace Kurenai
 
         // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
         // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
-        m_SkySettings.TimeOfDay = m_Scene.SunTimeOfDay;
-        m_SkySettings.SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
+        m_Settings.Sky.TimeOfDay = m_Scene.SunTimeOfDay;
+        m_Settings.Sky.SunAzimuthDegrees = m_Scene.SunAzimuthDegrees;
         // .ksceneが持つのは「影を出すか」の真偽値だけなので、手法の選択はエンジン側で決める
-        // (反射のm_ReflectionSettings.Modeと同じ扱い)。規則はDefaultShadowModeに1か所だけ置いてある
-        m_ShadowSettings.Mode = m_Scene.ShadowEnabled ? ShadowSettings::DefaultShadowMode(m_RenderCapabilities.RaytracingAvailable) : ShadowMode::Off;
-        m_SkySettings.SunEnabled = m_Scene.SunEnabled;
-        m_AmbientOcclusionSettings.Enabled = m_Scene.AOEnabled;
+        // (反射のm_Settings.Reflection.Modeと同じ扱い)。規則はDefaultShadowModeに1か所だけ置いてある
+        m_Settings.Shadow.Mode = m_Scene.ShadowEnabled ? ShadowSettings::DefaultShadowMode(m_RenderCapabilities.RaytracingAvailable) : ShadowMode::Off;
+        m_Settings.Sky.SunEnabled = m_Scene.SunEnabled;
+        m_Settings.AmbientOcclusion.Enabled = m_Scene.AOEnabled;
         // .ksceneが持つのは「反射を使うか」の真偽値だけなので、手法の選択はエンジン側で決める。
         //
         // 【キーを書いたシーンと書いていないシーンを区別する】書いていなければエンジンの既定
@@ -639,16 +639,16 @@ namespace Kurenai
         // 優先して手法だけを環境から選ぶ(ReflectionModeForCapability)。
         // 区別せずに「= true」のときもエンジンの既定へ問い合わせ直すと、DX11ではシーンの指定が
         // 握り潰されて反射が出なくなる(両関数のコメント参照)
-        m_ReflectionSettings.Mode = m_Scene.HasSSREnabledOverride
+        m_Settings.Reflection.Mode = m_Scene.HasSSREnabledOverride
             ? (m_Scene.SSREnabled ? ReflectionSettings::ReflectionModeForCapability(m_RenderCapabilities.RaytracingAvailable) : ReflectionMode::Off)
             : ReflectionSettings::DefaultReflectionMode(m_RenderCapabilities.RaytracingAvailable);
         // UIの「既定値に戻す」はエンジンの既定ではなくここへ戻す(m_SceneDefaultReflectionMode参照)
-        m_SceneDefaultReflectionMode = m_ReflectionSettings.Mode;
+        m_SceneDefaultReflectionMode = m_Settings.Reflection.Mode;
         // TAAと内部レンダー解像度。どちらも反射と同じく「キーを書いたシーンだけ」上書きし、
         // 書いていないシーンはエンジンの既定のまま(Assets::Scene の Has〜Override のコメント参照)
         if (m_Scene.HasTAAOverride)
         {
-            m_PostProcessSettings.TAAEnabled = m_Scene.TAAEnabled;
+            m_Settings.PostProcess.TAAEnabled = m_Scene.TAAEnabled;
         }
         if (m_Scene.HasRenderResolutionOverride)
         {
@@ -660,67 +660,67 @@ namespace Kurenai
             // 超解像が無効ならRequestUpscaleSettingsは中でRequestRenderResolutionを呼ぶだけなので、
             // 従来とまったく同じ動作になる
             RequestUpscaleSettings(
-                m_PostProcessSettings.UpscaleEnabled, m_PostProcessSettings.UpscaleQuality, m_Scene.RenderWidth, m_Scene.RenderHeight);
+                m_Settings.PostProcess.UpscaleEnabled, m_Settings.PostProcess.UpscaleQuality, m_Scene.RenderWidth, m_Scene.RenderHeight);
         }
         // トーンマップのカーブと空の彩度(アート指定)をシーンから受け取る。
         // Source/LibraryはSource/Engineに依存できないため、Scene側は同じ並びの独立した列挙を持つ。
         // 【並びを変えたら両方直すこと】(Assets/Scene.h の TonemapCurveSetting)
         switch (m_Scene.Tonemap)
         {
-        case Assets::Scene::TonemapCurveSetting::Reinhard: m_PostProcessSettings.Curve = TonemapCurve::Reinhard; break;
-        case Assets::Scene::TonemapCurveSetting::ACES:     m_PostProcessSettings.Curve = TonemapCurve::ACES;     break;
-        case Assets::Scene::TonemapCurveSetting::AgX:      m_PostProcessSettings.Curve = TonemapCurve::AgX;      break;
+        case Assets::Scene::TonemapCurveSetting::Reinhard: m_Settings.PostProcess.Curve = TonemapCurve::Reinhard; break;
+        case Assets::Scene::TonemapCurveSetting::ACES:     m_Settings.PostProcess.Curve = TonemapCurve::ACES;     break;
+        case Assets::Scene::TonemapCurveSetting::AgX:      m_Settings.PostProcess.Curve = TonemapCurve::AgX;      break;
         }
         // 黒の締め。Tonemap/SkySaturationと同じく無条件に反映する(既定0で恒等のため)
-        m_PostProcessSettings.TonemapBlackPoint = m_Scene.TonemapBlackPoint;
-        m_SkySettings.Saturation = m_Scene.SkySaturation;
+        m_Settings.PostProcess.TonemapBlackPoint = m_Scene.TonemapBlackPoint;
+        m_Settings.Sky.Saturation = m_Scene.SkySaturation;
         // タービディティは指定されたときだけ上書きする(Scene.h の HasSkyTurbidity 参照)。
         // 値が動けばRender()側のturbidityMoved判定が大気LUTを焼き直す
-        if (m_Scene.HasSkyTurbidity) { m_SkySettings.Turbidity = m_Scene.SkyTurbidity; }
+        if (m_Scene.HasSkyTurbidity) { m_Settings.Sky.Turbidity = m_Scene.SkyTurbidity; }
         if (m_Scene.HasIBLIntensityOverride)
         {
-            m_IBLSettings.Intensity = m_Scene.IBLIntensity;
+            m_Settings.IBL.Intensity = m_Scene.IBLIntensity;
         }
         // シーン全体の露出。IBLIntensityと同じく指定されたときだけ上書きする。
         // 屋外の風景と屋内では被写体の輝度が桁で違うため、エンジンの既定値(屋内基準)を
         // 動かさずにシーン側で持てるようにしてある(Scene.h の HasExposureOverride 参照)
         if (m_Scene.HasExposureOverride)
         {
-            m_PostProcessSettings.SceneExposureEV100 = m_Scene.ExposureEV100;
+            m_Settings.PostProcess.SceneExposureEV100 = m_Scene.ExposureEV100;
         }
         // 雲。天候はシーンの性質なので[Cloud]セクションで持てるようにした。
         // 露出と同じく指定されたキーだけを上書きする。CellSizeだけは.kscene側が「雲の塊1つの
         // 大きさ[m]」で持ち、エンジン側はその逆数(UVスケール)を持つので変換する
-        if (m_Scene.HasCloudCoverage)  { m_CloudSettings.Coverage = m_Scene.CloudCoverage; }
-        if (m_Scene.HasCloudAltitude)  { m_CloudSettings.Altitude = m_Scene.CloudAltitude; }
-        if (m_Scene.HasCloudThickness) { m_CloudSettings.Thickness = m_Scene.CloudThickness; }
-        if (m_Scene.HasCloudDensity)   { m_CloudSettings.Density = m_Scene.CloudDensity; }
-        if (m_Scene.HasCloudTypeBias) { m_CloudSettings.TypeBias = m_Scene.CloudTypeBias; }
-        if (m_Scene.HasCloudCellSize)  { m_CloudSettings.UvScale = 1.0f / std::max(m_Scene.CloudCellSize, 1.0f); }
+        if (m_Scene.HasCloudCoverage)  { m_Settings.Cloud.Coverage = m_Scene.CloudCoverage; }
+        if (m_Scene.HasCloudAltitude)  { m_Settings.Cloud.Altitude = m_Scene.CloudAltitude; }
+        if (m_Scene.HasCloudThickness) { m_Settings.Cloud.Thickness = m_Scene.CloudThickness; }
+        if (m_Scene.HasCloudDensity)   { m_Settings.Cloud.Density = m_Scene.CloudDensity; }
+        if (m_Scene.HasCloudTypeBias) { m_Settings.Cloud.TypeBias = m_Scene.CloudTypeBias; }
+        if (m_Scene.HasCloudCellSize)  { m_Settings.Cloud.UvScale = 1.0f / std::max(m_Scene.CloudCellSize, 1.0f); }
         // 巻雲(P11)。CirrusCellSizeも積雲のCellSizeと同じく逆数へ直す
-        if (m_Scene.HasCirrusCoverage)   { m_CloudSettings.CirrusCoverage = m_Scene.CirrusCoverage; }
-        if (m_Scene.HasCirrusAltitude)   { m_CloudSettings.CirrusAltitude = m_Scene.CirrusAltitude; }
-        if (m_Scene.HasCirrusCellSize)   { m_CloudSettings.CirrusUvScale = 1.0f / std::max(m_Scene.CirrusCellSize, 1.0f); }
-        if (m_Scene.HasCirrusDensity)    { m_CloudSettings.CirrusDensity = m_Scene.CirrusDensity; }
-        if (m_Scene.HasCirrusAnisotropy) { m_CloudSettings.CirrusAnisotropy = m_Scene.CirrusAnisotropy; }
-        if (m_Scene.HasCirrusWindSpeed)  { m_CloudSettings.CirrusWindSpeed = m_Scene.CirrusWindSpeed; }
+        if (m_Scene.HasCirrusCoverage)   { m_Settings.Cloud.CirrusCoverage = m_Scene.CirrusCoverage; }
+        if (m_Scene.HasCirrusAltitude)   { m_Settings.Cloud.CirrusAltitude = m_Scene.CirrusAltitude; }
+        if (m_Scene.HasCirrusCellSize)   { m_Settings.Cloud.CirrusUvScale = 1.0f / std::max(m_Scene.CirrusCellSize, 1.0f); }
+        if (m_Scene.HasCirrusDensity)    { m_Settings.Cloud.CirrusDensity = m_Scene.CirrusDensity; }
+        if (m_Scene.HasCirrusAnisotropy) { m_Settings.Cloud.CirrusAnisotropy = m_Scene.CirrusAnisotropy; }
+        if (m_Scene.HasCirrusWindSpeed)  { m_Settings.Cloud.CirrusWindSpeed = m_Scene.CirrusWindSpeed; }
         // 大気遠近。[Cloud]と同じく指定されたキーだけを上書きする。
         // 【この値は遠景の霞だけの設定ではない】消散係数は雲がどれだけ空から浮き上がって
         // 見えるかも一手に決める(Scene.h の HasFogDensity 付近のコメントに実測を残してある)
-        if (m_Scene.HasFogEnabled)     { m_FogSettings.Enabled = m_Scene.FogEnabled; }
-        if (m_Scene.HasFogDensity)     { m_FogSettings.Density = m_Scene.FogDensity; }
-        if (m_Scene.HasFogScaleHeight) { m_FogSettings.ScaleHeight = m_Scene.FogScaleHeight; }
-        if (m_Scene.HasFogRefHeight)   { m_FogSettings.RefHeight = m_Scene.FogRefHeight; }
+        if (m_Scene.HasFogEnabled)     { m_Settings.Fog.Enabled = m_Scene.FogEnabled; }
+        if (m_Scene.HasFogDensity)     { m_Settings.Fog.Density = m_Scene.FogDensity; }
+        if (m_Scene.HasFogScaleHeight) { m_Settings.Fog.ScaleHeight = m_Scene.FogScaleHeight; }
+        if (m_Scene.HasFogRefHeight)   { m_Settings.Fog.RefHeight = m_Scene.FogRefHeight; }
         // ブルーム。エンジンの既定は無効なので、夜景で光源が主役になるシーンは
         // ここで有効にしないと発光体に光芒が出ない
-        if (m_Scene.HasBloomEnabled)   { m_PostProcessSettings.BloomEnabled = m_Scene.BloomEnabled; }
-        if (m_Scene.HasBloomStrength)  { m_PostProcessSettings.BloomStrength = m_Scene.BloomStrength; }
-        if (m_Scene.HasBloomThreshold) { m_PostProcessSettings.BloomThreshold = m_Scene.BloomThreshold; }
+        if (m_Scene.HasBloomEnabled)   { m_Settings.PostProcess.BloomEnabled = m_Scene.BloomEnabled; }
+        if (m_Scene.HasBloomStrength)  { m_Settings.PostProcess.BloomStrength = m_Scene.BloomStrength; }
+        if (m_Scene.HasBloomThreshold) { m_Settings.PostProcess.BloomThreshold = m_Scene.BloomThreshold; }
         // 星空。[Cloud]/[Fog]と同じく指定されたキーだけを上書きする
-        if (m_Scene.HasStarsEnabled)    { m_StarsSettings.Enabled = m_Scene.StarsEnabled; }
-        if (m_Scene.HasStarsDensity)    { m_StarsSettings.Density = m_Scene.StarsDensity; }
-        if (m_Scene.HasStarsBrightness) { m_StarsSettings.Brightness = m_Scene.StarsBrightness; }
-        if (m_Scene.HasStarsTwinkle)    { m_StarsSettings.Twinkle = m_Scene.StarsTwinkle; }
+        if (m_Scene.HasStarsEnabled)    { m_Settings.Stars.Enabled = m_Scene.StarsEnabled; }
+        if (m_Scene.HasStarsDensity)    { m_Settings.Stars.Density = m_Scene.StarsDensity; }
+        if (m_Scene.HasStarsBrightness) { m_Settings.Stars.Brightness = m_Scene.StarsBrightness; }
+        if (m_Scene.HasStarsTwinkle)    { m_Settings.Stars.Twinkle = m_Scene.StarsTwinkle; }
         // ドローンショー。[Cloud]/[Fog]と同じく指定されたキーだけを上書きする。
         // ショーの中身(点・機体数・秒数・明るさ)は.kshowが持ち、Loaderスレッドで読み込み済み
         if (m_Scene.HasDroneShowEnabled) { m_DroneShowEnabled = m_Scene.DroneShowEnabled; }
@@ -752,10 +752,10 @@ namespace Kurenai
 
         // 水面。[Water]が無いシーンでもScene::WaterWaveScale等はリテラル既定値
         // (EngineDefaults.hを複製したもの、Scene.h参照)を持っているため、常にそのまま反映してよい
-        // (m_SkySettings.TimeOfDay/m_SkySettings.SunAzimuthDegreesと同じ扱い)
-        m_WaterSettings.WaveScale = m_Scene.WaterWaveScale;
-        m_WaterSettings.WaveSpeed = m_Scene.WaterWaveSpeed;
-        m_WaterSettings.WaveStrength = m_Scene.WaterWaveStrength;
+        // (m_Settings.Sky.TimeOfDay/m_Settings.Sky.SunAzimuthDegreesと同じ扱い)
+        m_Settings.Water.WaveScale = m_Scene.WaterWaveScale;
+        m_Settings.Water.WaveSpeed = m_Scene.WaterWaveSpeed;
+        m_Settings.Water.WaveStrength = m_Scene.WaterWaveStrength;
 
         // スカイボックスが差し替わった場合のみ非nullptr。IBLの拡散イラディアンス・プリフィルタ済み
         // 鏡面はスカイボックスから焼かれるため、差し替えたら焼き上がりの旗を倒して焼き直させる
@@ -862,7 +862,7 @@ namespace Kurenai
         m_TextureStreaming.Build(m_Scene, *m_Device);
 
         m_SelectedProbeIndex = m_GIResources.ReflectionProbes.empty() ? -1 : 0;
-        m_ReflectionProbeSettings.DebugIndex = 0;
+        m_Settings.ReflectionProbe.DebugIndex = 0;
         m_ReflectionProbePasses->GetProbeBaked() = false;
         m_ReflectionProbePasses->GetProbeBakeRequested() = !m_GIResources.ReflectionProbes.empty();
         // Realtimeのラウンドロビンは先頭から仕切り直す(シーンが変わればプローブの数も並びも変わる)
@@ -943,7 +943,7 @@ namespace Kurenai
         // シーンを切り替えたらプリセットの選択も「高」へ戻す(新しいシーンに対して前のシーンで
         // 選んだ「低」が適用されたままになるわけではなく、実際に高相当の状態になっているため)
         m_SceneDefaultQuality = CaptureQualitySettings();
-        m_QualitySettings.Preset = QualityPreset::High;
+        m_Settings.Quality.Preset = QualityPreset::High;
 
         // 初期カメラとウィンドウタイトルはUpdateスレッドが適用する。m_Cameraの書き込み手を
         // 1スレッドに保ち、ウィンドウタイトルもウィンドウを所有するスレッドから設定するため
@@ -954,7 +954,7 @@ namespace Kurenai
             // カメラを適用するかどうか。「現在のカメラを保持する」が入っていても
             // ウィンドウタイトルは更新したいので、引き渡し自体は毎回行う。
             // 保持が効くのは同じシーンの読み直しのときだけ(上のisSameSceneReload参照)
-            m_AppliedSceneApplyCamera = !(m_SystemSettings.SceneReloadKeepsCamera && isSameSceneReload);
+            m_AppliedSceneApplyCamera = !(m_Settings.System.SceneReloadKeepsCamera && isSameSceneReload);
             m_AppliedSceneCamera = loaded.Camera;
             m_AppliedSceneTitle = std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name;
         }

@@ -298,7 +298,7 @@ namespace Kurenai::UI
         };
 
         // 超解像が有効なときComboが指すのは出力解像度、無効なときは内部レンダー解像度。
-        // どちらもm_PostProcessSettings.UpscaleOutputWidth/Heightが追いかけているのでこれを見ればよい
+        // どちらもm_Settings.PostProcess.UpscaleOutputWidth/Heightが追いかけているのでこれを見ればよい
         const uint32_t comboWidth = m_Engine.GetPostProcessSettings().UpscaleOutputWidth;
         const uint32_t comboHeight = m_Engine.GetPostProcessSettings().UpscaleOutputHeight;
 

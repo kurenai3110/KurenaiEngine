@@ -21,12 +21,12 @@ namespace Kurenai
         AOIndirectLightRaw, // AO/GIバッファのrgb(間接拡散光、ブラー前の生値)
         AOOcclusion,        // AO/GIバッファのa(遮蔽率、ブラー後)をグレースケール表示
         AOOcclusionRaw,     // AO/GIバッファのa(遮蔽率、ブラー前の生値)
-        ShadowMap,          // m_ShadowSettings.DebugCascadeで選択したカスケードのシャドウマップを表示
+        ShadowMap,          // m_Settings.Shadow.DebugCascadeで選択したカスケードのシャドウマップを表示
         RTShadow,           // RTシャドウの可視率(0=影, 1=光)をグレースケール表示。RTシャドウ未実行時は最終結果
         SSR,                // 反射パスの出力(SceneColor+反射)。反射がOffのときはSceneColorと同一
-        HiZ,                // Hi-Zミップチェーンの指定ミップ(m_DebugViewSettings.HiZDebugMipLevel)をグレースケール表示
+        HiZ,                // Hi-Zミップチェーンの指定ミップ(m_Settings.DebugView.HiZDebugMipLevel)をグレースケール表示
         IBLIrradiance,      // IBL拡散イラディアンスマップ(TextureCube。現在の視線方向で球面を見回す表示)
-        IBLPrefilter,       // IBLプリフィルタ済み鏡面マップの指定ミップ(m_IBLSettings.PrefilterDebugMipLevel、TextureCube)
+        IBLPrefilter,       // IBLプリフィルタ済み鏡面マップの指定ミップ(m_Settings.IBL.PrefilterDebugMipLevel、TextureCube)
         IBLBRDFLUT,         // IBL BRDF積分LUT(x=NdotV, y=ラフネス。R=A, G=B, B=Eavg)
         Bloom,              // ブルームのピラミッド最上段(半解像度、HDR)をトーンマッピングして表示
         LightTiles,         // タイルライトカリングのライトグリッド(タイルあたりのライト数)をヒートマップ表示
@@ -43,7 +43,7 @@ namespace Kurenai
                             // データを持たないマテリアルはマゼンタで塗る
         WaterMask,          // G-BufferのMaterial.a(水面のマテリアルID)をグレースケール表示
         PlanarReflection,   // 平面反射パスの出力(m_RenderTargets.PlanarReflectionColor)をトーンマッピングして表示
-        CloudNoiseSlice,    // 雲の3Dノイズの任意スライス。m_CloudSettings.NoiseDebugSlice/Detailで選ぶ
+        CloudNoiseSlice,    // 雲の3Dノイズの任意スライス。m_Settings.Cloud.NoiseDebugSlice/Detailで選ぶ
         AtmosphereLUT,      // 大気散乱のLUT。m_AtmosphereLUTDebugMultiで2枚を切り替える
         DDGIProbeBackface,  // DDGIのプローブ裏面率(イラディアンスアトラスのα、22章)。
                             // 白いほど「面の裏側ばかり見ている」=壁の内部に埋まっている。

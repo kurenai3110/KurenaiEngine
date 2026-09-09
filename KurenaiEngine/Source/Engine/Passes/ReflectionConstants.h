@@ -19,13 +19,13 @@ namespace Kurenai::Passes
         struct alignas(16) SSRConstants
         {
             // w: 水面の解析空フォールバックを使うか(1=使う)。Render()側で
-            // m_WaterSettings.AnalyticSkyReflection && usingProceduralSky の両方が立っているときだけ1にする
+            // m_Settings.Water.AnalyticSkyReflection && usingProceduralSky の両方が立っているときだけ1にする
             // (手続き空が無効なシーンではDDSは任意の絵でPerezモデルとは無関係なため、
             // このトグルの値に関わらず必ず0にする)
             DirectX::XMFLOAT4 Params0; // x: 最大レイ距離, y: ヒット判定の厚み, z: ラフネスカットオフ, w: 水面の解析空フォールバック
-            // 平面反射(末尾に追加)。x: 平面反射が有効か(1=使う。m_ReflectionSettings.PlanarEnabled &&
+            // 平面反射(末尾に追加)。x: 平面反射が有効か(1=使う。m_Settings.Reflection.PlanarEnabled &&
             // 水面インスタンスが存在するときのみ1)、y: 波の法線による画面UVのずらし量
-            // (m_ReflectionSettings.PlanarDistortion)、zw: 未使用
+            // (m_Settings.Reflection.PlanarDistortion)、zw: 未使用
             DirectX::XMFLOAT4 Params1;
         };
         // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は

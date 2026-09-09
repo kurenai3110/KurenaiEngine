@@ -165,7 +165,7 @@ namespace Kurenai
             if (m_PlanarReflectionResolutionDirty)
             {
                 m_PlanarReflectionResolutionDirty = false;
-                m_ReflectionSettings.PlanarResolutionScale = m_PendingPlanarReflectionResolutionScale;
+                m_Settings.Reflection.PlanarResolutionScale = m_PendingPlanarReflectionResolutionScale;
             }
 
             m_Device->WaitForGPUIdle();
@@ -200,7 +200,7 @@ namespace Kurenai
                 m_UpscaleTargetsDirty = false;
                 try
                 {
-                    CreateUpscaleTargets(m_PostProcessSettings.UpscaleOutputWidth, m_PostProcessSettings.UpscaleOutputHeight);
+                    CreateUpscaleTargets(m_Settings.PostProcess.UpscaleOutputWidth, m_Settings.PostProcess.UpscaleOutputHeight);
                 }
                 catch (const std::exception& e)
                 {
@@ -208,10 +208,10 @@ namespace Kurenai
                     // Presentがバイリニアで拡大するので絵は出続ける(41.23節以前と同じ経路)
                     Core::Logger::Error(
                         "KurenaiEngine3D",
-                        "超解像の出力解像度" + std::to_string(m_PostProcessSettings.UpscaleOutputWidth) + "x" +
-                            std::to_string(m_PostProcessSettings.UpscaleOutputHeight) +
+                        "超解像の出力解像度" + std::to_string(m_Settings.PostProcess.UpscaleOutputWidth) + "x" +
+                            std::to_string(m_Settings.PostProcess.UpscaleOutputHeight) +
                             "のテクスチャ作成に失敗したため、超解像を無効にします: " + e.what());
-                    m_PostProcessSettings.UpscaleEnabled = false;
+                    m_Settings.PostProcess.UpscaleEnabled = false;
                     m_RenderTargets.ResetUpscale();
                 }
             }
@@ -271,7 +271,7 @@ namespace Kurenai
             // 割り戻すので、fp16の範囲に収まっている画素は1つも動かない。実測でも
             // 地形・水面・空の画素値は-18のときと完全に一致し、飽和していた機体だけが変わった。
             // 上限0段は「昼より明るくはしない」の意味で従来どおり
-            const float targetEV100 = m_PostProcessSettings.SceneExposureEV100 + std::clamp(autoBias, -12.0f, 0.0f);
+            const float targetEV100 = m_Settings.PostProcess.SceneExposureEV100 + std::clamp(autoBias, -12.0f, 0.0f);
 
             if (!m_EffectiveExposureInitialized)
             {
@@ -283,7 +283,7 @@ namespace Kurenai
             {
                 // 一時停止や巨大なdtで飛ばないよう上限を設ける
                 const float deltaTime = std::clamp(m_RenderDeltaTime, 0.0f, 0.1f);
-                const float t = std::clamp(1.0f - std::exp(-deltaTime * m_PostProcessSettings.EffectiveExposureAdaptSpeed), 0.0f, 1.0f);
+                const float t = std::clamp(1.0f - std::exp(-deltaTime * m_Settings.PostProcess.EffectiveExposureAdaptSpeed), 0.0f, 1.0f);
                 m_EffectiveExposureEV100 += (targetEV100 - m_EffectiveExposureEV100) * t;
             }
         }
@@ -296,11 +296,11 @@ namespace Kurenai
         // 明るさが暴れないか)は、静止した絵をいくら撮っても測れない。
         // 蓄積ダンプは総和を書くので、Nを変えた2本の差が1フレームぶんになる ――
         // これで追従の時間変化を、フレームごとのGPU読み戻し無しで測れる
-        if (m_MegaLightsSettings.PerturbMode != 0 && !m_MegaLightsPerturbApplied && m_MegaLightsSettings.AccumTargetFrames > 0 &&
+        if (m_Settings.MegaLights.PerturbMode != 0 && !m_MegaLightsPerturbApplied && m_Settings.MegaLights.AccumTargetFrames > 0 &&
             m_MegaLightsPasses->GetAccumWarmupFrames() >= Passes::kMegaLightsAccumWarmup)
         {
             m_MegaLightsPerturbApplied = true;
-            if (m_MegaLightsSettings.PerturbMode == 1)
+            if (m_Settings.MegaLights.PerturbMode == 1)
             {
                 // 全ライトを消す。次フレーム以降のGPULight配列から外れるので、
                 // 真値は「ローカルライトの寄与が0」になる。時間再利用が履歴を抱えていると
@@ -311,7 +311,7 @@ namespace Kurenai
                 }
                 Core::Logger::Info("KurenaiEngine3D", "【検証】全ライトを消しました(ゴースト測定)");
             }
-            else if (m_MegaLightsSettings.PerturbMode == 2)
+            else if (m_Settings.MegaLights.PerturbMode == 2)
             {
                 // 実効プリ露出を+2段跳ばす。ライトの放射輝度は露出を掛け込んで作られるので、
                 // 履歴のWは前フレームの露出のままになる。補正が効いていれば絵は変わらない
@@ -540,7 +540,7 @@ namespace Kurenai
         // Present呼び出し自体のCPUコストはここで計測しないと、各パスのコマンド記録時間の
         // 合計とCPU Frame Time全体の差分がどこにあるのか分からなくなるため計測しておく
         m_CPUProfiler.BeginScope("PresentSubmit");
-        m_SwapChain->Present(m_SystemSettings.VSyncEnabled);
+        m_SwapChain->Present(m_Settings.System.VSyncEnabled);
         m_CPUProfiler.EndScope(); // PresentSubmit
 
         // GPUの完了待ち(DX12のフレームパイプライン化に伴うフェンス待ち)は実際のCPU負荷ではなく
@@ -569,15 +569,15 @@ namespace Kurenai
         // MegaLightsの時間再利用も同じ場所でping-pongを反転する。
         // 今フレームの書き込み先が、次フレームでは履歴(読み込み元)になる
         {
-            const bool temporalRan = ShouldRunMegaLights() && m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic &&
-                                     m_MegaLightsSettings.TemporalEnabled && m_MegaLightsPasses->HasTemporalPipelineState() &&
+            const bool temporalRan = ShouldRunMegaLights() && m_Settings.MegaLights.Mode == MegaLightsMode::Stochastic &&
+                                     m_Settings.MegaLights.TemporalEnabled && m_MegaLightsPasses->HasTemporalPipelineState() &&
                                      m_RenderTargets.MegaLightsReservoirHistory[0] && m_RenderTargets.MegaLightsHistoryGuide[0];
             // 【手法3もガイドを書くので同じ反転が要る】あちらは時間再利用を持たないが、
             // デノイザが読む「前フレームの幾何」を Resolve が書いている。反転しないと
             // 同じフレームで書いた側を読むことになり、比べたい「別のフレームの同じ点」に
             // ならない(そのうえ RenderGraph は WAR の辺を張らないので競合する)
             const bool quadGuideRan = ShouldRunMegaLights() &&
-                                      m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared &&
+                                      m_Settings.MegaLights.Mode == MegaLightsMode::QuadShared &&
                                       m_MegaLightsPasses->HasResolvePipelineState() && m_RenderTargets.MegaLightsHistoryGuide[0];
             m_MegaLightsPasses->AdvanceHistory(temporalRan || quadGuideRan);
             // 露出はパスの有無に関わらず記録する(次に走ったときの比較の基準になる)
@@ -588,14 +588,14 @@ namespace Kurenai
             // リザーバを混ぜる時間再利用とは独立に効く。条件を混ぜると、片方を切ったときに
             // もう片方の履歴まで無効になって原因が分からなくなる
             const bool denoiseRan = ShouldRunMegaLights() &&
-                                    (m_MegaLightsSettings.Mode == MegaLightsMode::Stochastic ||
-                                     m_MegaLightsSettings.Mode == MegaLightsMode::QuadShared) &&
-                                    m_MegaLightsSettings.DenoiseEnabled && m_MegaLightsPasses->HasDenoisePipelineStates() &&
+                                    (m_Settings.MegaLights.Mode == MegaLightsMode::Stochastic ||
+                                     m_Settings.MegaLights.Mode == MegaLightsMode::QuadShared) &&
+                                    m_Settings.MegaLights.DenoiseEnabled && m_MegaLightsPasses->HasDenoisePipelineStates() &&
                                     m_RenderTargets.MegaLightsDenoisedTexture != nullptr;
             m_MegaLightsPasses->AdvanceDenoiseHistory(denoiseRan);
         }
 
-        if (m_PostProcessSettings.TAAEnabled)
+        if (m_Settings.PostProcess.TAAEnabled)
         {
             // 今フレームの書き込み先が、次フレームでは履歴(読み込み元)になる
             m_TAAHistoryIndex ^= 1u;

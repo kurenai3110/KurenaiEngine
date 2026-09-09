@@ -14,44 +14,44 @@ namespace Kurenai
     KurenaiEngine3D::QualitySnapshot KurenaiEngine3D::CaptureQualitySettings() const
     {
         QualitySnapshot settings;
-        settings.Reflection = m_ReflectionSettings.Mode;
-        settings.PlanarReflectionEnabled = m_ReflectionSettings.PlanarEnabled;
-        settings.PlanarReflectionResolutionScale = m_ReflectionSettings.PlanarResolutionScale;
-        settings.CloudVolumetric = m_CloudSettings.Volumetric;
-        settings.CirrusEnabled = m_CloudSettings.CirrusEnabled;
-        settings.StarsEnabled = m_StarsSettings.Enabled;
-        settings.TAAEnabled = m_PostProcessSettings.TAAEnabled;
-        settings.BloomEnabled = m_PostProcessSettings.BloomEnabled;
-        settings.ScreenSpaceShadowEnabled = m_ShadowSettings.ScreenSpaceEnabled;
-        settings.DDGIProbesPerFrame = m_DDGISettings.ProbesPerFrame;
-        settings.SSAOKernelSize = m_AmbientOcclusionSettings.SSAOKernelSize;
-        settings.CloudRaymarchSteps = m_CloudSettings.RaymarchSteps;
-        settings.DDGIUpdate = m_DDGISettings.UpdateMode;
-        settings.DDGIHalfResolution = m_DDGISettings.HalfResolution;
+        settings.Reflection = m_Settings.Reflection.Mode;
+        settings.PlanarReflectionEnabled = m_Settings.Reflection.PlanarEnabled;
+        settings.PlanarReflectionResolutionScale = m_Settings.Reflection.PlanarResolutionScale;
+        settings.CloudVolumetric = m_Settings.Cloud.Volumetric;
+        settings.CirrusEnabled = m_Settings.Cloud.CirrusEnabled;
+        settings.StarsEnabled = m_Settings.Stars.Enabled;
+        settings.TAAEnabled = m_Settings.PostProcess.TAAEnabled;
+        settings.BloomEnabled = m_Settings.PostProcess.BloomEnabled;
+        settings.ScreenSpaceShadowEnabled = m_Settings.Shadow.ScreenSpaceEnabled;
+        settings.DDGIProbesPerFrame = m_Settings.DDGI.ProbesPerFrame;
+        settings.SSAOKernelSize = m_Settings.AmbientOcclusion.SSAOKernelSize;
+        settings.CloudRaymarchSteps = m_Settings.Cloud.RaymarchSteps;
+        settings.DDGIUpdate = m_Settings.DDGI.UpdateMode;
+        settings.DDGIHalfResolution = m_Settings.DDGI.HalfResolution;
         return settings;
     }
 
     void KurenaiEngine3D::ApplyQualitySettings(const QualitySnapshot& settings)
     {
-        m_ReflectionSettings.Mode = settings.Reflection;
-        m_ReflectionSettings.PlanarEnabled = settings.PlanarReflectionEnabled;
-        m_CloudSettings.Volumetric = settings.CloudVolumetric;
-        m_CloudSettings.CirrusEnabled = settings.CirrusEnabled;
-        m_StarsSettings.Enabled = settings.StarsEnabled;
-        m_PostProcessSettings.TAAEnabled = settings.TAAEnabled;
-        m_PostProcessSettings.BloomEnabled = settings.BloomEnabled;
-        m_ShadowSettings.ScreenSpaceEnabled = settings.ScreenSpaceShadowEnabled;
-        m_DDGISettings.ProbesPerFrame = settings.DDGIProbesPerFrame;
+        m_Settings.Reflection.Mode = settings.Reflection;
+        m_Settings.Reflection.PlanarEnabled = settings.PlanarReflectionEnabled;
+        m_Settings.Cloud.Volumetric = settings.CloudVolumetric;
+        m_Settings.Cloud.CirrusEnabled = settings.CirrusEnabled;
+        m_Settings.Stars.Enabled = settings.StarsEnabled;
+        m_Settings.PostProcess.TAAEnabled = settings.TAAEnabled;
+        m_Settings.PostProcess.BloomEnabled = settings.BloomEnabled;
+        m_Settings.Shadow.ScreenSpaceEnabled = settings.ScreenSpaceShadowEnabled;
+        m_Settings.DDGI.ProbesPerFrame = settings.DDGIProbesPerFrame;
         // カーネル自体の作り直しはSSAOパスの中で行う(段数が変わったことを見て作り直す)
-        m_AmbientOcclusionSettings.SSAOKernelSize = settings.SSAOKernelSize;
-        m_CloudSettings.RaymarchSteps = settings.CloudRaymarchSteps;
-        m_DDGISettings.HalfResolution = settings.DDGIHalfResolution;
+        m_Settings.AmbientOcclusion.SSAOKernelSize = settings.SSAOKernelSize;
+        m_Settings.Cloud.RaymarchSteps = settings.CloudRaymarchSteps;
+        m_Settings.DDGI.HalfResolution = settings.DDGIHalfResolution;
 
         // 更新モードを変えたら停止状態は倒しておく。倒さないと「常時更新へ戻したのに
         // 止まったまま」になる(署名が変わるまで再開しないため)
-        if (m_DDGISettings.UpdateMode != settings.DDGIUpdate)
+        if (m_Settings.DDGI.UpdateMode != settings.DDGIUpdate)
         {
-            m_DDGISettings.UpdateMode = settings.DDGIUpdate;
+            m_Settings.DDGI.UpdateMode = settings.DDGIUpdate;
             m_DDGIPasses->GetUpdateSuspended() = false;
             m_DDGIPasses->GetStableCycles() = 0;
         }
@@ -64,7 +64,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::ApplyQualityPreset(QualityPreset preset)
     {
-        m_QualitySettings.Preset = preset;
+        m_Settings.Quality.Preset = preset;
 
         // 「高」はシーンを読み込んだ直後の状態へ戻す(QualitySnapshotのコメント参照)。
         // 静的な既定へ戻すと、SSRやTAAを自分で指定しているシーンの意図を壊す

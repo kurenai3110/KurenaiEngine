@@ -216,10 +216,10 @@ namespace Kurenai
         // instance.World/NormalMatrix/TangentSignFlipはAssets::LoadScene(SceneLoader.cpp)が
         // TRS(平行移動・回転・スケール)から計算済み(HLSL側のmul(vec, matrix)規約に合わせて
         // 転置済み)なので、ここでは単純にコピーするだけでよい
-        // emissiveIntensity: シーン全体の自発光の強度倍率(m_EmissiveLightSettings.Intensity)。glTFの
+        // emissiveIntensity: シーン全体の自発光の強度倍率(m_Settings.EmissiveLight.Intensity)。glTFの
         // emissiveFactorは通常1.0以下に収まるため、これを掛けないとG-Bufferのエミッシブを
         // HDR化しても照明器具の輝度が1.0を超えず、ブルームが効かない
-        // occlusionMapEnabled: マテリアルの遮蔽マップを使うか(m_AmbientOcclusionSettings.OcclusionMapEnabled)。
+        // occlusionMapEnabled: マテリアルの遮蔽マップを使うか(m_Settings.AmbientOcclusion.OcclusionMapEnabled)。
         // 各パスは lerp(1, occlusionSample, OcclusionStrength) で遮蔽率を求めるため、
         // ここで0を渡せばシェーダー側に手を入れずに遮蔽マップの寄与だけを消せる
         // ditherFade: モデルLODの切り替え中だけ1.0以外を渡す(既定の1.0は「全画素を描く」)。

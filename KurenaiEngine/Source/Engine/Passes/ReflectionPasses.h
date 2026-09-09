@@ -84,7 +84,7 @@ namespace Kurenai
             // --- 平面反射 ---
             // 水面に不透明ジオメトリの鏡像を映す専用フォワードパス。設計判断の詳細は
             // Shaders/3D/PlanarReflection.hlsl冒頭のコメントを参照。反射解像度はレンダー解像度に
-            // m_ReflectionSettings.PlanarResolutionScaleを掛けた値で、レンダーターゲット2枚と
+            // m_Settings.Reflection.PlanarResolutionScaleを掛けた値で、レンダーターゲット2枚と
             // 実寸はPresentPassのデバッグ表示も読むためRenderTargets側が持つ
             std::unique_ptr<RHI::IRHIShader> m_PlanarReflectionVertexShader;
             std::unique_ptr<RHI::IRHIShader> m_PlanarReflectionPixelShader;

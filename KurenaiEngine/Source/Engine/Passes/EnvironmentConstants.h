@@ -97,7 +97,7 @@ namespace Kurenai::Passes
             // xyz=太陽が「ある」向き(正規化済み。光が進む向きとは符号が逆)、w=未使用
             DirectX::XMFLOAT4 SunDirection;
             // x=目標照度[lx](SunLighting::SkyIlluminanceLux)、y=実効プリ露出(effectiveExposure)、
-            // z=タービディティ(m_SkySettings.Turbidity)、w=空の彩度(m_SkySettings.Saturation)
+            // z=タービディティ(m_Settings.Sky.Turbidity)、w=空の彩度(m_Settings.Sky.Saturation)
             DirectX::XMFLOAT4 IntegrateParams;
 
             // --- 以下はP18の第2段(雲込みの空の照度)専用。**FrameConstantsの同名の枠と

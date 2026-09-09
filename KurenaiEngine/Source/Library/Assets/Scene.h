@@ -254,7 +254,7 @@ namespace Kurenai::Assets
         float Direction[3] = { 0.0f, 1.0f, 0.0f };
         // 面が出している放射輝度。EmissiveFactor × エミッシブテクスチャの平均色。
         //
-        // 【シーン全体の倍率(m_EmissiveLightSettings.Intensity)も露出も掛けない】倍率は毎フレームの
+        // 【シーン全体の倍率(m_Settings.EmissiveLight.Intensity)も露出も掛けない】倍率は毎フレームの
         // ライトリスト構築で掛ける ―― そうしないとImGuiのスライダーが効かなくなる。
         // 露出はそもそも掛けてはいけない(G-Bufferのエミッシブが露出を通らないため。62章)
         float RadianceBase[3] = { 0.0f, 0.0f, 0.0f };
@@ -619,8 +619,8 @@ namespace Kurenai::Assets
         // 波の見た目に関する3つの既定値。SunTimeOfDay等と同じ方針で、EngineDefaults.h
         // ([--- 水面 ---]セクション)の値をリテラルとして複製している(Source/Libraryは
         // Source/Engineに依存できないため、Defaults::を直接参照できない)。
-        // シーン読み込み時にKurenaiEngine3D::m_WaterSettings.WaveScale等へコピーされ、以降はUIで
-        // 実行時上書きできる(m_ReflectionSettings.ModeがScene.SSREnabledから初期化されるのと同じ設計)
+        // シーン読み込み時にKurenaiEngine3D::m_Settings.Water.WaveScale等へコピーされ、以降はUIで
+        // 実行時上書きできる(m_Settings.Reflection.ModeがScene.SSREnabledから初期化されるのと同じ設計)
         float WaterWaveScale = 12.0f;
         float WaterWaveSpeed = 0.03f;
         float WaterWaveStrength = 0.25f;

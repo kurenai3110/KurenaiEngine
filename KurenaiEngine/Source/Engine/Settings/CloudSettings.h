@@ -53,7 +53,7 @@ namespace Kurenai
         bool Volumetric = Defaults::CloudVolumetric;
         // 雲底から雲頂までの厚み[m]。EngineDefaults::CloudThicknessのコメント参照
         float Thickness = Defaults::CloudThickness;
-        // trueにすると雲のスクロールが止まる(m_WaterSettings.TimeFrozenの雲版。A/B比較などスクロールが
+        // trueにすると雲のスクロールが止まる(m_Settings.Water.TimeFrozenの雲版。A/B比較などスクロールが
         // 揺れると困る場面で使う)
         bool TimeFrozen = Defaults::CloudTimeFrozen;
         // 積雲のボリュームレイマーチの段数。**このパスのコストの主なつまみ**。

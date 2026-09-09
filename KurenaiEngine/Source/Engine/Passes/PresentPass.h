@@ -50,7 +50,7 @@ namespace Kurenai
             // Mode==10(シャドウマップ配列)ではカスケード番号、
             // Mode==12(反射プローブのキューブマップ配列)では表示するプローブ番号として使う
             float ArraySlice;
-            // デバッグ表示の輝度倍率(m_DebugViewSettings.Gain)。色として表示するMode 0/3/4にだけ効く
+            // デバッグ表示の輝度倍率(m_Settings.DebugView.Gain)。色として表示するMode 0/3/4にだけ効く
             float Gain;
             // Mode==11(タイルライトカリングのヒートマップ)専用。
             // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=ヒートマップの上限ライト数

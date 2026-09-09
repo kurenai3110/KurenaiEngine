@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 
+#include "Settings/EngineSettings.h"
 #include "DroneShow.h"
 #include "EngineDefaults.h"
 #include "KurenaiEngineBase.h"
@@ -29,19 +30,6 @@
 #include "Diagnostics/RenderCapabilities.h"
 #include "Diagnostics/RenderStats.h"
 #include "Diagnostics/ScheduledRecreation.h"
-#include "Settings/AmbientOcclusionSettings.h"
-#include "Settings/CloudSettings.h"
-#include "Settings/DDGISettings.h"
-#include "Settings/DebugViewSettings.h"
-#include "Settings/EmissiveLightSettings.h"
-#include "Settings/FogSettings.h"
-#include "Settings/GeometrySettings.h"
-#include "Settings/IBLSettings.h"
-#include "Settings/MegaLightsSettings.h"
-#include "Settings/PostProcessSettings.h"
-#include "Settings/QualitySettings.h"
-#include "Settings/ReflectionProbeSettings.h"
-#include "Settings/ReflectionSettings.h"
 #include "Rendering/DroneShowResources.h"
 #include "Rendering/GIResources.h"
 #include "Rendering/IBLResources.h"
@@ -57,11 +45,6 @@
 #include "Passes/GeometryConstants.h"
 #include "Passes/MegaLightsConstants.h"
 #include "Passes/ReflectionProbeConstants.h"
-#include "Settings/ShadowSettings.h"
-#include "Settings/SkySettings.h"
-#include "Settings/StarsSettings.h"
-#include "Settings/SystemSettings.h"
-#include "Settings/WaterSettings.h"
 
 #pragma warning(push)
 #pragma warning(disable: 4251)
@@ -194,7 +177,7 @@ namespace Kurenai
         void ForceDDGIRayModeRaster();
 
         // プローブ分類のしきい値を上書きする(0以下なら分類そのものを無効にする)。
-        // しきい値の効き方をA/Bで測るための起動オプション用。根拠はm_DDGISettings.BackfaceThresholdを参照
+        // しきい値の効き方をA/Bで測るための起動オプション用。根拠はm_Settings.DDGI.BackfaceThresholdを参照
         void SetDDGIBackfaceThreshold(float threshold);
 
         // DDGIのクリップマップLODの段数と追従の有無を、読み込んだ`.kscene`の指定より優先して上書きする。
@@ -287,7 +270,7 @@ namespace Kurenai
         // 消えてしまい、「ライト数に対して横ばいか」を測れない
         // 【計測専用】自動露出の有効/無効を起動時に決める。
         //
-        // UI(PostProcessPanel)は m_PostProcessSettings.AutoExposureEnabled を直接触るが、起動オプションから
+        // UI(PostProcessPanel)は m_Settings.PostProcess.AutoExposureEnabled を直接触るが、起動オプションから
         // 同じ状態を作れないと「画面で見ていた設定」と「計測で走らせた設定」を揃えられない。
         // 揃っていない条件どうしの比較は、差が手法の差なのか設定の差なのか分けられない
         void SetAutoExposureEnabled(bool enabled);
@@ -474,23 +457,23 @@ namespace Kurenai
         // 要るものかを確かめること。
         // UIが書き換えるものは非const参照(アドレスを渡す/直接代入するため)、読むだけのものは
         // const(値またはconst参照)で返す。
-        AmbientOcclusionSettings& GetAmbientOcclusionSettings() { return m_AmbientOcclusionSettings; }
-        CloudSettings& GetCloudSettings() { return m_CloudSettings; }
-        DDGISettings& GetDDGISettings() { return m_DDGISettings; }
-        DebugViewSettings& GetDebugViewSettings() { return m_DebugViewSettings; }
-        EmissiveLightSettings& GetEmissiveLightSettings() { return m_EmissiveLightSettings; }
-        FogSettings& GetFogSettings() { return m_FogSettings; }
-        GeometrySettings& GetGeometrySettings() { return m_GeometrySettings; }
-        IBLSettings& GetIBLSettings() { return m_IBLSettings; }
-        MegaLightsSettings& GetMegaLightsSettings() { return m_MegaLightsSettings; }
-        PostProcessSettings& GetPostProcessSettings() { return m_PostProcessSettings; }
-        ReflectionProbeSettings& GetReflectionProbeSettings() { return m_ReflectionProbeSettings; }
-        ReflectionSettings& GetReflectionSettings() { return m_ReflectionSettings; }
-        ShadowSettings& GetShadowSettings() { return m_ShadowSettings; }
-        SkySettings& GetSkySettings() { return m_SkySettings; }
-        StarsSettings& GetStarsSettings() { return m_StarsSettings; }
-        SystemSettings& GetSystemSettings() { return m_SystemSettings; }
-        WaterSettings& GetWaterSettings() { return m_WaterSettings; }
+        AmbientOcclusionSettings& GetAmbientOcclusionSettings() { return m_Settings.AmbientOcclusion; }
+        CloudSettings& GetCloudSettings() { return m_Settings.Cloud; }
+        DDGISettings& GetDDGISettings() { return m_Settings.DDGI; }
+        DebugViewSettings& GetDebugViewSettings() { return m_Settings.DebugView; }
+        EmissiveLightSettings& GetEmissiveLightSettings() { return m_Settings.EmissiveLight; }
+        FogSettings& GetFogSettings() { return m_Settings.Fog; }
+        GeometrySettings& GetGeometrySettings() { return m_Settings.Geometry; }
+        IBLSettings& GetIBLSettings() { return m_Settings.IBL; }
+        MegaLightsSettings& GetMegaLightsSettings() { return m_Settings.MegaLights; }
+        PostProcessSettings& GetPostProcessSettings() { return m_Settings.PostProcess; }
+        ReflectionProbeSettings& GetReflectionProbeSettings() { return m_Settings.ReflectionProbe; }
+        ReflectionSettings& GetReflectionSettings() { return m_Settings.Reflection; }
+        ShadowSettings& GetShadowSettings() { return m_Settings.Shadow; }
+        SkySettings& GetSkySettings() { return m_Settings.Sky; }
+        StarsSettings& GetStarsSettings() { return m_Settings.Stars; }
+        SystemSettings& GetSystemSettings() { return m_Settings.System; }
+        WaterSettings& GetWaterSettings() { return m_Settings.Water; }
 
         std::vector<Assets::Light>& GetLights() { return m_Lights; }
         int& GetSelectedLightIndex() { return m_SelectedLightIndex; }
@@ -548,7 +531,7 @@ namespace Kurenai
         bool GetSceneLoadInFlight() const { return m_SceneLoadInFlight; }
         const std::vector<std::wstring>& GetSceneDisplayNames() const { return m_SceneDisplayNames; }
         size_t GetSceneLoadingIndex() const { return m_SceneLoadingIndex; }
-        const QualitySettings& GetQualitySettings() const { return m_QualitySettings; }
+        const QualitySettings& GetQualitySettings() const { return m_Settings.Quality; }
         uint32_t GetLightTileCountX() const { return m_RenderTargets.LightTileCountX; }
         uint32_t GetLightTileCountY() const { return m_RenderTargets.LightTileCountY; }
         GraphicsAPI GetGraphicsAPI() const { return m_GraphicsAPI; }
@@ -559,8 +542,12 @@ namespace Kurenai
         RHI::IRHIDevice* GetDevice() { return m_Device.get(); }
 
     private:
+        // 機能ごとの設定18個をまとめた入れ物。**Rendering::RenderSettingsSnapshot は
+        // これの写し**で、実体を共有させてはいけない(理由は EngineSettings.h)
+        Settings::EngineSettings m_Settings;
+
         // UpdateスレッドからRenderスレッドへ、1フレーム分のカメラ・ImGui表示状態を引き渡すための
-        // スナップショット。m_SkySettings.TimeOfDay等それ以外の状態はRenderスレッド側のみが読み書きするため
+        // スナップショット。m_Settings.Sky.TimeOfDay等それ以外の状態はRenderスレッド側のみが読み書きするため
         // ここには含めない(RenderThreadMain参照)
         struct FrameState
         {
@@ -569,7 +556,7 @@ namespace Kurenai
         };
 
         void CreateSceneResources();
-        // 中間バッファの精度構成(m_SystemSettings.Precision)によって変わるフォーマット。
+        // 中間バッファの精度構成(m_Settings.System.Precision)によって変わるフォーマット。
         // レンダーターゲットの作成(CreateRenderTargets)と、そこへ描くPSOのRenderTargetFormats
         // 宣言の両方がこれを使う。両者がずれるとD3D12では仕様違反(デバッグレイヤーがID 613を出す)
         // になるため、値の出所をこの2関数に一本化している
@@ -586,7 +573,7 @@ namespace Kurenai
         void CreateSamplerSets();
         void CreateRenderTargets(uint32_t width, uint32_t height);
         // 平面反射専用のレンダーターゲット2枚(m_RenderTargets.PlanarReflectionColor/Depth)を、
-        // 反射解像度(レンダー解像度 × m_ReflectionSettings.PlanarResolutionScale)で作り直す。
+        // 反射解像度(レンダー解像度 × m_Settings.Reflection.PlanarResolutionScale)で作り直す。
         // メインのCreateRenderTargetsとは独立に呼べる(Legacy8bitフォールバックの対象外。
         // このバッファは常にHDR固定フォーマットのため)。呼び出し箇所はCreateRenderTargetsと
         // 同じ2か所(Initialize直後、Render()の解像度変更ハンドリング)
@@ -714,7 +701,7 @@ namespace Kurenai
         // 出来上がったシーンの取り込みを行う
         void UpdateSceneStreaming();
         // .ksceneの更新時刻を見て、変わっていれば再読み込みを要求する。
-        // UpdateSceneStreamingの先頭から呼ぶ。m_SystemSettings.SceneAutoReloadEnabledがfalseなら何もしない
+        // UpdateSceneStreamingの先頭から呼ぶ。m_Settings.System.SceneAutoReloadEnabledがfalseなら何もしない
         void UpdateSceneHotReloadWatch();
         // 現在のシーンの.ksceneの最終更新時刻。取得できなければ0を返す
         // (ファイルが一時的に開けない、削除された等。0のときは何もしないのが正しい振る舞い)
@@ -961,7 +948,6 @@ namespace Kurenai
         // Updateスレッドが毎フレーム読み取ってm_Camera.SetAspectRatio()を呼ぶ
         std::atomic<float> m_RenderAspect{ 1.0f };
 
-        PostProcessSettings m_PostProcessSettings;
         // 出力解像度用テクスチャの作り直し要求。m_RenderResolutionDirtyとまったく同じ扱いで、
         // Render()の先頭のWaitForGPUIdle()を挟んだ位置で処理する
         bool m_UpscaleTargetsDirty = false;
@@ -988,7 +974,6 @@ namespace Kurenai
         // このフレームで超解像パスを走らせるか(有効かつテクスチャが確保済み)
         bool IsUpscaleActive() const;
 
-        SystemSettings m_SystemSettings;
         // ImGuiでBufferPrecisionが変更されたことをRender()へ伝えるフラグ。レンダーターゲットの
         // 作り直しはGPUがそれらを参照していない状態で行う必要があるため、UI関数の中では実行せず
         // Render()の先頭(RenderGraphの構築より前)でm_Device->WaitForGPUIdle()を挟んで処理する
@@ -998,7 +983,7 @@ namespace Kurenai
         // PSOは Passes/GeometryPasses へ移した
 
         // プリパスを走らせるか・メッシュ単位のフラスタムカリングを行うかは
-        // m_GeometrySettings.DepthPrepassEnabled / MeshCullingEnabledへ移した
+        // m_Settings.Geometry.DepthPrepassEnabled / MeshCullingEnabledへ移した
 
         // --- インスタンシング(Stage 7) ------------------------------------------------------
         //
@@ -1050,7 +1035,6 @@ namespace Kurenai
         // 1つの巨大AABBになり、どのパスからも一度も間引かれなくなる。
         // グループ内を空間セルでソートしてから刻むので、バッチは局所的にまとまる
         static constexpr uint32_t kMaxInstancesPerBatch = 128;
-        GeometrySettings m_GeometrySettings;
         // バッチを組み直す(レンダーグラフの構築より前に1フレーム1回。UpdateModelLODの後)
         void BuildInstanceBatches(RHI::IRHICommandList* commandList);
 
@@ -1170,7 +1154,6 @@ namespace Kurenai
 
         // 直接光パスのシェーダーとPSOはPasses/LightingPassesへ移した
 
-        AmbientOcclusionSettings m_AmbientOcclusionSettings;
         std::unique_ptr<RHI::IRHITexture> m_AODisabledTexture; // AO無効時に使う、遮蔽なし・間接光なしのテクスチャ
 
         // AO/GI(共通ブラー・SSAO・SSIL)のシェーダー・PSO・定数バッファ・SSAOカーネルは
@@ -1245,9 +1228,8 @@ namespace Kurenai
 
         // Hi-Zのミップ段数と「1回でも構築されたか」は Passes::GeometryPasses が持つ
         // (構築するのがHi-Zパス自身のため)。デバッグ表示で確認するミップレベルは
-        // m_DebugViewSettings.HiZDebugMipLevelへ移した
+        // m_Settings.DebugView.HiZDebugMipLevelへ移した
 
-        ReflectionSettings m_ReflectionSettings;
         // UIの「既定値に戻す」(右クリック)が戻る先。シーン読み込み時に決まった手法を控えておく。
         // 【静的なDefaultReflectionModeを使ってはいけない】.ksceneが指定を持つ場合、
         // 戻る先はエンジンの既定ではなく**そのシーンを読み込んだ直後の状態**である。
@@ -1260,7 +1242,6 @@ namespace Kurenai
 
         // MegaLightsのシェーダー・PSO・定数バッファは Passes/MegaLightsPasses へ移した。
         // 生出力と候補プール本体は直接光・Presentも読むため RenderTargets が持つ
-        MegaLightsSettings m_MegaLightsSettings;
 
         // 出所は Passes/MegaLightsConstants.h(移行中の別名)
         // 履歴・デノイザの作業バッファは RenderTargets、その添字と有効性は
@@ -1456,17 +1437,14 @@ namespace Kurenai
         // レンダー解像度に追従して作り直すためRenderTargets(SkyCloud*)にある
 
         // DDGIの低解像度解決パスの資源と実寸は Passes/DDGIPasses と Rendering/GIResources.h へ移した
-        DDGISettings m_DDGISettings;
 
         // --- 大気遠近(height fog / aerial perspective) ---
         // 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
         // Lightingパスの中へ入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl
-        // 冒頭のコメント参照。無効時(m_FogSettings.Enabled=falseまたはm_FogSettings.Density<=0)はパス自体を
+        // 冒頭のコメント参照。無効時(m_Settings.Fog.Enabled=falseまたはm_Settings.Fog.Density<=0)はパス自体を
         // 登録せず、GetActiveReflectionOutput()の結果がそのままTAA(またはTonemap)へ渡る
         // シェーダーとPSOはPasses/PostProcessPassesへ移した。書き先は
         // レンダー解像度に追従するためRenderTargets(AerialPerspectiveTexture)にある
-        FogSettings m_FogSettings;
-        WaterSettings m_WaterSettings;
 
         // TAA(Temporal Anti-Aliasing)パス: SSRの後、露出/ブルーム/トーンマップの前に置く。
         // 毎フレーム投影行列を1ピクセル未満だけずらして(ジッター)サンプル位置を散らし、
@@ -1534,7 +1512,7 @@ namespace Kurenai
         // 結果はRenderTargets::ExposureTextureへ書かれ、Tonemapパスが読んで露出倍率に変換する。
         //
         // 露出そのものはCPU側でライト強度へ事前乗算されている(プリ露出方式、
-        // m_PostProcessSettings.SceneExposureEV100)。自動露出の結果をライト強度へ戻すとフィードバックループになり、
+        // m_Settings.PostProcess.SceneExposureEV100)。自動露出の結果をライト強度へ戻すとフィードバックループになり、
         // かつGPU→CPUのリードバック(同期待ち)が要るため、プリ露出は固定のままにして
         // 「プリ露出EVと自動露出EVの差」だけをTonemapで掛ける構成にしている
         // (詳細はAutoExposure.hlsl冒頭)
@@ -1554,23 +1532,20 @@ namespace Kurenai
         static constexpr uint32_t kBloomLevelCount = 6;
 
 
-        // 垂直同期・固定FPSモードはm_SystemSettingsへ移した
+        // 垂直同期・固定FPSモードはm_Settings.Systemへ移した
 
         // Presentパスのシェーダー・PSO・定数バッファはPasses/PresentPassへ移した
 
         // デバッグ表示用: Presentパスで最終的に表示するレンダーターゲットの種類(DebugView enum)と
-        // その表示パラメータはm_DebugViewSettingsへ移した(Settings/DebugViewSettings.h)。
+        // その表示パラメータはm_Settings.DebugViewへ移した(Settings/DebugViewSettings.h)。
         // enumとkDebugViewCountも同じヘッダのKurenai名前空間直下にある
-        DebugViewSettings m_DebugViewSettings;
         // シャドウパス(平行光のライト視点から深度のみを描画する)。カメラ視錐台をkCascadeCount個の
         // 深度範囲に分割し(Practical Split Scheme)、それぞれ専用の正射影・シャドウマップを持たせる
         // カスケードシャドウマップ(CSM)。近いカスケードほどテクセル密度が高く、遠いカスケードほど
         // 広い範囲を粗くカバーする
         // 出所は Rendering/ShadowConstants.h(移行中の別名)
 
-        ShadowSettings m_ShadowSettings;
 
-        SkySettings m_SkySettings;
 
         // 背景(深度が書き込まれなかったピクセル)に表示する空のキューブマップ。
         // .ksceneの[Scene]Skyboxでシーンごとに差し替えられる(LoadScene参照)
@@ -1651,7 +1626,7 @@ namespace Kurenai
         // 最後に焼いたときの実効プリ露出。空はプリ露出済みの値で焼かれるため、
         // 露出が動いたときも焼き直さないと空だけ古い露出のまま取り残される
         float m_LastBakedExposureEV100 = 0.0f;
-        // 最後に焼いたときのタービディティ。m_SkySettings.Turbidityが動いたときも、Preethamの
+        // 最後に焼いたときのタービディティ。m_Settings.Sky.Turbidityが動いたときも、Preethamの
         // xyYモデルの形自体が変わるため焼き直しが要る(exposureMovedと同じ形の判定。Render()参照)
         float m_LastBakedTurbidity = 0.0f;
         // 最後に焼いたときの空の彩度。タービディティと同じ理由で、動いたら焼き直す
@@ -1666,14 +1641,14 @@ namespace Kurenai
         // 焼き直しになる。求めているのは半球平均なので、雲の場の平行移動では値がほとんど動かない
         struct CloudBakeSignature
         {
-            float CumulusCoverage = -1.0f;   // 無効(m_CloudSettings.Enabled=false)なら0
+            float CumulusCoverage = -1.0f;   // 無効(m_Settings.Cloud.Enabled=false)なら0
             float CumulusAltitude = 0.0f;
             float CumulusUvScale = 0.0f;
             float CumulusDensity = 0.0f;
             float CumulusForwardG = 0.0f;
             float CumulusThickness = 0.0f;   // ボリューム無効なら0(FrameConstantsと同じ扱い)
             float CloudTypeBias = 0.0f;
-            float CirrusCoverage = 0.0f;     // 無効(m_CloudSettings.CirrusEnabled=false)なら0
+            float CirrusCoverage = 0.0f;     // 無効(m_Settings.Cloud.CirrusEnabled=false)なら0
             float CirrusAltitude = 0.0f;
             float CirrusUvScale = 0.0f;
             float CirrusDensity = 0.0f;
@@ -1686,7 +1661,7 @@ namespace Kurenai
             bool operator==(const CloudBakeSignature&) const = default;
         };
         // 現在の設定からシグネチャを作る。**FrameConstants/SkyIntegrateConstantsへ詰めるのと
-        // 同じ有効/無効の潰し方をすること**(m_CloudSettings.Enabled=falseなら被覆率0、など)。
+        // 同じ有効/無効の潰し方をすること**(m_Settings.Cloud.Enabled=falseなら被覆率0、など)。
         // 揃っていないと「無効にしたのに焼き直しが走らない」取りこぼしが出る
         CloudBakeSignature MakeCloudBakeSignature() const;
         CloudBakeSignature m_LastBakedCloudSignature{};
@@ -1708,7 +1683,7 @@ namespace Kurenai
         // 太陽がこの角度以上動いたらSkyView LUTを焼き直す。LUTは天頂方向180度を108テクセルで
         // 持つので1テクセルあたり約1.67度あり、その1/30以下しかずらさない値にしてある。
         //
-        // 【意図的に手続き空のm_SkySettings.BakeAngleThresholdDegrees(1.0度)より桁で細かくしている】
+        // 【意図的に手続き空のm_Settings.Sky.BakeAngleThresholdDegrees(1.0度)より桁で細かくしている】
         // このLUTは背景の空(Sky.hlsliのSkyColor)が画面解像度で毎フレーム引くもので、
         // 間引きの粒度がそのまま背景の時間解像度になる。一方あちらが焼くIBLキューブは
         // 6面+プリフィルタ36回のディスパッチを伴う重いベイクで、間接光にしか効かない。
@@ -1723,7 +1698,7 @@ namespace Kurenai
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
         // 畳み込みのPSOは持ち主を IBLResources::PrefilterPipelineState へ移した
         // 拡散イラディアンスの球面調和関数(SH L2)経路。CSIrradianceの高速な
-        // 代替で、m_IBLSettings.UseSHIrradianceでA/B比較できるようトグルにしてある。詳細は
+        // 代替で、m_Settings.IBL.UseSHIrradianceでA/B比較できるようトグルにしてある。詳細は
         // IBLConvolve.hlsl冒頭のコメントとdocs/Architecture.htmlを参照
         // SHの項数の定数は Passes/EnvironmentConstants.h へ移した
         // CSProjectSHの射影に使う離散化解像度(1面の1辺のテクセル数)。
@@ -1735,11 +1710,9 @@ namespace Kurenai
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
         // SHのシェーダー3本・PSO3本・バッファ2本は Passes/EnvironmentPasses へ移した
         // IBLの有効/強度・SH経路・専用イラディアンス・環境光の拡散/鏡面/フォールバック強度は
-        // m_IBLSettingsへ移した(Settings/IBLSettings.h)。bent normal/multi-bounce AOの
-        // ソース選択はm_AmbientOcclusionSettingsへ移した(Settings/AmbientOcclusionSettings.h)
-        IBLSettings m_IBLSettings;
+        // m_Settings.IBLへ移した(Settings/IBLSettings.h)。bent normal/multi-bounce AOの
+        // ソース選択はm_Settings.AmbientOcclusionへ移した(Settings/AmbientOcclusionSettings.h)
 
-        EmissiveLightSettings m_EmissiveLightSettings;
 
         // --- エミッシブ光源(自発光メッシュを光源として扱う) ---
         //
@@ -1800,7 +1773,6 @@ namespace Kurenai
         int m_SelectedProbeIndex = -1;
         // 焼き上がりの状態(要求・焼けたか・Realtimeの進行・署名・焼いた時点の露出)は
         // 持ち主を Passes::ReflectionProbePasses へ移した。書き手がその群だけだったため
-        ReflectionProbeSettings m_ReflectionProbeSettings;
         // プリフィルタの進行状態・OnDemandの署名は持ち主を Passes::ReflectionProbePasses へ移した。
         // ステップ数の定数(kProbePrefilterStepCount / kProbeRealtimePrefilterStepsPerFrame)も
         // 読み手がその群だけになったため、Passes/ReflectionProbeConstants.h を直接使わせている
@@ -1954,14 +1926,14 @@ namespace Kurenai
         // 上のクランプが効いたことを一度だけログへ出すためのフラグ(毎フレーム出さない)
         bool m_DDGIProbesPerFrameClampReported = false;
 
-        // 水面。m_SkySettings.TimeOfDayの自動進行とまったく同じ方針
+        // 水面。m_Settings.Sky.TimeOfDayの自動進行とまったく同じ方針
         // (RenderThreadMainが同じ場所・同じ条件分岐の形で進める)で、水面法線マップの
         // スクロール位相を[0,1)で持つ。FrameConstants.TimeParams.xとしてWater.hlslへ渡る
         float m_WaterScrollOffset = 0.0f;
         // --- 平面反射 ---
         // 水面に不透明ジオメトリの鏡像を映す専用フォワードパス。設計判断の詳細は
         // Shaders/3D/PlanarReflection.hlsl冒頭のコメントを参照。反射解像度はレンダー解像度に
-        // m_ReflectionSettings.PlanarResolutionScaleを掛けた値で、実際の作成はCreatePlanarReflectionTargetsが行う。
+        // m_Settings.Reflection.PlanarResolutionScaleを掛けた値で、実際の作成はCreatePlanarReflectionTargetsが行う。
         // レンダーターゲット2枚と実寸は、PresentPassのデバッグ表示も読むため
         // 持ち主をRenderTargets(m_RenderTargets.PlanarReflection*)へ移した。
         // シェーダー・PSO・定数バッファはPasses/ReflectionPassesへ移した
@@ -1976,7 +1948,6 @@ namespace Kurenai
         // 「水面は単一の水平な平面である」という前提に立っており、複数ある場合は最初のものだけを使う
         bool m_PlanarReflectionMultipleWaterLogged = false;
 
-        CloudSettings m_CloudSettings;
     public:
         // UIのつまみの上限。**シェーダー側の段数そのものではない。**
         // Sky.hlsli は既定 kCloudMaxRaymarchSteps(384)で走り、cbuffer で0より大きい値を
@@ -1990,17 +1961,16 @@ namespace Kurenai
         // 判断B(被覆率による平均透過率をIBLキューブのベイク時にだけ掛ける)のキャッシュ。
         // bakeSkyThisFrameブロックで確定させ、ベイクとFrameConstantsが同じタイミングの
         // 値を見るようにする(GPU側のm_SkyResources.ParametersBufferと同じ更新タイミング)。
-        // 巻雲(m_CloudSettings.CirrusCoverage)も加味した2層の積になる
+        // 巻雲(m_Settings.Cloud.CirrusCoverage)も加味した2層の積になる
         // (ComputeCloudAverageTransmittance参照)
         float m_ActiveCloudTransmittance = 1.0f;
 
         // 風によるノイズ空間の移動量(巻雲側)。m_CloudScrollOffsetとまったく同じ形で
         // RenderThreadMainがkCloudNoisePeriodの周期でstd::fmodしながら進める。
-        // 凍結トグルはm_CloudSettings.TimeFrozenを共有する(片方にしか効かないとA/B比較の対照が
+        // 凍結トグルはm_Settings.Cloud.TimeFrozenを共有する(片方にしか効かないとA/B比較の対照が
         // 崩れるため。RenderThreadMainのスクロール更新箇所を参照)
         DirectX::XMFLOAT2 m_CirrusScrollOffset{ 0.0f, 0.0f };
 
-        StarsSettings m_StarsSettings;
 
         // パスごとにバインドするサンプラーの組。スロットの役割(s0=MaterialSampler、
         // s1=ColorSampler、s2=DataSampler)はShaders/3D/Samplers.hlsliで定義しており、
@@ -2039,7 +2009,7 @@ namespace Kurenai
         // ここで決めた本数だけを重みつきで取り出す。届いた灯が欠落するわけではない
         // (どの灯も w_i / SumW の確率で選ばれる)ため、容量超過のような静かな欠落は起きない。
         // 【実行時に振れる。ここは確保の上限】1タイルの抽出数Kは
-        // m_MegaLightsSettings.TilePoolCapacity が持ち、シェーダへは定数バッファで渡している。
+        // m_Settings.MegaLights.TilePoolCapacity が持ち、シェーダへは定数バッファで渡している。
         // バッファの確保だけがコンパイル時の上限を要るのでここに残す
         static constexpr uint32_t kMegaLightsTilePoolCapacity = 128;
         // Kの下限。これを下回るとタイルに届く灯を代表できない。
@@ -2062,18 +2032,18 @@ namespace Kurenai
         // 警告ログを出すためのフラグ(m_LightOverflowLoggedと同じ作法)。
         // 実際に超過したかはGPU側にしか無いため、確認はDebugView::LightTilesのマゼンタで行う
         bool m_LightTileOverflowLogged = false;
-        // DebugView::LightTilesのヒートマップの上限はm_DebugViewSettings.LightTileHeatmapMaxへ移した
+        // DebugView::LightTilesのヒートマップの上限はm_Settings.DebugView.LightTileHeatmapMaxへ移した
 
         // 自前ソフトウェアラスタライザ(46章)の資源とパス本体は Passes::GeometryPasses が持つ。
         // 型と定数(SWRasterConstants / SWRasterMeshInfo / kSWRaster*)は
         // Passes/GeometryConstants.h へ移した。
         // 巨大三角形とみなすbbox画素面積のしきい値と、その既定値・可動範囲(kSWRasterDefault/Min/Max
-        // LargeTriangleArea)はm_GeometrySettings.SoftwareRasterLargeTriangleAreaへ移した
+        // LargeTriangleArea)はm_Settings.Geometry.SoftwareRasterLargeTriangleAreaへ移した
 
         // --- 品質プリセット(41章) ---------------------------------------------------------
         //
         // QualityPreset(enum)とその既定値はSettings/QualitySettings.hへ移した
-        // (m_QualitySettings.Preset)。ここに残るのはプリセットが実際に触る設定の一式
+        // (m_Settings.Quality.Preset)。ここに残るのはプリセットが実際に触る設定の一式
         // (QualitySnapshot)と、それを読み書きする関数だけ。
         //
         // 【QualitySnapshotという名前にしている理由】Settings/QualitySettings.hの
@@ -2081,7 +2051,6 @@ namespace Kurenai
         // 選んでいるか」の静的な設定、こちらは「プリセットが一括で振る個々のつまみの値を
         // 退避・復元するためのスナップショット」)。同じ名前にすると呼び出し側で
         // どちらの型か紛らわしくなるため、クラス内のこちらをQualitySnapshotと呼び分ける
-        QualitySettings m_QualitySettings;
 
         // 品質プリセットが触る設定の一式(退避・復元用のスナップショット)。
         //
@@ -2152,7 +2121,7 @@ namespace Kurenai
         // 書き込み手を1スレッドに保っている
         Core::Camera m_Camera;
 
-        // WASD/E/Qの移動速度[m/s]はm_SystemSettings.CameraSpeedへ移した。
+        // WASD/E/Qの移動速度[m/s]はm_Settings.System.CameraSpeedへ移した。
         // 【スレッド】書き手はRenderスレッド(ScenePanelのスライダとResetSceneDependentParams)、
         // 読み手はUpdateスレッド(UpdateMovement)。単一のfloatを跨いで読み書きするだけなので
         // 同期は置かない ―― 途中の値が1フレーム見えても「その1フレームだけ移動量が古い速度で
@@ -2196,7 +2165,7 @@ namespace Kurenai
         // リポジトリのScenes\*.ksceneからはKurenaiPacker --scene → Assets\Packed → xcopy の
         // 2ホップで届く。エンジンは自分が実際に読んだファイル(m_SceneFilePaths)だけを見る
 
-        // 自動監視の有効/無効とリロード時のカメラ保持はm_SystemSettingsへ移した
+        // 自動監視の有効/無効とリロード時のカメラ保持はm_Settings.Systemへ移した
         // (SceneAutoReloadEnabled / SceneReloadKeepsCamera)
         // 監視中の.ksceneの更新時刻(FILETIMEを64bitへ詰めたもの)。0は「まだ取得していない」
         uint64_t m_WatchedSceneWriteTime = 0;
@@ -2250,7 +2219,7 @@ namespace Kurenai
         // m_Sceneと同じくRenderスレッド専有のためロックは不要
         std::vector<Assets::Light> m_Lights;
         int m_SelectedLightIndex = -1;
-        // 実際にライト強度へ事前乗算される「実効プリ露出」。m_PostProcessSettings.SceneExposureEV100(ユーザー設定)に
+        // 実際にライト強度へ事前乗算される「実効プリ露出」。m_Settings.PostProcess.SceneExposureEV100(ユーザー設定)に
         // 時刻由来のバイアスを足したもので、Renderスレッドのみが読み書きする。
         //
         // 【なぜ可変にする必要があるか】
@@ -2288,11 +2257,11 @@ namespace Kurenai
         std::chrono::steady_clock::time_point m_LastRenderFrameTime;
         // 直前のRenderフレームの経過時間[秒]。自動露出の時間方向の順応に使う。
         // RenderThreadMainが書き、Render()が読む。どちらもRenderスレッドなので追加の排他は不要
-        // (m_SkySettings.TimeOfDayと同じ扱い)
+        // (m_Settings.Sky.TimeOfDayと同じ扱い)
         float m_RenderDeltaTime = 0.0f;
         float m_FixedTimeStep = 0.0f;
 
-        // 性能ログ(LogFrameStatsIfDue)の有効/無効はm_SystemSettings.FrameStatsLoggingEnabledへ移した。
+        // 性能ログ(LogFrameStatsIfDue)の有効/無効はm_Settings.System.FrameStatsLoggingEnabledへ移した。
         // 集計状態はすべてRenderスレッドのみが読み書きするため追加の排他制御は不要
         std::chrono::steady_clock::time_point m_FrameStatsWindowStart;
         uint32_t m_FrameStatsFrameCount = 0;
@@ -2332,7 +2301,7 @@ namespace Kurenai
         // 入れ子型のため、UIパネル向けのアクセサ一覧とは別にここで公開する
         const std::vector<InstanceLODState>& GetInstanceLODStates() const { return m_InstanceLODStates; }
     private:
-        // 段の切り替えにかける秒数とヒステリシス幅はm_GeometrySettings.LODFadeDuration /
+        // 段の切り替えにかける秒数とヒステリシス幅はm_Settings.Geometry.LODFadeDuration /
         // LODHysteresisへ移した
         // 統計。1フレームあたりの段の切り替え回数と、そのフレームでフェード中のインスタンス数。
         // 【0なら一度も切り替わっていない】LODが効いているかはここでしか分からない

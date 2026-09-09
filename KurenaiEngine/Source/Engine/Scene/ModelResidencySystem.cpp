@@ -147,7 +147,7 @@ namespace Kurenai
         m_InstancedBatchCount = 0;
         m_InstancedInstanceCount = 0;
 
-        if (!m_GeometrySettings.InstancingEnabled || m_Scene.Instances.empty() || !m_SceneGPUResources.ModelInstanceBuffer)
+        if (!m_Settings.Geometry.InstancingEnabled || m_Scene.Instances.empty() || !m_SceneGPUResources.ModelInstanceBuffer)
         {
             return;
         }
@@ -407,12 +407,12 @@ namespace Kurenai
             // 遠くから一気に近づいても数フレームで追いつく
             uint32_t desired = state.CurrentLOD;
             if (desired < instance.LODDistances.size() &&
-                distance > instance.LODDistances[desired] * (1.0f + m_GeometrySettings.LODHysteresis))
+                distance > instance.LODDistances[desired] * (1.0f + m_Settings.Geometry.LODHysteresis))
             {
                 desired = desired + 1;
             }
             else if (desired > 0 &&
-                     distance < instance.LODDistances[desired - 1] * (1.0f - m_GeometrySettings.LODHysteresis))
+                     distance < instance.LODDistances[desired - 1] * (1.0f - m_Settings.Geometry.LODHysteresis))
             {
                 desired = desired - 1;
             }
@@ -428,8 +428,8 @@ namespace Kurenai
             }
             else if (state.FadeT < 1.0f)
             {
-                state.FadeT = (m_GeometrySettings.LODFadeDuration > 0.0f)
-                    ? (std::min)(1.0f, state.FadeT + deltaSeconds / m_GeometrySettings.LODFadeDuration)
+                state.FadeT = (m_Settings.Geometry.LODFadeDuration > 0.0f)
+                    ? (std::min)(1.0f, state.FadeT + deltaSeconds / m_Settings.Geometry.LODFadeDuration)
                     : 1.0f;
             }
 

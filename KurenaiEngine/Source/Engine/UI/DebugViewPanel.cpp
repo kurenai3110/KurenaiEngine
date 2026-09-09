@@ -21,7 +21,7 @@ namespace Kurenai::UI
         using DebugView = Kurenai::DebugView;
 
         // DebugView::AtmosphereLUTで表示するLUTの選択肢。
-        // 並びはKurenaiEngine3D::m_SkySettings.AtmosphereLUTDebugIndexの意味と一致させること
+        // 並びはKurenaiEngine3D::m_Settings.Sky.AtmosphereLUTDebugIndexの意味と一致させること
         static const char* kAtmosphereLUTNames[] =
         {
             "Transmittance (256x64)",
