@@ -7,8 +7,8 @@ namespace Kurenai
     struct RenderCapabilities
     {
         // このデバイスがメッシュシェーダーを使えるか(IRHIDevice::SupportsMeshShader()の写し)。
-        // m_DeviceはKurenaiEngineBaseのprotectedメンバで、派生クラスのfriendであるUIパネルから
-        // 触れるかはC++の規則の解釈が分かれるため、RaytracingAvailableと同じくここへ控える
+        // m_DeviceはKurenaiEngineBaseのprotectedメンバで、UIパネルからは触れないため
+        // (段階6.5でfriendを全廃した)、RaytracingAvailableと同じくここへ控える
         bool MeshShaderAvailable = false;
 
         // レイトレーシング反射が使える環境か。デバイスのSupportsRaytracing()を初期化時に控えたもので、

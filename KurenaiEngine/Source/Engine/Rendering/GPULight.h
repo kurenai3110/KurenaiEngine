@@ -22,7 +22,9 @@ namespace Kurenai
         constexpr uint32_t kLightShadowScreenSpace = 1u;
         constexpr uint32_t kLightShadowRaytraced = 2u;
 
-        // DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
+        // PunctualLighting.hlsli の struct GPULight と並び・ストライド(64バイト)を
+        // 一致させる必要がある(PlanarReflection.hlsl / ProbeShading.hlsli / Transparent.hlsl が
+        // 持つ写し3本も同じ並び)
         struct alignas(16) GPULight
         {
             DirectX::XMFLOAT4 PositionType;   // xyz=ワールド座標, w=LightType

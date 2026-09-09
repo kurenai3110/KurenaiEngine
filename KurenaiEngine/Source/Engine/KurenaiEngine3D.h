@@ -1984,7 +1984,10 @@ namespace Kurenai
 
         CloudSettings m_CloudSettings;
     public:
-        // 段数の上限。**Sky.hlsliのkCumulusRaymarchStepsMaxと一致させること**
+        // UIのつまみの上限。**シェーダー側の段数そのものではない。**
+        // Sky.hlsli は既定 kCloudMaxRaymarchSteps(384)で走り、cbuffer で0より大きい値を
+        // 渡されたときだけそれを使う。その値は kCloudRaymarchStepsHardMax(512)で丸められる。
+        // したがってここに要る条件は「512を超えないこと」だけで、一致させる相手はいない
         static constexpr uint32_t kCloudRaymarchStepsMax = 32;
     private:
         // 風によるノイズ空間の移動量。m_WaterScrollOffsetと同じくUIつまみではなく内部状態で、
