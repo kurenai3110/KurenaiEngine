@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include "PassHost.h"
 #include <string>
 #include <vector>
 
@@ -35,7 +36,7 @@ namespace Kurenai
         class LightingPasses
         {
         public:
-            explicit LightingPasses(KurenaiEngine3D& engine) : m_Engine(engine) {}
+            explicit LightingPasses(IPassHost& engine) : m_Engine(engine) {}
 
             // 直接光とAO/GIと雲。AOの出力先をブラックボードへ載せるので bb は非 const
             void RegisterDirectAndAO(
@@ -77,7 +78,7 @@ namespace Kurenai
             bool HasRaytracedPipelineState() const { return m_RTAOPipelineState != nullptr; }
 
         private:
-            KurenaiEngine3D& m_Engine;
+            IPassHost& m_Engine;
 
             // 直接光パス(G-Buffer+シャドウマップからPBRの直接光(拡散+鏡面反射、シャドウ適用済み)を
             // 計算しHDRで書き出す。DeferredLightingパスとSSIL_VisibilityBitmask.hlslの両方から

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include "PassHost.h"
 #include <string>
 #include <vector>
 
@@ -36,7 +37,7 @@ namespace Kurenai
         class ReflectionPasses
         {
         public:
-            explicit ReflectionPasses(KurenaiEngine3D& engine) : m_Engine(engine) {}
+            explicit ReflectionPasses(IPassHost& engine) : m_Engine(engine) {}
 
             void Register(
                 Core::RenderGraph& graph,
@@ -61,7 +62,7 @@ namespace Kurenai
             bool HasRaytracedPipelineState() const { return m_RTReflectionPipelineState != nullptr; }
 
         private:
-            KurenaiEngine3D& m_Engine;
+            IPassHost& m_Engine;
 
             // SSR(Screen Space Reflections)パス: LightingパスのSceneColorを反射先の環境色として
             // 再利用し、G-Buffer(Normal/Material/Depth)からワールド空間でレイマーチングして

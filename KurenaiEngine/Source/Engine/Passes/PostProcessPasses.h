@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "PassHost.h"
 #include <memory>
 #include <string>
 
@@ -39,7 +40,7 @@ namespace Kurenai
         class PostProcessPasses
         {
         public:
-            explicit PostProcessPasses(KurenaiEngine3D& engine) : m_Engine(engine) {}
+            explicit PostProcessPasses(IPassHost& engine) : m_Engine(engine) {}
 
             void Register(
                 Core::RenderGraph& graph,
@@ -65,7 +66,7 @@ namespace Kurenai
             bool& GetAutoExposureResetRequested() { return m_AutoExposureResetRequested; }
 
         private:
-            KurenaiEngine3D& m_Engine;
+            IPassHost& m_Engine;
 
             // --- 大気遠近(height fog / aerial perspective) ---
             // 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。

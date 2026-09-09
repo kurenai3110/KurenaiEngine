@@ -1,4 +1,3 @@
-#include "../KurenaiEngine3D.h"
 
 #include <algorithm>
 #include <vector>

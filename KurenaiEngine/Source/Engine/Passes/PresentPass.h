@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include "PassHost.h"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -82,7 +83,7 @@ namespace Kurenai
         class PresentPass
         {
         public:
-            explicit PresentPass(KurenaiEngine3D& engine) : m_Engine(engine) {}
+            explicit PresentPass(IPassHost& engine) : m_Engine(engine) {}
 
             // 【引数の渡し方】frame はフレーム先頭で確定したスナップショット、
             // bb は登録の途中で確定していく出力。どちらも const& で受け、
@@ -101,7 +102,7 @@ namespace Kurenai
             void CreateConstantBuffer(RHI::IRHIDevice& device);
 
         private:
-            KurenaiEngine3D& m_Engine;
+            IPassHost& m_Engine;
 
             // Presentパス(頂点バッファなしのフルスクリーン三角形。
             // 選択中のレンダーターゲットをアスペクト比を保ってバックバッファへ拡大縮小表示)

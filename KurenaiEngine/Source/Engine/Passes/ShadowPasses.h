@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include "PassHost.h"
 #include <string>
 
 #include "RHI/IRHIDevice.h"
@@ -29,7 +30,7 @@ namespace Kurenai
         class ShadowPasses
         {
         public:
-            explicit ShadowPasses(KurenaiEngine3D& engine) : m_Engine(engine) {}
+            explicit ShadowPasses(IPassHost& engine) : m_Engine(engine) {}
 
             // カスケードシャドウマップ(Shadow0..Shadow3)
             void RegisterCascades(Core::RenderGraph& graph, const Rendering::RenderFrameContext& frame);
@@ -47,7 +48,7 @@ namespace Kurenai
             bool HasRaytracedPipelineState() const { return m_RTShadowPipelineState != nullptr; }
 
         private:
-            KurenaiEngine3D& m_Engine;
+            IPassHost& m_Engine;
 
             // RTシャドウパス: TLASへ太陽の見かけの円盤に向けて影レイを撃ち、可視率(0〜1)を
             // 単チャンネルのテクスチャへ書くコンピュートパス。DirectLighting.hlslがt6で読み、

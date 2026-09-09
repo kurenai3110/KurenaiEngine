@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "PassHost.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -37,7 +38,7 @@ namespace Kurenai
         class GeometryPasses
         {
         public:
-            explicit GeometryPasses(KurenaiEngine3D& engine) : m_Engine(engine) {}
+            explicit GeometryPasses(IPassHost& engine) : m_Engine(engine) {}
 
             void Register(
                 Core::RenderGraph& graph,
@@ -125,7 +126,7 @@ namespace Kurenai
             void ResetDrawCalls() { m_DrawCallsGBuffer = 0; m_DrawCallsDepthPrepass = 0; }
 
         private:
-            KurenaiEngine3D& m_Engine;
+            IPassHost& m_Engine;
 
             // モデル単位のGPUカリング(ModelCull.hlsl)。増幅シェーダーへ渡す候補を
             // コンピュートで間引き、生き残りだけをExecuteIndirectで描く

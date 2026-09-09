@@ -44,6 +44,7 @@
 #include "Rendering/RenderTargets.h"
 #include "Rendering/ShadowConstants.h"
 #include "Rendering/MeshletLODFrameConstants.h"
+#include "Passes/PassHost.h"
 #include "Rendering/GeometryDrawHost.h"
 #include "Rendering/GeometryDrawTypes.h"
 #include "Rendering/DroneShowSystem.h"
@@ -135,7 +136,7 @@ namespace Kurenai
     // 構築してRun()を呼ぶだけでウィンドウが開き、終了するまでブロックする
     class KURENAI_3D_API KurenaiEngine3D
         : public KurenaiEngineBase, public Diagnostics::IRecreationTarget, public UI::IEngineUIHost,
-          public Rendering::ILODSelector
+          public Rendering::ILODSelector, public Passes::IPassHost
     {
     public:
         // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。

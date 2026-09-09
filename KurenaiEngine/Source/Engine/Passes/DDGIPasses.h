@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "PassHost.h"
 #include <memory>
 #include <string>
 #include <vector>
@@ -39,7 +40,7 @@ namespace Kurenai
         class DDGIPasses
         {
         public:
-            explicit DDGIPasses(KurenaiEngine3D& engine) : m_Engine(engine) {}
+            explicit DDGIPasses(IPassHost& engine) : m_Engine(engine) {}
 
             // プローブの捕捉と更新(DDGIInvalidate / DDGIUpdate<probe>)
             void RegisterProbeUpdate(
@@ -90,7 +91,7 @@ namespace Kurenai
             bool IsBaked() const { return m_DDGIBaked; }
 
         private:
-            KurenaiEngine3D& m_Engine;
+            IPassHost& m_Engine;
 
             // 各スロットが「最後に焼いたときのワールド格子座標」。いまの座標と違えば未確定(dirty)。
             // 【ワールド座標で持つこと】アトラスのセル番号で持つと、スクロールしてもセル番号は

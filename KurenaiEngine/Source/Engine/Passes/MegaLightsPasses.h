@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include "PassHost.h"
 #include <string>
 
 #include "RHI/IRHIDevice.h"
@@ -32,7 +33,7 @@ namespace Kurenai
         class MegaLightsPasses
         {
         public:
-            explicit MegaLightsPasses(KurenaiEngine3D& engine) : m_Engine(engine) {}
+            explicit MegaLightsPasses(IPassHost& engine) : m_Engine(engine) {}
 
             void Register(
                 Core::RenderGraph& graph,
@@ -84,7 +85,7 @@ namespace Kurenai
             uint32_t GetAccumWarmupFrames() const { return m_MegaLightsAccumWarmupFrames; }
 
         private:
-            KurenaiEngine3D& m_Engine;
+            IPassHost& m_Engine;
 
             // 時間再利用の履歴の書き込み先(RenderTargets::MegaLightsReservoirHistory の添字)。
             // もう一方が前フレームの結果。Render()の末尾で反転する

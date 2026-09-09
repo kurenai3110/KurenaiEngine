@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include "PassHost.h"
 
 #include "EnvironmentConstants.h"
 #include "ReflectionProbeConstants.h"
@@ -31,7 +32,7 @@ namespace Kurenai
         class ReflectionProbePasses
         {
         public:
-            explicit ReflectionProbePasses(KurenaiEngine3D& engine) : m_Engine(engine) {}
+            explicit ReflectionProbePasses(IPassHost& engine) : m_Engine(engine) {}
 
             void Register(
                 Core::RenderGraph& graph,
@@ -59,7 +60,7 @@ namespace Kurenai
             }
 
         private:
-            KurenaiEngine3D& m_Engine;
+            IPassHost& m_Engine;
 
             // 次のRender()でプローブを焼き直す要求。シーン読み込み時とImGuiのBakeボタンで立てる。
             // スカイボックス由来のIBLと違いシーンのジオメトリ・ライトに依存するため、
