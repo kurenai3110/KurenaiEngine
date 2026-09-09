@@ -82,7 +82,7 @@ namespace Kurenai
     void KurenaiEngine3D::ForEachGeometryDraw(
         const Rendering::GeometryDrawLoopDesc& desc, ModelFn&& onModel, MeshFn&& onMesh)
     {
-        // 【入れ子の列挙を禁じる】m_DrawUnitScratchは1本しかなく、内側の列挙が
+        // 【入れ子の列挙を禁じる】m_DrawList.Scratchは1本しかなく、内側の列挙が
         // 外側の列挙対象を丸ごと書き換えてしまう。段階5から人手のコメントで守ってきた
         // 義務だが、ForEachGeometryDrawがpublicになって呼べる場所が広がったので検査にする。
         //
@@ -91,7 +91,7 @@ namespace Kurenai
         // 毎フレーム何千回も通るので記録は絞る。**ここはテンプレートなのでstaticは
         // インスタンス化ごとに別物**で、記録は呼び出し箇所ごとに1回になる
         // (非テンプレートのIsMeshVisibleWithStatsはプログラム全体で1回。そこは違う)
-        if (m_DrawUnitScratchInUse)
+        if (m_DrawList.ScratchInUse)
         {
             static bool loggedNestedDrawLoop = false;
             if (!loggedNestedDrawLoop)
@@ -99,7 +99,7 @@ namespace Kurenai
                 loggedNestedDrawLoop = true;
                 Core::Logger::Error(
                     "KurenaiEngine3D",
-                    "ForEachGeometryDrawを入れ子で呼んでいます。m_DrawUnitScratchは1本しか無く、"
+                    "ForEachGeometryDrawを入れ子で呼んでいます。m_DrawList.Scratchは1本しか無く、"
                     "内側の列挙が外側の列挙対象を書き換えます");
             }
         }
@@ -109,8 +109,8 @@ namespace Kurenai
             bool& InUse;
             bool Previous;
             ~ScratchGuard() { InUse = Previous; }
-        } scratchGuard{ m_DrawUnitScratchInUse, m_DrawUnitScratchInUse };
-        m_DrawUnitScratchInUse = true;
+        } scratchGuard{ m_DrawList.ScratchInUse, m_DrawList.ScratchInUse };
+        m_DrawList.ScratchInUse = true;
 
         const bool coarsest = desc.LODMode == Rendering::GeometryLODMode::Coarsest;
 
@@ -120,14 +120,14 @@ namespace Kurenai
         // 詰め直せば以降の分岐が1本で済む(unit.IsBatch() が常に偽になるだけ)
         if (desc.UseDrawUnits)
         {
-            GetInstanceDrawUnits(coarsest, m_DrawUnitScratch);
+            m_DrawList.GetInstanceDrawUnits(m_Scene, coarsest, m_DrawList.Scratch);
         }
         else
         {
-            BuildSingleInstanceDrawUnits(m_DrawUnitScratch);
+            m_DrawList.BuildSingleInstanceDrawUnits(m_Scene, m_DrawList.Scratch);
         }
 
-        for (const Rendering::InstanceDrawUnit& unit : m_DrawUnitScratch)
+        for (const Rendering::InstanceDrawUnit& unit : m_DrawList.Scratch)
         {
             const Assets::ModelInstance& instance = *unit.Instance;
 

@@ -108,30 +108,4 @@ namespace Kurenai
         }
     }
 
-    void KurenaiEngine3D::BuildSingleInstanceDrawUnits(std::vector<Rendering::InstanceDrawUnit>& outUnits) const
-    {
-        // インスタンシングのバッチを使わないパス用に、シーンの全インスタンスを
-        // 単体(InstanceCount==1)の描画単位として詰める。
-        // **列挙順はm_Scene.Instancesの並びそのもの** ―― 描画順が変わると、
-        // 同じ絵でも中間バッファのバイト列が変わりうる
-        outUnits.clear();
-        outUnits.reserve(m_Scene.Instances.size());
-        for (size_t instanceIndex = 0; instanceIndex < m_Scene.Instances.size(); ++instanceIndex)
-        {
-            const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
-            Rendering::InstanceDrawUnit unit;
-            unit.Instance = &instance;
-            unit.InstanceIndex = instanceIndex;
-            // 段は呼び出し側(共通ループ)がGetCurrentLOD/GetCoarsestLODで決める
-            unit.Model = nullptr;
-            unit.InstanceBase = 0;
-            unit.InstanceCount = 1;
-            for (int axis = 0; axis < 3; ++axis)
-            {
-                unit.WorldBoundsMin[axis] = instance.WorldBoundsMin[axis];
-                unit.WorldBoundsMax[axis] = instance.WorldBoundsMax[axis];
-            }
-            outUnits.push_back(unit);
-        }
-    }
 }

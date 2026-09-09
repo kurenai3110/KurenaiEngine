@@ -44,6 +44,7 @@
 #include "Rendering/ShadowConstants.h"
 #include "Rendering/MeshletLODFrameConstants.h"
 #include "Rendering/GeometryDrawTypes.h"
+#include "Rendering/SceneDrawList.h"
 #include "Rendering/CubeFaceMath.h"
 #include "Passes/DDGIConstants.h"
 #include "Passes/EnvironmentConstants.h"
@@ -116,17 +117,8 @@ namespace Kurenai
 
 namespace Kurenai
 {
-    // インスタンシングで1体ぶんの変換を渡すレコード。
-    // Shaders/3D/ObjectConstants.hlsli の struct ModelInstanceRecord と
-    // **バイト単位で一致させること**(144バイト。ずれると全インスタンスが見当違いの場所へ飛ぶ)
-    struct alignas(16) GPUModelInstance
-    {
-        DirectX::XMFLOAT4X4 World;
-        DirectX::XMFLOAT4X4 NormalMatrix;
-        float TangentSignFlip;
-        float Padding[3];
-    };
-    static_assert(sizeof(GPUModelInstance) == 144, "GPUModelInstanceはHLSL側と同じ144バイトであること");
+    // 実体は Rendering/SceneDrawList.h(インスタンシングのレコードと同じ持ち主)
+    using GPUModelInstance = Rendering::GPUModelInstance;
 
     // 3Dサンプルプログラム向けの公開API。Deferred Shading(G-Buffer)によるPBRレンダリング、
     // シャドウマッピング、SSAO/SSIL(間接光)、SSR(反射)、ImGuiによる各種設定パネル、
@@ -997,52 +989,12 @@ namespace Kurenai
         // ShouldUseModelMeshletPath が真になるモデルはバッチに入れない。
         // つまり DX12 でメッシュレット描画が有効なあいだ、この機能が働くのは
         // 水面・メッシュレットを持たないモデル・メッシュレット描画を切ったときに限られる
-        struct InstanceBatch
-        {
-            // このバッチが描く段。同じ段を選んだインスタンスだけをまとめる
-            const Assets::Model* Model = nullptr;
-            // m_SceneGPUResources.ModelInstanceBuffer の中の先頭位置。頂点シェーダーは
-            // ModelInstances[InstanceBase + SV_InstanceID] を読む
-            uint32_t InstanceBase = 0;
-            uint32_t InstanceCount = 0;
-            // ワインディングと水面の別はパイプラインステートで分かれるため、
-            // 違うものを1つのドローへまとめてはいけない(まとめると片方が裏面として全部捨てられる)
-            bool IsMirrored = false;
-            bool IsWater = false;
-            // 構成インスタンスのワールドAABBの包絡。パスごとのフラスタム判定に使う
-            float WorldBoundsMin[3] = { 0.0f, 0.0f, 0.0f };
-            float WorldBoundsMax[3] = { 0.0f, 0.0f, 0.0f };
-            // 代表インスタンスのシーン内番号(バッチの先頭)。IsMirrored/IsWaterはバッチ内で
-            // 同一なので、定数バッファを作るのに1体を代表として使える
-            size_t RepresentativeIndex = 0;
-        };
-
-        // バッチの一覧は「どの段を描くパスか」で2組に分かれる。
-        // 変換そのものはどちらでも同じだが、**まとめられる相手が違う** ――
-        // G-Buffer は各インスタンスがそのフレームに選んだ段、シャドウとプローブは常に
-        // 最も粗い段(GetCoarsestLOD)を描くため、同じ組では括れない
-        std::vector<InstanceBatch> m_InstanceBatchesCurrentLOD;   // 深度プリパス / G-Buffer / 平面反射
-        std::vector<InstanceBatch> m_InstanceBatchesCoarsestLOD;  // シャドウ / 反射プローブ
-        // インスタンスがどちらの組でバッチに入ったか。パスの個別ループはここが立っているものを飛ばす
-        std::vector<uint8_t> m_InstanceBatchedCurrentLOD;
-        std::vector<uint8_t> m_InstanceBatchedCoarsestLOD;
-        // アップロード用の作業領域(毎フレーム作り直す。確保のやり直しを避けるため持っておく)
-        std::vector<GPUModelInstance> m_ModelInstanceRecords;
-        // 1バッチの上限。上限が無いと「街灯を市街全域に5000個」のようなグループが
-        // 1つの巨大AABBになり、どのパスからも一度も間引かれなくなる。
-        // グループ内を空間セルでソートしてから刻むので、バッチは局所的にまとまる
-        static constexpr uint32_t kMaxInstancesPerBatch = 128;
+        // このフレームの描画リスト(バッチ・アップロード用レコード・作業領域)。
+        // **持ち主を1つにする理由は Rendering/SceneDrawList.h**
+        Rendering::SceneDrawList m_DrawList;
+        using InstanceBatch = Rendering::InstanceBatch;
         // バッチを組み直す(レンダーグラフの構築より前に1フレーム1回。UpdateModelLODの後)
         void BuildInstanceBatches(RHI::IRHICommandList* commandList);
-
-        // 出所は Rendering/GeometryDrawTypes.h(移行中の別名)
-        // このフレームの描画単位を組み立てる。coarsestLOD が真ならシャドウ/プローブ用の組、
-        // 偽なら深度プリパス/G-Buffer/平面反射用の組を使う。
-        // シーンの全インスタンスがちょうど1回ずつ現れる(バッチに入ったものはバッチとして)
-        void GetInstanceDrawUnits(bool coarsestLOD, std::vector<Rendering::InstanceDrawUnit>& outUnits) const;
-        // インスタンシングのバッチを使わないパス(DDGI / 半透明 / ソフトウェアラスタライザ)向けに、
-        // シーンの全インスタンスを単体の描画単位として詰める。列挙順はm_Scene.Instancesの並びのまま
-        void BuildSingleInstanceDrawUnits(std::vector<Rendering::InstanceDrawUnit>& outUnits) const;
 
         // --- ジオメトリ描画ループの共通化(Rendering/GeometryDrawLoop.h) --------------------
         //
@@ -1056,23 +1008,12 @@ namespace Kurenai
         // onModel: モデル単位で描き切ったなら真を返す(メッシュのループへ入らない)
         // onMesh : 偽を返すと列挙そのものを打ち切る
         //
-        // 【publicにしてある】Passes/*の各群がこれを呼ぶ。状態(下のm_DrawUnitScratch)は
+        // 【publicにしてある】Passes/*の各群がこれを呼ぶ。状態(m_DrawList.Scratch)は
         // エンジンが持ったままなので、群がスクラッチを持つことにはならない
         template <typename ModelFn, typename MeshFn>
         void ForEachGeometryDraw(const Rendering::GeometryDrawLoopDesc& desc, ModelFn&& onModel, MeshFn&& onMesh);
 
     private:
-        // 上の出力先。パスは順に実行されるので1本を使い回してよい(確保のやり直しを避ける)。
-        // **パスのラムダより長生きする必要がある**ため、ローカル変数ではなくここに置く
-        mutable std::vector<Rendering::InstanceDrawUnit> m_DrawUnitScratch;
-        // 上が1本しかないことを守るための旗。入れ子で列挙すると内側が外側の列挙対象を
-        // 書き換えてしまう。検査の中身はRendering/GeometryDrawLoop.hにある
-        mutable bool m_DrawUnitScratchInUse = false;
-        // 統計。**フラスタムカリングとは別建てにする** ―― 「バッチが0のまま」は
-        // 「まとめられる相手がいない」のか「一度も実行されていない」のかを区別できないため、
-        // まとめた数と減らせたドロー数の両方を出す
-        uint32_t m_InstancedBatchCount = 0;
-        uint32_t m_InstancedInstanceCount = 0;
 
         // 起動時に決まる能力値(メッシュシェーダー・レイトレーシング等)。詳細は
         // Diagnostics/RenderCapabilities.h

@@ -23,7 +23,7 @@ namespace Kurenai::Rendering
         // 太陽(平行光)はb0のLightDirection/LightColorのまま(詳細はdocs/Architecture.html参照)
         std::unique_ptr<RHI::IRHIBuffer> LightBuffer;
 
-        // m_ModelInstanceRecords のレコードを載せる StructuredBuffer。**1フレームに1回だけ更新する** ――
+        // SceneDrawList::InstanceRecords のレコードを載せる StructuredBuffer。**1フレームに1回だけ更新する** ――
         // パスごとに詰め直す案は、DX12 の StructuredReadOnly が
         // MaxUpdatesPerFrame x kFrameCount + 1 段の UPLOAD ヒープを常時確保するため、
         // 反射プローブの6面ぶんを見込むと VRAM が跳ねる(DX12Device::CreateBuffer)

@@ -617,11 +617,11 @@ namespace Kurenai
             instanceBufferDesc.MaxUpdatesPerFrame = 1;
             m_SceneGPUResources.ModelInstanceBuffer = m_Device->CreateBuffer(instanceBufferDesc);
         }
-        m_InstanceBatchesCurrentLOD.clear();
-        m_InstanceBatchesCoarsestLOD.clear();
-        m_InstanceBatchedCurrentLOD.clear();
-        m_InstanceBatchedCoarsestLOD.clear();
-        m_ModelInstanceRecords.clear();
+        m_DrawList.BatchesCurrentLOD.clear();
+        m_DrawList.BatchesCoarsestLOD.clear();
+        m_DrawList.BatchedCurrentLOD.clear();
+        m_DrawList.BatchedCoarsestLOD.clear();
+        m_DrawList.InstanceRecords.clear();
 
         // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
         // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい

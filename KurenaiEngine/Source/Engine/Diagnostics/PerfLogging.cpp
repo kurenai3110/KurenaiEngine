@@ -43,8 +43,8 @@ namespace Kurenai
         sample.DrawCallsGBuffer = m_GeometryPasses->GetDrawCallsGBuffer();
         sample.DrawCallsShadow = m_ShadowPasses->GetDrawCalls();
         sample.DrawCallsDepthPrepass = m_GeometryPasses->GetDrawCallsDepthPrepass();
-        sample.InstancedBatchCount = m_InstancedBatchCount;
-        sample.InstancedInstanceCount = m_InstancedInstanceCount;
+        sample.InstancedBatchCount = m_DrawList.InstancedBatchCount;
+        sample.InstancedInstanceCount = m_DrawList.InstancedInstanceCount;
         m_FrameStats.AddFrame(now, sample);
 
         const float elapsedSeconds = m_FrameStats.GetElapsedSeconds(now);

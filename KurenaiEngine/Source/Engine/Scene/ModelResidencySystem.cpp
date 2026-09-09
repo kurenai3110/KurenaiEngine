@@ -73,79 +73,15 @@ namespace Kurenai
         m_SceneLoadingIndex = sceneIndex;
     }
 
-    // 同じモデルを指すインスタンスを1回のDrawIndexedへまとめるバッチを作り直す。
-    //
-    // 【レンダーグラフの構築より前に1フレーム1回だけ呼ぶこと】UpdateModelLODが決めた段を読むので
-    // その後、かつどのパスより前。パスごとに組み直すと、深度プリパスとG-Bufferが違うまとめ方をして
-    // 同じ画素を別の経路で描くことになる。
-    //
-    // 【バッチに入れないもの】
-    //   - まだ読み込まれていない段(ストリーミング中)
-    //   - LOD切替のフェード中。DitherFadeはインスタンスごとに違い、定数バッファで渡す値なので
-    //     1ドローにまとめられない。フェードは短時間で終わるので、そのあいだ個別に描けばよい
-    //   - メッシュシェーダー経路に載るモデル。DispatchMeshにインスタンス数の概念が無い
-    //   - まとめる相手がいないもの(1体だけのグループ)。この場合は従来とまったく同じ描画になる
-    // このフレームの描画単位を組み立てる。バッチに入ったインスタンスはバッチとして1回、
-    // 入らなかったものは1体ずつ現れる ―― 全インスタンスがちょうど1回ずつ現れることが要点で、
-    // 取りこぼすと物が消え、二重に出すと同じ場所へ2回描いてZファイティングになる
-    void KurenaiEngine3D::GetInstanceDrawUnits(bool coarsestLOD, std::vector<Rendering::InstanceDrawUnit>& outUnits) const
-    {
-        const std::vector<InstanceBatch>& batches =
-            coarsestLOD ? m_InstanceBatchesCoarsestLOD : m_InstanceBatchesCurrentLOD;
-        const std::vector<uint8_t>& batched =
-            coarsestLOD ? m_InstanceBatchedCoarsestLOD : m_InstanceBatchedCurrentLOD;
-
-        outUnits.clear();
-        outUnits.reserve(m_Scene.Instances.size());
-
-        for (const InstanceBatch& batch : batches)
-        {
-            Rendering::InstanceDrawUnit unit;
-            // 代表はバッチの先頭。IsMirrored/IsWaterはバッチ内で同一(グループ化のキー)なので、
-            // どれを代表にしても同じ値になる
-            unit.Instance = &m_Scene.Instances[batch.RepresentativeIndex];
-            unit.InstanceIndex = batch.RepresentativeIndex;
-            unit.Model = batch.Model;
-            unit.InstanceBase = batch.InstanceBase;
-            unit.InstanceCount = batch.InstanceCount;
-            for (int axis = 0; axis < 3; ++axis)
-            {
-                unit.WorldBoundsMin[axis] = batch.WorldBoundsMin[axis];
-                unit.WorldBoundsMax[axis] = batch.WorldBoundsMax[axis];
-            }
-            outUnits.push_back(unit);
-        }
-
-        for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
-        {
-            if (i < batched.size() && batched[i] != 0)
-            {
-                continue;   // バッチとして既に積んである
-            }
-            Rendering::InstanceDrawUnit unit;
-            unit.Instance = &m_Scene.Instances[i];
-            unit.InstanceIndex = i;
-            unit.Model = nullptr;   // 段は呼び出し側が決める(フェード中は2段になる)
-            unit.InstanceBase = 0;
-            unit.InstanceCount = 1;
-            for (int axis = 0; axis < 3; ++axis)
-            {
-                unit.WorldBoundsMin[axis] = m_Scene.Instances[i].WorldBoundsMin[axis];
-                unit.WorldBoundsMax[axis] = m_Scene.Instances[i].WorldBoundsMax[axis];
-            }
-            outUnits.push_back(unit);
-        }
-    }
-
     void KurenaiEngine3D::BuildInstanceBatches(RHI::IRHICommandList* commandList)
     {
-        m_InstanceBatchesCurrentLOD.clear();
-        m_InstanceBatchesCoarsestLOD.clear();
-        m_ModelInstanceRecords.clear();
-        m_InstanceBatchedCurrentLOD.assign(m_Scene.Instances.size(), 0u);
-        m_InstanceBatchedCoarsestLOD.assign(m_Scene.Instances.size(), 0u);
-        m_InstancedBatchCount = 0;
-        m_InstancedInstanceCount = 0;
+        m_DrawList.BatchesCurrentLOD.clear();
+        m_DrawList.BatchesCoarsestLOD.clear();
+        m_DrawList.InstanceRecords.clear();
+        m_DrawList.BatchedCurrentLOD.assign(m_Scene.Instances.size(), 0u);
+        m_DrawList.BatchedCoarsestLOD.assign(m_Scene.Instances.size(), 0u);
+        m_DrawList.InstancedBatchCount = 0;
+        m_DrawList.InstancedInstanceCount = 0;
 
         if (!m_Settings.Geometry.InstancingEnabled || m_Scene.Instances.empty() || !m_SceneGPUResources.ModelInstanceBuffer)
         {
@@ -251,9 +187,9 @@ namespace Kurenai
                         return a < b;
                     });
 
-                for (size_t offset = 0; offset < group.second.size(); offset += kMaxInstancesPerBatch)
+                for (size_t offset = 0; offset < group.second.size(); offset += Rendering::SceneDrawList::kMaxInstancesPerBatch)
                 {
-                    const size_t count = std::min<size_t>(kMaxInstancesPerBatch, group.second.size() - offset);
+                    const size_t count = std::min<size_t>(Rendering::SceneDrawList::kMaxInstancesPerBatch, group.second.size() - offset);
                     if (count < 2)
                     {
                         // 刻んだ余りが1体だけになった場合。まとめる意味が無いので個別へ回す
@@ -264,7 +200,7 @@ namespace Kurenai
                     batch.Model = group.first.Model;
                     batch.IsMirrored = group.first.IsMirrored;
                     batch.IsWater = group.first.IsWater;
-                    batch.InstanceBase = static_cast<uint32_t>(m_ModelInstanceRecords.size());
+                    batch.InstanceBase = static_cast<uint32_t>(m_DrawList.InstanceRecords.size());
                     batch.InstanceCount = static_cast<uint32_t>(count);
                     batch.RepresentativeIndex = group.second[offset];
                     for (int axis = 0; axis < 3; ++axis)
@@ -282,7 +218,7 @@ namespace Kurenai
                         record.World = instance.World;
                         record.NormalMatrix = instance.NormalMatrix;
                         record.TangentSignFlip = instance.TangentSignFlip;
-                        m_ModelInstanceRecords.push_back(record);
+                        m_DrawList.InstanceRecords.push_back(record);
 
                         for (int axis = 0; axis < 3; ++axis)
                         {
@@ -321,18 +257,18 @@ namespace Kurenai
                 }
                 return draws[0].Model;
             },
-            m_InstanceBatchesCurrentLOD, m_InstanceBatchedCurrentLOD);
+            m_DrawList.BatchesCurrentLOD, m_DrawList.BatchedCurrentLOD);
 
         // 組2: 常に最も粗い段(シャドウ / 反射プローブ)
         buildFor(
             [this](size_t i) -> const Assets::Model* { return GetCoarsestLOD(m_Scene.Instances[i]); },
-            m_InstanceBatchesCoarsestLOD, m_InstanceBatchedCoarsestLOD);
+            m_DrawList.BatchesCoarsestLOD, m_DrawList.BatchedCoarsestLOD);
 
-        m_InstancedBatchCount =
-            static_cast<uint32_t>(m_InstanceBatchesCurrentLOD.size() + m_InstanceBatchesCoarsestLOD.size());
-        m_InstancedInstanceCount = static_cast<uint32_t>(m_ModelInstanceRecords.size());
+        m_DrawList.InstancedBatchCount =
+            static_cast<uint32_t>(m_DrawList.BatchesCurrentLOD.size() + m_DrawList.BatchesCoarsestLOD.size());
+        m_DrawList.InstancedInstanceCount = static_cast<uint32_t>(m_DrawList.InstanceRecords.size());
 
-        if (m_ModelInstanceRecords.empty())
+        if (m_DrawList.InstanceRecords.empty())
         {
             return;
         }
@@ -340,26 +276,26 @@ namespace Kurenai
         // 容量はシーン読み込み時に「インスタンス数×2組」で確保してある。超えることは無いが、
         // 超えたときに黙って壊れないよう検査してログを残す
         const size_t capacity = m_Scene.Instances.size() * 2;
-        if (m_ModelInstanceRecords.size() > capacity)
+        if (m_DrawList.InstanceRecords.size() > capacity)
         {
             Core::Logger::Error(
                 "KurenaiEngine3D",
                 "インスタンスバッファの容量(" + std::to_string(capacity) + "件)を超えました("
-                    + std::to_string(m_ModelInstanceRecords.size()) + "件)。このフレームはインスタンシングを見送ります");
-            m_InstanceBatchesCurrentLOD.clear();
-            m_InstanceBatchesCoarsestLOD.clear();
-            std::fill(m_InstanceBatchedCurrentLOD.begin(), m_InstanceBatchedCurrentLOD.end(), 0u);
-            std::fill(m_InstanceBatchedCoarsestLOD.begin(), m_InstanceBatchedCoarsestLOD.end(), 0u);
-            m_InstancedBatchCount = 0;
-            m_InstancedInstanceCount = 0;
+                    + std::to_string(m_DrawList.InstanceRecords.size()) + "件)。このフレームはインスタンシングを見送ります");
+            m_DrawList.BatchesCurrentLOD.clear();
+            m_DrawList.BatchesCoarsestLOD.clear();
+            std::fill(m_DrawList.BatchedCurrentLOD.begin(), m_DrawList.BatchedCurrentLOD.end(), 0u);
+            std::fill(m_DrawList.BatchedCoarsestLOD.begin(), m_DrawList.BatchedCoarsestLOD.end(), 0u);
+            m_DrawList.InstancedBatchCount = 0;
+            m_DrawList.InstancedInstanceCount = 0;
             return;
         }
 
         // 【1フレームに1回だけ】どのパスもこの1本を読む。バインドは各パスがDraw直前に張り直す
         // (頂点シェーダー用SRVはt0の1本しかなく、ドローンショーが同じスロットを使うため)
         commandList->UpdateBuffer(
-            m_SceneGPUResources.ModelInstanceBuffer.get(), m_ModelInstanceRecords.data(),
-            m_ModelInstanceRecords.size() * sizeof(GPUModelInstance));
+            m_SceneGPUResources.ModelInstanceBuffer.get(), m_DrawList.InstanceRecords.data(),
+            m_DrawList.InstanceRecords.size() * sizeof(GPUModelInstance));
     }
 
     void KurenaiEngine3D::UpdateModelLOD(const DirectX::XMFLOAT3& cameraPosition, float deltaSeconds)
