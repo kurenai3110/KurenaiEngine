@@ -1,9 +1,10 @@
 #pragma once
 
+#include "GeometryDrawHost.h"
+
 #include <string>
 
 #include "Core/Logger.h"
-#include "KurenaiEngine3D.h"
 
 // ジオメトリを描く各パスが共有する「列挙 → カリング → 段の選択 → メッシュのループ」。
 //
@@ -74,143 +75,143 @@ namespace Kurenai
         bool IsMeshVisibleWithStats(
             bool enabled, const FrustumPlanes& frustum, const Assets::ModelInstance& instance,
             const Assets::Model& model, const Assets::Mesh& mesh, uint32_t& tested, uint32_t& culled);
-    }
 
-    // 共通ループの本体。テンプレートにしてあるのは、メッシュごとに呼ぶコールバックを
-    // 間接呼び出しにしないため(1フレームに数千回通る)
-    template <typename ModelFn, typename MeshFn>
-    void KurenaiEngine3D::ForEachGeometryDraw(
-        const Rendering::GeometryDrawLoopDesc& desc, ModelFn&& onModel, MeshFn&& onMesh)
-    {
-        // 【入れ子の列挙を禁じる】m_DrawList.Scratchは1本しかなく、内側の列挙が
-        // 外側の列挙対象を丸ごと書き換えてしまう。段階5から人手のコメントで守ってきた
-        // 義務だが、ForEachGeometryDrawがpublicになって呼べる場所が広がったので検査にする。
-        //
-        // 【打ち切らずに記録だけ残す】ここでreturnすると、入れ子を書いた瞬間に
-        // 「描かれないメッシュ」が出る。従来どおり最後まで回して絵は変えない。
-        // 毎フレーム何千回も通るので記録は絞る。**ここはテンプレートなのでstaticは
-        // インスタンス化ごとに別物**で、記録は呼び出し箇所ごとに1回になる
-        // (非テンプレートのIsMeshVisibleWithStatsはプログラム全体で1回。そこは違う)
-        if (m_DrawList.ScratchInUse)
+        // 共通ループの本体。テンプレートにしてあるのは、メッシュごとに呼ぶコールバックを
+        // 間接呼び出しにしないため(1フレームに数千回通る)
+        template <typename ModelFn, typename MeshFn>
+        void ForEachGeometryDraw(
+            const GeometryDrawHost& host, const GeometryDrawLoopDesc& desc, ModelFn&& onModel, MeshFn&& onMesh)
         {
-            static bool loggedNestedDrawLoop = false;
-            if (!loggedNestedDrawLoop)
+            // 【入れ子の列挙を禁じる】host.DrawList.Scratchは1本しかなく、内側の列挙が
+            // 外側の列挙対象を丸ごと書き換えてしまう。段階5から人手のコメントで守ってきた
+            // 義務だが、ForEachGeometryDrawがpublicになって呼べる場所が広がったので検査にする。
+            //
+            // 【打ち切らずに記録だけ残す】ここでreturnすると、入れ子を書いた瞬間に
+            // 「描かれないメッシュ」が出る。従来どおり最後まで回して絵は変えない。
+            // 毎フレーム何千回も通るので記録は絞る。**ここはテンプレートなのでstaticは
+            // インスタンス化ごとに別物**で、記録は呼び出し箇所ごとに1回になる
+            // (非テンプレートのIsMeshVisibleWithStatsはプログラム全体で1回。そこは違う)
+            if (host.DrawList.ScratchInUse)
             {
-                loggedNestedDrawLoop = true;
-                Core::Logger::Error(
-                    "KurenaiEngine3D",
-                    "ForEachGeometryDrawを入れ子で呼んでいます。m_DrawList.Scratchは1本しか無く、"
-                    "内側の列挙が外側の列挙対象を書き換えます");
-            }
-        }
-        // onMeshが偽を返す打ち切りでも必ず戻すためスコープガードにする
-        struct ScratchGuard
-        {
-            bool& InUse;
-            bool Previous;
-            ~ScratchGuard() { InUse = Previous; }
-        } scratchGuard{ m_DrawList.ScratchInUse, m_DrawList.ScratchInUse };
-        m_DrawList.ScratchInUse = true;
-
-        const bool coarsest = desc.LODMode == Rendering::GeometryLODMode::Coarsest;
-
-        // 列挙元をどちらでも Rendering::InstanceDrawUnit へ揃える。
-        // 【バッチを使わないパスも同じ形で回す】DDGI・半透明・ソフトウェアラスタライザは
-        // インスタンシングのバッチを使わないが、InstanceCount==1 の単体として
-        // 詰め直せば以降の分岐が1本で済む(unit.IsBatch() が常に偽になるだけ)
-        if (desc.UseDrawUnits)
-        {
-            m_DrawList.GetInstanceDrawUnits(m_Scene, coarsest, m_DrawList.Scratch);
-        }
-        else
-        {
-            m_DrawList.BuildSingleInstanceDrawUnits(m_Scene, m_DrawList.Scratch);
-        }
-
-        for (const Rendering::InstanceDrawUnit& unit : m_DrawList.Scratch)
-        {
-            const Assets::ModelInstance& instance = *unit.Instance;
-
-            // 【錐台が無いパスは統計にも入れない】DDGIのラスタ経路はカリングを行わない
-            // (プローブの位置ごとに結果が変わり、定数バッファの予算計算と食い違うため)。
-            // ここで数えると「判定したが1つも間引けなかった」ように見えてしまう
-            if (desc.Frustum)
-            {
-                ++m_FrustumCullTested;
-                if (!Rendering::IsAABBVisible(*desc.Frustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
+                static bool loggedNestedDrawLoop = false;
+                if (!loggedNestedDrawLoop)
                 {
-                    ++m_FrustumCullCulled;
-                    continue;
+                    loggedNestedDrawLoop = true;
+                    Core::Logger::Error(
+                        "KurenaiEngine3D",
+                        "ForEachGeometryDrawを入れ子で呼んでいます。host.DrawList.Scratchは1本しか無く、"
+                        "内側の列挙が外側の列挙対象を書き換えます");
                 }
             }
+            // onMeshが偽を返す打ち切りでも必ず戻すためスコープガードにする
+            struct ScratchGuard
+            {
+                bool& InUse;
+                bool Previous;
+                ~ScratchGuard() { InUse = Previous; }
+            } scratchGuard{ host.DrawList.ScratchInUse, host.DrawList.ScratchInUse };
+            host.DrawList.ScratchInUse = true;
 
-            // 描く段を決める。バッチはどの段を描くかを既に決めてある
-            // (全員が同じ段であることがバッチの条件そのもの。BuildInstanceBatches)
-            LODDraw lodDraws[2];
-            uint32_t lodDrawCount = 1;
-            if (unit.Model)
+            const bool coarsest = desc.LODMode == GeometryLODMode::Coarsest;
+
+            // 列挙元をどちらでも InstanceDrawUnit へ揃える。
+            // 【バッチを使わないパスも同じ形で回す】DDGI・半透明・ソフトウェアラスタライザは
+            // インスタンシングのバッチを使わないが、InstanceCount==1 の単体として
+            // 詰め直せば以降の分岐が1本で済む(unit.IsBatch() が常に偽になるだけ)
+            if (desc.UseDrawUnits)
             {
-                lodDraws[0] = { unit.Model, 1.0f };
-            }
-            else if (coarsest)
-            {
-                lodDraws[0] = { GetCoarsestLOD(instance), 1.0f };
-            }
-            else if (desc.LODMode == Rendering::GeometryLODMode::Current)
-            {
-                lodDraws[0] = { GetCurrentLOD(unit.InstanceIndex), 1.0f };
+                host.DrawList.GetInstanceDrawUnits(host.Scene, coarsest, host.DrawList.Scratch);
             }
             else
             {
-                lodDrawCount = GetLODDraws(unit.InstanceIndex, lodDraws);
+                host.DrawList.BuildSingleInstanceDrawUnits(host.Scene, host.DrawList.Scratch);
             }
 
-            for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
+            for (const InstanceDrawUnit& unit : host.DrawList.Scratch)
             {
-                // ストリーミング中でまだ読み込まれていない段は描かない
-                const Assets::Model* const lodModelPtr = lodDraws[lodDrawIndex].Model;
-                if (!lodModelPtr)
-                {
-                    continue;
-                }
-                const Assets::Model& lodModel = *lodModelPtr;
-                const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
+                const Assets::ModelInstance& instance = *unit.Instance;
 
-                // モデル単位で描き切れるパス(メッシュレット経路)は、ここで真を返して
-                // メッシュのループへ入らない
-                if (onModel(unit, lodModel, lodDitherFade))
+                // 【錐台が無いパスは統計にも入れない】DDGIのラスタ経路はカリングを行わない
+                // (プローブの位置ごとに結果が変わり、定数バッファの予算計算と食い違うため)。
+                // ここで数えると「判定したが1つも間引けなかった」ように見えてしまう
+                if (desc.Frustum)
                 {
-                    continue;
+                    ++host.Counters.FrustumCullTested;
+                    if (!IsAABBVisible(*desc.Frustum, unit.WorldBoundsMin, unit.WorldBoundsMax))
+                    {
+                        ++host.Counters.FrustumCullCulled;
+                        continue;
+                    }
                 }
 
-                for (const Assets::Mesh& mesh : lodModel.Meshes)
+                // 描く段を決める。バッチはどの段を描くかを既に決めてある
+                // (全員が同じ段であることがバッチの条件そのもの。BuildInstanceBatches)
+                Scene::LODDraw lodDraws[2];
+                uint32_t lodDrawCount = 1;
+                if (unit.Model)
                 {
-                    // 不透明のパスはBLEND(mesh.IsTransparent)を、半透明のパスはそれ以外を落とす。
-                    // G-Bufferのアルファは常に1.0で半透明合成ができないため、BLENDだけは
-                    // 専用のフォワードパスへ回る。Allはシャドウパス専用(理由はGeometryMeshFilter)
-                    if (desc.MeshFilter != Rendering::GeometryMeshFilter::All
-                        && mesh.IsTransparent != (desc.MeshFilter == Rendering::GeometryMeshFilter::Transparent))
+                    lodDraws[0] = { unit.Model, 1.0f };
+                }
+                else if (coarsest)
+                {
+                    lodDraws[0] = { host.LOD.GetCoarsestLOD(instance), 1.0f };
+                }
+                else if (desc.LODMode == GeometryLODMode::Current)
+                {
+                    lodDraws[0] = { host.LOD.GetCurrentLOD(unit.InstanceIndex), 1.0f };
+                }
+                else
+                {
+                    lodDrawCount = host.LOD.GetLODDraws(unit.InstanceIndex, lodDraws);
+                }
+
+                for (uint32_t lodDrawIndex = 0; lodDrawIndex < lodDrawCount; ++lodDrawIndex)
+                {
+                    // ストリーミング中でまだ読み込まれていない段は描かない
+                    const Assets::Model* const lodModelPtr = lodDraws[lodDrawIndex].Model;
+                    if (!lodModelPtr)
+                    {
+                        continue;
+                    }
+                    const Assets::Model& lodModel = *lodModelPtr;
+                    const float lodDitherFade = lodDraws[lodDrawIndex].DitherFade;
+
+                    // モデル単位で描き切れるパス(メッシュレット経路)は、ここで真を返して
+                    // メッシュのループへ入らない
+                    if (onModel(unit, lodModel, lodDitherFade))
                     {
                         continue;
                     }
 
-                    // 【バッチでは行わない】メッシュ単位のワールドAABBは
-                    // 「インスタンス×メッシュ」の値で、まとめた相手のぶんが無い。
-                    // 判定を代表インスタンスだけで行うと、他の個体の見えているメッシュまで
-                    // 落ちて物が消える
-                    if (desc.Frustum && !unit.IsBatch()
-                        && !Rendering::IsMeshVisibleWithStats(
-                            desc.MeshCulling && m_Settings.Geometry.MeshCullingEnabled, *desc.Frustum,
-                            instance, lodModel, mesh, m_MeshCullTested, m_MeshCullCulled))
+                    for (const Assets::Mesh& mesh : lodModel.Meshes)
                     {
-                        continue;
-                    }
+                        // 不透明のパスはBLEND(mesh.IsTransparent)を、半透明のパスはそれ以外を落とす。
+                        // G-Bufferのアルファは常に1.0で半透明合成ができないため、BLENDだけは
+                        // 専用のフォワードパスへ回る。Allはシャドウパス専用(理由はGeometryMeshFilter)
+                        if (desc.MeshFilter != GeometryMeshFilter::All
+                            && mesh.IsTransparent != (desc.MeshFilter == GeometryMeshFilter::Transparent))
+                        {
+                            continue;
+                        }
 
-                    // 偽を返すと列挙そのものを打ち切る(ソフトウェアラスタライザの
-                    // メッシュ表があふれたときだけ使う)
-                    if (!onMesh(unit, lodModel, mesh, lodDitherFade))
-                    {
-                        return;
+                        // 【バッチでは行わない】メッシュ単位のワールドAABBは
+                        // 「インスタンス×メッシュ」の値で、まとめた相手のぶんが無い。
+                        // 判定を代表インスタンスだけで行うと、他の個体の見えているメッシュまで
+                        // 落ちて物が消える
+                        if (desc.Frustum && !unit.IsBatch()
+                            && !IsMeshVisibleWithStats(
+                                desc.MeshCulling && host.MeshCullingEnabled, *desc.Frustum,
+                                instance, lodModel, mesh, host.Counters.MeshCullTested, host.Counters.MeshCullCulled))
+                        {
+                            continue;
+                        }
+
+                        // 偽を返すと列挙そのものを打ち切る(ソフトウェアラスタライザの
+                        // メッシュ表があふれたときだけ使う)
+                        if (!onMesh(unit, lodModel, mesh, lodDitherFade))
+                        {
+                            return;
+                        }
                     }
                 }
             }

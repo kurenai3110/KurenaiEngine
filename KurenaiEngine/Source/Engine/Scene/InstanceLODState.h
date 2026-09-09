@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "Assets/Scene.h"
+
 // インスタンスごとのモデルLODの段と、段の切り替えのフェード状態。
 //
 // 【エンジンの入れ子型にしない】UIパネルがLOD段ごとの内訳を出すために読む。
@@ -13,5 +15,12 @@ namespace Kurenai::Scene
         uint32_t CurrentLOD = 0;   // 0 = ModelInstance::Model、1以上は LODModels[n-1]
         uint32_t PreviousLOD = 0;  // フェード中の切り替え元
         float FadeT = 1.0f;        // 1.0でフェード完了。0→1へ進み、その間だけ2段を重ねる
+    };
+
+    // このフレームで重ねて描く段。フェード中は2つになり、DitherFadeで混ぜる
+    struct LODDraw
+    {
+        const Assets::Model* Model = nullptr;
+        float DitherFade = 1.0f;
     };
 }

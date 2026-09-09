@@ -272,7 +272,8 @@ namespace Kurenai::Passes
                         shadowLoop.LODMode = Rendering::GeometryLODMode::Coarsest;
                         shadowLoop.MeshFilter = Rendering::GeometryMeshFilter::All;
 
-                        m_Engine.ForEachGeometryDraw(
+                        Rendering::ForEachGeometryDraw(
+                m_Engine.MakeGeometryDrawHost(),
                             shadowLoop,
                             [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& coarsestModel, float)
                             {

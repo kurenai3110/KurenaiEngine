@@ -165,7 +165,8 @@ namespace Kurenai::Passes
             // (プローブへ半透明を含めないのは一般的な割り切り)
             probeLoop.MeshFilter = Rendering::GeometryMeshFilter::Opaque;
 
-            m_Engine.ForEachGeometryDraw(
+            Rendering::ForEachGeometryDraw(
+                m_Engine.MakeGeometryDrawHost(),
                 probeLoop,
                 // このパスは1ドロー経路(メッシュレット)を持たない。常にメッシュのループへ入る
                 [](const Rendering::InstanceDrawUnit&, const Assets::Model&, float) { return false; },

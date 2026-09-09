@@ -44,6 +44,7 @@
 #include "Rendering/RenderTargets.h"
 #include "Rendering/ShadowConstants.h"
 #include "Rendering/MeshletLODFrameConstants.h"
+#include "Rendering/GeometryDrawHost.h"
 #include "Rendering/GeometryDrawTypes.h"
 #include "Rendering/DroneShowSystem.h"
 #include "Rendering/FrameHistoryState.h"
@@ -133,7 +134,8 @@ namespace Kurenai
     // 複数シーンの切り替えまでを内包した完結型のレンダラー。
     // 構築してRun()を呼ぶだけでウィンドウが開き、終了するまでブロックする
     class KURENAI_3D_API KurenaiEngine3D
-        : public KurenaiEngineBase, public Diagnostics::IRecreationTarget, public UI::IEngineUIHost
+        : public KurenaiEngineBase, public Diagnostics::IRecreationTarget, public UI::IEngineUIHost,
+          public Rendering::ILODSelector
     {
     public:
         // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
@@ -456,7 +458,7 @@ namespace Kurenai
         // いま選ばれている段を1つだけ返す(フェード中でも切り替え先だけ)。
         // 半透明・平面反射・ソフトウェアラスタライザ用 ―― これらはクロスディザを実装しておらず、
         // 2段を重ねると同じ画素に両方が描かれてしまうため、フェード中も1段に決め打つ
-        const Assets::Model* GetCurrentLOD(size_t instanceIndex) const;
+        const Assets::Model* GetCurrentLOD(size_t instanceIndex) const override;
         // 「システム」パネルのグラフィックスAPI切り替えコンボから呼ばれる。
         // 実際の作り直しはRun()から戻った後に呼び出し側が行う(上のHasPendingGraphicsAPIChange参照)
         void RequestGraphicsAPIChange(GraphicsAPI api);
@@ -612,7 +614,8 @@ namespace Kurenai
         //
         // 【publicにしてある】ForEachGeometryDrawと対で使う述語で、Passes/*の各群が
         // コールバックの中から呼ぶ。状態を持たない判定なので公開しても持ち主は変わらない
-        bool ShouldUseModelMeshletPath(const Assets::ModelInstance& instance, const Assets::Model& model) const;
+        bool ShouldUseModelMeshletPath(
+            const Assets::ModelInstance& instance, const Assets::Model& model) const override;
 
         // メッシュ単位カリングの判定を、共通の描画ループとまったく同じカウンタへ数えながら行う。
         //
@@ -1008,10 +1011,16 @@ namespace Kurenai
         // onModel: モデル単位で描き切ったなら真を返す(メッシュのループへ入らない)
         // onMesh : 偽を返すと列挙そのものを打ち切る
         //
-        // 【publicにしてある】Passes/*の各群がこれを呼ぶ。状態(m_DrawList.Scratch)は
-        // エンジンが持ったままなので、群がスクラッチを持つことにはならない
-        template <typename ModelFn, typename MeshFn>
-        void ForEachGeometryDraw(const Rendering::GeometryDrawLoopDesc& desc, ModelFn&& onModel, MeshFn&& onMesh);
+        // 【publicにしてある】Passes/*の各群が共通ループを回すために取る。
+        // 参照だけを束ねたものなので、**フレームより長く持たせないこと**
+        Rendering::GeometryDrawHost MakeGeometryDrawHost()
+        {
+            return Rendering::GeometryDrawHost{
+                m_Scene, m_DrawList, *this,
+                { m_FrustumCullTested, m_FrustumCullCulled, m_MeshCullTested, m_MeshCullCulled },
+                m_Settings.Geometry.MeshCullingEnabled };
+        }
+
 
     private:
 
@@ -1949,15 +1958,11 @@ namespace Kurenai
         void UpdateModelLOD(const DirectX::XMFLOAT3& cameraPosition, float deltaSeconds);
         // instanceIndex番目のインスタンスについて、このフレームで描く段を返す。
         // フェード中は2件(切り替え先と元)、そうでなければ1件。DitherFadeも一緒に返す
-        struct LODDraw
-        {
-            const Assets::Model* Model = nullptr;
-            float DitherFade = 1.0f;
-        };
+        using LODDraw = Scene::LODDraw;
         // 戻り値の件数。fadingなら2、それ以外は1
-        uint32_t GetLODDraws(size_t instanceIndex, LODDraw (&outDraws)[2]) const;
+        uint32_t GetLODDraws(size_t instanceIndex, LODDraw (&outDraws)[2]) const override;
         // シャドウ・反射プローブ・DDGI用。常に最も粗い段を返す(影と間接光はテクスチャを読まない)
-        const Assets::Model* GetCoarsestLOD(const Assets::ModelInstance& instance) const;
+        const Assets::Model* GetCoarsestLOD(const Assets::ModelInstance& instance) const override;
 
         // DDGIから自発光を抜くか。**判定を1か所に置くこと** ―― ラスタ経路(ObjectConstantsの
         // 倍率)とレイトレ経路(DDGITraceConstants.Params1.w)で条件がずれると、

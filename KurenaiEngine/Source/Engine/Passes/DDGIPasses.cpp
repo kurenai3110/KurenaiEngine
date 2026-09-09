@@ -291,7 +291,8 @@ namespace Kurenai::Passes
             ddgiLoop.MeshFilter = Rendering::GeometryMeshFilter::Opaque;
             ddgiLoop.MeshCulling = false;
 
-            m_Engine.ForEachGeometryDraw(
+            Rendering::ForEachGeometryDraw(
+                m_Engine.MakeGeometryDrawHost(),
                 ddgiLoop,
                 [](const Rendering::InstanceDrawUnit&, const Assets::Model&, float) { return false; },
                 [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& coarsestModel,

@@ -737,7 +737,8 @@ namespace Kurenai::Passes
                 transparentLoop.LODMode = Rendering::GeometryLODMode::Current;
                 transparentLoop.MeshFilter = Rendering::GeometryMeshFilter::Transparent;
 
-                m_Engine.ForEachGeometryDraw(
+                Rendering::ForEachGeometryDraw(
+                m_Engine.MakeGeometryDrawHost(),
                     transparentLoop,
                     [](const Rendering::InstanceDrawUnit&, const Assets::Model&, float) { return false; },
                     [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& currentModel,

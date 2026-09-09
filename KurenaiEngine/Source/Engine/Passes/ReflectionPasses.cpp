@@ -291,7 +291,8 @@ namespace Kurenai::Passes
                     // PlanarReflection.hlsl冒頭参照)
                     planarLoop.MeshFilter = Rendering::GeometryMeshFilter::Opaque;
 
-                    m_Engine.ForEachGeometryDraw(
+                    Rendering::ForEachGeometryDraw(
+                m_Engine.MakeGeometryDrawHost(),
                         planarLoop,
                         // このパスは1ドロー経路(メッシュレット)を持たない
                         [](const Rendering::InstanceDrawUnit&, const Assets::Model&, float) { return false; },

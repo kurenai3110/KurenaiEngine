@@ -519,7 +519,8 @@ namespace Kurenai::Passes
         // 「描かないメッシュを弾いた後」に自分で呼ぶ
         swRasterLoop.MeshCulling = false;
 
-        m_Engine.ForEachGeometryDraw(
+        Rendering::ForEachGeometryDraw(
+                m_Engine.MakeGeometryDrawHost(),
             swRasterLoop,
             [](const Rendering::InstanceDrawUnit&, const Assets::Model&, float) { return false; },
             [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& currentModel,
@@ -851,7 +852,8 @@ namespace Kurenai::Passes
             cullLoop.UseDrawUnits = false;
             cullLoop.LODMode = Rendering::GeometryLODMode::Fade;
 
-            m_Engine.ForEachGeometryDraw(
+            Rendering::ForEachGeometryDraw(
+                m_Engine.MakeGeometryDrawHost(),
                 cullLoop,
                 [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& lodModel, float lodDitherFade)
                 {
@@ -1232,7 +1234,8 @@ namespace Kurenai::Passes
                     prepassLoop.LODMode = Rendering::GeometryLODMode::Fade;
                     prepassLoop.MeshFilter = Rendering::GeometryMeshFilter::Opaque;
 
-                    m_Engine.ForEachGeometryDraw(
+                    Rendering::ForEachGeometryDraw(
+                m_Engine.MakeGeometryDrawHost(),
                         prepassLoop,
                         [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& lodModel,
                             float lodDitherFade)
@@ -1545,7 +1548,8 @@ namespace Kurenai::Passes
                 gbufferLoop.LODMode = Rendering::GeometryLODMode::Fade;
                 gbufferLoop.MeshFilter = Rendering::GeometryMeshFilter::Opaque;
 
-                m_Engine.ForEachGeometryDraw(
+                Rendering::ForEachGeometryDraw(
+                m_Engine.MakeGeometryDrawHost(),
                     gbufferLoop,
                     [&](const Rendering::InstanceDrawUnit& unit, const Assets::Model& lodModel, float lodDitherFade)
                     {
