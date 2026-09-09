@@ -541,6 +541,106 @@ namespace Kurenai
         // 生成に失敗していればnullptrになりうるので、参照ではなくポインタで返す
         RHI::IRHIDevice* GetDevice() { return m_Device.get(); }
 
+
+        // --- 以下は段階7.5で散在していた公開の口を集めたもの ---
+
+        // このインスタンスを「1回のDispatchMeshでモデル全体」の経路で描けるか。
+        // 描けない場合は従来どおりメッシュ単位のループで描く
+        // modelは「このパスが描く段」。モデルLODが入ったのでinstance.Model(最も詳細な段)とは
+        // 限らず、シャドウは最も粗い段、G-Buffer/プリパスは選ばれた段を渡す
+        //
+        // 【publicにしてある】ForEachGeometryDrawと対で使う述語で、Passes/*の各群が
+        // コールバックの中から呼ぶ。状態を持たない判定なので公開しても持ち主は変わらない
+        bool ShouldUseModelMeshletPath(
+            const Assets::ModelInstance& instance, const Assets::Model& model) const override;
+
+        // メッシュ単位カリングの判定を、共通の描画ループとまったく同じカウンタへ数えながら行う。
+        //
+        // 【publicにしてある】自前ソフトウェアラスタライザは共通ループへ判定を任せられない
+        // (三角形が3つ未満のメッシュを先に落とすため、任せると分母がずれる)。
+        // それでも統計は共通ループと同じ2つのカウンタへ積む必要がある
+        bool IsMeshVisibleCounted(
+            const Rendering::FrustumPlanes& frustum, const Assets::ModelInstance& instance,
+            const Assets::Model& model, const Assets::Mesh& mesh);
+
+        // onModel: モデル単位で描き切ったなら真を返す(メッシュのループへ入らない)
+        // onMesh : 偽を返すと列挙そのものを打ち切る
+        //
+        // 【publicにしてある】Passes/*の各群が共通ループを回すために取る。
+        // 参照だけを束ねたものなので、**フレームより長く持たせないこと**
+        Rendering::GeometryDrawHost MakeGeometryDrawHost()
+        {
+            return Rendering::GeometryDrawHost{
+                m_Scene, m_DrawList, *this,
+                { m_FrustumCullTested, m_FrustumCullCulled, m_MeshCullTested, m_MeshCullCulled },
+                m_Settings.Geometry.MeshCullingEnabled };
+        }
+
+        // 旗が立っていれば上を呼んで下ろす。
+        //
+        // 【publicにしてある】呼ぶのはPasses::PresentPassだけだが、名前を焼く対象は
+        // エンジン全体のテクスチャ表(BuildDumpableTextureTable)なので、この機能を
+        // Present群へ降ろすことはできない。**旗の判定と下ろしをここへ閉じておく**と、
+        // 群がエンジンのメンバ変数を触らずに済む
+        void ApplyDebugNamesIfDirty();
+
+        // 【publicにしてある】積む位置がPresentより前と決まっているためPasses::PresentPassが
+        // 呼ぶ。書き出す対象はエンジン全体のテクスチャ表なので、群へは降ろせない
+        void IssueTextureDumps(Core::RenderGraph& graph);
+
+        // キューブマップの面数(D3D標準順: +X,-X,+Y,-Y,+Z,-Z)。IBLの2つのキューブマップは
+        // いずれもこの順で面ごとにディスパッチする(IBLConvolve.hlsl CubeFaceDirectionと一致させる)
+        // 出所は Rendering/CubeFaceMath.h(移行中の別名)
+        static constexpr uint32_t kCubeFaceCount = ::Kurenai::kCubeFaceCount;
+
+        // 【publicにしてある】シーン読み込みが構築し、Passes::DDGIPasses が
+        // ラスタ経路で「このインスタンスは自発光プロキシか」を引くために読むだけ
+        const std::vector<bool>& GetEmissiveProxyInstances() const { return m_EmissiveLights.ProxyInstances; }
+
+        // キューブマップ配列の枚数上限。TextureCubeArrayは実行時に伸縮できないため固定容量で確保し、
+        // これを超えるプローブが置かれたシーンは先頭からこの数だけを採用する(警告ログを出す)
+        static constexpr uint32_t kMaxReflectionProbes = Passes::kMaxReflectionProbes;
+
+        // 【publicにしてある】Passes::DDGIPasses がプローブの位置と担当座標を引くために呼ぶ。
+        // どれも設定と格子から導くだけの計算で、状態を持たないので公開しても持ち主は変わらない
+        GI::DDGIGrid& GetDDGIGrid() { return m_DDGIGrid; }
+
+        // 【publicにしてある】上と同じ理由。1フレームに焼けるプローブ数を
+        // ObjectConstantsのリング段数から決める判定で、群が登録時に呼ぶ
+        uint32_t ClampDDGIProbesPerFrameToConstantRing(uint32_t requested);
+
+        // UIのつまみの上限。**シェーダー側の段数そのものではない。**
+        // Sky.hlsli は既定 kCloudMaxRaymarchSteps(384)で走り、cbuffer で0より大きい値を
+        // 渡されたときだけそれを使う。その値は kCloudRaymarchStepsHardMax(512)で丸められる。
+        // したがってここに要る条件は「512を超えないこと」だけで、一致させる相手はいない
+        static constexpr uint32_t kCloudRaymarchStepsMax = Kurenai::kCloudRaymarchStepsMax;
+
+        // MegaLightsの候補プールが1タイルあたりに抽出する候補の数(K)。
+        // ライトタイルの容量と違い**これは打ち切りではなく抽出数**で、タイルへ何灯届いていても
+        // ここで決めた本数だけを重みつきで取り出す。届いた灯が欠落するわけではない
+        // (どの灯も w_i / SumW の確率で選ばれる)ため、容量超過のような静かな欠落は起きない。
+        // 【実行時に振れる。ここは確保の上限】1タイルの抽出数Kは
+        // m_Settings.MegaLights.TilePoolCapacity が持ち、シェーダへは定数バッファで渡している。
+        // バッファの確保だけがコンパイル時の上限を要るのでここに残す
+        static constexpr uint32_t kMegaLightsTilePoolCapacity = Passes::kMegaLightsTilePoolCapacity;
+        // Kの下限。これを下回るとタイルに届く灯を代表できない。
+        static constexpr int32_t kMegaLightsTilePoolMinCapacity = Passes::kMegaLightsTilePoolMinCapacity;
+
+        // 1画素あたりの標本数の上限。リザーババッファはこの倍数まで太る
+        //(16バイト x 画素数 x 標本数。2560x1440・4本で236MB)ので、際限なく上げさせない。
+        // クアッド層化は4層なので、4を超えると層の割り当てが一巡して効きが鈍る
+        static constexpr int32_t kMegaLightsMaxSamplesPerPixel = Passes::kMegaLightsMaxSamplesPerPixel;
+
+        // 【publicにしてある】シーン読み込みが構築し、Passes::MegaLightsPasses が
+        // 三角形の数とバッファを引くために読むだけ
+        const Assets::MeshLightScene& GetMeshLightScene() const { return m_EmissiveLights.MeshLightScene; }
+        bool IsMeshLightsEnabled() const { return m_EmissiveLights.MeshLightsEnabled; }
+
+        // RenderingPanel(モデルLOD段ごとの内訳表示)向け
+        const std::vector<Scene::InstanceLODState>& GetInstanceLODStates() const override
+        {
+            return m_InstanceLODStates;
+        }
     private:
         // 機能ごとの設定18個をまとめた入れ物。**Rendering::RenderSettingsSnapshot は
         // これの写し**で、実体を共有させてはいけない(理由は EngineSettings.h)
@@ -607,27 +707,6 @@ namespace Kurenai
         // ずれると即座に破綻するため、判定を1か所に集約する。
         // isWaterがtrueのメッシュは常にfalse(理由は実装のコメント参照)
         bool ShouldUseMeshletPath(const Assets::Model& model, const Assets::Mesh& mesh, bool isWater) const;
-    public:
-        // このインスタンスを「1回のDispatchMeshでモデル全体」の経路で描けるか。
-        // 描けない場合は従来どおりメッシュ単位のループで描く
-        // modelは「このパスが描く段」。モデルLODが入ったのでinstance.Model(最も詳細な段)とは
-        // 限らず、シャドウは最も粗い段、G-Buffer/プリパスは選ばれた段を渡す
-        //
-        // 【publicにしてある】ForEachGeometryDrawと対で使う述語で、Passes/*の各群が
-        // コールバックの中から呼ぶ。状態を持たない判定なので公開しても持ち主は変わらない
-        bool ShouldUseModelMeshletPath(
-            const Assets::ModelInstance& instance, const Assets::Model& model) const override;
-
-        // メッシュ単位カリングの判定を、共通の描画ループとまったく同じカウンタへ数えながら行う。
-        //
-        // 【publicにしてある】自前ソフトウェアラスタライザは共通ループへ判定を任せられない
-        // (三角形が3つ未満のメッシュを先に落とすため、任せると分母がずれる)。
-        // それでも統計は共通ループと同じ2つのカウンタへ積む必要がある
-        bool IsMeshVisibleCounted(
-            const Rendering::FrustumPlanes& frustum, const Assets::ModelInstance& instance,
-            const Assets::Model& model, const Assets::Mesh& mesh);
-
-    private:
         // このフレームでライティングパス等が読むべきAO/GIバッファ(ブラー後 / ブラー前の生値)。
         // AO無効時はm_AODisabledTexture、Raytracedを選んでいても実行できないフレームはSSAOのもの
         RHI::IRHITexture* GetActiveAOTexture() const;
@@ -1008,22 +1087,6 @@ namespace Kurenai
 
         // 出所は Rendering/GeometryDrawTypes.h(移行中の別名)
 
-    public:
-        // onModel: モデル単位で描き切ったなら真を返す(メッシュのループへ入らない)
-        // onMesh : 偽を返すと列挙そのものを打ち切る
-        //
-        // 【publicにしてある】Passes/*の各群が共通ループを回すために取る。
-        // 参照だけを束ねたものなので、**フレームより長く持たせないこと**
-        Rendering::GeometryDrawHost MakeGeometryDrawHost()
-        {
-            return Rendering::GeometryDrawHost{
-                m_Scene, m_DrawList, *this,
-                { m_FrustumCullTested, m_FrustumCullCulled, m_MeshCullTested, m_MeshCullCulled },
-                m_Settings.Geometry.MeshCullingEnabled };
-        }
-
-
-    private:
 
         // 起動時に決まる能力値(メッシュシェーダー・レイトレーシング等)。詳細は
         // Diagnostics/RenderCapabilities.h
@@ -1178,25 +1241,9 @@ namespace Kurenai
         // ファイルへ書き出す(検証専用の -passmanifest)。graph.Execute()の直前に呼ぶこと
         void WritePassManifestIfDue(Core::RenderGraph& graph);
 
-    public:
-        // 旗が立っていれば上を呼んで下ろす。
-        //
-        // 【publicにしてある】呼ぶのはPasses::PresentPassだけだが、名前を焼く対象は
-        // エンジン全体のテクスチャ表(BuildDumpableTextureTable)なので、この機能を
-        // Present群へ降ろすことはできない。**旗の判定と下ろしをここへ閉じておく**と、
-        // 群がエンジンのメンバ変数を触らずに済む
-        void ApplyDebugNamesIfDirty();
-
-    private:
 
 
 
-    public:
-        // 【publicにしてある】積む位置がPresentより前と決まっているためPasses::PresentPassが
-        // 呼ぶ。書き出す対象はエンジン全体のテクスチャ表なので、群へは降ろせない
-        void IssueTextureDumps(Core::RenderGraph& graph);
-
-    private:
 
         // --- 雲(低解像度の専用パス) ---
         // Lightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。積雲と巻雲だけを
@@ -1305,12 +1352,6 @@ namespace Kurenai
         // 拡散イラディアンス・プリフィルタ済み鏡面はいずれも本物のTextureCube
         // (CreateUAVTextureCube/CreateMippedUAVTextureCube、面ごとに個別のUAVを持つ)で、
         // IBLConvolve.hlslが面ごとに1回ずつディスパッチして書き込む
-    public:
-        // キューブマップの面数(D3D標準順: +X,-X,+Y,-Y,+Z,-Z)。IBLの2つのキューブマップは
-        // いずれもこの順で面ごとにディスパッチする(IBLConvolve.hlsl CubeFaceDirectionと一致させる)
-        // 出所は Rendering/CubeFaceMath.h(移行中の別名)
-        static constexpr uint32_t kCubeFaceCount = ::Kurenai::kCubeFaceCount;
-    private:
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
@@ -1451,22 +1492,11 @@ namespace Kurenai
         // 中身と、それぞれが何のためにあるかは Scene/EmissiveLightSet.h
         Scene::EmissiveLightSet m_EmissiveLights;
 
-    public:
-        // 【publicにしてある】シーン読み込みが構築し、Passes::DDGIPasses が
-        // ラスタ経路で「このインスタンスは自発光プロキシか」を引くために読むだけ
-        const std::vector<bool>& GetEmissiveProxyInstances() const { return m_EmissiveLights.ProxyInstances; }
-
-    private:
         // 反射プローブ(19章): プローブ位置から6方向をProbeCapture.hlslで2Dレンダーターゲットへ描き、
         // IBLConvolve.hlsl CSCopyCaptureToCubeFaceでスクラッチのキューブマップへ組み上げてから、
         // IBLと同じCSIrradiance/CSPrefilterで畳み込んでプローブごとのキューブマップ配列へ書き込む。
         // 環境ソースを差し替えるだけなので、シェーダー側の評価式(EvaluateIBL)はIBLと完全に共通。
         //
-    public:
-        // キューブマップ配列の枚数上限。TextureCubeArrayは実行時に伸縮できないため固定容量で確保し、
-        // これを超えるプローブが置かれたシーンは先頭からこの数だけを採用する(警告ログを出す)
-        static constexpr uint32_t kMaxReflectionProbes = Passes::kMaxReflectionProbes;
-    private:
         // キャプチャ解像度。プリフィルタ済み鏡面のベース解像度(Passes::kIBLPrefilterBaseSize)と揃えることで、
         // ミップ0が「畳み込み無しのキャプチャそのもの」になりデバッグ表示で生の映り込みを確認できる
         // 出所は Passes/ReflectionProbeConstants.h(移行中の別名)
@@ -1568,12 +1598,6 @@ namespace Kurenai
 
         // クリップマップLODの格子(プローブ番号 ⇔ ワールド座標)は GI::DDGIGrid が持つ。
         // 設計の意図と、更新CSのアトラス座標式を1文字も変えずに済む理由は GI/DDGIGrid.h にある
-    public:
-        // 【publicにしてある】Passes::DDGIPasses がプローブの位置と担当座標を引くために呼ぶ。
-        // どれも設定と格子から導くだけの計算で、状態を持たないので公開しても持ち主は変わらない
-        GI::DDGIGrid& GetDDGIGrid() { return m_DDGIGrid; }
-
-    private:
 
         // m_GIResources.GIVolumeのProbeCountsに合わせてアトラス2枚を確保し直す。ボリュームが無いシーンでは
         // 1プローブぶんのダミーを確保する(SRVは常にバインドできる必要があるため、
@@ -1593,12 +1617,6 @@ namespace Kurenai
         // 59×6×16 = 5664 となり、実際に前者を踏んで起動直後に落ちていた。
         //
         // レイトレース経路にはメッシュごとの描画そのものが無いので、この制約は掛からない
-    public:
-        // 【publicにしてある】上と同じ理由。1フレームに焼けるプローブ数を
-        // ObjectConstantsのリング段数から決める判定で、群が登録時に呼ぶ
-        uint32_t ClampDDGIProbesPerFrameToConstantRing(uint32_t requested);
-
-    private:
         // ObjectConstantsのリングに要求する「1フレームあたりの書き込み回数」。
         // 根拠はこのバッファを作っている箇所(KurenaiEngine3D.cpp)のコメントを参照
         static constexpr uint32_t kObjectConstantUpdatesPerFrame = 16384;
@@ -1632,13 +1650,6 @@ namespace Kurenai
         // 「水面は単一の水平な平面である」という前提に立っており、複数ある場合は最初のものだけを使う
         bool m_PlanarReflectionMultipleWaterLogged = false;
 
-    public:
-        // UIのつまみの上限。**シェーダー側の段数そのものではない。**
-        // Sky.hlsli は既定 kCloudMaxRaymarchSteps(384)で走り、cbuffer で0より大きい値を
-        // 渡されたときだけそれを使う。その値は kCloudRaymarchStepsHardMax(512)で丸められる。
-        // したがってここに要る条件は「512を超えないこと」だけで、一致させる相手はいない
-        static constexpr uint32_t kCloudRaymarchStepsMax = Kurenai::kCloudRaymarchStepsMax;
-    private:
         // 風によるノイズ空間の移動量。m_WaterScrollOffsetと同じくUIつまみではなく内部状態で、
         // RenderThreadMainがSky.hlsliのkCloudNoisePeriodと同じ周期でstd::fmodしながら進める
         DirectX::XMFLOAT2 m_CloudScrollOffset{ 0.0f, 0.0f };
@@ -1687,28 +1698,10 @@ namespace Kurenai
         // ライトグリッド1タイルぶんの要素数(先頭1個がライト数、残りがライトインデックス)
         static constexpr uint32_t kLightTileStride = 1 + Passes::kLightTileCapacity;
 
-    public:
-        // MegaLightsの候補プールが1タイルあたりに抽出する候補の数(K)。
-        // ライトタイルの容量と違い**これは打ち切りではなく抽出数**で、タイルへ何灯届いていても
-        // ここで決めた本数だけを重みつきで取り出す。届いた灯が欠落するわけではない
-        // (どの灯も w_i / SumW の確率で選ばれる)ため、容量超過のような静かな欠落は起きない。
-        // 【実行時に振れる。ここは確保の上限】1タイルの抽出数Kは
-        // m_Settings.MegaLights.TilePoolCapacity が持ち、シェーダへは定数バッファで渡している。
-        // バッファの確保だけがコンパイル時の上限を要るのでここに残す
-        static constexpr uint32_t kMegaLightsTilePoolCapacity = Passes::kMegaLightsTilePoolCapacity;
-        // Kの下限。これを下回るとタイルに届く灯を代表できない。
-        static constexpr int32_t kMegaLightsTilePoolMinCapacity = Passes::kMegaLightsTilePoolMinCapacity;
-    private:
         // 候補プール1タイルぶんの要素数。先頭6個がヘッダ(SumW / 届いた灯数 / 有効候補数 / 予約 /
         // 手前のViewZ / 奥のViewZ)、
         // 以降は候補1つにつき2個(ライト番号と重み)。MegaLightsTilePool.hlsl 冒頭のレイアウトと一致させること
         static constexpr uint32_t kMegaLightsTilePoolStride = 6 + 2 * kMegaLightsTilePoolCapacity;
-    public:
-        // 1画素あたりの標本数の上限。リザーババッファはこの倍数まで太る
-        //(16バイト x 画素数 x 標本数。2560x1440・4本で236MB)ので、際限なく上げさせない。
-        // クアッド層化は4層なので、4を超えると層の割り当てが一巡して効きが鈍る
-        static constexpr int32_t kMegaLightsMaxSamplesPerPixel = Passes::kMegaLightsMaxSamplesPerPixel;
-    private:
 
         // ライトグリッド本体とタイル数は、3群(Lighting / MegaLights / Present)が読むため
         // 持ち主をRenderTargets(m_RenderTargets.LightTileBuffer / LightTileCountX / Y)へ移した
@@ -1781,13 +1774,6 @@ namespace Kurenai
         // GPU側のシーンデータの持ち主は Rendering/SceneGPUResources.h。
         // **m_Sceneより後に宣言すること**(理由はそのヘッダの冒頭)
         Rendering::SceneGPUResources m_SceneGPUResources;
-    public:
-        // 【publicにしてある】シーン読み込みが構築し、Passes::MegaLightsPasses が
-        // 三角形の数とバッファを引くために読むだけ
-        const Assets::MeshLightScene& GetMeshLightScene() const { return m_EmissiveLights.MeshLightScene; }
-        bool IsMeshLightsEnabled() const { return m_EmissiveLights.MeshLightsEnabled; }
-
-    private:
         // テクスチャの常駐ミップ制御。自前のワーカースレッドを持ち、そこがm_Sceneの
         // IRHITexture*を掴む。
         //
@@ -1940,13 +1926,6 @@ namespace Kurenai
         // 実体は Scene/InstanceLODState.h(UIが型名を書けるよう入れ子にしていない)
         using InstanceLODState = Scene::InstanceLODState;
         std::vector<InstanceLODState> m_InstanceLODStates;
-    public:
-        // RenderingPanel(モデルLOD段ごとの内訳表示)向け
-        const std::vector<Scene::InstanceLODState>& GetInstanceLODStates() const override
-        {
-            return m_InstanceLODStates;
-        }
-    private:
         // 段の切り替えにかける秒数とヒステリシス幅はm_Settings.Geometry.LODFadeDuration /
         // LODHysteresisへ移した
         // 統計。1フレームあたりの段の切り替え回数と、そのフレームでフェード中のインスタンス数。
