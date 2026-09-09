@@ -66,11 +66,11 @@ namespace Kurenai
             // Halton(2,3)を16段階へ量子化する。RadicalInverseは[0,1)だが、丸め誤差でも
             // 16にならないようタイル幅-1で明示的に押さえる
             megaLightsTileOffset.x = std::min<uint32_t>(
-                static_cast<uint32_t>(Rendering::RadicalInverse(m_TAAFrameIndex, 2u) * kLightTileSize),
-                kLightTileSize - 1u);
+                static_cast<uint32_t>(Rendering::RadicalInverse(m_TAAFrameIndex, 2u) * Passes::kLightTileSize),
+                Passes::kLightTileSize - 1u);
             megaLightsTileOffset.y = std::min<uint32_t>(
-                static_cast<uint32_t>(Rendering::RadicalInverse(m_TAAFrameIndex, 3u) * kLightTileSize),
-                kLightTileSize - 1u);
+                static_cast<uint32_t>(Rendering::RadicalInverse(m_TAAFrameIndex, 3u) * Passes::kLightTileSize),
+                Passes::kLightTileSize - 1u);
         }
         frameContext.MegaLightsTileOffset = megaLightsTileOffset;
         // 無効時だけ従来のタイル数をそのまま使い、添字・乱数の種・ディスパッチ数を保存する。
@@ -778,7 +778,7 @@ namespace Kurenai
         const float specularEnergyCompensation = static_cast<float>(m_ReflectionSettings.SpecularCompensation);
         constants.ShadowParams = {
             m_ShadowSettings.LightSize,
-            static_cast<float>(kIBLPrefilterMipLevels - 1),
+            static_cast<float>(Passes::kIBLPrefilterMipLevels - 1),
             iblIntensity,
             specularEnergyCompensation,
         };
@@ -889,7 +889,7 @@ namespace Kurenai
         constants.ProbeParams2 = {
             m_ReflectionProbeSettings.DepthParallaxEnabled ? 1.0f : 0.0f,
             m_ReflectionProbeSettings.OcclusionEnabled ? 1.0f : 0.0f,
-            static_cast<float>(kProbeCaptureSize),
+            static_cast<float>(Passes::kProbeCaptureSize),
             // 焼いた時点の実効プリ露出から現在の実効プリ露出への換算倍率
             // (ReflectionProbePasses::m_ProbeBakedExposureEV100のコメント参照)。ComputeExposure(ev)=1/(1.2*2^ev)
             // なので、比は 2^(焼いたEV - 現在のEV) になる。
@@ -931,10 +931,10 @@ namespace Kurenai
             m_GIResources.GIVolume.ViewBias,
         };
         constants.DDGIParams3 = {
-            static_cast<float>(kDDGIIrradianceTexels),
-            static_cast<float>(kDDGIDistanceTexels),
+            static_cast<float>(Passes::kDDGIIrradianceTexels),
+            static_cast<float>(Passes::kDDGIDistanceTexels),
             m_DDGISettings.Intensity,
-            static_cast<float>(kDDGIProbeBorder),
+            static_cast<float>(Passes::kDDGIProbeBorder),
         };
         // y = DeferredLightingがDDGIを低解像度パス(DDGIResolve)から引くか。
         // 【パスが実際に走る条件と一致させること】走らないのに1を渡すと、前フレームの
@@ -1172,8 +1172,8 @@ namespace Kurenai
         lightingConstants.TileParams =
         {
             m_RenderTargets.LightTileCountX,
-            kLightTileSize,
-            kLightTileCapacity,
+            Passes::kLightTileSize,
+            Passes::kLightTileCapacity,
             // 「このフレームのライトグリッドは有効か」。**パスを積む述語と同じものを使う** ――
             // トグルの状態(m_GeometrySettings.LightCullingEnabled)ではなく実際に書いたかどうかで決める。
             // なおMegaLightsが走るフレームはLightCount.wが先に効くのでこの枝には入らない

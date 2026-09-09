@@ -356,7 +356,7 @@ namespace Kurenai
         static_assert(offsetof(GPUSkyParameters, CloudSkyLight) == 96, "CloudSkyLight のレイアウトが変わっている");
         static_assert(sizeof(GPUSkyParameters) == 112, "GPUSkyParameters の総サイズが変わっている");
 
-        // 間接引数の刻みが8の倍数であること。区画の定義と kModelCullArgsBaseOffset は
+        // 間接引数の刻みが8の倍数であること。区画の定義と Passes::kModelCullArgsBaseOffset は
         // Passes/GeometryConstants.h が持つ(ここに在った写しは消した)。
         static_assert(
             (RHI::IRHICommandList::kDispatchMeshIndirectArgStride % 8) == 0,
@@ -388,7 +388,7 @@ namespace Kurenai
         // 同名の .hlsli と1対1で対応させている(食い違いはあちらのstatic_assertが止める)
         using ShaderInterop::MegaLightsStochasticConstants;
 
-        // kLightTileSize / kLightTileCapacity / kLightTileStride はKurenaiEngine3Dのstatic constexprへ
+        // Passes::kLightTileSize / Passes::kLightTileCapacity / kLightTileStride はKurenaiEngine3Dのstatic constexprへ
         // 移した(DebugViewPanelがヒートマップの上限として参照するため)。定義はKurenaiEngine3D.h
 
         // SWRasterConstants / SWRasterMeshInfo は Passes/GeometryConstants.h へ移した
@@ -652,7 +652,7 @@ namespace Kurenai
                         RHI::BufferDesc readbackDesc;
                         readbackDesc.Usage = RHI::BufferUsage::Readback;
                         readbackDesc.SizeInBytes =
-                            static_cast<uint32_t>(sizeof(uint32_t)) * kMeshletCullStatsCount;
+                            static_cast<uint32_t>(sizeof(uint32_t)) * Passes::kMeshletCullStatsCount;
                         readbackDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
                         m_MeshletCullStatsReadback[i] = m_Device->CreateBuffer(readbackDesc);
                     }
@@ -692,7 +692,7 @@ namespace Kurenai
                     RHI::BufferDesc readbackDesc;
                     readbackDesc.Usage = RHI::BufferUsage::Readback;
                     readbackDesc.SizeInBytes =
-                        static_cast<uint32_t>(sizeof(uint32_t)) * kModelCullCounterCount;
+                        static_cast<uint32_t>(sizeof(uint32_t)) * Passes::kModelCullCounterCount;
                     readbackDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
                     m_ModelCullReadback[i] = m_Device->CreateBuffer(readbackDesc);
                 }
@@ -789,7 +789,7 @@ namespace Kurenai
 
         m_ShadowPasses->CreateCascadePipelineStates(*m_Device, shaderDirectory);
 
-        m_RenderTargets.CreateShadowCascadeArray(*m_Device, kShadowMapSize, kCascadeCount);
+        m_RenderTargets.CreateShadowCascadeArray(*m_Device, Rendering::kShadowMapSize, kCascadeCount);
 
         // 既定のスカイボックス。.ksceneの[Scene]Skyboxで差し替えられる(LoadScene参照)ため、
         // 現在読み込んでいるパスを覚えておき、同じパスなら読み直さない
@@ -809,14 +809,14 @@ namespace Kurenai
         // コンピュートシェーダー一式。実際の畳み込み(スカイボックスのサンプリング)はRender()の
         // 最初のフレームで一度だけ行う(EnvironmentPassesのm_IBLBaked参照)。ここではリソースの作成のみ行う
         m_IBLResources.CreateEnvironmentMaps(
-            *m_Device, kIBLIrradianceSize, kIBLPrefilterBaseSize, kIBLPrefilterMipLevels);
+            *m_Device, Passes::kIBLIrradianceSize, Passes::kIBLPrefilterBaseSize, Passes::kIBLPrefilterMipLevels);
         // BRDF積分LUTは2パスで焼く。パス1(CSMain)が(A, B)をスクラッチへ書き、
         // パス2(CSCombineEavg)がそれを読んでEavgを足した float4(A, B, Eavg, 0) を最終LUTへ書く。
         // 同一リソースをSRVとUAVへ同時バインドできないためスクラッチが要る(BRDFLUT.hlsl参照)
         // 【元の行位置のまま呼ぶ】DX12はディスクリプタ枠を生成順に割り当てるため、
         // 所有権をEnvironmentPassesへ移しても生成の順序はここから動かさない
-        m_EnvironmentPasses->CreateBRDFLUTScratch(*m_Device, kIBLBRDFLUTSize);
-        m_IBLResources.CreateBRDFLUT(*m_Device, kIBLBRDFLUTSize);
+        m_EnvironmentPasses->CreateBRDFLUTScratch(*m_Device, Passes::kIBLBRDFLUTSize);
+        m_IBLResources.CreateBRDFLUT(*m_Device, Passes::kIBLBRDFLUTSize);
         if (!m_EnvironmentPasses->HasBRDFLUTScratch() || !m_IBLResources.BRDFLUTTexture)
         {
             Core::Logger::Error("KurenaiEngine3D",
@@ -829,7 +829,7 @@ namespace Kurenai
         // 純粋な手続き生成なので、BRDF積分LUTと同じく起動後に一度だけ焼く(EnvironmentPassesのm_CloudNoiseBaked)。
         // ここではリソースとパイプラインの作成だけを行う
         m_SkyResources.CreateCloudNoise(
-            *m_Device, kCloudShapeNoiseSize, kCloudDetailNoiseSize, kCloudWeatherNoiseSize);
+            *m_Device, Passes::kCloudShapeNoiseSize, Passes::kCloudDetailNoiseSize, Passes::kCloudWeatherNoiseSize);
         if (!m_SkyResources.CloudShapeNoiseTexture || !m_SkyResources.CloudDetailNoiseTexture ||
             !m_SkyResources.CloudWeatherNoiseTexture)
         {
@@ -844,8 +844,8 @@ namespace Kurenai
         // (EnvironmentPassesのm_AtmosphereLUTBakedTurbidity)。SkyViewは太陽の位置と濁りで変わるため、
         // そのどちらかが動いたときに焼き直す(同 m_SkyViewBakedSunPosition)。
         m_SkyResources.CreateAtmosphereLUTs(
-            *m_Device, kTransmittanceLUTWidth, kTransmittanceLUTHeight, kMultiScatteringLUTSize,
-            kSkyViewLUTWidth, kSkyViewLUTHeight);
+            *m_Device, Passes::kTransmittanceLUTWidth, Passes::kTransmittanceLUTHeight, Passes::kMultiScatteringLUTSize,
+            Passes::kSkyViewLUTWidth, Passes::kSkyViewLUTHeight);
         if (!m_SkyResources.TransmittanceLUT || !m_SkyResources.MultiScatteringLUT ||
             !m_SkyResources.SkyViewLUT)
         {
@@ -869,7 +869,7 @@ namespace Kurenai
         // 面ごとに1回ずつディスパッチする。プリフィルタの入力にしかならないので解像度は
         // オフラインDDS(512)より小さい256で足りる(生成コストが1/4になる)
         m_SkyResources.ProceduralSkyTexture =
-            m_Device->CreateUAVTextureCube(kProceduralSkySize, RHI::Format::R16G16B16A16_Float);
+            m_Device->CreateUAVTextureCube(Passes::kProceduralSkySize, RHI::Format::R16G16B16A16_Float);
 
         m_EnvironmentPasses->CreateSkyGenerateResources(*m_Device, shaderDirectory);
 
@@ -893,25 +893,25 @@ namespace Kurenai
 
         // --- 反射プローブ(19章) ---
         // キャプチャ先(1面ぶんを6面で使い回す)。キューブへ写す前のHDR値を保つためFloatにする
-        m_GIResources.ProbeCaptureColor = m_Device->CreateRenderTexture(kProbeCaptureSize, kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
+        m_GIResources.ProbeCaptureColor = m_Device->CreateRenderTexture(Passes::kProbeCaptureSize, Passes::kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
         // 同じキャプチャの2枚目(SV_TARGET1)。プローブからのワールド距離をそのまま入れるため、
         // [0,1]に収まらず精度も必要になる。R32_Floatなら室内スケールでも十分な絶対精度がある
-        m_GIResources.ProbeCaptureDistance = m_Device->CreateRenderTexture(kProbeCaptureSize, kProbeCaptureSize, RHI::Format::R32_Float);
+        m_GIResources.ProbeCaptureDistance = m_Device->CreateRenderTexture(Passes::kProbeCaptureSize, Passes::kProbeCaptureSize, RHI::Format::R32_Float);
         // Reverse-Zのため遠平面側(0.0)でクリアする(G-Buffer深度と同じ)
-        m_GIResources.ProbeCaptureDepth = m_Device->CreateDepthTexture(kProbeCaptureSize, kProbeCaptureSize, 0.0f);
+        m_GIResources.ProbeCaptureDepth = m_Device->CreateDepthTexture(Passes::kProbeCaptureSize, Passes::kProbeCaptureSize, 0.0f);
         // 畳み込みの入力になるスクラッチのキューブマップ(TextureCubeとして読めること
         // = 配列ではないことが必須。理由はGIResources::ProbeRadianceCubeのコメント参照)
-        m_GIResources.ProbeRadianceCube = m_Device->CreateUAVTextureCube(kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
+        m_GIResources.ProbeRadianceCube = m_Device->CreateUAVTextureCube(Passes::kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
         // 畳み込み結果はプローブごとに保持するためキューブマップ配列で確保する。
         // 反射プローブは鏡面専任なので拡散イラディアンス側の配列は持たない
         // (拡散はDDGIへ一本化。ReflectionProbe.hlsli冒頭のコメント参照)
         m_GIResources.ProbePrefilteredArray = m_Device->CreateMippedUAVTextureCubeArray(
-            kIBLPrefilterBaseSize, RHI::Format::R16G16B16A16_Float, kIBLPrefilterMipLevels, kMaxReflectionProbes);
+            Passes::kIBLPrefilterBaseSize, RHI::Format::R16G16B16A16_Float, Passes::kIBLPrefilterMipLevels, kMaxReflectionProbes);
         // 距離キューブ(19.12節)。畳み込まないためミップは1段だけでよく、スクラッチのキューブも要らない
         // (キャプチャからこの配列のスライスへ直接書き込む)。
         // 128²×6面×8枚×4バイト = 3.1MB
         m_GIResources.ProbeDistanceArray = m_Device->CreateMippedUAVTextureCubeArray(
-            kProbeCaptureSize, RHI::Format::R32_Float, 1, kMaxReflectionProbes);
+            Passes::kProbeCaptureSize, RHI::Format::R32_Float, 1, kMaxReflectionProbes);
 
         RHI::ShaderDesc probeCaptureVsDesc;
         probeCaptureVsDesc.Stage = RHI::ShaderStage::Vertex;
@@ -1497,7 +1497,7 @@ namespace Kurenai
                     std::to_string(iterations));
             return;
         }
-        const int clamped = std::min(iterations, static_cast<int>(kMegaLightsMaxSpatialIterations));
+        const int clamped = std::min(iterations, static_cast<int>(Passes::kMegaLightsMaxSpatialIterations));
         if (clamped != iterations)
         {
             Core::Logger::Warning(
@@ -1809,11 +1809,11 @@ namespace Kurenai
             static_cast<uint64_t>(m_GIResources.GIVolume.ProbeCounts[1]) *
             static_cast<uint64_t>(m_GIResources.GIVolume.ProbeCounts[2]) *
             static_cast<uint64_t>(clamped);
-        if (probeCount > kDDGIMaxProbes)
+        if (probeCount > Passes::kDDGIMaxProbes)
         {
             Core::Logger::Error(
                 "KurenaiEngine3D",
-                "LODの上書きでプローブ数が上限(" + std::to_string(kDDGIMaxProbes) + ")を超えるため無視します: " +
+                "LODの上書きでプローブ数が上限(" + std::to_string(Passes::kDDGIMaxProbes) + ")を超えるため無視します: " +
                     std::to_string(probeCount) + "個");
             return;
         }
@@ -2150,7 +2150,7 @@ namespace Kurenai
 
             // タイルライトカリングのライトグリッド。タイル数は解像度に依存するためここで作り直す。
             // 端のタイルは部分的にしか埋まらないので切り上げる
-            m_RenderTargets.CreateLightTiles(*m_Device, width, height, kLightTileSize, kLightTileStride);
+            m_RenderTargets.CreateLightTiles(*m_Device, width, height, Passes::kLightTileSize, kLightTileStride);
 
             // MegaLightsの候補プール。タイルの切り方はライトグリッドと同じで、1タイルあたりの
             // 要素数だけが違う。非対応環境ではパス自体が走らないので確保しない
@@ -2721,7 +2721,7 @@ namespace Kurenai
         // 中心が原点近辺の値になってしまい意味がないため、この向きだけの基準行列を使う
         const XMMATRIX lightRotation = XMMatrixLookAtLH(XMVectorZero(), lightDirVec, lightUp);
         const float orthoSize = sphereRadius * 2.0f;
-        const float texelSize = orthoSize / static_cast<float>(kShadowMapSize);
+        const float texelSize = orthoSize / static_cast<float>(Rendering::kShadowMapSize);
 
         XMFLOAT3 centerLightSpace;
         XMStoreFloat3(&centerLightSpace, XMVector3TransformCoord(sphereCenter, lightRotation));
@@ -3359,12 +3359,12 @@ namespace Kurenai
         // 【条件はパスを積む述語と揃える】グリッドを作っていないフレームで警告すると、
         // 実際には起きない欠落を知らせることになる(MegaLightsが走っていればローカルライトは
         // グリッドを経由しない)
-        if (ShouldRunLightCulling() && gpuLights.size() > kLightTileCapacity && !m_LightTileOverflowLogged)
+        if (ShouldRunLightCulling() && gpuLights.size() > Passes::kLightTileCapacity && !m_LightTileOverflowLogged)
         {
             Core::Logger::Warning(
                 "KurenaiEngine3D",
                 "有効ライト数(" + std::to_string(gpuLights.size()) + ")がタイルの容量(" +
-                    std::to_string(kLightTileCapacity) +
+                    std::to_string(Passes::kLightTileCapacity) +
                     ")を超えています。1タイルへ集中した場合そのタイルではライトが欠落します"
                     "(Render TargetsのLight Tiles表示でマゼンタのタイルとして確認できます)");
             m_LightTileOverflowLogged = true;

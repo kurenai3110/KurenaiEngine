@@ -56,7 +56,7 @@ namespace Kurenai::ShaderInterop
         // M2: カスケード選択・PCSS用(末尾に追加)。xyzw = 各カスケードのView空間far距離
         DirectX::XMFLOAT4 CascadeSplits;
         // x: PCSSのライトサイズ(m_ShadowSettings.LightSize)。y: IBLプリフィルタ済み鏡面マップの
-        // 最大ミップレベル(kIBLPrefilterMipLevels-1、DeferredLighting.hlslがラフネス→ミップの
+        // 最大ミップレベル(Passes::kIBLPrefilterMipLevels-1、DeferredLighting.hlslがラフネス→ミップの
         // 変換に使う)。z: IBL強度倍率(m_IBLSettings.Enabled=falseの場合は0.0fを渡し、シェーダ側で
         // EvaluateIBLの代わりに定数色アンビエント(AmbientColor.rgb)へフォールバックする)。
         // w: スペキュラのマルチスキャッタリング・エネルギー補正の方式

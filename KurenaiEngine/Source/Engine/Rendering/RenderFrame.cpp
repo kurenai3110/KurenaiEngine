@@ -297,7 +297,7 @@ namespace Kurenai
         // 蓄積ダンプは総和を書くので、Nを変えた2本の差が1フレームぶんになる ――
         // これで追従の時間変化を、フレームごとのGPU読み戻し無しで測れる
         if (m_MegaLightsSettings.PerturbMode != 0 && !m_MegaLightsPerturbApplied && m_MegaLightsSettings.AccumTargetFrames > 0 &&
-            m_MegaLightsPasses->GetAccumWarmupFrames() >= kMegaLightsAccumWarmup)
+            m_MegaLightsPasses->GetAccumWarmupFrames() >= Passes::kMegaLightsAccumWarmup)
         {
             m_MegaLightsPerturbApplied = true;
             if (m_MegaLightsSettings.PerturbMode == 1)
@@ -364,8 +364,8 @@ namespace Kurenai
         m_EnvironmentPasses->Register(graph, frameContext, blackboard);
 
         RHI::Viewport shadowViewport;
-        shadowViewport.Width = static_cast<float>(kShadowMapSize);
-        shadowViewport.Height = static_cast<float>(kShadowMapSize);
+        shadowViewport.Width = static_cast<float>(Rendering::kShadowMapSize);
+        shadowViewport.Height = static_cast<float>(Rendering::kShadowMapSize);
 
         RHI::Viewport gbufferViewport;
         gbufferViewport.Width = static_cast<float>(m_RenderWidth);
@@ -459,7 +459,7 @@ namespace Kurenai
         if (meshletCullStatsActive)
         {
             const uint32_t oldestIndex = (m_MeshletCullStatsRingIndex + 1) % kMeshletCullStatsRingSize;
-            uint32_t counters[kMeshletCullStatsCount] = {};
+            uint32_t counters[Passes::kMeshletCullStatsCount] = {};
             if (m_MeshletCullStatsReadback[oldestIndex] &&
                 m_MeshletCullStatsReadback[oldestIndex]->ReadbackData(counters, sizeof(counters)))
             {
@@ -496,7 +496,7 @@ namespace Kurenai
                 - m_GeometryPasses->GetModelCullPrepassCandidateCount();
 
             const uint32_t oldest = (m_ModelCullRingIndex + 1) % kMeshletCullStatsRingSize;
-            uint32_t counters[kModelCullCounterCount] = {};
+            uint32_t counters[Passes::kModelCullCounterCount] = {};
             if (m_ModelCullReadback[oldest] &&
                 m_ModelCullReadback[oldest]->ReadbackData(counters, sizeof(counters)))
             {
@@ -504,7 +504,7 @@ namespace Kurenai
                 m_ModelCullFrustumCulled = counters[1];
                 m_ModelCullOcclusionCulled = counters[2];
                 m_ModelCullSurvived = counters[3];
-                for (uint32_t region = 0; region < kModelCullRegionCount; ++region)
+                for (uint32_t region = 0; region < Passes::kModelCullRegionCount; ++region)
                 {
                     m_ModelCullRegionIssued[region] = counters[4 + region];
                 }

@@ -856,7 +856,7 @@ namespace Kurenai::Defaults
     inline constexpr bool DroneShowCastLight = false;
     // 光源として送る灯の数。全機ぶんは送れないので間引く(理由はBuildLightSamplesのコメント)。
     // 【シーンにもショーにも持たせない】これは描画側の容量で決まる数で、ショーの表現ではない。
-    // 上限はタイルライトカリングの1タイル容量(KurenaiEngine3D::kLightTileCapacity = 64)で、
+    // 上限はタイルライトカリングの1タイル容量(Passes::kLightTileCapacity = 64)で、
     // 超えると溢れた灯が静かに欠落する。手置きライトと同居する余地を残して48にしてある。
     // 精度は1500機の厳密な逆二乗和に対し、島と水面で平均+3%(最大+9%)。
     // 灯数を倍にしても最大誤差は+7%までしか縮まらない(docs/ImplementationDetail.md 38.12)

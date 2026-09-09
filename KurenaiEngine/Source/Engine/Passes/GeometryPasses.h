@@ -142,13 +142,13 @@ namespace Kurenai
             // 1モデルを2回数えてしまい、CPU側の判定と単位が合わなくなる
             std::unique_ptr<RHI::IRHIBuffer> m_ModelCullCounterBuffer;
             // ExecuteIndirectへそのまま渡すバッファ。先頭に区画ごとの発行数が並び、
-            // kModelCullArgsBaseOffset から先が区画ごとの引数配列
+            // Passes::kModelCullArgsBaseOffset から先が区画ごとの引数配列
             std::unique_ptr<RHI::IRHIBuffer> m_ModelCullDrawArgsBuffer;
             // 区画1つぶんのバイト数(ComputeModelCullRegionStride)。描画パスが
             // 自分の区画の先頭オフセットを求めるのに使う
             uint32_t m_ModelCullRegionStride = 0;
             // 区画ごとの候補数。ExecuteIndirectへ渡すmaxCommandCount(GPUが書く発行数の上限)
-            uint32_t m_ModelCullRegionCandidates[kModelCullRegionCount]{};
+            uint32_t m_ModelCullRegionCandidates[Passes::kModelCullRegionCount]{};
             // GPUへ載せる直前の候補配列。毎フレームの確保を避けるため使い回す
             std::vector<GpuModelCullInstance> m_ModelCullUploadScratch;
             // m_ModelCullInstanceBuffer / m_ModelCullDrawArgsBuffer が収まる候補数。

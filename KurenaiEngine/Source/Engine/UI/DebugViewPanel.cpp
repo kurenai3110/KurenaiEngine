@@ -114,7 +114,7 @@ namespace Kurenai::UI
         {
             SliderIntEx(
                 "プリフィルタ ミップレベル###PrefilterMip", &m_Engine.GetIBLSettings().PrefilterDebugMipLevel, 0,
-                static_cast<int>(KurenaiEngine3D::kIBLPrefilterMipLevels) - 1, 0,
+                static_cast<int>(Passes::kIBLPrefilterMipLevels) - 1, 0,
                 "表示するミップの段。段が進むほど粗い面向けにぼかされている");
         }
 
@@ -131,7 +131,7 @@ namespace Kurenai::UI
             {
                 SliderIntEx(
                     "プローブ プリフィルタ ミップ###ProbePrefilterMip", &m_Engine.GetReflectionProbeSettings().PrefilterDebugMipLevel, 0,
-                    static_cast<int>(KurenaiEngine3D::kIBLPrefilterMipLevels) - 1, 0,
+                    static_cast<int>(Passes::kIBLPrefilterMipLevels) - 1, 0,
                     "表示するミップの段。ミップ0はぼかす前のキャプチャ結果そのもの");
             }
 
@@ -182,7 +182,7 @@ namespace Kurenai::UI
                 // ヒートマップの色: 黒=0灯、青=少ない、緑、赤=上限以上、マゼンタ=タイル容量超過
                 ImGui::TextWrapped(
                     "黒=0灯 / 青→緑→赤=ライトが多い / マゼンタ=タイル容量(%uライト)を超過",
-                    KurenaiEngine3D::kLightTileCapacity);
+                    Passes::kLightTileCapacity);
             }
             else
             {
@@ -194,12 +194,12 @@ namespace Kurenai::UI
                     "「ライトタイル」側にマゼンタが出ていたらそこは比べられない。"
                     "また下の上限を上げないと、ライトの多いシーンでは一面が赤に飽和して"
                     "違いが色に出ない(飽和した状態での一致は検出力がほとんど無い)",
-                    KurenaiEngine3D::kLightTileCapacity);
+                    Passes::kLightTileCapacity);
             }
 
             SliderIntEx(
                 "ヒートマップの上限###HeatmapMax", &m_Engine.GetDebugViewSettings().LightTileHeatmapMax, 1,
-                static_cast<int>(KurenaiEngine3D::kLightTileCapacity), Defaults::LightTileHeatmapMax,
+                static_cast<int>(Passes::kLightTileCapacity), Defaults::LightTileHeatmapMax,
                 "この灯数で赤になるようヒートマップを正規化する。ライトが少ないシーンでは下げると差が見える");
 
             if (m_Engine.GetDebugViewSettings().View == DebugView::LightTiles && !m_Engine.GetGeometrySettings().LightCullingEnabled)

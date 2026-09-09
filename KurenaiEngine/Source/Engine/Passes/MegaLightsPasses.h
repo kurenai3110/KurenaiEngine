@@ -187,7 +187,7 @@ namespace Kurenai
             // 空間再利用の反復ごとの定数(中身は共有分と同じで、反復番号だけが違う)。
             // 【1本を使い回してはいけない】UpdateBuffer は同じフレームで2回書くと
             // 後の値が両方のパスに見えるため、反復の数だけバッファを分ける
-            std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsSpatialConstantBuffer[kMegaLightsMaxSpatialIterations];
+            std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsSpatialConstantBuffer[Passes::kMegaLightsMaxSpatialIterations];
 
             // 蓄積平均(計測専用)。レイを撃たないがMegaLightsと同時にしか使わない
             std::unique_ptr<RHI::IRHIShader> m_MegaLightsAccumComputeShader;

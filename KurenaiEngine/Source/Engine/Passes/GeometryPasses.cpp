@@ -284,7 +284,7 @@ namespace Kurenai::Passes
         RHI::BufferDesc modelCullCounterDesc;
         modelCullCounterDesc.Usage = RHI::BufferUsage::Structured;
         modelCullCounterDesc.SizeInBytes =
-            static_cast<uint32_t>(sizeof(uint32_t)) * kModelCullCounterCount;
+            static_cast<uint32_t>(sizeof(uint32_t)) * Passes::kModelCullCounterCount;
         modelCullCounterDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
         m_ModelCullCounterBuffer = device.CreateBuffer(modelCullCounterDesc);
     }
@@ -332,7 +332,7 @@ namespace Kurenai::Passes
             RHI::BufferDesc drawArgsDesc;
             drawArgsDesc.Usage = RHI::BufferUsage::IndirectArgs;
             drawArgsDesc.SizeInBytes =
-                kModelCullArgsBaseOffset + ComputeModelCullRegionStride(capacity) * kModelCullRegionCount;
+                Passes::kModelCullArgsBaseOffset + ComputeModelCullRegionStride(capacity) * Passes::kModelCullRegionCount;
             drawArgsDesc.StrideInBytes = RHI::IRHICommandList::kDispatchMeshIndirectArgStride;
             auto drawArgsBuffer = device.CreateBuffer(drawArgsDesc);
 
@@ -360,7 +360,7 @@ namespace Kurenai::Passes
         RHI::IRHIPipelineState*& currentPipelineState, RHI::IRHIBuffer* frameConstantBuffer,
         RHI::IRHISamplerSet* materialSamplers)
     {
-        if (!cmd || region >= kModelCullRegionCount || !pipelineState || !m_ModelCullDrawArgsBuffer)
+        if (!cmd || region >= Passes::kModelCullRegionCount || !pipelineState || !m_ModelCullDrawArgsBuffer)
         {
             return false;
         }
@@ -384,7 +384,7 @@ namespace Kurenai::Passes
         // 「張ってあるから大丈夫」という誤解の元になる
         cmd->DispatchMeshIndirect(
             m_ModelCullDrawArgsBuffer.get(),
-            kModelCullArgsBaseOffset + region * m_ModelCullRegionStride,
+            Passes::kModelCullArgsBaseOffset + region * m_ModelCullRegionStride,
             maxCommandCount,
             region * static_cast<uint32_t>(sizeof(uint32_t)));
         return true;
@@ -394,7 +394,7 @@ namespace Kurenai::Passes
     {
         RHI::BufferDesc cullStatsDesc;
         cullStatsDesc.Usage = RHI::BufferUsage::Structured;
-        cullStatsDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * kMeshletCullStatsCount;
+        cullStatsDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * Passes::kMeshletCullStatsCount;
         cullStatsDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
         m_MeshletCullStatsBuffer = device.CreateBuffer(cullStatsDesc);
     }
@@ -795,25 +795,25 @@ namespace Kurenai::Passes
             : (occlusionPrevFrameEnabled ? 1u : 0u);
 
         // 区画(=PSO)の対応表。nullptrの区画は候補に載せない(そのぶんは従来のCPUループが描く)
-        RHI::IRHIPipelineState* modelCullRegionPipelines[kModelCullRegionCount]{};
+        RHI::IRHIPipelineState* modelCullRegionPipelines[Passes::kModelCullRegionCount]{};
         if (modelCullGpuActive)
         {
             const bool meshletDebug = frame.Settings.Geometry.MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
-            modelCullRegionPipelines[kModelCullRegionGBuffer] = meshletDebug
+            modelCullRegionPipelines[Passes::kModelCullRegionGBuffer] = meshletDebug
                 ? m_GBufferMeshletDebugPipelineState.get()
                 : m_GBufferMeshletPipelineState.get();
-            modelCullRegionPipelines[kModelCullRegionGBufferMirrored] = meshletDebug
+            modelCullRegionPipelines[Passes::kModelCullRegionGBufferMirrored] = meshletDebug
                 ? m_GBufferMeshletDebugPipelineStateMirrored.get()
                 : m_GBufferMeshletPipelineStateMirrored.get();
             if (depthPrepassRuns)
             {
-                modelCullRegionPipelines[kModelCullRegionPrepassOpaque] =
+                modelCullRegionPipelines[Passes::kModelCullRegionPrepassOpaque] =
                     m_DepthPrepassMeshletPipelineState.get();
-                modelCullRegionPipelines[kModelCullRegionPrepassOpaqueMirrored] =
+                modelCullRegionPipelines[Passes::kModelCullRegionPrepassOpaqueMirrored] =
                     m_DepthPrepassMeshletPipelineStateMirrored.get();
-                modelCullRegionPipelines[kModelCullRegionPrepassCutout] =
+                modelCullRegionPipelines[Passes::kModelCullRegionPrepassCutout] =
                     m_DepthPrepassMeshletCutoutPipelineState.get();
-                modelCullRegionPipelines[kModelCullRegionPrepassCutoutMirrored] =
+                modelCullRegionPipelines[Passes::kModelCullRegionPrepassCutoutMirrored] =
                     m_DepthPrepassMeshletCutoutPipelineStateMirrored.get();
             }
         }
@@ -909,7 +909,7 @@ namespace Kurenai::Passes
                     // G-Bufferに書かず専用のフォワードパスへ回るため
                     addCandidate(
                         modelCullGBufferDraws,
-                        mirrored ? kModelCullRegionGBufferMirrored : kModelCullRegionGBuffer,
+                        mirrored ? Passes::kModelCullRegionGBufferMirrored : Passes::kModelCullRegionGBuffer,
                         Assets::kGpuMaterialFlagTransparent, 0u, lodDitherFade, /*countCullStats=*/true,
                         gbufferOcclusionMode);
 
@@ -923,7 +923,7 @@ namespace Kurenai::Passes
                     }
                     addCandidate(
                         modelCullDraws,
-                        mirrored ? kModelCullRegionPrepassOpaqueMirrored : kModelCullRegionPrepassOpaque,
+                        mirrored ? Passes::kModelCullRegionPrepassOpaqueMirrored : Passes::kModelCullRegionPrepassOpaque,
                         Assets::kGpuMaterialFlagTransparent | Assets::kGpuMaterialFlagCutout, 0u, 1.0f, false,
                         prepassOcclusionMode);
                     // カットアウトぶん(clipを通す)。持たないモデルではこの回は発行しない
@@ -931,7 +931,7 @@ namespace Kurenai::Passes
                     {
                         addCandidate(
                             modelCullDraws,
-                            mirrored ? kModelCullRegionPrepassCutoutMirrored : kModelCullRegionPrepassCutout,
+                            mirrored ? Passes::kModelCullRegionPrepassCutoutMirrored : Passes::kModelCullRegionPrepassCutout,
                             Assets::kGpuMaterialFlagTransparent, Assets::kGpuMaterialFlagCutout, 1.0f, false,
                             prepassOcclusionMode);
                     }
@@ -1072,10 +1072,10 @@ namespace Kurenai::Passes
                         cullConstants.CullPrevViewProj = taaPrevViewProj;
                     }
                     cullConstants.CullParams = {
-                        count, m_HiZMipLevels, occlusionEnabled ? 1u : 0u, kModelCullArgsBaseOffset
+                        count, m_HiZMipLevels, occlusionEnabled ? 1u : 0u, Passes::kModelCullArgsBaseOffset
                     };
                     cullConstants.CullRegionParams = {
-                        regionStride, kModelCullRegionCount, beginIndex, statsBeginIndex
+                        regionStride, Passes::kModelCullRegionCount, beginIndex, statsBeginIndex
                     };
                     cullConstants.CullHiZScreenParams = {
                         static_cast<float>(renderWidth), static_cast<float>(renderHeight), 0.0f, 0.0f
@@ -1195,25 +1195,25 @@ namespace Kurenai::Passes
                     if (modelCullIndirectActive)
                     {
                         if (IssueModelCullIndirect(
-                                cmd, kModelCullRegionPrepassOpaque, m_DepthPrepassMeshletPipelineState.get(),
+                                cmd, Passes::kModelCullRegionPrepassOpaque, m_DepthPrepassMeshletPipelineState.get(),
                                 currentPipelineState, frameConstantBuffer, materialSamplers))
                         {
                             ++m_DrawCallsDepthPrepass;
                         }
                         if (IssueModelCullIndirect(
-                                cmd, kModelCullRegionPrepassOpaqueMirrored,
+                                cmd, Passes::kModelCullRegionPrepassOpaqueMirrored,
                                 m_DepthPrepassMeshletPipelineStateMirrored.get(), currentPipelineState, frameConstantBuffer, materialSamplers))
                         {
                             ++m_DrawCallsDepthPrepass;
                         }
                         if (IssueModelCullIndirect(
-                                cmd, kModelCullRegionPrepassCutout,
+                                cmd, Passes::kModelCullRegionPrepassCutout,
                                 m_DepthPrepassMeshletCutoutPipelineState.get(), currentPipelineState, frameConstantBuffer, materialSamplers))
                         {
                             ++m_DrawCallsDepthPrepass;
                         }
                         if (IssueModelCullIndirect(
-                                cmd, kModelCullRegionPrepassCutoutMirrored,
+                                cmd, Passes::kModelCullRegionPrepassCutoutMirrored,
                                 m_DepthPrepassMeshletCutoutPipelineStateMirrored.get(), currentPipelineState, frameConstantBuffer, materialSamplers))
                         {
                             ++m_DrawCallsDepthPrepass;
@@ -1520,7 +1520,7 @@ namespace Kurenai::Passes
                 {
                     const bool meshletDebug = geometrySettings.MeshletDebugViewEnabled && m_GBufferMeshletDebugPipelineState;
                     if (IssueModelCullIndirect(
-                            cmd, kModelCullRegionGBuffer,
+                            cmd, Passes::kModelCullRegionGBuffer,
                             meshletDebug ? m_GBufferMeshletDebugPipelineState.get()
                                          : m_GBufferMeshletPipelineState.get(),
                             currentPipelineState, frameConstantBuffer, materialSamplers))
@@ -1528,7 +1528,7 @@ namespace Kurenai::Passes
                         ++m_DrawCallsGBuffer;
                     }
                     if (IssueModelCullIndirect(
-                            cmd, kModelCullRegionGBufferMirrored,
+                            cmd, Passes::kModelCullRegionGBufferMirrored,
                             meshletDebug ? m_GBufferMeshletDebugPipelineStateMirrored.get()
                                          : m_GBufferMeshletPipelineStateMirrored.get(),
                             currentPipelineState, frameConstantBuffer, materialSamplers))
@@ -1646,7 +1646,7 @@ namespace Kurenai::Passes
                     cmd->CopyBufferToReadback(
                         m_Engine.GetMeshletCullStatsReadbackSlot(),
                         m_MeshletCullStatsBuffer.get(),
-                        static_cast<uint32_t>(sizeof(uint32_t)) * kMeshletCullStatsCount);
+                        static_cast<uint32_t>(sizeof(uint32_t)) * Passes::kMeshletCullStatsCount);
                 }
             },
         });
@@ -1671,7 +1671,7 @@ namespace Kurenai::Passes
                 {
                     cmd->CopyBufferToReadback(
                         m_Engine.GetModelCullReadbackSlot(), m_ModelCullCounterBuffer.get(),
-                        static_cast<uint32_t>(sizeof(uint32_t)) * kModelCullCounterCount);
+                        static_cast<uint32_t>(sizeof(uint32_t)) * Passes::kModelCullCounterCount);
                 },
             });
         }

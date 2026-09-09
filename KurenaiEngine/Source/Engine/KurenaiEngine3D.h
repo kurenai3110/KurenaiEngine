@@ -342,7 +342,7 @@ namespace Kurenai
         // 未知の名前・存在しないテクスチャ・非対応フォーマットはログを出して無視する
         void AddTextureDump(const wchar_t* name, const wchar_t* path, int mipLevel, int arraySlice, int frames, int stride);
 
-        // 何フレーム目のものを書き出すか。負なら既定(kMegaLightsAccumWarmup)。
+        // 何フレーム目のものを書き出すか。負なら既定(Passes::kMegaLightsAccumWarmup)。
         // **整定を待たずに撮ると、内部解像度が既定値のままの絵を掴む**(実際に起きた)
         void SetTextureDumpFrame(int frame);
 
@@ -1055,14 +1055,13 @@ namespace Kurenai
         void BuildInstanceBatches(RHI::IRHICommandList* commandList);
 
         // 出所は Rendering/GeometryDrawTypes.h(移行中の別名)
-        using InstanceDrawUnit = Rendering::InstanceDrawUnit;
         // このフレームの描画単位を組み立てる。coarsestLOD が真ならシャドウ/プローブ用の組、
         // 偽なら深度プリパス/G-Buffer/平面反射用の組を使う。
         // シーンの全インスタンスがちょうど1回ずつ現れる(バッチに入ったものはバッチとして)
-        void GetInstanceDrawUnits(bool coarsestLOD, std::vector<InstanceDrawUnit>& outUnits) const;
+        void GetInstanceDrawUnits(bool coarsestLOD, std::vector<Rendering::InstanceDrawUnit>& outUnits) const;
         // インスタンシングのバッチを使わないパス(DDGI / 半透明 / ソフトウェアラスタライザ)向けに、
         // シーンの全インスタンスを単体の描画単位として詰める。列挙順はm_Scene.Instancesの並びのまま
-        void BuildSingleInstanceDrawUnits(std::vector<InstanceDrawUnit>& outUnits) const;
+        void BuildSingleInstanceDrawUnits(std::vector<Rendering::InstanceDrawUnit>& outUnits) const;
 
         // --- ジオメトリ描画ループの共通化(Rendering/GeometryDrawLoop.h) --------------------
         //
@@ -1071,9 +1070,6 @@ namespace Kurenai
         // 前半をForEachGeometryDrawへ寄せ、後半をコールバックとして呼び出し側に残す
 
         // 出所は Rendering/GeometryDrawTypes.h(移行中の別名)
-        using GeometryLODMode = Rendering::GeometryLODMode;
-        using GeometryMeshFilter = Rendering::GeometryMeshFilter;
-        using GeometryDrawLoopDesc = Rendering::GeometryDrawLoopDesc;
 
     public:
         // onModel: モデル単位で描き切ったなら真を返す(メッシュのループへ入らない)
@@ -1082,12 +1078,12 @@ namespace Kurenai
         // 【publicにしてある】Passes/*の各群がこれを呼ぶ。状態(下のm_DrawUnitScratch)は
         // エンジンが持ったままなので、群がスクラッチを持つことにはならない
         template <typename ModelFn, typename MeshFn>
-        void ForEachGeometryDraw(const GeometryDrawLoopDesc& desc, ModelFn&& onModel, MeshFn&& onMesh);
+        void ForEachGeometryDraw(const Rendering::GeometryDrawLoopDesc& desc, ModelFn&& onModel, MeshFn&& onMesh);
 
     private:
         // 上の出力先。パスは順に実行されるので1本を使い回してよい(確保のやり直しを避ける)。
         // **パスのラムダより長生きする必要がある**ため、ローカル変数ではなくここに置く
-        mutable std::vector<InstanceDrawUnit> m_DrawUnitScratch;
+        mutable std::vector<Rendering::InstanceDrawUnit> m_DrawUnitScratch;
         // 上が1本しかないことを守るための旗。入れ子で列挙すると内側が外側の列挙対象を
         // 書き換えてしまう。検査の中身はRendering/GeometryDrawLoop.hにある
         mutable bool m_DrawUnitScratchInUse = false;
@@ -1109,7 +1105,6 @@ namespace Kurenai
         MeshletLODFrameConstants m_MeshletLODFrame;
         // 増幅シェーダーが数え上げる先。uint×3 = [判定, 視錐台+コーンで間引き, オクルージョンで間引き]
         // 出所は Passes/GeometryConstants.h(移行中の別名)
-        static constexpr uint32_t kMeshletCullStatsCount = Passes::kMeshletCullStatsCount;
         // カウンタバッファ本体は Passes::GeometryPasses が持つ(数えるのが増幅シェーダーのため)。
 
         // カウンタをCPUへ持ってくるための受け皿。
@@ -1134,17 +1129,9 @@ namespace Kurenai
         //
         // 【区画の分け方と、その理由】Passes/GeometryConstants.h が持つ。
         // ここに並ぶ7本は移行中の別名で、あちらの値を引くだけ。
-        static constexpr uint32_t kModelCullRegionGBuffer = Passes::kModelCullRegionGBuffer;
-        static constexpr uint32_t kModelCullRegionGBufferMirrored = Passes::kModelCullRegionGBufferMirrored;
-        static constexpr uint32_t kModelCullRegionPrepassOpaque = Passes::kModelCullRegionPrepassOpaque;
-        static constexpr uint32_t kModelCullRegionPrepassOpaqueMirrored = Passes::kModelCullRegionPrepassOpaqueMirrored;
-        static constexpr uint32_t kModelCullRegionPrepassCutout = Passes::kModelCullRegionPrepassCutout;
-        static constexpr uint32_t kModelCullRegionPrepassCutoutMirrored = Passes::kModelCullRegionPrepassCutoutMirrored;
-        static constexpr uint32_t kModelCullRegionCount = Passes::kModelCullRegionCount;
         // 出所は Passes/GeometryConstants.h(移行中の別名)
-        static constexpr uint32_t kModelCullArgsBaseOffset = Passes::kModelCullArgsBaseOffset;
         static_assert(
-            kModelCullArgsBaseOffset >= sizeof(uint32_t) * kModelCullRegionCount,
+            Passes::kModelCullArgsBaseOffset >= sizeof(uint32_t) * Passes::kModelCullRegionCount,
             "区画ごとの発行数が引数配列の領域へはみ出している");
 
         // GpuModelCullInstance は Passes/GeometryConstants.h へ移した
@@ -1154,7 +1141,6 @@ namespace Kurenai
         //
         // [判定, 視錐台で間引き, オクルージョンで間引き, 生き残り] + 区画ごとの発行数
         // 出所は Passes/GeometryConstants.h(移行中の別名)
-        static constexpr uint32_t kModelCullCounterCount = Passes::kModelCullCounterCount;
         // 受け皿。リングの理由と段数はメッシュレット統計と同じ
         std::unique_ptr<RHI::IRHIBuffer> m_ModelCullReadback[kMeshletCullStatsRingSize];
         uint32_t m_ModelCullRingIndex = 0;
@@ -1165,7 +1151,7 @@ namespace Kurenai
         uint32_t m_ModelCullSurvived = 0;
         // 区画ごとにGPUが実際に発行したドロー数(読み戻した値)。
         // ここが0のまま絵が出ているなら、間接描画ではなく従来のCPUループが描いている
-        uint32_t m_ModelCullRegionIssued[kModelCullRegionCount]{};
+        uint32_t m_ModelCullRegionIssued[Passes::kModelCullRegionCount]{};
         // GPUの数値と突き合わせるためのCPU側の値を積むリング。
         //
         // 【GPUの数値は2フレーム遅れなので、CPU側も同じだけ遅らせて比べる】
@@ -1277,7 +1263,6 @@ namespace Kurenai
         MegaLightsSettings m_MegaLightsSettings;
 
         // 出所は Passes/MegaLightsConstants.h(移行中の別名)
-        static constexpr uint32_t kMegaLightsMaxSpatialIterations = Passes::kMegaLightsMaxSpatialIterations;
         // 履歴・デノイザの作業バッファは RenderTargets、その添字と有効性は
         // Passes/MegaLightsPasses が持つ
 
@@ -1308,7 +1293,6 @@ namespace Kurenai
         // 蓄積バッファは RenderTargets::MegaLightsAccumBuffer、進行状態は Passes/MegaLightsPasses が持つ
         // 何フレーム待ってから足し始めるか。小さなシーンの読み込みとリサイズが片付く目安
         // 出所は Passes/MegaLightsConstants.h(移行中の別名)
-        static constexpr uint32_t kMegaLightsAccumWarmup = Passes::kMegaLightsAccumWarmup;
 
         // --- GPU計測の書き出し(計測専用) ---
         std::wstring m_PerfDumpPath;
@@ -1425,7 +1409,7 @@ namespace Kurenai
             bool Done = false;
         };
         std::vector<TextureDumpRequest> m_TextureDumps;
-        // 何フレーム目で撮るか。負なら kMegaLightsAccumWarmup を使う
+        // 何フレーム目で撮るか。負なら Passes::kMegaLightsAccumWarmup を使う
         // (新しい定数を作らないのは、あちらのコメントに書かれた「整定を待つ理由」が
         //  そのまま当てはまり、値が2つに割れると片方だけ直す事故が起きるため)
         int32_t m_TextureDumpFrame = -1;
@@ -1583,7 +1567,6 @@ namespace Kurenai
         // カスケードシャドウマップ(CSM)。近いカスケードほどテクセル密度が高く、遠いカスケードほど
         // 広い範囲を粗くカバーする
         // 出所は Rendering/ShadowConstants.h(移行中の別名)
-        static constexpr uint32_t kShadowMapSize = Rendering::kShadowMapSize;
 
         ShadowSettings m_ShadowSettings;
 
@@ -1621,17 +1604,8 @@ namespace Kurenai
         static constexpr uint32_t kCubeFaceCount = ::Kurenai::kCubeFaceCount;
     private:
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kIBLIrradianceSize = Passes::kIBLIrradianceSize;
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kIBLPrefilterBaseSize = Passes::kIBLPrefilterBaseSize;
-    public:
-        // プリフィルタ済み鏡面マップのミップ数(128,64,32,16,8,4の6段)。ラフネス[0,1]を
-        // [0, kIBLPrefilterMipLevels-1]のミップ番号へ線形マッピングする(DeferredLighting.hlsl参照)
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kIBLPrefilterMipLevels = Passes::kIBLPrefilterMipLevels;
-    private:
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kIBLBRDFLUTSize = Passes::kIBLBRDFLUTSize;
         // ボリュメトリック雲の3Dノイズの1辺のテクセル数。
         // Shapeは128^3のRGBA8で8MB、Detailは32^3のRGBA8で128KB。合わせて約8.1MB。
         // Shapeを128にしているのは、雲1つが画面上で数百画素に広がるため塊の形にはこの程度の
@@ -1641,29 +1615,21 @@ namespace Kurenai
         // Transmittanceは高度×視線天頂角、MultiScatteringは高度×太陽天頂角で、
         // どちらも大気パラメータだけで決まるためカメラにも時刻にも依存しない。
         // SkyViewは空そのもの(太陽の子午線からの方位×天頂角)で、太陽が動くと変わる。
-        // **kSkyViewLUTWidth/Heightはシェーダ側(AtmosphereCommon.hlsliの
+        // **Passes::kSkyViewLUTWidth/Heightはシェーダ側(AtmosphereCommon.hlsliの
         // kSkyViewLUTWidthF/kSkyViewLUTHeightF)と一致させること** — UVの半テクセル補正に
         // 解像度が要るため、焼く側・引く側の両方が同じ値を知っている必要がある
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kTransmittanceLUTWidth = Passes::kTransmittanceLUTWidth;
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kTransmittanceLUTHeight = Passes::kTransmittanceLUTHeight;
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kMultiScatteringLUTSize = Passes::kMultiScatteringLUTSize;
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kSkyViewLUTWidth = Passes::kSkyViewLUTWidth;
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kSkyViewLUTHeight = Passes::kSkyViewLUTHeight;
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kCloudShapeNoiseSize = Passes::kCloudShapeNoiseSize;
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kCloudDetailNoiseSize = Passes::kCloudDetailNoiseSize;
         // ウェザーマップ(H3)。ノイズ空間の1周期(256セル=358km)を1枚で覆うので、
         // 4096なら88m/テクセル。**CloudNoiseGenerate.hlsl の kWeatherNoiseSize と同じ値であること**
         // (片方だけ変えるとテクセル中心がずれ、バイリニアが半テクセル分ぼける)。
         // R8G8B8A8で4096^2 = 67MB。解像度の実測はSky.hlsliのウェザーマップの節
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kCloudWeatherNoiseSize = Passes::kCloudWeatherNoiseSize;
         // 手続き空(SkyGenerate.hlsl): Perez分布をGPUで評価してキューブマップを生成する。
         // オフラインで焼いたDDS(Sky.dds)と違い、太陽が動くと空の輝度分布の「形」も追従する
         // (circumsolarの明るい領域が太陽と一緒に動く)。詳細はSkyGenerate.hlsl冒頭。
@@ -1672,7 +1638,6 @@ namespace Kurenai
         // 従来どおりDDSを使う必要があるため、手続き空は別テクスチャに持ち、
         // ActiveSkyTexture()がフレームごとにどちらを使うか決める
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kProceduralSkySize = Passes::kProceduralSkySize;
         // 手続き空のキューブマップは持ち主を SkyResources::ProceduralSkyTexture へ移した
         // シェーダー・PSO・定数バッファは Passes/EnvironmentPasses へ移した
         // SkyGenerate用の専用定数バッファ。m_IBLResources.PrefilterConstantBufferと共用しないこと
@@ -1754,7 +1719,6 @@ namespace Kurenai
         // 削減が効くのは太陽が止まっているシーン(Defaults::TimeAutoAdvanceは既定false)で、
         // その場合は起動直後の1回だけになる
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr float kSkyViewRebakeAngleDegrees = Passes::kSkyViewRebakeAngleDegrees;
         // イラディアンス畳み込みのシェーダーとPSOは Passes/EnvironmentPasses へ移した
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
         // 畳み込みのPSOは持ち主を IBLResources::PrefilterPipelineState へ移した
@@ -1769,7 +1733,6 @@ namespace Kurenai
         // 64×64×6=24,576テクセルはCSIrradianceの約9,750万サンプルに対し十分密で、
         // 9個の係数を求めるだけの積分には(理論上は32でも足りる範囲)余裕を持たせた値
         // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        static constexpr uint32_t kSHProjectionSize = Passes::kSHProjectionSize;
         // SHのシェーダー3本・PSO3本・バッファ2本は Passes/EnvironmentPasses へ移した
         // IBLの有効/強度・SH経路・専用イラディアンス・環境光の拡散/鏡面/フォールバック強度は
         // m_IBLSettingsへ移した(Settings/IBLSettings.h)。bent normal/multi-bounce AOの
@@ -1822,10 +1785,9 @@ namespace Kurenai
         // これを超えるプローブが置かれたシーンは先頭からこの数だけを採用する(警告ログを出す)
         static constexpr uint32_t kMaxReflectionProbes = 8;
     private:
-        // キャプチャ解像度。プリフィルタ済み鏡面のベース解像度(kIBLPrefilterBaseSize)と揃えることで、
+        // キャプチャ解像度。プリフィルタ済み鏡面のベース解像度(Passes::kIBLPrefilterBaseSize)と揃えることで、
         // ミップ0が「畳み込み無しのキャプチャそのもの」になりデバッグ表示で生の映り込みを確認できる
         // 出所は Passes/ReflectionProbeConstants.h(移行中の別名)
-        static constexpr uint32_t kProbeCaptureSize = Passes::kProbeCaptureSize;
         std::unique_ptr<RHI::IRHIShader> m_ProbeCaptureVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_ProbeCapturePixelShader;
         // キャプチャのPSOは持ち主を GIResources::ProbeCapturePipelineState へ移した。
@@ -1866,19 +1828,14 @@ namespace Kurenai
         // オクタヘドラル1プローブぶんの1辺のテクセル数(境界を含まない)。
         // 拡散イラディアンスは低周波なのでこの程度で足りる。距離は遮蔽の輪郭を担うので広く取る
         // 出所は Passes/DDGIConstants.h(移行中の別名)
-        static constexpr uint32_t kDDGIIrradianceTexels = Passes::kDDGIIrradianceTexels;
         // 出所は Passes/DDGIConstants.h(移行中の別名)
-        static constexpr uint32_t kDDGIDistanceTexels = Passes::kDDGIDistanceTexels;
         // 各辺に足す境界の幅。オクタヘドラルは正方形の縁が球面上で折り返して繋がるため、
         // その繋がる先のテクセルを外周へ複製しておかないと、バイリニア補間が縁で破綻する
         // (隣のプローブのテクセルを拾ってしまうことの防止も兼ねる)
         // 出所は Passes/DDGIConstants.h(移行中の別名)
-        static constexpr uint32_t kDDGIProbeBorder = Passes::kDDGIProbeBorder;
         // アトラス上の1プローブぶんのセルの1辺(境界込み)
         // 出所は Passes/DDGIConstants.h(移行中の別名)
-        static constexpr uint32_t kDDGIIrradianceCell = Passes::kDDGIIrradianceCell;
         // 出所は Passes/DDGIConstants.h(移行中の別名)
-        static constexpr uint32_t kDDGIDistanceCell = Passes::kDDGIDistanceCell;
         // プローブ数の上限。反射プローブと違いアトラスはシーン読み込み時に確保し直すので
         // 技術的な固定容量ではないが、.ksceneの書き間違いで数GBのアトラスを作らないための歯止め
         // シーン全体で確保してよいプローブ数の上限。**容量の限界ではなく、`.kscene`の
@@ -1886,7 +1843,6 @@ namespace Kurenai
         // クリップマップLODでプローブ総数が「格子の積 × LOD段数」になったので引き上げた
         // (8192でもイラディアンス8MB + 距離16MB程度で、実際の律速は更新スループット側)
         // 出所は Passes/DDGIConstants.h(移行中の別名)
-        static constexpr uint32_t kDDGIMaxProbes = Passes::kDDGIMaxProbes;
         // クリップマップLODの最大段数。FrameConstantsへ段数ぶんの配列を持つので有界にしておく。
         // SceneLoaderのLODCountの検証範囲と一致させること
         static constexpr uint32_t kDDGIMaxLODCount = 4;
@@ -1894,7 +1850,6 @@ namespace Kurenai
         // 反射プローブのkProbeCaptureSize(128)と違い小さくてよいのは、DDGIが必要とするのが
         // 「低周波の拡散イラディアンス」であって鏡面の映り込みではないため
         // 出所は Passes/DDGIConstants.h(移行中の別名)
-        static constexpr uint32_t kDDGICaptureSize = Passes::kDDGICaptureSize;
 
         // LOD 1段ぶんのプローブ数(ProbeCountsの3軸の積)。通し番号からLODを割り出すのに使う
         uint32_t m_DDGIProbesPerLOD = 1;
@@ -1909,7 +1864,6 @@ namespace Kurenai
 
         // これを超えて実効プリ露出が動いたら追従させる(段)。1段=明るさ2倍ぶん
         // 出所は Passes/DDGIConstants.h(移行中の別名)
-        static constexpr float kDDGIExposureRewarmEV = Passes::kDDGIExposureRewarmEV;
         // ConvergeThenStopで停止するまでの巡回数。
         //
         // 【なぜヒステリシス由来の巡回数をやめたか】以前は残差0.01を切る巡回数
@@ -1935,7 +1889,6 @@ namespace Kurenai
         // 値で、多重バウンスの寄与を分離できる計測になっていない。上の残差の式は理屈であって
         // 裏取り済みの数字ではない
         // 出所は Passes/DDGIConstants.h(移行中の別名)
-        static constexpr uint32_t kDDGIBounceCycles = Passes::kDDGIBounceCycles;
 
         // 格子上のプローブ番号からワールド座標を求める。番号の分解は
         // index = x + y*Cx + z*Cx*Cy で、シェーダー側の並びと一致させること
@@ -2077,19 +2030,8 @@ namespace Kurenai
         // タイルライトカリングのタイルサイズ(1辺のピクセル数)。
         // LightCulling.hlsl の kTileSize および numthreads と必ず一致させること
         // 出所は Passes/MegaLightsConstants.h(移行中の別名)
-        static constexpr uint32_t kLightTileSize = Passes::kLightTileSize;
-    public:
-        // 1タイルが保持できるライト数の上限。LightCulling.hlsl の kMaxLightsPerTile および
-        // DirectLighting.hlsl の同名の定数と必ず一致させること(バッファのストライドがこの値で決まる)。
-        // HLSL側はgroupshared配列のサイズに使うためコンパイル時定数である必要があり、
-        // C++からの受け渡しでは代用できないので、3箇所で同じ値を書く形になっている。
-        // .cppの無名名前空間ではなくここに置いてあるのは、DebugViewPanelがヒートマップの
-        // 上限としてこの値を使うため
-        // 出所は Passes/MegaLightsConstants.h(移行中の別名)
-        static constexpr uint32_t kLightTileCapacity = Passes::kLightTileCapacity;
-    private:
         // ライトグリッド1タイルぶんの要素数(先頭1個がライト数、残りがライトインデックス)
-        static constexpr uint32_t kLightTileStride = 1 + kLightTileCapacity;
+        static constexpr uint32_t kLightTileStride = 1 + Passes::kLightTileCapacity;
 
     public:
         // MegaLightsの候補プールが1タイルあたりに抽出する候補の数(K)。

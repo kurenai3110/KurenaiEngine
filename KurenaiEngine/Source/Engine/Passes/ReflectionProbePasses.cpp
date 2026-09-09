@@ -89,8 +89,8 @@ namespace Kurenai::Passes
             const DirectX::XMFLOAT3 probePosition{ probe.Position[0], probe.Position[1], probe.Position[2] };
 
             RHI::Viewport probeViewport;
-            probeViewport.Width = static_cast<float>(kProbeCaptureSize);
-            probeViewport.Height = static_cast<float>(kProbeCaptureSize);
+            probeViewport.Width = static_cast<float>(Passes::kProbeCaptureSize);
+            probeViewport.Height = static_cast<float>(Passes::kProbeCaptureSize);
             // 2枚目は距離(19.12節)。ProbeCapture.hlslのPSOutputと並びを一致させること
             RHI::IRHITexture* const captureTargets[] = { gi->ProbeCaptureColor.get(), gi->ProbeCaptureDistance.get() };
 
@@ -225,7 +225,7 @@ namespace Kurenai::Passes
             // 距離は畳み込まないため、スクラッチのキューブを経由せずプローブのスライスへ直接書く
             cmd->SetComputeUnorderedAccessTextureCubeFace(
                 1, gi->ProbeDistanceArray.get(), face, 0, static_cast<uint32_t>(probeIndex));
-            cmd->Dispatch((kProbeCaptureSize + 7) / 8, (kProbeCaptureSize + 7) / 8, 1);
+            cmd->Dispatch((Passes::kProbeCaptureSize + 7) / 8, (Passes::kProbeCaptureSize + 7) / 8, 1);
         };
 
         // 組み上がったスクラッチのキューブマップを、IBLとまったく同じ手順で畳み込んで
@@ -240,8 +240,8 @@ namespace Kurenai::Passes
             [this, gi, iblPrefilterConstantBuffer](RHI::IRHICommandList* cmd, size_t probeIndex, uint32_t mip, uint32_t face)
         {
             const uint32_t cubeIndex = static_cast<uint32_t>(probeIndex);
-            const uint32_t mipSize = std::max(1u, kIBLPrefilterBaseSize >> mip);
-            const float roughness = static_cast<float>(mip) / static_cast<float>(kIBLPrefilterMipLevels - 1);
+            const uint32_t mipSize = std::max(1u, Passes::kIBLPrefilterBaseSize >> mip);
+            const float roughness = static_cast<float>(mip) / static_cast<float>(Passes::kIBLPrefilterMipLevels - 1);
 
             Passes::IBLFaceConstants faceConstants{};
             faceConstants.Face = face;
@@ -259,7 +259,7 @@ namespace Kurenai::Passes
             cmd->SetComputePipelineState(iblPrefilterPipelineState);
             cmd->SetComputeTexture(0, gi->ProbeRadianceCube.get());
             cmd->SetComputeSamplerSet(materialSamplers);
-            for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
+            for (uint32_t mip = 0; mip < Passes::kIBLPrefilterMipLevels; ++mip)
             {
                 for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                 {
@@ -387,8 +387,8 @@ namespace Kurenai::Passes
                             // つまりミップ0の6面ぶんに対して約1/4.5になる。
                             // なお1フレームの下限は「ミップ0の1面」であり、これ以上細かくするには
                             // 1つの面をさらに矩形へ分割する必要がある(そこまではやっていない)
-                            const uint32_t face = step / kIBLPrefilterMipLevels;
-                            const uint32_t mip = step % kIBLPrefilterMipLevels;
+                            const uint32_t face = step / Passes::kIBLPrefilterMipLevels;
+                            const uint32_t mip = step % Passes::kIBLPrefilterMipLevels;
                             convolveProbePrefilterStep(cmd, realtimeProbe, mip, face);
                         }
                     },

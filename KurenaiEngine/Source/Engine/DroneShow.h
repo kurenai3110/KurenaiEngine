@@ -64,7 +64,7 @@ namespace Kurenai
         // Evaluateが作った機体から、シーンを照らすための光源をsampleCount灯ぶん作る。
         //
         // 【なぜ全機を灯にしないか】1500灯はkMaxLights(1024)を超えるうえ、編隊は空の一点に
-        // 密集するので16pxタイルの容量(kLightTileCapacity=64)を確実に超え、超過分は
+        // 密集するので16pxタイルの容量(Passes::kLightTileCapacity=64)を確実に超え、超過分は
         // DirectLighting.hlslのmin()で**静かに欠落する**。さらにTransparent/PlanarReflection/
         // ProbeShading/DDGIProbeTraceの4本はタイルカリングを通らない全灯ループである。
         //

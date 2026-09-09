@@ -897,13 +897,13 @@ namespace Kurenai
                 static_cast<uint64_t>(m_GIResources.GIVolume.ProbeCounts[1]) *
                 static_cast<uint64_t>(m_GIResources.GIVolume.ProbeCounts[2]) *
                 static_cast<uint64_t>(lodCount);
-            if (probeCount > kDDGIMaxProbes)
+            if (probeCount > Passes::kDDGIMaxProbes)
             {
                 // 切り捨てでは格子が歪んで意味を成さない(反射プローブのように「先頭N個」で
                 // 済ませられない)ため、ボリュームごと無効にして従来のIBLのまま描く
                 Core::Logger::Error(
                     "KurenaiEngine3D",
-                    "[GIVolume]のプローブ数が上限(" + std::to_string(kDDGIMaxProbes) + ")を超えたためDDGIを無効にします: " +
+                    "[GIVolume]のプローブ数が上限(" + std::to_string(Passes::kDDGIMaxProbes) + ")を超えたためDDGIを無効にします: " +
                         std::to_string(probeCount) + "個(格子 × LOD" + std::to_string(lodCount) +
                         "段)。ProbeCountsかLODCountを減らすかProbeSpacingを広げてください");
                 m_GIResources.HasGIVolume = false;

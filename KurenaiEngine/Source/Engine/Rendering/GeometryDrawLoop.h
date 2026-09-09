@@ -80,7 +80,7 @@ namespace Kurenai
     // 間接呼び出しにしないため(1フレームに数千回通る)
     template <typename ModelFn, typename MeshFn>
     void KurenaiEngine3D::ForEachGeometryDraw(
-        const GeometryDrawLoopDesc& desc, ModelFn&& onModel, MeshFn&& onMesh)
+        const Rendering::GeometryDrawLoopDesc& desc, ModelFn&& onModel, MeshFn&& onMesh)
     {
         // 【入れ子の列挙を禁じる】m_DrawUnitScratchは1本しかなく、内側の列挙が
         // 外側の列挙対象を丸ごと書き換えてしまう。段階5から人手のコメントで守ってきた
@@ -112,9 +112,9 @@ namespace Kurenai
         } scratchGuard{ m_DrawUnitScratchInUse, m_DrawUnitScratchInUse };
         m_DrawUnitScratchInUse = true;
 
-        const bool coarsest = desc.LODMode == GeometryLODMode::Coarsest;
+        const bool coarsest = desc.LODMode == Rendering::GeometryLODMode::Coarsest;
 
-        // 列挙元をどちらでも InstanceDrawUnit へ揃える。
+        // 列挙元をどちらでも Rendering::InstanceDrawUnit へ揃える。
         // 【バッチを使わないパスも同じ形で回す】DDGI・半透明・ソフトウェアラスタライザは
         // インスタンシングのバッチを使わないが、InstanceCount==1 の単体として
         // 詰め直せば以降の分岐が1本で済む(unit.IsBatch() が常に偽になるだけ)
@@ -127,7 +127,7 @@ namespace Kurenai
             BuildSingleInstanceDrawUnits(m_DrawUnitScratch);
         }
 
-        for (const InstanceDrawUnit& unit : m_DrawUnitScratch)
+        for (const Rendering::InstanceDrawUnit& unit : m_DrawUnitScratch)
         {
             const Assets::ModelInstance& instance = *unit.Instance;
 
@@ -156,7 +156,7 @@ namespace Kurenai
             {
                 lodDraws[0] = { GetCoarsestLOD(instance), 1.0f };
             }
-            else if (desc.LODMode == GeometryLODMode::Current)
+            else if (desc.LODMode == Rendering::GeometryLODMode::Current)
             {
                 lodDraws[0] = { GetCurrentLOD(unit.InstanceIndex), 1.0f };
             }
@@ -188,8 +188,8 @@ namespace Kurenai
                     // 不透明のパスはBLEND(mesh.IsTransparent)を、半透明のパスはそれ以外を落とす。
                     // G-Bufferのアルファは常に1.0で半透明合成ができないため、BLENDだけは
                     // 専用のフォワードパスへ回る。Allはシャドウパス専用(理由はGeometryMeshFilter)
-                    if (desc.MeshFilter != GeometryMeshFilter::All
-                        && mesh.IsTransparent != (desc.MeshFilter == GeometryMeshFilter::Transparent))
+                    if (desc.MeshFilter != Rendering::GeometryMeshFilter::All
+                        && mesh.IsTransparent != (desc.MeshFilter == Rendering::GeometryMeshFilter::Transparent))
                     {
                         continue;
                     }

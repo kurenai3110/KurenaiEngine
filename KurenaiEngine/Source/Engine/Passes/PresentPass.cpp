@@ -267,8 +267,8 @@ namespace Kurenai::Passes
         case DebugView::IBLBRDFLUT:
             presentSourceTexture = brdfLUTTexture;
             presentMode = 0; // (A, B, Eavg)の生値をそのままRGBとして表示(値域はおおむね[0,1])
-            presentSourceWidth = kIBLBRDFLUTSize;
-            presentSourceHeight = kIBLBRDFLUTSize;
+            presentSourceWidth = Passes::kIBLBRDFLUTSize;
+            presentSourceHeight = Passes::kIBLBRDFLUTSize;
             break;
         case DebugView::Bloom:
             // ピラミッド最上段(半解像度、HDR)。Mode 4でトーンマッピングしてから表示する
@@ -343,7 +343,7 @@ namespace Kurenai::Passes
             // 裏面率はイラディアンスアトラスのαなので、資源も寸法もイラディアンスと同じ
             const bool isIrradiance =
                 (frame.Settings.DebugView.View == DebugView::DDGIIrradiance || frame.Settings.DebugView.View == DebugView::DDGIProbeBackface);
-            const uint32_t cell = isIrradiance ? kDDGIIrradianceCell : kDDGIDistanceCell;
+            const uint32_t cell = isIrradiance ? Passes::kDDGIIrradianceCell : Passes::kDDGIDistanceCell;
             const uint32_t columns = gi->GIVolume.ProbeCounts[0] * gi->GIVolume.ProbeCounts[1];
             const uint32_t rows = gi->GIVolume.ProbeCounts[2];
 
@@ -382,20 +382,20 @@ namespace Kurenai::Passes
             if (frame.Settings.Sky.AtmosphereLUTDebugIndex == 1)
             {
                 presentSourceTexture = multiScatteringLUT;
-                presentSourceWidth = kMultiScatteringLUTSize;
-                presentSourceHeight = kMultiScatteringLUTSize;
+                presentSourceWidth = Passes::kMultiScatteringLUTSize;
+                presentSourceHeight = Passes::kMultiScatteringLUTSize;
             }
             else if (frame.Settings.Sky.AtmosphereLUTDebugIndex == 2)
             {
                 presentSourceTexture = skyViewLUT;
-                presentSourceWidth = kSkyViewLUTWidth;
-                presentSourceHeight = kSkyViewLUTHeight;
+                presentSourceWidth = Passes::kSkyViewLUTWidth;
+                presentSourceHeight = Passes::kSkyViewLUTHeight;
             }
             else
             {
                 presentSourceTexture = transmittanceLUT;
-                presentSourceWidth = kTransmittanceLUTWidth;
-                presentSourceHeight = kTransmittanceLUTHeight;
+                presentSourceWidth = Passes::kTransmittanceLUTWidth;
+                presentSourceHeight = Passes::kTransmittanceLUTHeight;
             }
             presentMode = 4;
             break;
@@ -437,7 +437,7 @@ namespace Kurenai::Passes
             presentDebugVolumeTexture =
                 showDetail ? cloudDetailNoiseTexture : cloudShapeNoiseTexture;
             presentMode = 18;
-            const uint32_t size = showDetail ? kCloudDetailNoiseSize : kCloudShapeNoiseSize;
+            const uint32_t size = showDetail ? Passes::kCloudDetailNoiseSize : Passes::kCloudShapeNoiseSize;
             presentSourceWidth = size;
             presentSourceHeight = size;
             break;
@@ -451,7 +451,7 @@ namespace Kurenai::Passes
         RHI::IRHIBuffer* const presentTileBuffer =
             presentUsesTilePool ? targets->MegaLightsTilePoolBuffer.get() : targets->LightTileBuffer.get();
         const uint32_t presentTileCapacity =
-            presentUsesTilePool ? static_cast<uint32_t>(frame.Settings.MegaLights.TilePoolCapacity) : kLightTileCapacity;
+            presentUsesTilePool ? static_cast<uint32_t>(frame.Settings.MegaLights.TilePoolCapacity) : Passes::kLightTileCapacity;
         // Mode 21だけは候補プールを書いた有効タイル幅を使う。Mode 11は従来のライトグリッドなので
         // LightTileCountXのままにし、デバッグ表示が実データと別の添字を読まないようにする
         const uint32_t presentTileCountX =
@@ -462,7 +462,7 @@ namespace Kurenai::Passes
         presentConstants.TileParams =
         {
             static_cast<float>(presentTileCountX),
-            static_cast<float>(kLightTileSize),
+            static_cast<float>(Passes::kLightTileSize),
             static_cast<float>(presentTileCapacity),
             // ヒートマップで赤に振り切る基準のライト数。容量そのものを基準にすると
             // 実データ(数灯)ではほぼ真っ青で差が読めないため、別のつまみにしてある

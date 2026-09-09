@@ -166,7 +166,7 @@ namespace Kurenai::UI
 
         ImGui::Text(
             "タイル: %u x %u (1タイルあたり最大%uライト)", m_Engine.GetLightTileCountX(), m_Engine.GetLightTileCountY(),
-            KurenaiEngine3D::kLightTileCapacity);
+            Passes::kLightTileCapacity);
 
         // 有効にしていてもパスが積まれないことがあるので、その旨をここで断る。
         // このチェックボックスだけを見て「効いていない」と読まれないようにする

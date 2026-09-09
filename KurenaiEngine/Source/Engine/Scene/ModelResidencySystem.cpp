@@ -88,7 +88,7 @@ namespace Kurenai
     // このフレームの描画単位を組み立てる。バッチに入ったインスタンスはバッチとして1回、
     // 入らなかったものは1体ずつ現れる ―― 全インスタンスがちょうど1回ずつ現れることが要点で、
     // 取りこぼすと物が消え、二重に出すと同じ場所へ2回描いてZファイティングになる
-    void KurenaiEngine3D::GetInstanceDrawUnits(bool coarsestLOD, std::vector<InstanceDrawUnit>& outUnits) const
+    void KurenaiEngine3D::GetInstanceDrawUnits(bool coarsestLOD, std::vector<Rendering::InstanceDrawUnit>& outUnits) const
     {
         const std::vector<InstanceBatch>& batches =
             coarsestLOD ? m_InstanceBatchesCoarsestLOD : m_InstanceBatchesCurrentLOD;
@@ -100,7 +100,7 @@ namespace Kurenai
 
         for (const InstanceBatch& batch : batches)
         {
-            InstanceDrawUnit unit;
+            Rendering::InstanceDrawUnit unit;
             // 代表はバッチの先頭。IsMirrored/IsWaterはバッチ内で同一(グループ化のキー)なので、
             // どれを代表にしても同じ値になる
             unit.Instance = &m_Scene.Instances[batch.RepresentativeIndex];
@@ -122,7 +122,7 @@ namespace Kurenai
             {
                 continue;   // バッチとして既に積んである
             }
-            InstanceDrawUnit unit;
+            Rendering::InstanceDrawUnit unit;
             unit.Instance = &m_Scene.Instances[i];
             unit.InstanceIndex = i;
             unit.Model = nullptr;   // 段は呼び出し側が決める(フェード中は2段になる)

@@ -206,9 +206,9 @@ namespace Kurenai::Passes
         m_EvaluateSHPipelineState = device.CreateComputePipelineState({ m_EvaluateSHComputeShader.get() });
 
         // SHの部分和(CSProjectSHのグループごとの出力)と最終係数(CSProjectSHFinalの出力)。
-        // グループ数は (kSHProjectionSize/8)² × 6面で固定(射影解像度はSourceSkyboxの実解像度と
+        // グループ数は (Passes::kSHProjectionSize/8)² × 6面で固定(射影解像度はSourceSkyboxの実解像度と
         // 無関係な固定値。kSHProjectionSizeのコメント参照)
-        const uint32_t groupsPerSide = (kSHProjectionSize + 7) / 8;
+        const uint32_t groupsPerSide = (Passes::kSHProjectionSize + 7) / 8;
         const uint32_t maxSHGroups = groupsPerSide * groupsPerSide * kCubeFaceCount;
         RHI::BufferDesc shPartialSumsDesc;
         shPartialSumsDesc.Usage = RHI::BufferUsage::StructuredRW;
@@ -343,7 +343,7 @@ namespace Kurenai::Passes
                     cmd->SetComputePipelineState(m_TransmittancePipelineState.get());
                     updateAtmosphereConstants(cmd);
                     cmd->SetComputeUnorderedAccessTexture(0, transmittanceLUT, 0);
-                    cmd->Dispatch((kTransmittanceLUTWidth + 7) / 8, (kTransmittanceLUTHeight + 7) / 8, 1);
+                    cmd->Dispatch((Passes::kTransmittanceLUTWidth + 7) / 8, (Passes::kTransmittanceLUTHeight + 7) / 8, 1);
 
                     // UAVはDispatch直後に自動で解除されるため張り直す。
                     // ここでTransmittanceをSRV(t0)として読むので、上のDispatchより後でなければならない
@@ -352,7 +352,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeTexture(0, transmittanceLUT);
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
                     cmd->SetComputeUnorderedAccessTexture(0, multiScatteringLUT, 0);
-                    const uint32_t groups = (kMultiScatteringLUTSize + 7) / 8;
+                    const uint32_t groups = (Passes::kMultiScatteringLUTSize + 7) / 8;
                     cmd->Dispatch(groups, groups, 1);
                 },
             });
@@ -372,7 +372,7 @@ namespace Kurenai::Passes
             const DirectX::XMVECTOR baked = DirectX::XMLoadFloat3(&m_SkyViewBakedSunPosition);
             const float cosAngle = DirectX::XMVectorGetX(DirectX::XMVector3Dot(current, baked));
             bakeSkyViewThisFrame =
-                cosAngle < std::cos(DirectX::XMConvertToRadians(kSkyViewRebakeAngleDegrees));
+                cosAngle < std::cos(DirectX::XMConvertToRadians(Passes::kSkyViewRebakeAngleDegrees));
         }
 
         if (m_SkyViewPipelineState && bakeSkyViewThisFrame)
@@ -391,7 +391,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeTexture(1, multiScatteringLUT);
                     cmd->SetComputeSamplerSet(screenSpaceSamplers);
                     cmd->SetComputeUnorderedAccessTexture(0, skyViewLUT, 0);
-                    cmd->Dispatch((kSkyViewLUTWidth + 7) / 8, (kSkyViewLUTHeight + 7) / 8, 1);
+                    cmd->Dispatch((Passes::kSkyViewLUTWidth + 7) / 8, (Passes::kSkyViewLUTHeight + 7) / 8, 1);
                 },
             });
         }
@@ -527,7 +527,7 @@ namespace Kurenai::Passes
                         cmd->UpdateBuffer(m_SkyBakeConstantBuffer.get(), &skyConstants, sizeof(skyConstants));
                         cmd->SetComputeConstantBuffer(0, m_SkyBakeConstantBuffer.get());
                         cmd->SetComputeUnorderedAccessTextureCubeFace(0, proceduralSkyTexture, face, 0);
-                        cmd->Dispatch((kProceduralSkySize + 7) / 8, (kProceduralSkySize + 7) / 8, 1);
+                        cmd->Dispatch((Passes::kProceduralSkySize + 7) / 8, (Passes::kProceduralSkySize + 7) / 8, 1);
                     }
                 },
             });
@@ -549,7 +549,7 @@ namespace Kurenai::Passes
                     // パス1: (A, B)をスクラッチへ焼く
                     cmd->SetComputePipelineState(m_BRDFLUTPipelineState.get());
                     cmd->SetComputeUnorderedAccessTexture(0, m_BRDFLUTScratchTexture.get(), 0);
-                    cmd->Dispatch((kIBLBRDFLUTSize + 7) / 8, (kIBLBRDFLUTSize + 7) / 8, 1);
+                    cmd->Dispatch((Passes::kIBLBRDFLUTSize + 7) / 8, (Passes::kIBLBRDFLUTSize + 7) / 8, 1);
 
                     // パス2: スクラッチをSRVで読み、Eavgを足した float4(A, B, Eavg, 0) を最終LUTへ。
                     // UAVはDispatch直後に自動で解除されるため、ここで張り直す必要がある
@@ -557,7 +557,7 @@ namespace Kurenai::Passes
                     cmd->SetComputePipelineState(m_BRDFLUTCombinePipelineState.get());
                     cmd->SetComputeTexture(0, m_BRDFLUTScratchTexture.get());
                     cmd->SetComputeUnorderedAccessTexture(0, brdfLUTTexture, 0);
-                    cmd->Dispatch((kIBLBRDFLUTSize + 7) / 8, (kIBLBRDFLUTSize + 7) / 8, 1);
+                    cmd->Dispatch((Passes::kIBLBRDFLUTSize + 7) / 8, (Passes::kIBLBRDFLUTSize + 7) / 8, 1);
                 },
             });
             m_BRDFLUTBaked = true;
@@ -583,14 +583,14 @@ namespace Kurenai::Passes
 
                     cmd->SetComputePipelineState(m_CloudShapeNoisePipelineState.get());
                     cmd->SetComputeUnorderedAccessTexture(0, cloudShapeNoiseTexture, 0);
-                    const uint32_t shapeGroups = (kCloudShapeNoiseSize + kGroupSize - 1) / kGroupSize;
+                    const uint32_t shapeGroups = (Passes::kCloudShapeNoiseSize + kGroupSize - 1) / kGroupSize;
                     cmd->Dispatch(shapeGroups, shapeGroups, shapeGroups);
 
                     // UAVはDispatch直後に自動で解除されるため張り直す
                     // (IRHICommandList.hのバインド寿命の説明を参照)
                     cmd->SetComputePipelineState(m_CloudDetailNoisePipelineState.get());
                     cmd->SetComputeUnorderedAccessTexture(0, cloudDetailNoiseTexture, 0);
-                    const uint32_t detailGroups = (kCloudDetailNoiseSize + kGroupSize - 1) / kGroupSize;
+                    const uint32_t detailGroups = (Passes::kCloudDetailNoiseSize + kGroupSize - 1) / kGroupSize;
                     cmd->Dispatch(detailGroups, detailGroups, detailGroups);
 
                     // ウェザーマップ(H3)は2Dなのでスレッドグループが8x8(=64。上の4x4x4と同じ粒度)。
@@ -599,7 +599,7 @@ namespace Kurenai::Passes
                     cmd->SetComputePipelineState(m_CloudWeatherNoisePipelineState.get());
                     cmd->SetComputeUnorderedAccessTexture(0, cloudWeatherNoiseTexture, 0);
                     const uint32_t weatherGroups =
-                        (kCloudWeatherNoiseSize + kWeatherGroupSize - 1) / kWeatherGroupSize;
+                        (Passes::kCloudWeatherNoiseSize + kWeatherGroupSize - 1) / kWeatherGroupSize;
                     cmd->Dispatch(weatherGroups, weatherGroups, 1);
                 },
             });
@@ -619,10 +619,10 @@ namespace Kurenai::Passes
                     cmd->SetComputePipelineState(iblPrefilterPipelineState);
                     cmd->SetComputeTexture(0, skyTexture);
                     cmd->SetComputeSamplerSet(materialSamplers);
-                    for (uint32_t mip = 0; mip < kIBLPrefilterMipLevels; ++mip)
+                    for (uint32_t mip = 0; mip < Passes::kIBLPrefilterMipLevels; ++mip)
                     {
-                        const uint32_t mipSize = std::max(1u, kIBLPrefilterBaseSize >> mip);
-                        const float roughness = static_cast<float>(mip) / static_cast<float>(kIBLPrefilterMipLevels - 1);
+                        const uint32_t mipSize = std::max(1u, Passes::kIBLPrefilterBaseSize >> mip);
+                        const float roughness = static_cast<float>(mip) / static_cast<float>(Passes::kIBLPrefilterMipLevels - 1);
                         for (uint32_t face = 0; face < kCubeFaceCount; ++face)
                         {
                             IBLFaceConstants faceConstants{};
@@ -668,7 +668,7 @@ namespace Kurenai::Passes
                     if (iblSettings.UseSHIrradiance)
                     {
                         IBLFaceConstants shConstants{};
-                        shConstants.SHProjectionSize = static_cast<float>(kSHProjectionSize);
+                        shConstants.SHProjectionSize = static_cast<float>(Passes::kSHProjectionSize);
                         shConstants.SHWindowLambda = iblSettings.SHWindowLambda;
 
                         // --- 1. 射影: ソースキューブ全体を1回だけ読んで9個の係数(RGB)へ集約する ---
@@ -678,7 +678,7 @@ namespace Kurenai::Passes
                         cmd->SetComputeTexture(0, skyTexture);
                         cmd->SetComputeSamplerSet(materialSamplers);
                         cmd->SetComputeUnorderedAccessBuffer(0, m_SHPartialSumsBuffer.get());
-                        const uint32_t groupsPerSide = (kSHProjectionSize + 7) / 8;
+                        const uint32_t groupsPerSide = (Passes::kSHProjectionSize + 7) / 8;
                         cmd->Dispatch(groupsPerSide, groupsPerSide, kCubeFaceCount);
 
                         // --- 2. 最終合算: 全グループぶんの部分和を1ディスパッチでまとめる ---
@@ -701,7 +701,7 @@ namespace Kurenai::Passes
                             cmd->UpdateBuffer(iblPrefilterConstantBuffer, &faceConstants, sizeof(faceConstants));
                             cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
                             cmd->SetComputeUnorderedAccessTextureCubeFace(0, irradianceTexture, face, 0);
-                            cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
+                            cmd->Dispatch((Passes::kIBLIrradianceSize + 7) / 8, (Passes::kIBLIrradianceSize + 7) / 8, 1);
                         }
                     }
                     else
@@ -716,7 +716,7 @@ namespace Kurenai::Passes
                             cmd->UpdateBuffer(iblPrefilterConstantBuffer, &faceConstants, sizeof(faceConstants));
                             cmd->SetComputeConstantBuffer(0, iblPrefilterConstantBuffer);
                             cmd->SetComputeUnorderedAccessTextureCubeFace(0, irradianceTexture, face, 0);
-                            cmd->Dispatch((kIBLIrradianceSize + 7) / 8, (kIBLIrradianceSize + 7) / 8, 1);
+                            cmd->Dispatch((Passes::kIBLIrradianceSize + 7) / 8, (Passes::kIBLIrradianceSize + 7) / 8, 1);
                         }
                     }
                 },

@@ -192,7 +192,7 @@ namespace Kurenai
         Core::Logger::Info(
             "KurenaiEngine3D",
             "テクスチャを書き出すフレームを設定しました: " +
-                (frame < 0 ? std::string("既定(") + std::to_string(kMegaLightsAccumWarmup) + ")"
+                (frame < 0 ? std::string("既定(") + std::to_string(Passes::kMegaLightsAccumWarmup) + ")"
                            : std::to_string(frame)));
     }
 
@@ -350,7 +350,7 @@ namespace Kurenai
         // 待たずに書き出すと、読み込み途中の絵を既定解像度のまま吐き出すことになる
         // (kMegaLightsAccumWarmupのコメントに、実際にそうなった記録がある)
         const uint32_t targetFrame =
-            m_TextureDumpFrame >= 0 ? static_cast<uint32_t>(m_TextureDumpFrame) : kMegaLightsAccumWarmup;
+            m_TextureDumpFrame >= 0 ? static_cast<uint32_t>(m_TextureDumpFrame) : Passes::kMegaLightsAccumWarmup;
         if (m_TAAFrameIndex < targetFrame)
         {
             return;
@@ -1075,12 +1075,12 @@ namespace Kurenai
                 modelCullRegionText, sizeof(modelCullRegionText),
                 "  モデル単位GPU発行(%s): G-Buffer %u+%u / プリパス不透明 %u+%u / プリパスカットアウト %u+%u",
                 m_GeometryPasses->WasModelCullIndirectActiveLastFrame() ? "間接描画" : "計数のみ",
-                m_ModelCullRegionIssued[kModelCullRegionGBuffer],
-                m_ModelCullRegionIssued[kModelCullRegionGBufferMirrored],
-                m_ModelCullRegionIssued[kModelCullRegionPrepassOpaque],
-                m_ModelCullRegionIssued[kModelCullRegionPrepassOpaqueMirrored],
-                m_ModelCullRegionIssued[kModelCullRegionPrepassCutout],
-                m_ModelCullRegionIssued[kModelCullRegionPrepassCutoutMirrored]);
+                m_ModelCullRegionIssued[Passes::kModelCullRegionGBuffer],
+                m_ModelCullRegionIssued[Passes::kModelCullRegionGBufferMirrored],
+                m_ModelCullRegionIssued[Passes::kModelCullRegionPrepassOpaque],
+                m_ModelCullRegionIssued[Passes::kModelCullRegionPrepassOpaqueMirrored],
+                m_ModelCullRegionIssued[Passes::kModelCullRegionPrepassCutout],
+                m_ModelCullRegionIssued[Passes::kModelCullRegionPrepassCutoutMirrored]);
             Core::Logger::Info("Perf", modelCullRegionText);
 
             // どの経路で判定したか。**間引き数だけでは切り替わったか分からない** ――
@@ -1165,7 +1165,7 @@ namespace Kurenai
         {
             ++m_PerfDumpWarmupFrames;
             // 整定を待つ。内部解像度の切り替えとストリーミングが片付くまで
-            if (m_PerfDumpWarmupFrames > static_cast<int32_t>(kMegaLightsAccumWarmup))
+            if (m_PerfDumpWarmupFrames > static_cast<int32_t>(Passes::kMegaLightsAccumWarmup))
             {
                 for (const RHI::GPUTimingResult& pass : m_GPUProfiler->GetResults())
                 {
@@ -1207,7 +1207,7 @@ namespace Kurenai
     {
         // 1枚だけなら既存のテクスチャダンプと同じフレームを使う。複数枚では焼き込みを捕まえるため最初から出す。
         const uint32_t manifestTargetFrame =
-            m_TextureDumpFrame >= 0 ? static_cast<uint32_t>(m_TextureDumpFrame) : kMegaLightsAccumWarmup;
+            m_TextureDumpFrame >= 0 ? static_cast<uint32_t>(m_TextureDumpFrame) : Passes::kMegaLightsAccumWarmup;
         const bool writeSingleManifest =
             m_PassManifestTargetFrames == 1 && !m_PassManifestIssued && m_TAAFrameIndex >= manifestTargetFrame;
         const bool writeManifestSequence =

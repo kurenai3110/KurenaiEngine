@@ -147,7 +147,7 @@ namespace Kurenai
             // 署名が変わらないまま完了した巡回数。停止判定に使う
             uint32_t m_DDGIStableCycles = 0;
             // 収束済みとみなして更新を止めている状態。署名が変わると倒れる。
-            // 停止までの巡回数(kDDGIBounceCycles)の根拠は Passes/DDGIConstants.h を参照
+            // 停止までの巡回数(Passes::kDDGIBounceCycles)の根拠は Passes/DDGIConstants.h を参照
             bool m_DDGIUpdateSuspended = false;
 
             // 格子から画面へ解決する低解像度パス(雲パスと同じ作り。拡散イラディアンスと

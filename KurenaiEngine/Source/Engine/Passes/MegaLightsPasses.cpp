@@ -203,7 +203,7 @@ namespace Kurenai::Passes
         m_MegaLightsStochasticConstantBuffer =
             device.CreateBuffer(megaLightsStochasticConstantBufferDesc);
         // 空間再利用の反復ごとに1本ずつ。中身は共有分と同じで反復番号だけが違う
-        for (uint32_t spatialIteration = 0u; spatialIteration < kMegaLightsMaxSpatialIterations;
+        for (uint32_t spatialIteration = 0u; spatialIteration < Passes::kMegaLightsMaxSpatialIterations;
              ++spatialIteration)
         {
             m_MegaLightsSpatialConstantBuffer[spatialIteration] =
@@ -292,7 +292,7 @@ namespace Kurenai::Passes
                         targets->LightTileCountX,
                         targets->LightTileCountY,
                         static_cast<uint32_t>(gpuLights.size()),
-                        kLightTileCapacity,
+                        Passes::kLightTileCapacity,
                     };
                     cullingConstants.RenderSize = { renderWidth, renderHeight, 0u, 0u };
 
@@ -517,7 +517,7 @@ namespace Kurenai::Passes
                 stochasticConstants.Params1 =
                 {
                     megaLightsEffectiveTilesX,
-                    kLightTileSize,
+                    Passes::kLightTileSize,
                     // 候補プールを書いたときと同じKでなければならない(上のTileParams.wと同値)
                     static_cast<uint32_t>(megaLightsSettings.TilePoolCapacity),
                     m_Engine.GetTAAFrameIndex(),
@@ -624,14 +624,14 @@ namespace Kurenai::Passes
             uint32_t spatialIterations =
                 spatialRuns ? static_cast<uint32_t>(std::clamp(
                                   frame.Settings.MegaLights.SpatialIterations, 1,
-                                  static_cast<int32_t>(kMegaLightsMaxSpatialIterations)))
+                                  static_cast<int32_t>(Passes::kMegaLightsMaxSpatialIterations)))
                             : 0u;
             if (!temporalRuns && spatialIterations > 1u)
             {
                 spatialIterations = 1u;
             }
             // 最後の反復が書いた側をシェードが読む
-            RHI::IRHIBuffer* const spatialPingPong[kMegaLightsMaxSpatialIterations] = {
+            RHI::IRHIBuffer* const spatialPingPong[Passes::kMegaLightsMaxSpatialIterations] = {
                 targets->MegaLightsReservoirSpatialBuffer.get(), targets->MegaLightsReservoirSpatialBuffer2.get()
             };
 
@@ -650,7 +650,7 @@ namespace Kurenai::Passes
             RHI::IRHIBuffer* const reuseInputBuffer =
                 temporalRuns ? temporalOutputBuffer : targets->MegaLightsReservoirBuffer.get();
             RHI::IRHIBuffer* const shadeReservoirBuffer =
-                spatialRuns ? spatialPingPong[(spatialIterations - 1u) % kMegaLightsMaxSpatialIterations]
+                spatialRuns ? spatialPingPong[(spatialIterations - 1u) % Passes::kMegaLightsMaxSpatialIterations]
                             : reuseInputBuffer;
 
             graph.AddPass(Core::RenderGraphPassDesc{
@@ -753,11 +753,11 @@ namespace Kurenai::Passes
                 RHI::IRHIBuffer* const spatialInput =
                     (spatialIteration == 0u)
                         ? reuseInputBuffer
-                        : spatialPingPong[(spatialIteration - 1u) % kMegaLightsMaxSpatialIterations];
+                        : spatialPingPong[(spatialIteration - 1u) % Passes::kMegaLightsMaxSpatialIterations];
                 RHI::IRHIBuffer* const spatialOutput =
-                    spatialPingPong[spatialIteration % kMegaLightsMaxSpatialIterations];
+                    spatialPingPong[spatialIteration % Passes::kMegaLightsMaxSpatialIterations];
                 RHI::IRHIBuffer* const spatialConstants =
-                    m_MegaLightsSpatialConstantBuffer[spatialIteration % kMegaLightsMaxSpatialIterations].get();
+                    m_MegaLightsSpatialConstantBuffer[spatialIteration % Passes::kMegaLightsMaxSpatialIterations].get();
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "MegaLightsSpatial",
                     .Reads =
@@ -1098,7 +1098,7 @@ namespace Kurenai::Passes
         ++m_MegaLightsAccumWarmupFrames;
         const bool megaLightsAccumRuns = megaLightsRuns && frame.Settings.MegaLights.AccumTargetFrames > 0 &&
                                          m_MegaLightsAccumPipelineState && targets->MegaLightsAccumBuffer &&
-                                         m_MegaLightsAccumWarmupFrames > kMegaLightsAccumWarmup &&
+                                         m_MegaLightsAccumWarmupFrames > Passes::kMegaLightsAccumWarmup &&
                                          m_MegaLightsAccumFrames < static_cast<uint32_t>(frame.Settings.MegaLights.AccumTargetFrames);
         if (megaLightsAccumRuns)
         {

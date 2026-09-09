@@ -41,10 +41,10 @@ namespace Kurenai
         // R32_Floatを2テクセル並べる構成にしている)。
         // アトラスは455プローブでも合計1.4MB程度と小さいため、精度と可搬性を取って素直にR32にする
         m_GIResources.DDGIIrradianceAtlas = m_Device->CreateUAVTexture(
-            columns * kDDGIIrradianceCell, rows * kDDGIIrradianceCell, RHI::Format::R32G32B32A32_Float);
+            columns * Passes::kDDGIIrradianceCell, rows * Passes::kDDGIIrradianceCell, RHI::Format::R32G32B32A32_Float);
         // R=平均距離、G=平均二乗距離
         m_GIResources.DDGIDistanceAtlas = m_Device->CreateUAVTexture(
-            columns * kDDGIDistanceCell, rows * kDDGIDistanceCell, RHI::Format::R32G32_Float);
+            columns * Passes::kDDGIDistanceCell, rows * Passes::kDDGIDistanceCell, RHI::Format::R32G32_Float);
 
         // 進行状態は Passes::DDGIPasses が持つ。中身が未定義の新しいアトラスに対して
         // 「もう焼いてある」と誤判定させないため、確保の直後に一巡目からやり直させる
@@ -59,8 +59,8 @@ namespace Kurenai
                 "DDGIボリューム '" + m_GIResources.GIVolume.Name + "' を確保しました: " +
                     std::to_string(countX) + "x" + std::to_string(countY) + "x" + std::to_string(countZ) +
                     " = " + std::to_string(m_GIResources.DDGIProbeCount) + "プローブ, アトラス " +
-                    std::to_string(columns * kDDGIIrradianceCell) + "x" + std::to_string(rows * kDDGIIrradianceCell) +
-                    " / " + std::to_string(columns * kDDGIDistanceCell) + "x" + std::to_string(rows * kDDGIDistanceCell));
+                    std::to_string(columns * Passes::kDDGIIrradianceCell) + "x" + std::to_string(rows * Passes::kDDGIIrradianceCell) +
+                    " / " + std::to_string(columns * Passes::kDDGIDistanceCell) + "x" + std::to_string(rows * Passes::kDDGIDistanceCell));
         }
     }
 

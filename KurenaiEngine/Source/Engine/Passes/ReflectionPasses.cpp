@@ -283,7 +283,7 @@ namespace Kurenai::Passes
                     // インスタンシングのバッチと、まとめられなかった1体を同じ形で回す。
                     // 深度プリパス/G-Bufferと同じ「そのフレームに選ばれた段」を描くが、
                     // 【このパスはクロスディザ非対応】なのでフェード中でも段は1つに決め打つ
-                    // (GeometryLODMode::Current)。ストリーミング中で未読み込みなら描かない
+                    // (Rendering::GeometryLODMode::Current)。ストリーミング中で未読み込みなら描かない
                     Rendering::GeometryDrawLoopDesc planarLoop;
                     planarLoop.Frustum = &reflectionFrustum;
                     planarLoop.LODMode = Rendering::GeometryLODMode::Current;
