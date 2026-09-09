@@ -5,8 +5,6 @@
 #include <algorithm>
 #include <cmath>
 #include <exception>
-// std::begin / std::end (m_ModelCullRegionIssued の一括ゼロ埋め)
-#include <iterator>
 #include <string>
 #include <vector>
 
@@ -450,7 +448,7 @@ namespace Kurenai
         // --- メッシュレットカリングの統計を読み戻す(Stage 5-2) ---
         //
         // 【GPUを待たない】直前に積んだコピーはまだ実行されていないので、リングの中で
-        // **最も古いもの**(kMeshletCullStatsRingSize-1 = 2フレーム前に書いたもの)を読む。
+        // **最も古いもの**(2フレーム前に書いたもの)を読む。段数の根拠は CullStatsReadback.h。
         // DX12はkFrameCount(=2)フレームぶんCPUが先行するため、2フレーム前のGPU実行は
         // 完了している。待ちを入れるとフレームが直列化し、計測のために計測対象を壊す。
         //
@@ -458,10 +456,8 @@ namespace Kurenai
         // 0として集計に足すと間引き率が実際より低く出るので、そのフレームは丸ごと飛ばす
         if (meshletCullStatsActive)
         {
-            const uint32_t oldestIndex = (m_MeshletCullStatsRingIndex + 1) % kMeshletCullStatsRingSize;
             uint32_t counters[Passes::kMeshletCullStatsCount] = {};
-            if (m_MeshletCullStatsReadback[oldestIndex] &&
-                m_MeshletCullStatsReadback[oldestIndex]->ReadbackData(counters, sizeof(counters)))
+            if (m_CullStats.ResolveMeshlet(counters, sizeof(counters)))
             {
                 m_RenderStats.MeshletCullTested = counters[0];
                 m_RenderStats.MeshletCullFrustumCulled = counters[1];
@@ -472,7 +468,6 @@ namespace Kurenai
                 m_FrameStatsMeshletOcclusionCulledSum += m_RenderStats.MeshletCullOcclusionCulled;
                 ++m_FrameStatsMeshletSampleCount;
             }
-            m_MeshletCullStatsRingIndex = (m_MeshletCullStatsRingIndex + 1) % kMeshletCullStatsRingSize;
         }
         else
         {
@@ -487,39 +482,15 @@ namespace Kurenai
         // リングの理由も「読めなかったフレームは足さない」もメッシュレット統計と同じ
         if (blackboard.ModelCullReady)
         {
-            // 今フレームのCPU側の結果を、GPUのコピーとまったく同じ位置へ積む。
-            // 読むときに同じ位置から取れば、比べるのは同じフレームのもの同士になる
-            m_ModelCullCpuFrustumHistory[m_ModelCullRingIndex] = m_GeometryPasses->GetModelCullCpuFrustumCulled();
             // 【比べる相手はG-Bufferぶんの候補数】GPU側の「判定」もそこだけを数えている
-            m_ModelCullCandidateHistory[m_ModelCullRingIndex] =
+            m_CullStats.ResolveModel(
+                m_GeometryPasses->GetModelCullCpuFrustumCulled(),
                 m_GeometryPasses->GetModelCullCandidateCount()
-                - m_GeometryPasses->GetModelCullPrepassCandidateCount();
-
-            const uint32_t oldest = (m_ModelCullRingIndex + 1) % kMeshletCullStatsRingSize;
-            uint32_t counters[Passes::kModelCullCounterCount] = {};
-            if (m_ModelCullReadback[oldest] &&
-                m_ModelCullReadback[oldest]->ReadbackData(counters, sizeof(counters)))
-            {
-                m_ModelCullTested = counters[0];
-                m_ModelCullFrustumCulled = counters[1];
-                m_ModelCullOcclusionCulled = counters[2];
-                m_ModelCullSurvived = counters[3];
-                for (uint32_t region = 0; region < Passes::kModelCullRegionCount; ++region)
-                {
-                    m_ModelCullRegionIssued[region] = counters[4 + region];
-                }
-                m_ModelCullComparedCpuFrustumCulled = m_ModelCullCpuFrustumHistory[oldest];
-                m_ModelCullComparedCandidateCount = m_ModelCullCandidateHistory[oldest];
-            }
-            m_ModelCullRingIndex = (m_ModelCullRingIndex + 1) % kMeshletCullStatsRingSize;
+                    - m_GeometryPasses->GetModelCullPrepassCandidateCount());
         }
         else
         {
-            m_ModelCullTested = 0;
-            m_ModelCullFrustumCulled = 0;
-            m_ModelCullOcclusionCulled = 0;
-            m_ModelCullSurvived = 0;
-            std::fill(std::begin(m_ModelCullRegionIssued), std::end(m_ModelCullRegionIssued), 0u);
+            m_CullStats.ClearModelStats();
         }
     }
 

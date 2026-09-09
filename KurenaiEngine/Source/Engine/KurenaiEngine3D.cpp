@@ -636,9 +636,9 @@ namespace Kurenai
 
                 // 【SRVではなくUAVを登録する】増幅シェーダーは読むのではなく書く。
                 // RegisterBindless(SRV)の番号を渡すと読み取り専用のビューへ書き込むことになる
-                m_MeshletCullStatsBindlessIndex =
-                    m_Device->RegisterBindlessUAV(m_GeometryPasses->GetMeshletCullStatsBuffer());
-                if (m_MeshletCullStatsBindlessIndex == RHI::kInvalidBindlessIndex)
+                m_CullStats.SetMeshletBindlessIndex(
+                    m_Device->RegisterBindlessUAV(m_GeometryPasses->GetMeshletCullStatsBuffer()));
+                if (m_CullStats.GetMeshletBindlessIndex() == RHI::kInvalidBindlessIndex)
                 {
                     Core::Logger::Warning(
                         "KurenaiEngine3D",
@@ -647,15 +647,7 @@ namespace Kurenai
                 }
                 else
                 {
-                    for (uint32_t i = 0; i < kMeshletCullStatsRingSize; ++i)
-                    {
-                        RHI::BufferDesc readbackDesc;
-                        readbackDesc.Usage = RHI::BufferUsage::Readback;
-                        readbackDesc.SizeInBytes =
-                            static_cast<uint32_t>(sizeof(uint32_t)) * Passes::kMeshletCullStatsCount;
-                        readbackDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
-                        m_MeshletCullStatsReadback[i] = m_Device->CreateBuffer(readbackDesc);
-                    }
+                    m_CullStats.CreateMeshletRing(*m_Device, Passes::kMeshletCullStatsCount);
                 }
             }
             catch (const std::exception& e)
@@ -665,11 +657,7 @@ namespace Kurenai
                     "KurenaiEngine3D",
                     std::string("メッシュレットカリングの統計の初期化に失敗したため無効にします: ") + e.what());
                 m_GeometryPasses->ResetMeshletCullStatsBuffer();
-                for (auto& readback : m_MeshletCullStatsReadback)
-                {
-                    readback.reset();
-                }
-                m_MeshletCullStatsBindlessIndex = RHI::kInvalidBindlessIndex;
+                m_CullStats.ResetMeshletRing();
             }
         }
 
@@ -687,15 +675,7 @@ namespace Kurenai
                 m_GeometryPasses->CreateModelCullResources(*m_Device, shaderDirectory);
 
                 // カウンタの読み戻し。大きさは群が作るカウンタバッファと同じにする
-                for (uint32_t i = 0; i < kMeshletCullStatsRingSize; ++i)
-                {
-                    RHI::BufferDesc readbackDesc;
-                    readbackDesc.Usage = RHI::BufferUsage::Readback;
-                    readbackDesc.SizeInBytes =
-                        static_cast<uint32_t>(sizeof(uint32_t)) * Passes::kModelCullCounterCount;
-                    readbackDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
-                    m_ModelCullReadback[i] = m_Device->CreateBuffer(readbackDesc);
-                }
+                m_CullStats.CreateModelRing(*m_Device, Passes::kModelCullCounterCount);
             }
             catch (const std::exception& e)
             {
@@ -704,10 +684,7 @@ namespace Kurenai
                     "KurenaiEngine3D",
                     std::string("モデル単位のGPUカリングの初期化に失敗したため無効にします: ") + e.what());
                 m_GeometryPasses->ResetModelCullResources();
-                for (auto& readback : m_ModelCullReadback)
-                {
-                    readback.reset();
-                }
+                m_CullStats.ResetModelRing();
             }
         }
 

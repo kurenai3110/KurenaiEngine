@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 
+#include "Diagnostics/CullStatsReadback.h"
 #include "GI/DDGIGrid.h"
 #include "Settings/EngineSettings.h"
 #include "DroneShow.h"
@@ -515,14 +516,8 @@ namespace Kurenai
         RHI::IRHITexture* GetWaterNormalMapTexture() const { return m_WaterNormalMapTexture.get(); }
         // 【publicにしてある】カウンタをGPUからコピーするのはジオメトリのパス群で、
         // 読み戻して数値にするのはこちらのRender()。受け皿のリングはこちらが持つ
-        RHI::IRHIBuffer* GetMeshletCullStatsReadbackSlot() const
-        {
-            return m_MeshletCullStatsReadback[m_MeshletCullStatsRingIndex].get();
-        }
-        RHI::IRHIBuffer* GetModelCullReadbackSlot() const
-        {
-            return m_ModelCullReadback[m_ModelCullRingIndex].get();
-        }
+        RHI::IRHIBuffer* GetMeshletCullStatsReadbackSlot() const { return m_CullStats.GetMeshletWriteSlot(); }
+        RHI::IRHIBuffer* GetModelCullReadbackSlot() const { return m_CullStats.GetModelWriteSlot(); }
         const RenderCapabilities& GetRenderCapabilities() const { return m_RenderCapabilities; }
         bool GetHasGIVolume() const { return m_GIResources.HasGIVolume; }
         const Assets::GIVolume& GetGIVolume() const { return m_GIResources.GIVolume; }
@@ -1084,19 +1079,9 @@ namespace Kurenai
         // 出所は Passes/GeometryConstants.h(移行中の別名)
         // カウンタバッファ本体は Passes::GeometryPasses が持つ(数えるのが増幅シェーダーのため)。
 
-        // カウンタをCPUへ持ってくるための受け皿。
-        //
-        // 【リングにする理由】コピーを積んだ直後に読んでもGPUはまだ実行していない。
-        // DX12はkFrameCount(=2)フレームぶんCPUが先行するので、3本持って「2フレーム前に
-        // 書いたもの」を読めばGPUの完了を待たずに済む。待つとフレームが直列化し、
-        // 計測のために計測対象を壊すことになる
-        static constexpr uint32_t kMeshletCullStatsRingSize = 3;
-        std::unique_ptr<RHI::IRHIBuffer> m_MeshletCullStatsReadback[kMeshletCullStatsRingSize];
-        // 今フレームが書き込むリングの位置。読むのは (index + 1) % リング長 = 最も古いもの
-        uint32_t m_MeshletCullStatsRingIndex = 0;
-        // カウンタバッファのUAVのbindless番号(RegisterBindlessUAVが払い出す)。
-        // 非対応環境ではkInvalidBindlessIndexのままで、統計は無効になる
-        uint32_t m_MeshletCullStatsBindlessIndex = RHI::kInvalidBindlessIndex;
+        // カウンタをCPUへ持ってくる受け皿(メッシュレット統計とモデルカリングの両方)。
+        // リングの段数と添字の扱いは Diagnostics/CullStatsReadback.h にある
+        Diagnostics::CullStatsReadback m_CullStats;
 
         // --- モデル単位のGPUカリング(Stage 5-3) ---
         //
@@ -1113,32 +1098,8 @@ namespace Kurenai
 
         // GpuModelCullInstance は Passes/GeometryConstants.h へ移した
 
-        // GPUカリングの資源一式は Passes::GeometryPasses が持つ。エンジンに残るのは
-        // 読み戻し(下のリング)と、そこから作るログ用の値だけ。
-        //
-        // [判定, 視錐台で間引き, オクルージョンで間引き, 生き残り] + 区画ごとの発行数
-        // 出所は Passes/GeometryConstants.h(移行中の別名)
-        // 受け皿。リングの理由と段数はメッシュレット統計と同じ
-        std::unique_ptr<RHI::IRHIBuffer> m_ModelCullReadback[kMeshletCullStatsRingSize];
-        uint32_t m_ModelCullRingIndex = 0;
-        // 直近に読み戻せた値(判定 / 視錐台で間引き / オクルージョンで間引き / 生き残り)
-        uint32_t m_ModelCullTested = 0;
-        uint32_t m_ModelCullFrustumCulled = 0;
-        uint32_t m_ModelCullOcclusionCulled = 0;
-        uint32_t m_ModelCullSurvived = 0;
-        // 区画ごとにGPUが実際に発行したドロー数(読み戻した値)。
-        // ここが0のまま絵が出ているなら、間接描画ではなく従来のCPUループが描いている
-        uint32_t m_ModelCullRegionIssued[Passes::kModelCullRegionCount]{};
-        // GPUの数値と突き合わせるためのCPU側の値を積むリング。
-        //
-        // 【GPUの数値は2フレーム遅れなので、CPU側も同じだけ遅らせて比べる】
-        // 今フレームのCPU値と2フレーム前のGPU値を比べると、カメラが動いている間は
-        // 常に食い違って見える。リードバックと同じリングに積んで、同じフレームのものを比べる
-        uint32_t m_ModelCullCpuFrustumHistory[kMeshletCullStatsRingSize]{};
-        uint32_t m_ModelCullCandidateHistory[kMeshletCullStatsRingSize]{};
-        // 上のリングから取り出した、GPUの数値と同じフレームのCPU側の値(ログの比較に使う)
-        uint32_t m_ModelCullComparedCpuFrustumCulled = 0;
-        uint32_t m_ModelCullComparedCandidateCount = 0;
+        // GPUカリングの資源一式は Passes::GeometryPasses が持つ。読み戻しと、
+        // そこから作るログ用の値は上の m_CullStats が持つ
 
         // G-Bufferは複数のパス群が共有するため、特定のパス群ではなく唯一の所有者へ集める。
         Rendering::RenderTargets m_RenderTargets;

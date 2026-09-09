@@ -1114,7 +1114,7 @@ namespace Kurenai
         // float32が誤差なく表せる整数の範囲(2^24)に十分収まる
         constants.MeshletCullStatsParams = {
             frameContext.MeshletCullStatsActive ? 1.0f : 0.0f,
-            frameContext.MeshletCullStatsActive ? static_cast<float>(m_MeshletCullStatsBindlessIndex) : 0.0f,
+            frameContext.MeshletCullStatsActive ? static_cast<float>(m_CullStats.GetMeshletBindlessIndex()) : 0.0f,
             0.0f,
             0.0f,
         };

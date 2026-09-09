@@ -1057,15 +1057,15 @@ namespace Kurenai
         // 同じ視錐台で判定しているので、一致しなければ平面の作り方か候補の積み方が壊れている。
         // **間接描画はこの数を信じて描く**ので、食い違ったまま進むと絵が消えてから
         // 原因を探すことになる。だから食い違いは警告として残す
-        if (m_ModelCullTested > 0)
+        if (m_CullStats.GetModelTested() > 0)
         {
             char modelCullText[256];
             std::snprintf(
                 modelCullText, sizeof(modelCullText),
                 "  モデル単位GPUカリング: 判定 %u (CPU候補 %u) / 視錐台 %u (CPU %u) / オクルージョン %u / 生存 %u",
-                m_ModelCullTested, m_ModelCullComparedCandidateCount,
-                m_ModelCullFrustumCulled, m_ModelCullComparedCpuFrustumCulled,
-                m_ModelCullOcclusionCulled, m_ModelCullSurvived);
+                m_CullStats.GetModelTested(), m_CullStats.GetModelComparedCandidateCount(),
+                m_CullStats.GetModelFrustumCulled(), m_CullStats.GetModelComparedCpuFrustumCulled(),
+                m_CullStats.GetModelOcclusionCulled(), m_CullStats.GetModelSurvived());
             Core::Logger::Info("Perf", modelCullText);
 
             // 区画ごとの発行数。**間引きの数だけ見ても、間接描画が本当に描いているかは分からない** ――
@@ -1075,12 +1075,12 @@ namespace Kurenai
                 modelCullRegionText, sizeof(modelCullRegionText),
                 "  モデル単位GPU発行(%s): G-Buffer %u+%u / プリパス不透明 %u+%u / プリパスカットアウト %u+%u",
                 m_GeometryPasses->WasModelCullIndirectActiveLastFrame() ? "間接描画" : "計数のみ",
-                m_ModelCullRegionIssued[Passes::kModelCullRegionGBuffer],
-                m_ModelCullRegionIssued[Passes::kModelCullRegionGBufferMirrored],
-                m_ModelCullRegionIssued[Passes::kModelCullRegionPrepassOpaque],
-                m_ModelCullRegionIssued[Passes::kModelCullRegionPrepassOpaqueMirrored],
-                m_ModelCullRegionIssued[Passes::kModelCullRegionPrepassCutout],
-                m_ModelCullRegionIssued[Passes::kModelCullRegionPrepassCutoutMirrored]);
+                m_CullStats.GetModelRegionIssued(Passes::kModelCullRegionGBuffer),
+                m_CullStats.GetModelRegionIssued(Passes::kModelCullRegionGBufferMirrored),
+                m_CullStats.GetModelRegionIssued(Passes::kModelCullRegionPrepassOpaque),
+                m_CullStats.GetModelRegionIssued(Passes::kModelCullRegionPrepassOpaqueMirrored),
+                m_CullStats.GetModelRegionIssued(Passes::kModelCullRegionPrepassCutout),
+                m_CullStats.GetModelRegionIssued(Passes::kModelCullRegionPrepassCutoutMirrored));
             Core::Logger::Info("Perf", modelCullRegionText);
 
             // どの経路で判定したか。**間引き数だけでは切り替わったか分からない** ――
@@ -1094,18 +1094,18 @@ namespace Kurenai
                 m_GeometryPasses->GetModelCullDispatchCount(0), m_GeometryPasses->GetModelCullDispatchCount(1));
             Core::Logger::Info("Perf", modelCullPathText);
 
-            if (m_ModelCullTested != m_ModelCullComparedCandidateCount ||
-                m_ModelCullFrustumCulled != m_ModelCullComparedCpuFrustumCulled)
+            if (m_CullStats.GetModelTested() != m_CullStats.GetModelComparedCandidateCount() ||
+                m_CullStats.GetModelFrustumCulled() != m_CullStats.GetModelComparedCpuFrustumCulled())
             {
                 // 【黙って進めない】食い違ったままExecuteIndirectへ繋ぐと、
                 // 絵が消えてから原因を探すことになる
                 Core::Logger::Warning(
                     "Perf",
                     "モデル単位GPUカリングの判定がCPUと食い違っています(判定 " +
-                        std::to_string(m_ModelCullTested) + " vs " +
-                        std::to_string(m_ModelCullComparedCandidateCount) + " / 視錐台 " +
-                        std::to_string(m_ModelCullFrustumCulled) + " vs " +
-                        std::to_string(m_ModelCullComparedCpuFrustumCulled) + ")");
+                        std::to_string(m_CullStats.GetModelTested()) + " vs " +
+                        std::to_string(m_CullStats.GetModelComparedCandidateCount()) + " / 視錐台 " +
+                        std::to_string(m_CullStats.GetModelFrustumCulled()) + " vs " +
+                        std::to_string(m_CullStats.GetModelComparedCpuFrustumCulled()) + ")");
             }
         }
 

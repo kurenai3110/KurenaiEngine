@@ -5,6 +5,7 @@
 
 #include <DirectXMath.h>
 
+#include "Assets/Scene.h"
 #include "RHI/IRHIBuffer.h"
 #include "ShaderInterop/GroupSizes.h"
 #include "RHI/IRHICommandList.h"
