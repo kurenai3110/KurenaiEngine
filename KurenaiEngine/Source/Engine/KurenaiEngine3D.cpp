@@ -1143,7 +1143,7 @@ namespace Kurenai
     {
         // 【プロキシが1つも無いなら抑止しない】発光面を光源にしていないのに
         // DDGIから自発光だけ抜くと、その面の照明が丸ごと落ちる
-        return m_Settings.EmissiveLight.LightsEnabled && !m_Settings.EmissiveLight.LightsDoubleCountGI && !m_EmissiveProxies.empty();
+        return m_Settings.EmissiveLight.LightsEnabled && !m_Settings.EmissiveLight.LightsDoubleCountGI && !m_EmissiveLights.Proxies.empty();
     }
 
     void KurenaiEngine3D::SetEmissiveLights(int enabled, float cutoffIrradiance, int maxCount, int doubleCountGI)
@@ -1174,17 +1174,17 @@ namespace Kurenai
         // (実際に踏んだ。τを100分の1にしてもダンプがバイト完全一致した)
         if (cutoffChanged && m_Device && !m_Scene.Instances.empty())
         {
-            m_MeshLightScene.Build(*m_Device, m_Scene, m_Settings.EmissiveLight.LightsCutoffIrradiance);
+            m_EmissiveLights.MeshLightScene.Build(*m_Device, m_Scene, m_Settings.EmissiveLight.LightsCutoffIrradiance);
         }
 
         // 上限の警告は設定を変えたら出し直す(τを上げてRangeを縮めた結果を見たいため)
-        m_EmissiveLightsCapLogged = false;
+        m_EmissiveLights.CapLogged = false;
         Core::Logger::Info(
             "KurenaiEngine3D",
             std::string("エミッシブ光源: ") + (m_Settings.EmissiveLight.LightsEnabled ? "有効" : "無効") +
                 " / 打ち切り照度 " + std::to_string(m_Settings.EmissiveLight.LightsCutoffIrradiance) + " / 上限 " +
                 std::to_string(m_Settings.EmissiveLight.LightsMaxCount) + "個 / プロキシ " +
-                std::to_string(m_EmissiveProxies.size()) + "個 / DDGIの自発光 " +
+                std::to_string(m_EmissiveLights.Proxies.size()) + "個 / DDGIの自発光 " +
                 (ShouldSuppressEmissiveForGI() ? "抑止" : "そのまま(二重計上)"));
     }
 
@@ -1195,19 +1195,19 @@ namespace Kurenai
         {
             return;
         }
-        m_MeshLightsEnabled = (enabled > 0);
+        m_EmissiveLights.MeshLightsEnabled = (enabled > 0);
 
         // 【効かない組み合わせを黙って受け付けない】有効にしたのに何も起きない状態は、
         // 「実装が壊れている」と「前提が揃っていない」の区別がつかない。
         // 実際にどちらへ落ちるかをここで言い切る
         std::string note;
-        if (m_MeshLightsEnabled)
+        if (m_EmissiveLights.MeshLightsEnabled)
         {
             if (!m_Settings.EmissiveLight.LightsEnabled)
             {
                 note = " ※エミッシブ光源が無効なので三角形は出ない";
             }
-            else if (!m_MeshLightScene.IsValid())
+            else if (!m_EmissiveLights.MeshLightScene.IsValid())
             {
                 note = " ※三角形テーブルが空(発光メッシュが無いか読み込み前)";
             }
@@ -1218,8 +1218,8 @@ namespace Kurenai
         }
         Core::Logger::Info(
             "KurenaiEngine3D",
-            std::string("メッシュライト: ") + (m_MeshLightsEnabled ? "有効" : "無効") + " / 三角形 " +
-                std::to_string(m_MeshLightScene.GetTriangleCount()) + "枚" + note);
+            std::string("メッシュライト: ") + (m_EmissiveLights.MeshLightsEnabled ? "有効" : "無効") + " / 三角形 " +
+                std::to_string(m_EmissiveLights.MeshLightScene.GetTriangleCount()) + "枚" + note);
     }
 
     void KurenaiEngine3D::SetEmissiveIntensity(float intensity)
@@ -1230,8 +1230,8 @@ namespace Kurenai
         }
         m_Settings.EmissiveLight.Intensity = intensity;
         // 倍率を変えるとRangeも変わる(強さから解いているため)。上限の警告を出し直す
-        m_EmissiveLightsCapLogged = false;
-        m_EmissiveLightsValuesLogged = false;
+        m_EmissiveLights.CapLogged = false;
+        m_EmissiveLights.ValuesLogged = false;
         Core::Logger::Info(
             "KurenaiEngine3D", "自発光の強度: " + std::to_string(m_Settings.EmissiveLight.Intensity) + "倍");
     }

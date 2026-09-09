@@ -45,6 +45,7 @@
 #include "Rendering/MeshletLODFrameConstants.h"
 #include "Rendering/GeometryDrawTypes.h"
 #include "Rendering/SceneDrawList.h"
+#include "Scene/EmissiveLightSet.h"
 #include "Rendering/CubeFaceMath.h"
 #include "Passes/DDGIConstants.h"
 #include "Passes/EnvironmentConstants.h"
@@ -485,8 +486,8 @@ namespace Kurenai
         // 焼き上がりの状態の持ち主は Passes::EnvironmentPasses。ここは委譲するだけ
         bool& GetIBLBaked();
         bool& GetIBLIrradianceBaked();
-        bool& GetEmissiveLightsCapLogged() { return m_EmissiveLightsCapLogged; }
-        bool& GetEmissiveLightsValuesLogged() { return m_EmissiveLightsValuesLogged; }
+        bool& GetEmissiveLightsCapLogged() { return m_EmissiveLights.CapLogged; }
+        bool& GetEmissiveLightsValuesLogged() { return m_EmissiveLights.ValuesLogged; }
         bool& GetDDGIEmissiveSuppressLoggedRaster();
         bool& GetDDGIEmissiveSuppressLoggedTrace();
         std::vector<Assets::ReflectionProbe>& GetReflectionProbes() { return m_GIResources.ReflectionProbes; }
@@ -505,7 +506,7 @@ namespace Kurenai
         std::atomic<uint32_t>& GetSceneLoadProgressTotal() { return m_SceneLoadProgressTotal; }
 
         uint32_t GetHiZMipLevels() const;
-        const std::vector<Assets::EmissiveProxy>& GetEmissiveProxies() const { return m_EmissiveProxies; }
+        const std::vector<Assets::EmissiveProxy>& GetEmissiveProxies() const { return m_EmissiveLights.Proxies; }
         const RenderStats& GetRenderStats() const { return m_RenderStats; }
         RHI::IRHIGPUProfiler* GetGPUProfiler() const { return m_GPUProfiler.get(); }
         const Core::CPUProfiler& GetCPUProfiler() const { return m_CPUProfiler; }
@@ -1523,39 +1524,15 @@ namespace Kurenai
 
 
         // --- エミッシブ光源(自発光メッシュを光源として扱う) ---
-        //
-        // SceneLoaderがワールド空間へ変換したプロキシ。**m_Lightsとは別に持つ。**
-        // 作者が置いたライトと自動生成の光源を同じ配列にすると、ImGuiのライト一覧から
-        // 消せてしまい元のメッシュと食い違う。上限超過時に手置きを押し出さないためでもある
-        std::vector<Assets::EmissiveProxy> m_EmissiveProxies;
-        // インスタンスごとに「このインスタンスからプロキシを起こしたか」。
-        // LoadSceneでm_EmissiveProxiesから作る(要素数はm_Scene.Instances.size())。
-        //
-        // 【DDGIのラスタ経路で要る】あちらはモデルLODの粗い段を描くので、
-        // プロキシが持つMeshIndex(段0の番号)では引けない。インスタンス単位で
-        // 判定し、メッシュ側はEmissiveClustersの有無で見る
-        std::vector<bool> m_EmissiveProxyInstances;
+        // 中身と、それぞれが何のためにあるかは Scene/EmissiveLightSet.h
+        Scene::EmissiveLightSet m_EmissiveLights;
+
     public:
         // 【publicにしてある】シーン読み込みが構築し、Passes::DDGIPasses が
         // ラスタ経路で「このインスタンスは自発光プロキシか」を引くために読むだけ
-        const std::vector<bool>& GetEmissiveProxyInstances() const { return m_EmissiveProxyInstances; }
+        const std::vector<bool>& GetEmissiveProxyInstances() const { return m_EmissiveLights.ProxyInstances; }
 
     private:
-        // 段階2: 発光面を三角形のまま面積分するか。MegaLights 経路でのみ効く
-        // (有効なフレームは参照実装が型3のプロキシを読み飛ばし、代わりに三角形を積む)
-        bool m_MeshLightsEnabled = Defaults::MeshLightsEnabled;
-        // RangeのクランプにつかうシーンAABBの対角。LoadSceneで一度だけ求める
-        float m_EmissiveLightsMaxRange = 0.0f;
-        // 上限で切り捨てたときの「採用した集合」の指紋。切り捨てが起きなければ0。
-        //
-        // 【プローブの署名に混ぜるためだけにある】採用順はカメラからの照度で決まるので、
-        // 上限に当たっているシーンではカメラを動かすだけで焼く光源の集合が変わる。
-        // 署名へ入れないと、収束済みのプローブだけ古い集合のまま残る
-        uint64_t m_EmissiveLightsSelectionHash = 0;
-        bool m_EmissiveLightsCapLogged = false;
-        // 送信した灯の実効値を1回だけログへ出したか(「走っていない」と「暗い」の切り分け用)
-        bool m_EmissiveLightsValuesLogged = false;
-
         // 反射プローブ(19章): プローブ位置から6方向をProbeCapture.hlslで2Dレンダーターゲットへ描き、
         // IBLConvolve.hlsl CSCopyCaptureToCubeFaceでスクラッチのキューブマップへ組み上げてから、
         // IBLと同じCSIrradiance/CSPrefilterで畳み込んでプローブごとのキューブマップ配列へ書き込む。
@@ -1880,13 +1857,11 @@ namespace Kurenai
         // GPU側のシーンデータの持ち主は Rendering/SceneGPUResources.h。
         // **m_Sceneより後に宣言すること**(理由はそのヘッダの冒頭)
         Rendering::SceneGPUResources m_SceneGPUResources;
-        // メッシュライトの三角形テーブル(段階2)。段階1のプロキシと同じ集合から作られる
-        Assets::MeshLightScene m_MeshLightScene;
     public:
         // 【publicにしてある】シーン読み込みが構築し、Passes::MegaLightsPasses が
         // 三角形の数とバッファを引くために読むだけ
-        const Assets::MeshLightScene& GetMeshLightScene() const { return m_MeshLightScene; }
-        bool IsMeshLightsEnabled() const { return m_MeshLightsEnabled; }
+        const Assets::MeshLightScene& GetMeshLightScene() const { return m_EmissiveLights.MeshLightScene; }
+        bool IsMeshLightsEnabled() const { return m_EmissiveLights.MeshLightsEnabled; }
 
     private:
         // テクスチャの常駐ミップ制御。自前のワーカースレッドを持ち、そこがm_Sceneの

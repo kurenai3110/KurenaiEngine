@@ -190,7 +190,7 @@ namespace Kurenai
         // 【上限に当たると採用集合がカメラ依存になる】採用順はカメラからの照度で決まるため、
         // 上の4つだけでは「カメラを動かしただけで焼く光源が変わったのに署名は同じ」になる。
         // 切り捨てが起きていないフレームでは0で固定なので、余分な焼き直しは起きない
-        mixBytes(&m_EmissiveLightsSelectionHash, sizeof(m_EmissiveLightsSelectionHash));
+        mixBytes(&m_EmissiveLights.SelectionHash, sizeof(m_EmissiveLights.SelectionHash));
 
         // bent normalによる遮蔽(34章)。ProbeCapture.hlslが同じ分岐を持つため、
         // 含め忘れるとつまみを動かしてもプローブの中身だけ古いまま残る

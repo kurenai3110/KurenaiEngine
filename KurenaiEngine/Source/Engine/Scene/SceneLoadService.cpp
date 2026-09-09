@@ -565,7 +565,7 @@ namespace Kurenai
 
         m_Scene = std::move(loaded.Scene);
         m_SceneGPUResources.RaytracingScene = std::move(loaded.RaytracingScene);
-        m_MeshLightScene = std::move(loaded.MeshLightScene);
+        m_EmissiveLights.MeshLightScene = std::move(loaded.MeshLightScene);
         m_CurrentSceneIndex = loaded.SceneIndex;
 
         // ストリーミングの状態もシーンに紐づく。世代を進めることで、切り替え前に発注して
@@ -797,15 +797,15 @@ namespace Kurenai
 
         // エミッシブ光源のプロキシ(ワールド空間)。**m_Lightsへは混ぜない**(宣言側の注記参照)。
         // ImGuiのライト一覧にも出さないので、m_SelectedLightIndexの範囲は変わらない
-        m_EmissiveProxies = m_Scene.EmissiveProxies;
+        m_EmissiveLights.Proxies = m_Scene.EmissiveProxies;
         // インスタンスごとの「プロキシを起こしたか」。DDGIのラスタ経路で引く。
         // ストリーミング中のインスタンスはプロキシを作らないので、ここも自動的に立たない
-        m_EmissiveProxyInstances.assign(m_Scene.Instances.size(), false);
-        for (const Assets::EmissiveProxy& proxy : m_EmissiveProxies)
+        m_EmissiveLights.ProxyInstances.assign(m_Scene.Instances.size(), false);
+        for (const Assets::EmissiveProxy& proxy : m_EmissiveLights.Proxies)
         {
-            if (proxy.InstanceIndex < m_EmissiveProxyInstances.size())
+            if (proxy.InstanceIndex < m_EmissiveLights.ProxyInstances.size())
             {
-                m_EmissiveProxyInstances[proxy.InstanceIndex] = true;
+                m_EmissiveLights.ProxyInstances[proxy.InstanceIndex] = true;
             }
             else
             {
@@ -817,8 +817,8 @@ namespace Kurenai
             }
         }
         m_RenderStats.EmissiveLightsUsedCount = 0;
-        m_EmissiveLightsCapLogged = false;
-        m_EmissiveLightsValuesLogged = false;
+        m_EmissiveLights.CapLogged = false;
+        m_EmissiveLights.ValuesLogged = false;
         // Rangeの上限。自発光の強度を上げたときにRangeが数kmまで伸びて、タイルカリングが
         // 全タイルにヒットするのを止める安全弁。シーンAABBの対角より長いRangeに意味は無い
         {
@@ -828,7 +828,7 @@ namespace Kurenai
                 const float extent = m_Scene.BoundsMax[axis] - m_Scene.BoundsMin[axis];
                 diagonalSq += extent * extent;
             }
-            m_EmissiveLightsMaxRange = (diagonalSq > 0.0f) ? std::sqrt(diagonalSq) : 0.0f;
+            m_EmissiveLights.MaxRange = (diagonalSq > 0.0f) ? std::sqrt(diagonalSq) : 0.0f;
         }
         // 平面反射。新しいシーンでは水面の構成が変わるため、複数水面高さの警告も仕切り直す
         m_PlanarReflectionMultipleWaterLogged = false;

@@ -58,7 +58,7 @@ namespace Kurenai
         RetiredAssets retired;
         retired.Scene = std::move(m_Scene);
         retired.RaytracingScene = std::move(m_SceneGPUResources.RaytracingScene);
-        retired.MeshLightScene = std::move(m_MeshLightScene);
+        retired.MeshLightScene = std::move(m_EmissiveLights.MeshLightScene);
         m_Scene = Assets::Scene{};
         m_SceneGPUResources.RaytracingScene = Assets::RaytracingScene{};
         RetireAssets(std::move(retired));

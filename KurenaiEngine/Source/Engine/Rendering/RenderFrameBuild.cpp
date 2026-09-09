@@ -242,19 +242,19 @@ namespace Kurenai
         // プローブが焼く光源の集合が変わる**。署名が変わらないと反射プローブはOnDemandで
         // 焼き直さず、DDGIは更新を止めたまま、収束済みのプローブだけ古い集合で残る。
         // 切り捨てが起きない限り集合はシーン固定なので、そのときは0で十分
-        m_EmissiveLightsSelectionHash = 0;
-        if (m_Settings.EmissiveLight.LightsEnabled && !m_EmissiveProxies.empty() && manualLightCount < Rendering::kMaxLights)
+        m_EmissiveLights.SelectionHash = 0;
+        if (m_Settings.EmissiveLight.LightsEnabled && !m_EmissiveLights.Proxies.empty() && manualLightCount < Rendering::kMaxLights)
         {
             const size_t budget = std::min<size_t>(
                 static_cast<size_t>(std::max(0, m_Settings.EmissiveLight.LightsMaxCount)), Rendering::kMaxLights - manualLightCount);
 
-            if (m_EmissiveProxies.size() <= budget)
+            if (m_EmissiveLights.Proxies.size() <= budget)
             {
-                for (const Assets::EmissiveProxy& proxy : m_EmissiveProxies)
+                for (const Assets::EmissiveProxy& proxy : m_EmissiveLights.Proxies)
                 {
                     gpuLights.push_back(MakeGPULightFromEmissiveProxy(
                         proxy, m_Settings.EmissiveLight.Intensity, m_Settings.EmissiveLight.LightsCutoffIrradiance,
-                        m_EmissiveLightsMaxRange));
+                        m_EmissiveLights.MaxRange));
                 }
             }
             else
@@ -263,14 +263,14 @@ namespace Kurenai
                 // 遠くの明るい看板より近くの暗い豆電球が残る。
                 // 同値のときは (インスタンス, メッシュ, かたまり) の辞書順で決める ――
                 // 順序が揺れるとライトが出入りしてちらつく
-                std::vector<size_t> order(m_EmissiveProxies.size());
+                std::vector<size_t> order(m_EmissiveLights.Proxies.size());
                 for (size_t i = 0; i < order.size(); ++i)
                 {
                     order[i] = i;
                 }
                 const auto scoreOf = [this, &cameraPosition](size_t index)
                 {
-                    const Assets::EmissiveProxy& p = m_EmissiveProxies[index];
+                    const Assets::EmissiveProxy& p = m_EmissiveLights.Proxies[index];
                     const float dx = p.Position[0] - cameraPosition.x;
                     const float dy = p.Position[1] - cameraPosition.y;
                     const float dz = p.Position[2] - cameraPosition.z;
@@ -286,8 +286,8 @@ namespace Kurenai
                         const float sa = scoreOf(a);
                         const float sb = scoreOf(b);
                         if (sa != sb) { return sa > sb; }
-                        const Assets::EmissiveProxy& pa = m_EmissiveProxies[a];
-                        const Assets::EmissiveProxy& pb = m_EmissiveProxies[b];
+                        const Assets::EmissiveProxy& pa = m_EmissiveLights.Proxies[a];
+                        const Assets::EmissiveProxy& pb = m_EmissiveLights.Proxies[b];
                         if (pa.InstanceIndex != pb.InstanceIndex) { return pa.InstanceIndex < pb.InstanceIndex; }
                         if (pa.MeshIndex != pb.MeshIndex) { return pa.MeshIndex < pb.MeshIndex; }
                         return pa.ClusterIndex < pb.ClusterIndex;
@@ -306,30 +306,30 @@ namespace Kurenai
                 };
                 for (size_t i = 0; i < budget; ++i)
                 {
-                    const Assets::EmissiveProxy& proxy = m_EmissiveProxies[order[i]];
+                    const Assets::EmissiveProxy& proxy = m_EmissiveLights.Proxies[order[i]];
                     mixIndex(proxy.InstanceIndex);
                     mixIndex(proxy.MeshIndex);
                     mixIndex(proxy.ClusterIndex);
                     gpuLights.push_back(MakeGPULightFromEmissiveProxy(
-                        proxy, m_Settings.EmissiveLight.Intensity, m_Settings.EmissiveLight.LightsCutoffIrradiance, m_EmissiveLightsMaxRange));
+                        proxy, m_Settings.EmissiveLight.Intensity, m_Settings.EmissiveLight.LightsCutoffIrradiance, m_EmissiveLights.MaxRange));
                 }
-                m_EmissiveLightsSelectionHash = selectionHash;
+                m_EmissiveLights.SelectionHash = selectionHash;
 
                 // 【切り捨ては発光を捨てている】併合で減らせないか先に疑うこと。
                 // EmeraldSquare の実測では、面積の大きい順に上位256個を残しても
                 // 総面積の46.7%にしかならない(上位1024個でも84.9%)
-                if (!m_EmissiveLightsCapLogged)
+                if (!m_EmissiveLights.CapLogged)
                 {
                     Core::Logger::Warning(
                         "KurenaiEngine3D",
                         "エミッシブ光源が上限(" + std::to_string(budget) + ")を超えたため" +
-                            std::to_string(m_EmissiveProxies.size() - budget) +
+                            std::to_string(m_EmissiveLights.Proxies.size() - budget) +
                             "個を捨てました。捨てたぶんの発光は絵から消えます" +
                             (ShouldSuppressEmissiveForGI()
                                  ? "。**しかもDDGIからは抑止されたまま**です ―― 捨てた面は"
                                    "直接光にも間接光にも入らず、純粋なエネルギー損失になります"
                                  : ""));
-                    m_EmissiveLightsCapLogged = true;
+                    m_EmissiveLights.CapLogged = true;
                 }
             }
             m_RenderStats.EmissiveLightsUsedCount = static_cast<uint32_t>(gpuLights.size() - manualLightCount);
@@ -337,7 +337,7 @@ namespace Kurenai
             // 【「効いていない」と「暗すぎて見えない」を切り分けられるようにする】
             // 絵の差だけを見ていると、経路が走っていないのか寄与が小さいだけなのかが分からない。
             // 実際に送った灯数と、代表1灯の強さ・Range・κ を1回だけ出す
-            if (!m_EmissiveLightsValuesLogged && m_RenderStats.EmissiveLightsUsedCount > 0)
+            if (!m_EmissiveLights.ValuesLogged && m_RenderStats.EmissiveLightsUsedCount > 0)
             {
                 const GPULight& sample = gpuLights[manualLightCount];
                 // 【RGBの最大を出す。Rだけを出さない】Rangeはmax(R,G,B)から解いているので、
@@ -350,7 +350,7 @@ namespace Kurenai
                         std::to_string(manualLightCount) + "灯) / 先頭の灯 強さ(RGBの最大) " +
                         std::to_string(samplePeak) + " Range " + std::to_string(sample.ColorRange.w) +
                         "m 半径 " + std::to_string(sample.Params.z) + "m κ " + std::to_string(sample.Params.w));
-                m_EmissiveLightsValuesLogged = true;
+                m_EmissiveLights.ValuesLogged = true;
             }
         }
 
@@ -414,9 +414,9 @@ namespace Kurenai
                 // 下限は光源自身の広がりを覆う分。上限はエミッシブ光源と同じシーンAABB対角で、
                 // タイルライトカリングが全タイルにヒットするのを止める安全弁
                 range = std::max(range, 2.0f * sample.SourceRadius);
-                if (m_EmissiveLightsMaxRange > 0.0f)
+                if (m_EmissiveLights.MaxRange > 0.0f)
                 {
-                    range = std::min(range, m_EmissiveLightsMaxRange);
+                    range = std::min(range, m_EmissiveLights.MaxRange);
                 }
 
                 light.ColorRange = { sample.Intensity.x * exposure, sample.Intensity.y * exposure,
