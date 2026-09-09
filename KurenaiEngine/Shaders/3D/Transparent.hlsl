@@ -45,14 +45,7 @@ static const float PI = 3.14159265359f;
 // 実質未使用だが、同じルートシグネチャ/定数バッファを共有するため並び順を合わせる)。
 #include "ObjectConstants.hlsli"
 
-// PunctualLighting.hlsli の struct GPULight と並び・ストライド(64バイト)を一致させる必要がある
-struct GPULight
-{
-    float4 PositionType;
-    float4 ColorRange;
-    float4 DirectionAngle;
-    float4 Params;
-};
+#include "ShaderInterop/GPULight.hlsli"
 StructuredBuffer<GPULight> Lights : register(t8);
 
 Texture2D BaseColorTexture : register(t0);

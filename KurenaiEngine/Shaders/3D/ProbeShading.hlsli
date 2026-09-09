@@ -27,14 +27,7 @@
 #error "ProbeShading.hlsli をインクルードする前に KURENAI_PROBE_*_REGISTER をすべて定義すること"
 #endif
 
-// PunctualLighting.hlsli の struct GPULight と並び・ストライド(64バイト)を一致させる必要がある
-struct GPULight
-{
-    float4 PositionType;
-    float4 ColorRange;
-    float4 DirectionAngle;
-    float4 Params;
-};
+#include "ShaderInterop/GPULight.hlsli"
 StructuredBuffer<GPULight> Lights : register(KURENAI_PROBE_LIGHT_REGISTER);
 
 // スカイボックス由来のグローバルIBL。プローブに映る面の環境光として使う
