@@ -108,6 +108,9 @@
     <ClInclude Include="Source\Library\RHI\DXGIFormatUtil.h">
       <Filter>Source\Library\RHI</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Library\RHI\RHIBindingLimits.h">
+      <Filter>Source\Library\RHI</Filter>
+    </ClInclude>
     <ClInclude Include="Source\Library\RHI\RHIReadbackFormat.h">
       <Filter>Source\Library\RHI</Filter>
     </ClInclude>

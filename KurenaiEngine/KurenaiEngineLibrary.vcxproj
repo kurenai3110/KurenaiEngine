@@ -100,6 +100,7 @@
     <ClInclude Include="Source\Library\RHI\RHIBindless.h" />
     <ClInclude Include="Source\Library\RHI\RHIShaderPackage.h" />
     <ClInclude Include="Source\Library\RHI\DXGIFormatUtil.h" />
+    <ClInclude Include="Source\Library\RHI\RHIBindingLimits.h" />
     <ClInclude Include="Source\Library\RHI\RHIReadbackFormat.h" />
     <ClInclude Include="Source\Library\RHI\PipelineStateNormalize.h" />
     <ClInclude Include="Source\Library\RHI\ReadbackUtil.h" />

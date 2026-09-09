@@ -6,6 +6,7 @@
 
 #include "RHI/IRHIBuffer.h"
 #include "RHI/IRHICommandList.h"
+#include "RHI/RHIBindingLimits.h"
 #include "RHI/IRHIPipelineState.h"
 #include "RHI/IRHISamplerSet.h"
 #include "RHI/IRHISwapChain.h"
@@ -107,7 +108,7 @@ namespace Kurenai::RHI
         // (DX12Device::CreateRootSignatureのrootParams[4]と一致させること)
         static constexpr uint32_t kVertexShaderSrvRootParameterIndex = 4;
         // SetVertexShaderResourceBufferで有効なスロット。ルートSRVはt0の1本だけを割り当てている
-        static constexpr uint32_t kVertexShaderSrvSlotCount = 1;
+        static constexpr uint32_t kVertexShaderSrvSlotCount = RHIBindingLimits::kVertexShaderSrvSlotCount;
 
         // SRVスロット(t0〜t17)のシャドウ。SetTexture/SetShaderResourceBufferはCopyDescriptorsを
         // その場では呼ばず、コピー元ハンドルをここへ記録するだけにして、Draw直前の
@@ -116,15 +117,8 @@ namespace Kurenai::RHI
         // 全スロットはコンストラクタでnullディスクリプタに初期化してあり、以降は必ず有効な
         // ディスクリプタを指す。そのため「どのスロットが設定済みか」を区別する必要がなく、
         // 未バインドのスロットを読むと0が返るというDX11と同じ挙動になる。
-        // 反射プローブ(19章)がDeferredLighting.hlslでt11〜t14(イラディアンス配列・プリフィルタ配列・
-        // 影響範囲バッファ・距離キューブ配列)を、DDGI(22章)がt15〜t16(イラディアンスアトラス・
-        // 距離モーメントアトラス)を使い、さらに空パラメータの構造化バッファ・bent normalの
-        // G-Buffer(34章)・低解像度の雲パスの出力・DDGIResolveの出力2枚・大気散乱のSkyView LUT・
-        // 低解像度の雲パスが書いたfogInFrontを使うため23スロット必要。
-        // 内訳はDX11CommandList.hの同名の定数のコメントに1枚ずつ書いてある。
-        // DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)およびDX11CommandList
-        // 側の同名の定数と必ず一致させること
-        static constexpr uint32_t kTextureSlotCount = 23;
+        // 【定義は RHI/RHIBindingLimits.h】ここはその別名。なぜ23必要かの内訳もあちらにある
+        static constexpr uint32_t kTextureSlotCount = RHIBindingLimits::kTextureSlotCount;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingSrvHandles[kTextureSlotCount]{};
         // 現在の描画で使うSRVテーブルの割り当て済みブロック先頭インデックス
         uint32_t m_CurrentSrvTableBase = 0;
@@ -164,9 +158,9 @@ namespace Kurenai::RHI
         // CSSetUnorderedAccessViewsでnullを張るのに合わせてDispatch直後にnullへ戻す
         // SRVが18あるのはレイトレーシングのパス(RT反射)がTLAS・G-Buffer・シーンジオメトリに加えて
         // bent normal(t16、34章)とメッシュレット表(t17、38章)を1回のディスパッチで同時に読むため。
-        // DX12Device.cpp側の同名の定数(ルートシグネチャのSRVレンジ幅)と必ず一致させること
-        static constexpr uint32_t kComputeSrvSlotCount = 18;
-        static constexpr uint32_t kComputeUavSlotCount = 4;
+        // 【定義は RHI/RHIBindingLimits.h】ここはその別名
+        static constexpr uint32_t kComputeSrvSlotCount = RHIBindingLimits::kComputeSrvSlotCount;
+        static constexpr uint32_t kComputeUavSlotCount = RHIBindingLimits::kComputeUavSlotCount;
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeSrvHandles[kComputeSrvSlotCount]{};
         D3D12_CPU_DESCRIPTOR_HANDLE m_PendingComputeUavHandles[kComputeUavSlotCount]{};
         // 今回のDispatchでUAVとしてバインドされているリソース。Dispatch直後にUAVバリアを発行し、

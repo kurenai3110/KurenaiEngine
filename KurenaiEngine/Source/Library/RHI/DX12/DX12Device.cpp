@@ -28,6 +28,7 @@
 #include "DX12Util.h"
 #include "Core/StringUtil.h"
 #include "RHI/DXGIFormatUtil.h"
+#include "RHI/RHIBindingLimits.h"
 #include "RHI/PipelineStateNormalize.h"
 #include "RHI/ReadbackUtil.h"
 #include "RHI/RHIReadbackFormat.h"
@@ -46,17 +47,9 @@ namespace Kurenai::RHI
         constexpr bool kIsDebugBuild = false;
 #endif
 
-        // シェーダのレジスタ実測値(Sandbox/Shaders/*.hlsl)に基づく固定のルートシグネチャレイアウト
-        // t0〜t17。最大はDeferredLighting.hlsl(G-Buffer4枚+スカイボックス+AO+エミッシブ+法線+
-        // グローバルIBL3枚+反射プローブのキューブ配列2枚+プローブ一覧のStructuredBuffer+距離キューブ配列
-        // +DDGIのオクタヘドラルアトラス2枚+空パラメータのStructuredBuffer
-        // +bent normalのG-Buffer+低解像度の雲パスの出力+DDGIResolveの出力2枚
-        // +大気散乱のSkyView LUT+低解像度の雲パスのfogInFront)。
-        // 内訳はDX11CommandList.hの同名の定数のコメントに1枚ずつ書いてある。
-        // DX11CommandList/DX12CommandListの同名の定数と必ず一致させること(3か所)。
-        // 【超えるとDX11では黙って落ち、DX12ではPSOの作成が 0x80070057 で失敗する】
-        // H3でt21を足したときに実際に踏んだ。DX11だけで確認していると気付けない
-        constexpr uint32_t kTextureSlotCount = 23;
+        // ルートシグネチャのSRVレンジ幅。【定義は RHI/RHIBindingLimits.h】が唯一の出所で、
+        // ここはそこから引くだけ。なぜ23必要かの内訳と、超えたときに何が起きるかもあちらにある
+        using RHIBindingLimits::kTextureSlotCount;
         // ObjectConstants(b1)を受けるルートパラメータの番号。
         // CreateRootSignature / CreateMeshRootSignature の rootParams[1] と一致させること。
         // 間接DispatchMeshのコマンドシグネチャが、この番号のCBVをドローごとに差し替える
@@ -67,14 +60,9 @@ namespace Kurenai::RHI
         // 3必要だったのはTransparent.hlslが「マテリアル・シャドウマップ・BRDF積分LUT」の3種類を
         // 1回のピクセルシェーダ実行で同時に使うためで、4つ目はボリュームテクスチャ(3Dノイズ)を
         // Wrapで引くためのVolumeSampler。
-        // 一部のスロットしか宣言しないシェーダーでもテーブルはkSamplerSlotCount個ぶんまとめて
-        // バインドされるため、セット生成時に余ったスロットは既定のサンプラーで埋める(CreateSamplerSet参照)。
-        //
-        // 【この値はShaders/3D/Samplers.hlsliの役割数と必ず一致させること】小さいままだと
-        // CreateSamplerSetが超過分を**切り捨てて**しまい(下記のcount = kSamplerSlotCount)、
-        // DX11は正しく動くのにDX12でだけサンプラーが既定のものに差し替わる、という
-        // 片側だけ静かに壊れる形になる
-        constexpr uint32_t kSamplerSlotCount = 4;
+        // 一部のスロットしか宣言しないシェーダーでもテーブルはこの個数ぶんまとめてバインドされる
+        // (CreateSamplerSet参照)。【定義は RHI/RHIBindingLimits.h】
+        using RHIBindingLimits::kSamplerSlotCount;
         // 作成できるサンプラーセットの最大数。セットは初期化時にだけ作られ解放されないため、
         // 用途の種類数に余裕を持たせた値でよい。
         // シェーダ可視Samplerヒープの上限はD3D12の仕様で2048ディスクリプタ
@@ -109,8 +97,9 @@ namespace Kurenai::RHI
         // マテリアル) + インスタンス情報 + bent normal(t16、34章) + メッシュレット表(t17、38章)
         // を1回のディスパッチで同時に読むため。
         // DX12CommandList.h側の同名の定数と必ず一致させること
-        constexpr uint32_t kComputeSrvSlotCount = 18;
-        constexpr uint32_t kComputeUavSlotCount = 4;
+        // 【定義は RHI/RHIBindingLimits.h】ルートシグネチャのSRV/UAVレンジ幅
+        using RHIBindingLimits::kComputeSrvSlotCount;
+        using RHIBindingLimits::kComputeUavSlotCount;
         constexpr uint32_t kComputeTableSlotCount = kComputeSrvSlotCount + kComputeUavSlotCount;
         // 1フレームあたりに払い出せるコンピュートSRV+UAVテーブルブロックの最大数(Dispatch呼び出し回数の上限)。
         // 反射プローブのベイクは1プローブあたり6(面コピー)+6(イラディアンス)+36(プリフィルタ6ミップ×6面)=48回
