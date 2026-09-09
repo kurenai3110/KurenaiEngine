@@ -744,7 +744,7 @@ namespace Kurenai
         // 各LODの原点も、後段のプローブのキャプチャ位置も、すべてこの値を基準に決まる。
         // 1フレームの途中で動かすと「シェーダーが見ている格子」と「実際に焼いた位置」が
         // 食い違い、間接光が別の場所のものになる
-        m_DDGIFollowCenter = DirectX::XMFLOAT3{ cameraPosition.x, cameraPosition.y, cameraPosition.z };
+        m_DDGIGrid.SetFollowCenter(DirectX::XMFLOAT3{ cameraPosition.x, cameraPosition.y, cameraPosition.z });
 
         constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
         constants.LightDirection = { sunLighting.Direction.x, sunLighting.Direction.y, sunLighting.Direction.z, 0.0f };
@@ -950,7 +950,7 @@ namespace Kurenai
             (m_Settings.DDGI.ProbeClassificationEnabled && ShouldRunRaytracedDDGITrace()) ? m_Settings.DDGI.BackfaceThreshold : 0.0f;
         constants.DDGIParams4 = {
             effectiveExposure, ddgiHalfResolutionActive ? 1.0f : 0.0f,
-            static_cast<float>(m_DDGILODCount), ddgiBackfaceThreshold
+            static_cast<float>(m_DDGIGrid.GetLODCount()), ddgiBackfaceThreshold
         };
 
         // クリップマップLODの各段の原点と、トロイダルaddressingの基準になる格子座標。
@@ -962,10 +962,10 @@ namespace Kurenai
             "(ずれるとcbufferのレイアウトが静かに食い違う)");
         for (uint32_t lod = 0; lod < kDDGIMaxLODCount; ++lod)
         {
-            if (m_GIResources.HasGIVolume && lod < m_DDGILODCount)
+            if (m_GIResources.HasGIVolume && lod < m_DDGIGrid.GetLODCount())
             {
-                const DirectX::XMFLOAT3 lodOrigin = ComputeDDGILODOrigin(lod);
-                const DirectX::XMINT3 lodBase = ComputeDDGILODBaseIndex(lod);
+                const DirectX::XMFLOAT3 lodOrigin = m_DDGIGrid.ComputeLODOrigin(lod);
+                const DirectX::XMINT3 lodBase = m_DDGIGrid.ComputeLODBaseIndex(lod);
                 constants.DDGILODOrigin[lod] = { lodOrigin.x, lodOrigin.y, lodOrigin.z, 0.0f };
                 constants.DDGILODBase[lod] = {
                     static_cast<float>(lodBase.x), static_cast<float>(lodBase.y),

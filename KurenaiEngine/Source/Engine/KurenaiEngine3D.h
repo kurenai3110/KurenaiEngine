@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 
+#include "GI/DDGIGrid.h"
 #include "Settings/EngineSettings.h"
 #include "DroneShow.h"
 #include "EngineDefaults.h"
@@ -1823,14 +1824,9 @@ namespace Kurenai
         // 「低周波の拡散イラディアンス」であって鏡面の映り込みではないため
         // 出所は Passes/DDGIConstants.h(移行中の別名)
 
-        // LOD 1段ぶんのプローブ数(ProbeCountsの3軸の積)。通し番号からLODを割り出すのに使う
-        uint32_t m_DDGIProbesPerLOD = 1;
-        // 実際に使うLOD段数(m_GIResources.GIVolume.LODCountをkDDGIMaxLODCountでクランプしたもの)
-        uint32_t m_DDGILODCount = 1;
-        // 格子を追従させる中心(カメラのワールド座標)。
-        // 【Render中に固定する】格子の原点・プローブ位置・dirty判定・シェーダーへ渡す値が
-        // すべてこれを基準に決まるので、1フレームの途中で動くと食い違う
-        DirectX::XMFLOAT3 m_DDGIFollowCenter{ 0.0f, 0.0f, 0.0f };
+        // 【m_GIResourcesより後に宣言すること】ボリュームの実体を参照で掴むので、
+        // 宣言順が逆になると未初期化のメンバを束ねることになる
+        GI::DDGIGrid m_DDGIGrid{ m_GIResources.GIVolume };
 
         // レイ取得(DXR)の経路とキャプチャ資源一式は Passes/DDGIPasses へ移した
 
@@ -1862,32 +1858,12 @@ namespace Kurenai
         // 裏取り済みの数字ではない
         // 出所は Passes/DDGIConstants.h(移行中の別名)
 
-        // 格子上のプローブ番号からワールド座標を求める。番号の分解は
-        // index = x + y*Cx + z*Cx*Cy で、シェーダー側の並びと一致させること
-        // --- クリップマップLODの格子 ---
-        //
-        // LOD k は間隔が ProbeSpacing * 2^k。プローブ数は全LOD共通なので、覆う範囲は
-        // LODが1つ上がるごとに2倍になる。アトラスはLODを縦に積むだけで済む ――
-        // 通し番号 slot = k*(Cx*Cy*Cz) + z*Cx*Cy + y*Cx + x を使うと、既存の
-        // 「行 = slot/(Cx*Cy)、列 = slot%(Cx*Cy)」がそのまま LOD k の行 [k*Cz, (k+1)*Cz) を指す。
-        // このおかげで**更新CSのアトラス座標式は1文字も変えなくてよい**。
-        DirectX::XMFLOAT3 ComputeDDGILODSpacing(uint32_t lod) const;
-        // そのLODの格子の原点。追従するときはLOD自身の格子へスナップし、カメラを中心に置く。
-        // 追従しないときは、LOD0は.ksceneのOriginそのまま、上のLODは中心を保ったまま広がる
-        DirectX::XMFLOAT3 ComputeDDGILODOrigin(uint32_t lod) const;
-        // 原点に対応する格子の整数座標。トロイダル(剰余)addressingの基準になる。
-        // **CPUとシェーダーで同じ値を使う必要があるので、CPU側で求めて渡す**
-        // (原点÷間隔をシェーダー側でも計算すると、丸めが食い違ったときに
-        //  プローブの位置とアトラスのセルがずれる)
+        // クリップマップLODの格子(プローブ番号 ⇔ ワールド座標)は GI::DDGIGrid が持つ。
+        // 設計の意図と、更新CSのアトラス座標式を1文字も変えずに済む理由は GI/DDGIGrid.h にある
     public:
         // 【publicにしてある】Passes::DDGIPasses がプローブの位置と担当座標を引くために呼ぶ。
         // どれも設定と格子から導くだけの計算で、状態を持たないので公開しても持ち主は変わらない
-        DirectX::XMINT3 ComputeDDGILODBaseIndex(uint32_t lod) const;
-
-        // そのスロットがいま担当しているワールド格子座標。dirty判定の基準になる
-        DirectX::XMINT3 ComputeDDGIProbeWorldCoord(uint32_t probeIndex) const;
-
-        DirectX::XMFLOAT3 ComputeDDGIProbePosition(uint32_t probeIndex) const;
+        GI::DDGIGrid& GetDDGIGrid() { return m_DDGIGrid; }
 
     private:
 

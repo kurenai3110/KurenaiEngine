@@ -165,6 +165,7 @@
     <ClCompile Include="Source\Engine\Settings\QualitySettings.cpp" />
     <ClCompile Include="Source\Engine\Diagnostics\RenderDumpService.cpp" />
     <ClCompile Include="Source\Engine\GI\DDGISystem.cpp" />
+    <ClCompile Include="Source\Engine\GI\DDGIGrid.cpp" />
     <ClCompile Include="Source\Engine\Scene\ModelResidencySystem.cpp" />
     <ClCompile Include="Source\Engine\Scene\SceneLoadService.cpp" />
     <ClCompile Include="Source\Engine\Rendering\GeometryDrawLoop.cpp" />

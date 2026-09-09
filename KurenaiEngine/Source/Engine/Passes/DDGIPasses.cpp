@@ -222,7 +222,7 @@ namespace Kurenai::Passes
         const auto captureDDGIProbeFace =
             [this, gi, targets, lightBuffer, brdfLUTTexture, iblPrefilterConstantBuffer, irradianceTexture, prefilteredEnvTexture, meshletLOD, suppressEmissiveForGI, ambientOcclusionSettings, emissiveLightSettings, &constants, probeFaceProjection, skyTexture, bakedLightCount, materialSamplers, objectConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
-            const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
+            const DirectX::XMFLOAT3 probePosition = m_Engine.GetDDGIGrid().ComputeProbePosition(probeIndex);
 
             RHI::Viewport ddgiViewport;
             ddgiViewport.Width = static_cast<float>(Passes::kDDGICaptureSize);
@@ -394,7 +394,7 @@ namespace Kurenai::Passes
         const auto traceDDGIProbeFace =
             [this, gi, lightBuffer, raytracingScene, brdfLUTTexture, irradianceTexture, prefilteredEnvTexture, suppressEmissiveForGI, ddgiSettings, emissiveLightSettings, skyTexture, bakedLightCount, materialSamplers, frameConstantBuffer](RHI::IRHICommandList* cmd, uint32_t probeIndex, uint32_t face)
         {
-            const DirectX::XMFLOAT3 probePosition = m_Engine.ComputeDDGIProbePosition(probeIndex);
+            const DirectX::XMFLOAT3 probePosition = m_Engine.GetDDGIGrid().ComputeProbePosition(probeIndex);
 
             DDGITraceConstants traceConstants{};
             traceConstants.Params0 = {
@@ -588,7 +588,7 @@ namespace Kurenai::Passes
             {
                 for (uint32_t slot = 0; slot < gi->DDGIProbeCount; ++slot)
                 {
-                    const DirectX::XMINT3 current = m_Engine.ComputeDDGIProbeWorldCoord(slot);
+                    const DirectX::XMINT3 current = m_Engine.GetDDGIGrid().ComputeProbeWorldCoord(slot);
                     const DirectX::XMINT3& baked = m_DDGIProbeBakedCoord[slot];
                     if (current.x != baked.x || current.y != baked.y || current.z != baked.z)
                     {
@@ -615,7 +615,7 @@ namespace Kurenai::Passes
             {
                 // 【LOD0の基準格子座標も出す】これが同じなら格子は同じ場所にある。
                 // 往復の検証で「カメラが同じセルへ戻ったか」を、絵ではなく数で確かめられる
-                const DirectX::XMINT3 base0 = m_Engine.ComputeDDGILODBaseIndex(0);
+                const DirectX::XMINT3 base0 = m_Engine.GetDDGIGrid().ComputeLODBaseIndex(0);
                 Core::Logger::Info(
                     "KurenaiEngine3D",
                     "DDGIの格子がスクロールしました: 未確定 " +
@@ -689,7 +689,7 @@ namespace Kurenai::Passes
                 // このスロットを焼いたので、担当しているワールド格子座標を記録し直す
                 if (m_DDGIProbeBakedCoord.size() == gi->DDGIProbeCount)
                 {
-                    m_DDGIProbeBakedCoord[probeIndex] = m_Engine.ComputeDDGIProbeWorldCoord(probeIndex);
+                    m_DDGIProbeBakedCoord[probeIndex] = m_Engine.GetDDGIGrid().ComputeProbeWorldCoord(probeIndex);
                 }
 
                 graph.AddPass(Core::RenderGraphPassDesc{

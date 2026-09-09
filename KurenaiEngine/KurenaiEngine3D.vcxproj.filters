@@ -192,6 +192,9 @@
     <ClCompile Include="Source\Engine\GI\DDGISystem.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Engine\GI\DDGIGrid.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
     <ClCompile Include="Source\Engine\Scene\ModelResidencySystem.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>
