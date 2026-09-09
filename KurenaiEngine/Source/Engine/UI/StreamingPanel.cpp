@@ -14,7 +14,6 @@
 
 #include "Core/Camera.h"
 #include "Core/Logger.h"
-#include "KurenaiEngine3D.h"
 #include "UI/UIWidgets.h"
 
 namespace Kurenai::UI

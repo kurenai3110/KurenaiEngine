@@ -5,7 +5,6 @@
 #include <cfloat>
 
 #include "EngineDefaults.h"
-#include "KurenaiEngine3D.h"
 #include "UI/UIManager.h"
 #include "UI/UIWidgets.h"
 

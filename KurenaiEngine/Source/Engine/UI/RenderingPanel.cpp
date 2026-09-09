@@ -1,9 +1,10 @@
 #include "UI/RenderingPanel.h"
+#include "../Passes/MegaLightsConstants.h"
+#include "../Settings/CloudSettings.h"
 
 #include <imgui.h>
 
 #include "EngineDefaults.h"
-#include "KurenaiEngine3D.h"
 #include "Passes/GeometryConstants.h"
 #include "UI/UIWidgets.h"
 
@@ -241,8 +242,8 @@ namespace Kurenai::UI
             int poolCapacity = m_Engine.GetSettings().MegaLights.TilePoolCapacity;
             if (SliderIntEx(
                     "候補プールの容量 K###MegaLightsTilePoolCapacity", &poolCapacity,
-                    KurenaiEngine3D::kMegaLightsTilePoolMinCapacity,
-                    static_cast<int>(KurenaiEngine3D::kMegaLightsTilePoolCapacity),
+                    Passes::kMegaLightsTilePoolMinCapacity,
+                    static_cast<int>(Passes::kMegaLightsTilePoolCapacity),
                     Defaults::MegaLightsTilePoolCapacity,
                     "候補プールが1タイル(16x16画素)あたりに抽出する灯の数。\n\n"
                     "【1画素あたりの標本数では減らないノイズがここで決まる】プールはタイルに"
@@ -313,7 +314,7 @@ namespace Kurenai::UI
                 int quadSamples = m_Engine.GetSettings().MegaLights.QuadSamplesPerPixel;
                 if (SliderIntEx(
                         "1画素あたりの標本数###MegaLightsQuadSamples", &quadSamples, 1,
-                        KurenaiEngine3D::kMegaLightsMaxSamplesPerPixel,
+                        Passes::kMegaLightsMaxSamplesPerPixel,
                         Defaults::MegaLightsQuadSamplesPerPixel,
                         "1画素あたりに候補プールから引く標本(リザーバ)の数。"
                         "**影レイの本数がそのままこれになる**ので、コストはほぼ比例して増える。\n\n"
@@ -1649,7 +1650,7 @@ namespace Kurenai::UI
                 "雄大積雲(congestus)が約2500m。厚いほど縦に伸びた入道雲になる");
             SliderUIntEx(
                 "レイマーチ段数###CloudRaymarchSteps", &m_Engine.GetSettings().Cloud.RaymarchSteps, 1,
-                KurenaiEngine3D::kCloudRaymarchStepsMax, Defaults::CloudRaymarchSteps,
+                kCloudRaymarchStepsMax, Defaults::CloudRaymarchSteps,
                 "雲底から雲頂までを何段に分けて積分するか。雲パスのコストの主なつまみで、"
                 "1段ごとにウェザーマップのfBm(4オクターブ)と3Dノイズ2枚を引くため、"
                 "コストはほぼこの数に比例する。減らすと雲の内部の階調が段状に粗くなる"

@@ -1,11 +1,7 @@
 #pragma once
 
 #include "UI/IPanel.h"
-
-namespace Kurenai
-{
-    class KurenaiEngine3D;
-}
+#include "EngineUIHost.h"
 
 namespace Kurenai::UI
 {
@@ -13,7 +9,7 @@ namespace Kurenai::UI
     class ProfilerPanel final : public IPanel
     {
     public:
-        explicit ProfilerPanel(KurenaiEngine3D& engine) : m_Engine(engine) {}
+        explicit ProfilerPanel(IEngineUIHost& engine) : m_Engine(engine) {}
 
         // ###以降がウィンドウIDになる。imgui.iniとドックレイアウトのキーになるため
         // ###以降は変更しないこと(表示名だけなら変更してよい)
@@ -22,6 +18,6 @@ namespace Kurenai::UI
         void Draw(const PanelDrawContext& context) override;
 
     private:
-        KurenaiEngine3D& m_Engine;
+        IEngineUIHost& m_Engine;
     };
 }

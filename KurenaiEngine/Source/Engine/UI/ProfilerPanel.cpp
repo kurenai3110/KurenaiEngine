@@ -2,7 +2,6 @@
 
 #include <imgui.h>
 
-#include "KurenaiEngine3D.h"
 #include "RHI/IRHIGPUProfiler.h"
 
 namespace Kurenai::UI

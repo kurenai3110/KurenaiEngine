@@ -8,7 +8,6 @@
 #include "Core/ImGuiDockLayout.h"
 #include "Core/Logger.h"
 #include "Core/StringUtil.h"
-#include "KurenaiEngine3D.h"
 #include "UI/DebugViewPanel.h"
 #include "UI/LightingPanel.h"
 #include "UI/PostProcessPanel.h"
@@ -34,7 +33,7 @@ namespace Kurenai::UI
         constexpr unsigned int kDockSpaceId = 0x4B554E46u; // 'KUNF' (世代F: ストリーミングのパネルを足した9パネル構成)
     }
 
-    UIManager::UIManager(KurenaiEngine3D& engine)
+    UIManager::UIManager(IEngineUIHost& engine)
         : m_Engine(engine)
     {
         // 見た目とフォントは最初のNewFrame()より前に設定する必要がある。

@@ -1,11 +1,7 @@
 #pragma once
 
 #include "UI/IPanel.h"
-
-namespace Kurenai
-{
-    class KurenaiEngine3D;
-}
+#include "EngineUIHost.h"
 
 namespace Kurenai::UI
 {
@@ -13,7 +9,7 @@ namespace Kurenai::UI
     class DebugViewPanel final : public IPanel
     {
     public:
-        explicit DebugViewPanel(KurenaiEngine3D& engine) : m_Engine(engine) {}
+        explicit DebugViewPanel(IEngineUIHost& engine) : m_Engine(engine) {}
 
         // ###以降がウィンドウIDになる。imgui.iniとドックレイアウトのキーになるため
         // ###以降は変更しないこと(表示名だけなら変更してよい)
@@ -24,6 +20,6 @@ namespace Kurenai::UI
     private:
         void DrawBufferPrecisionSection();
 
-        KurenaiEngine3D& m_Engine;
+        IEngineUIHost& m_Engine;
     };
 }

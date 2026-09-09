@@ -1,4 +1,5 @@
 #include "UI/ScenePanel.h"
+#include "Core/Camera.h"
 
 #include <imgui.h>
 
@@ -11,7 +12,6 @@
 #include "Core/Logger.h"
 #include "Core/StringUtil.h"
 #include "EngineDefaults.h"
-#include "KurenaiEngine3D.h"
 #include "UI/UIWidgets.h"
 
 namespace Kurenai::UI

@@ -3,7 +3,6 @@
 #include <imgui.h>
 
 #include "EngineDefaults.h"
-#include "KurenaiEngine3D.h"
 #include "UI/UIWidgets.h"
 
 namespace Kurenai::UI

@@ -7,6 +7,10 @@
 
 namespace Kurenai::Passes
 {
+        // キューブマップ配列の枚数上限。TextureCubeArrayは実行時に伸縮できないため固定容量で
+        // 確保し、これを超えるプローブが置かれたシーンは先頭からこの数だけを採用する(警告ログを出す)
+        inline constexpr uint32_t kMaxReflectionProbes = 8;
+
     inline constexpr uint32_t kProbeCaptureSize = kIBLPrefilterBaseSize;
 
     // プリフィルタ畳み込み(6ミップ×6面=36ディスパッチ)を1フレームへ集中させず、

@@ -1,9 +1,11 @@
 #include "UI/DebugViewPanel.h"
+#include "../Passes/EnvironmentConstants.h"
+#include "../Rendering/ShadowConstants.h"
+#include "../Passes/MegaLightsConstants.h"
 
 #include <imgui.h>
 
 #include "EngineDefaults.h"
-#include "KurenaiEngine3D.h"
 #include "UI/UIWidgets.h"
 
 namespace Kurenai::UI
@@ -106,7 +108,7 @@ namespace Kurenai::UI
         {
             SliderIntEx(
                 "シャドウカスケード###ShadowCascade", &m_Engine.GetSettings().Shadow.DebugCascade, 0,
-                static_cast<int>(KurenaiEngine3D::kCascadeCount) - 1, 0,
+                static_cast<int>(Rendering::kCascadeCount) - 1, 0,
                 "表示するカスケードの番号。0がカメラに最も近い範囲");
         }
 

@@ -16,6 +16,16 @@
 // 【static_assert が守るのはC++側だけ】**通すために期待値を書き換えないこと。**
 namespace Kurenai::Passes
 {
+        // 【実行時に振れる。ここは確保の上限】1タイルの抽出数Kは設定が持ち、シェーダへは
+        // 定数バッファで渡している。バッファの確保だけがコンパイル時の上限を要る
+        inline constexpr uint32_t kMegaLightsTilePoolCapacity = 128;
+        // Kの下限。これを下回るとタイルに届く灯を代表できない
+        inline constexpr int32_t kMegaLightsTilePoolMinCapacity = 8;
+        // 1画素あたりの標本数の上限。リザーババッファはこの倍数まで太る
+        //(16バイト x 画素数 x 標本数。2560x1440・4本で236MB)ので、際限なく上げさせない。
+        // クアッド層化は4層なので、4を超えると層の割り当てが一巡して効きが鈍る
+        inline constexpr int32_t kMegaLightsMaxSamplesPerPixel = 4;
+
         // タイルライトカリングのタイルサイズ(1辺のピクセル数)。
         // LightCulling.hlsl の kTileSize および numthreads と必ず一致させること
         inline constexpr uint32_t kLightTileSize = 16;

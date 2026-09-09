@@ -21,6 +21,7 @@
 #include "Diagnostics/ScheduledRecreationQueue.h"
 #include "GI/DDGIGrid.h"
 #include "Settings/EngineSettings.h"
+#include "UI/EngineUIHost.h"
 #include "DroneShow.h"
 #include "EngineDefaults.h"
 #include "KurenaiEngineBase.h"
@@ -48,6 +49,7 @@
 #include "Rendering/FrameHistoryState.h"
 #include "Rendering/SceneDrawList.h"
 #include "Scene/EmissiveLightSet.h"
+#include "Scene/InstanceLODState.h"
 #include "Scene/ModelStreamingState.h"
 #include "Scene/RaytracingRebuildState.h"
 #include "Scene/SceneLoadHandoff.h"
@@ -130,7 +132,8 @@ namespace Kurenai
     // シャドウマッピング、SSAO/SSIL(間接光)、SSR(反射)、ImGuiによる各種設定パネル、
     // 複数シーンの切り替えまでを内包した完結型のレンダラー。
     // 構築してRun()を呼ぶだけでウィンドウが開き、終了するまでブロックする
-    class KURENAI_3D_API KurenaiEngine3D : public KurenaiEngineBase, public Diagnostics::IRecreationTarget
+    class KURENAI_3D_API KurenaiEngine3D
+        : public KurenaiEngineBase, public Diagnostics::IRecreationTarget, public UI::IEngineUIHost
     {
     public:
         // renderWidth/renderHeight: G-Buffer以降の内部解像度(ウィンドウサイズとは独立。
@@ -468,7 +471,12 @@ namespace Kurenai
         // const(値またはconst参照)で返す。
         // 【必ず参照で返すこと】UIはここへ直接書き込む。値で返すと一時オブジェクトを
         // 掴んで操作が効かなくなるが、**コンパイルは通ってしまう**
-        Settings::EngineSettings& GetSettings() { return m_Settings; }
+        Settings::EngineSettings& GetSettings() override { return m_Settings; }
+
+        // 【転送が要る】GetWidth/GetHeightはKurenaiEngineBaseの非仮想メンバで、
+        // 別の基底の純粋仮想を満たさない。ここで明示的に橋渡しする
+        uint32_t GetWidth() const override { return KurenaiEngineBase::GetWidth(); }
+        uint32_t GetHeight() const override { return KurenaiEngineBase::GetHeight(); }
 
         std::vector<Assets::Light>& GetLights() { return m_Lights; }
         int& GetSelectedLightIndex() { return m_SelectedLightIndex; }
@@ -1447,7 +1455,7 @@ namespace Kurenai
     public:
         // キューブマップ配列の枚数上限。TextureCubeArrayは実行時に伸縮できないため固定容量で確保し、
         // これを超えるプローブが置かれたシーンは先頭からこの数だけを採用する(警告ログを出す)
-        static constexpr uint32_t kMaxReflectionProbes = 8;
+        static constexpr uint32_t kMaxReflectionProbes = Passes::kMaxReflectionProbes;
     private:
         // キャプチャ解像度。プリフィルタ済み鏡面のベース解像度(Passes::kIBLPrefilterBaseSize)と揃えることで、
         // ミップ0が「畳み込み無しのキャプチャそのもの」になりデバッグ表示で生の映り込みを確認できる
@@ -1619,7 +1627,7 @@ namespace Kurenai
         // Sky.hlsli は既定 kCloudMaxRaymarchSteps(384)で走り、cbuffer で0より大きい値を
         // 渡されたときだけそれを使う。その値は kCloudRaymarchStepsHardMax(512)で丸められる。
         // したがってここに要る条件は「512を超えないこと」だけで、一致させる相手はいない
-        static constexpr uint32_t kCloudRaymarchStepsMax = 32;
+        static constexpr uint32_t kCloudRaymarchStepsMax = Kurenai::kCloudRaymarchStepsMax;
     private:
         // 風によるノイズ空間の移動量。m_WaterScrollOffsetと同じくUIつまみではなく内部状態で、
         // RenderThreadMainがSky.hlsliのkCloudNoisePeriodと同じ周期でstd::fmodしながら進める
@@ -1677,9 +1685,9 @@ namespace Kurenai
         // 【実行時に振れる。ここは確保の上限】1タイルの抽出数Kは
         // m_Settings.MegaLights.TilePoolCapacity が持ち、シェーダへは定数バッファで渡している。
         // バッファの確保だけがコンパイル時の上限を要るのでここに残す
-        static constexpr uint32_t kMegaLightsTilePoolCapacity = 128;
+        static constexpr uint32_t kMegaLightsTilePoolCapacity = Passes::kMegaLightsTilePoolCapacity;
         // Kの下限。これを下回るとタイルに届く灯を代表できない。
-        static constexpr int32_t kMegaLightsTilePoolMinCapacity = 8;
+        static constexpr int32_t kMegaLightsTilePoolMinCapacity = Passes::kMegaLightsTilePoolMinCapacity;
     private:
         // 候補プール1タイルぶんの要素数。先頭6個がヘッダ(SumW / 届いた灯数 / 有効候補数 / 予約 /
         // 手前のViewZ / 奥のViewZ)、
@@ -1689,7 +1697,7 @@ namespace Kurenai
         // 1画素あたりの標本数の上限。リザーババッファはこの倍数まで太る
         //(16バイト x 画素数 x 標本数。2560x1440・4本で236MB)ので、際限なく上げさせない。
         // クアッド層化は4層なので、4を超えると層の割り当てが一巡して効きが鈍る
-        static constexpr int32_t kMegaLightsMaxSamplesPerPixel = 4;
+        static constexpr int32_t kMegaLightsMaxSamplesPerPixel = Passes::kMegaLightsMaxSamplesPerPixel;
     private:
 
         // ライトグリッド本体とタイル数は、3群(Lighting / MegaLights / Present)が読むため
@@ -1919,17 +1927,15 @@ namespace Kurenai
         // 【Assets::Sceneではなくエンジン側に持つ理由】これは読み込んだデータではなく
         // カメラ位置から毎フレーム決まる実行時の状態で、Loaderスレッドが作るSceneに
         // 混ぜると「シーンの内容」と「今の見え方」の境界が曖昧になる
-        struct InstanceLODState
-        {
-            uint32_t CurrentLOD = 0;   // 0 = ModelInstance::Model、1以上は LODModels[n-1]
-            uint32_t PreviousLOD = 0;  // フェード中の切り替え元
-            float FadeT = 1.0f;        // 1.0でフェード完了。0→1へ進み、その間だけ2段を重ねる
-        };
+        // 実体は Scene/InstanceLODState.h(UIが型名を書けるよう入れ子にしていない)
+        using InstanceLODState = Scene::InstanceLODState;
         std::vector<InstanceLODState> m_InstanceLODStates;
     public:
-        // RenderingPanel(モデルLOD段ごとの内訳表示)向け。InstanceLODStateがこのクラスの
-        // 入れ子型のため、UIパネル向けのアクセサ一覧とは別にここで公開する
-        const std::vector<InstanceLODState>& GetInstanceLODStates() const { return m_InstanceLODStates; }
+        // RenderingPanel(モデルLOD段ごとの内訳表示)向け
+        const std::vector<Scene::InstanceLODState>& GetInstanceLODStates() const override
+        {
+            return m_InstanceLODStates;
+        }
     private:
         // 段の切り替えにかける秒数とヒステリシス幅はm_Settings.Geometry.LODFadeDuration /
         // LODHysteresisへ移した

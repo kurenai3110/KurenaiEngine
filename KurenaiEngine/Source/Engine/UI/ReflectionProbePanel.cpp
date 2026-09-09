@@ -1,4 +1,6 @@
 #include "UI/ReflectionProbePanel.h"
+#include "../Rendering/CubeFaceMath.h"
+#include "../Passes/ReflectionProbeConstants.h"
 
 #include <imgui.h>
 
@@ -6,7 +8,6 @@
 #include <cstdio>
 
 #include "EngineDefaults.h"
-#include "KurenaiEngine3D.h"
 #include "UI/UIWidgets.h"
 
 namespace Kurenai::UI
@@ -100,7 +101,7 @@ namespace Kurenai::UI
         EndParamGroup();
 
         ImGui::Text(
-            "プローブ数: %zu / %u", m_Engine.GetReflectionProbes().size(), KurenaiEngine3D::kMaxReflectionProbes);
+            "プローブ数: %zu / %u", m_Engine.GetReflectionProbes().size(), Passes::kMaxReflectionProbes);
 
         if (!m_Engine.GetProbeBaked() && !m_Engine.GetReflectionProbes().empty())
         {
@@ -112,7 +113,7 @@ namespace Kurenai::UI
             // 「変化が反射へ現れるまでの遅れ」がこの進行から読める
             ImGui::Text(
                 "更新中: プローブ %u の %u / %u 面目", m_Engine.GetProbeRealtimeProbeIndex(),
-                m_Engine.GetProbeRealtimeFace() + 1, KurenaiEngine3D::kCubeFaceCount);
+                m_Engine.GetProbeRealtimeFace() + 1, kCubeFaceCount);
         }
     }
 
@@ -149,7 +150,7 @@ namespace Kurenai::UI
         }
 
         // キューブマップ配列は固定容量のため、上限に達したら追加できない
-        ImGui::BeginDisabled(m_Engine.GetReflectionProbes().size() >= KurenaiEngine3D::kMaxReflectionProbes);
+        ImGui::BeginDisabled(m_Engine.GetReflectionProbes().size() >= Passes::kMaxReflectionProbes);
         if (ImGui::Button("追加"))
         {
             // 追加位置はカメラ位置ではなくシーンAABBの中心にする(カメラ位置だと壁や地面へ

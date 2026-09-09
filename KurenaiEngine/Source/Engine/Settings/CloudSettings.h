@@ -6,6 +6,11 @@
 
 namespace Kurenai
 {
+    // UIスライダの上限。Sky.hlsli は既定 kCloudMaxRaymarchSteps(384)で走り、cbufferで
+    // 0より大きい値を渡されたときだけそれを使う。その値は kCloudRaymarchStepsHardMax(512)で
+    // 丸められる。したがってここに要る条件は「512を超えないこと」だけで、一致させる相手はいない
+    inline constexpr uint32_t kCloudRaymarchStepsMax = 32;
+
     struct CloudSettings
     {
         // DebugView::CloudNoiseSlice で表示する3Dノイズのスライス位置(0〜1、W方向)と、
