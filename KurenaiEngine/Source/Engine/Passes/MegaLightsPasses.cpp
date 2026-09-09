@@ -267,6 +267,8 @@ namespace Kurenai::Passes
         const uint32_t megaLightsEffectiveTilesX = frame.MegaLightsEffectiveTilesX;
         const uint32_t megaLightsEffectiveTilesY = frame.MegaLightsEffectiveTilesY;
         const DirectX::XMUINT2 megaLightsTileOffset = frame.MegaLightsTileOffset;
+        // 候補プールと確率的サンプリングの種。登録から実行までの間に進むことはないので値で持つ
+        const uint32_t frameIndex = frame.FrameIndex;
 
         // --- タイルライトカリングパス: 画面を16x16のタイルに分け、タイルごとに「そのタイルに届くライト」の
         //     インデックスリストをコンピュートシェーダーで作る。直接光パスはそのリストだけをループする。
@@ -333,7 +335,7 @@ namespace Kurenai::Passes
                 .Reads = { targets->GBufferDepth.get() },
                 .BufferReads = { lightBuffer },
                 .BufferWrites = { targets->MegaLightsTilePoolBuffer.get() },
-                .Execute = [this, targets, lightBuffer, megaLightsSettings, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, lightBuffer, megaLightsSettings, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset, frameIndex, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                 {
                     Passes::MegaLightsTilePoolConstants poolConstants{};
                     DirectX::XMStoreFloat4x4(&poolConstants.View, DirectX::XMMatrixTranspose(viewMatrix));
@@ -363,7 +365,7 @@ namespace Kurenai::Passes
                     // (単調増加していればよく、ジッターの位相とは無関係)
                     poolConstants.PoolParams =
                     {
-                        m_Engine.GetTAAFrameIndex(),
+                        frameIndex,
                         megaLightsTileOffset.x,
                         megaLightsTileOffset.y,
                         0u,
@@ -425,7 +427,7 @@ namespace Kurenai::Passes
                 // 読むが、宣言しておくことで候補プールパスより後ろへ順序付けられる
                 // (参照実装のフレームでは辺が1本余分に張られるだけで無害)
                 .BufferReads = { lightBuffer, tilePoolBufferForBinding, meshLightBufferForBinding },
-                .Execute = [this, targets, lightBuffer, raytracingScene, brdfLUTTexture, emissiveLightSettings, megaLightsSettings, &gpuLights, tilePoolBufferForBinding, meshLightBufferForBinding, meshLightTriangleCount, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, lightBuffer, raytracingScene, brdfLUTTexture, emissiveLightSettings, megaLightsSettings, &gpuLights, tilePoolBufferForBinding, meshLightBufferForBinding, meshLightTriangleCount, frameIndex, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     Passes::MegaLightsConstants megaLightsConstants{};
                     megaLightsConstants.Params0 =
@@ -437,7 +439,7 @@ namespace Kurenai::Passes
                     };
                     // 球光源のサンプル列を毎フレーム回す種。確率的サンプリング側と同じ
                     // フレーム番号を使う(あちらは Params1.w)
-                    megaLightsConstants.Params1 = { m_Engine.GetTAAFrameIndex(), meshLightTriangleCount, 0u, 0u };
+                    megaLightsConstants.Params1 = { frameIndex, meshLightTriangleCount, 0u, 0u };
                     // 段階1が MakeGPULightFromEmissiveProxy で毎フレーム掛けているのと同じ倍率。
                     // これで ImGui の「自発光の強度」がメッシュライトにもライブに効く
                     // y は影響半径の伸縮。半径は倍率1で焼いてあり、段階1の Range は
@@ -502,7 +504,7 @@ namespace Kurenai::Passes
             // Initial側のExecuteで1回だけ更新すればよい
             const auto buildStochasticConstants =
                 [this, megaLightsSamplesPerPixel, megaLightsSettings, jitteredProj, megaLightsQuadShared, megaLightsEffectiveTilesX,
-                 megaLightsTileOffset, renderWidth, renderHeight](uint32_t spatialIteration)
+                 megaLightsTileOffset, frameIndex, renderWidth, renderHeight](uint32_t spatialIteration)
             {
                 MegaLightsStochasticConstants stochasticConstants{};
                 stochasticConstants.Params0 =
@@ -520,7 +522,7 @@ namespace Kurenai::Passes
                     Passes::kLightTileSize,
                     // 候補プールを書いたときと同じKでなければならない(上のTileParams.wと同値)
                     static_cast<uint32_t>(megaLightsSettings.TilePoolCapacity),
-                    m_Engine.GetTAAFrameIndex(),
+                    frameIndex,
                 };
                 stochasticConstants.Params2 =
                 {
@@ -1175,11 +1177,11 @@ namespace Kurenai::Passes
                         },
                     });
                     m_MegaLightsDumpIssued = true;
-                    m_MegaLightsDumpCopyFrame = m_Engine.GetTAAFrameIndex();
+                    m_MegaLightsDumpCopyFrame = frame.FrameIndex;
                 }
             }
             // GPUの実行はCPUより数フレーム遅れる。積んだ直後に読むと未完了の内容を掴む
-            else if (m_Engine.GetTAAFrameIndex() - m_MegaLightsDumpCopyFrame >= 5u)
+            else if (frame.FrameIndex - m_MegaLightsDumpCopyFrame >= 5u)
             {
                 std::vector<float> host(static_cast<size_t>(renderWidth) * renderHeight * 4u);
                 if (m_MegaLightsAccumReadback->ReadbackData(host.data(), accumBytes))

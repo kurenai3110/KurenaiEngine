@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
@@ -17,6 +18,22 @@
 // **通すために期待値を書き換えないこと。**
 namespace Kurenai::Passes
 {
+        // UIのシャープネス(0〜1)を、シェーダーへ渡す線形スケールへ変換する。
+        //
+        // FSR1のsharpnessは「シャープさを何ストップ(=半分に)落とすか」で、0が最大・大きいほど弱い。
+        // UI側は「0で無効、1で最強」のほうが直感的なので、ここで向きと尺度を変換する。
+        // 2ストップ(=1/4)を弱い側の端にしているのは、それ以上落とすと見た目の変化が無くなるため
+        inline float ComputeRcasSharpnessScale(float sharpness)
+        {
+            const float clamped = std::clamp(sharpness, 0.0f, 1.0f);
+            if (clamped <= 0.0f)
+            {
+                // 完全に0のときはlobeごと0になるようにする(exp2(-2)=0.25では弱いシャープが残る)
+                return 0.0f;
+            }
+            return std::exp2(-2.0f * (1.0f - clamped));
+        }
+
         // 輝度ヒストグラムのビン数。AutoExposure.hlslのHISTOGRAM_BINSと一致させること
         inline constexpr uint32_t kExposureHistogramBins = 256;
 

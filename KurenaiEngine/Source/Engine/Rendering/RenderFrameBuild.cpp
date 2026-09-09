@@ -55,6 +55,8 @@ namespace Kurenai
         // ようにする。TAAが複数フレームぶんを蓄積することで実質的なスーパーサンプリングになる。
         // TAA無効時はジッターも必ず0にすること(ジッターだけ残ると画面が振動するだけになる)
         ++m_TAAFrameIndex;
+        // 【前進の直後に載せること】下げると、パス群だけが1つ古い番号を見る
+        frameContext.FrameIndex = m_TAAFrameIndex;
 
         // --- MegaLights候補プールのタイル格子ジッター ---
         // 書き手・Initial/Spatial・Presentへ配る値をここで一度だけ決める。

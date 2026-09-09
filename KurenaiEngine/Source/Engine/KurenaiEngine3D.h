@@ -961,14 +961,6 @@ namespace Kurenai
         static void ComputeUpscaleRenderResolution(
             uint32_t outputWidth, uint32_t outputHeight, UpscaleQualityMode mode,
             uint32_t& outRenderWidth, uint32_t& outRenderHeight);
-        // UIのシャープネス(0〜1)を、シェーダーへ渡す線形スケールへ変換する。
-        // FSR1のsharpnessは「何ストップ弱めるか」で0が最大なので、2^(-2*(1-v)) とする
-    public:
-        // 【publicにしてある】Passes::PostProcessPasses が RCAS の定数を組むときに呼ぶ。
-        // 状態を持たない純粋な変換なので、公開しても持ち主は変わらない
-        static float ComputeRcasSharpnessScale(float sharpness);
-
-    private:
 
         // 出力解像度のテクスチャを作り直す。GPUがそれらを参照していない状態で呼ぶこと
         void CreateUpscaleTargets(uint32_t width, uint32_t height);
@@ -1465,13 +1457,6 @@ namespace Kurenai
         std::atomic<bool> m_TAAHistoryValid{ false };
         // ジッターのサンプル列を進めるフレーム番号(Halton列の添字に使う)
         uint32_t m_TAAFrameIndex = 0;
-    public:
-        // 【publicにしてある】ジッターの添字・ダンプの発火・作り直し予約の基準に使う
-        // エンジンのフレーム番号。Passes::MegaLightsPasses がタイル格子のジッターと
-        // 蓄積の書き出し待ちに読む。**進めるのはRender()だけ**なので公開しても持ち主は変わらない
-        uint32_t GetTAAFrameIndex() const { return m_TAAFrameIndex; }
-
-    private:
         // 前フレームのビュー射影行列(ジッター済み・転置済み=シェーダへ渡す形のまま)。
         // Renderスレッドのみが読み書きするため追加の排他は不要。
         // 履歴テクスチャの有効性(m_TAAHistoryValid)とは意図的に別管理にしている。シーン切り替えや

@@ -259,6 +259,11 @@ namespace Kurenai::Rendering
         // 前フレームの露出。TAAが履歴の明るさを今フレームへ合わせ直すのに使う
         float TAAPrevEffectiveExposureEV100 = 0.0f;
 
+        // 通し番号のフレーム番号。TAAのサブピクセルジッター・MegaLightsのタイル格子
+        // ジッター・ダンプの発火判定が、すべてこの1つの番号から導かれる。
+        // 【DecideFrameJitterAndCameraの先頭で載せる】前進より後に載せると1つ古い番号が配られる
+        uint32_t FrameIndex = 0;
+
         // 今フレームのTAA履歴の書き込み先(RenderTargets::TAAHistoryの添字)。
         // もう一方が前フレームの結果=履歴。Render()の末尾で入れ替わる
         uint32_t TAAHistoryIndex = 0;

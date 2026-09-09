@@ -639,7 +639,7 @@ namespace Kurenai::Passes
             ComputeEasuConstants(
                 upscaleConstants, renderWidth, renderHeight, upscaleOutputWidth, upscaleOutputHeight);
             upscaleConstants.OutputSize = { upscaleOutputWidth, upscaleOutputHeight };
-            upscaleConstants.RcasSharpnessScale = m_Engine.ComputeRcasSharpnessScale(frame.Settings.PostProcess.UpscaleSharpness);
+            upscaleConstants.RcasSharpnessScale = ComputeRcasSharpnessScale(frame.Settings.PostProcess.UpscaleSharpness);
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "UpscaleEASU",
