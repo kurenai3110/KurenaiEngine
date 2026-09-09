@@ -3344,73 +3344,7 @@ namespace Kurenai
         ShaderInterop::FrameConstants& constants, Passes::LightingConstants& lightingConstants,
         size_t& bakedLightCount)
     {
-        // --- TAAのサブピクセルジッター ---
-        // 投影行列を1ピクセル未満だけずらして、同じ画素が毎フレームわずかに違う位置をサンプルする
-        // ようにする。TAAが複数フレームぶんを蓄積することで実質的なスーパーサンプリングになる。
-        // TAA無効時はジッターも必ず0にすること(ジッターだけ残ると画面が振動するだけになる)
-        ++m_TAAFrameIndex;
-
-        // --- MegaLights候補プールのタイル格子ジッター ---
-        // 書き手・Initial/Spatial・Presentへ配る値をここで一度だけ決める。
-        // 各パスが個別にフレーム番号から導くと、式の片側だけを直した際に別タイルを静かに読むため
-        const bool megaLightsTileJitterEnabled = m_MegaLightsSettings.TileJitterMode != 0;
-        DirectX::XMUINT2 megaLightsTileOffset{ 0u, 0u };
-        if (m_MegaLightsSettings.TileJitterMode == 1)
-        {
-            // Halton(2,3)を16段階へ量子化する。RadicalInverseは[0,1)だが、丸め誤差でも
-            // 16にならないようタイル幅-1で明示的に押さえる
-            megaLightsTileOffset.x = std::min<uint32_t>(
-                static_cast<uint32_t>(RadicalInverse(m_TAAFrameIndex, 2u) * kLightTileSize),
-                kLightTileSize - 1u);
-            megaLightsTileOffset.y = std::min<uint32_t>(
-                static_cast<uint32_t>(RadicalInverse(m_TAAFrameIndex, 3u) * kLightTileSize),
-                kLightTileSize - 1u);
-        }
-        // 無効時だけ従来のタイル数をそのまま使い、添字・乱数の種・ディスパッチ数を保存する。
-        // モード2は対照実験なので、オフセット0でも有効側と同じ+1タイルを通す
-        const uint32_t megaLightsEffectiveTilesX =
-            megaLightsTileJitterEnabled ? (m_RenderTargets.LightTileCountX + 1u) : m_RenderTargets.LightTileCountX;
-        const uint32_t megaLightsEffectiveTilesY =
-            megaLightsTileJitterEnabled ? (m_RenderTargets.LightTileCountY + 1u) : m_RenderTargets.LightTileCountY;
-
-        DirectX::XMFLOAT2 jitterOffsetPixels{ 0.0f, 0.0f };
-        if (m_PostProcessSettings.TAAEnabled)
-        {
-            // Halton列の添字は1から始める。添字0はradical inverseの定義上どの基数でも0となり、
-            // オフセットがピクセルの角(-0.5, -0.5)へ偏ってしまう
-            const uint32_t haltonIndex = (m_TAAFrameIndex % kTAAJitterSampleCount) + 1;
-            jitterOffsetPixels.x = (RadicalInverse(haltonIndex, 2) - 0.5f) * m_PostProcessSettings.TAAJitterScale;
-            jitterOffsetPixels.y = (RadicalInverse(haltonIndex, 3) - 0.5f) * m_PostProcessSettings.TAAJitterScale;
-        }
-        // ピクセル単位のオフセットをNDCとUVの2つの単位へ直す。
-        // ピクセル座標は右が+x・下が+yなのに対しNDCは上が+yなので、yだけ符号が反転する
-        // (この符号を落とすと縦方向のジッターと速度が逆向きになる)
-        const DirectX::XMFLOAT2 jitterNdc{
-            2.0f * jitterOffsetPixels.x / static_cast<float>(m_RenderWidth),
-            -2.0f * jitterOffsetPixels.y / static_cast<float>(m_RenderHeight),
-        };
-        // NDC→UVは xy * (0.5, -0.5) + 0.5 なので、ジッターのUV換算はピクセル数/解像度そのものになる
-        const DirectX::XMFLOAT2 jitterUv{
-            jitterOffsetPixels.x / static_cast<float>(m_RenderWidth),
-            jitterOffsetPixels.y / static_cast<float>(m_RenderHeight),
-        };
-
-        // ビュー行列と「ジッター済み」射影行列をここで一度だけ確定させ、以降のカメラ由来の行列は
-        // すべてこれらから作る。
-        //
-        // 【なぜ行列の掛け算でジッターを入れられるのか】Camera::GetProjectionMatrixは行ベクトル規約
-        // (clip = view * P)で、第3列が(0,0,1,0)すなわち clip.w = viewZ である。
-        // XMMatrixTranslationは行ベクトル規約では第3行が(jx, jy, 0, 1)になるので、P * T を展開すると
-        // 変化するのは要素[2][0]と[2][1]、つまり clip.xy += jitterNdc * clip.w だけになる。
-        // w除算後には ndc.xy += jitterNdc という定数オフセットになり、狙いどおり平行移動として効く。
-        //
-        // 【なぜ全パスで統一するのか】深度バッファはこのジッター済み行列でラスタライズされる。
-        // 深度から位置を復元する側(SSAO/SSIL/SSR/スクリーンスペースシャドウ)がジッター前の行列を
-        // 使うと、再構成した位置がサブピクセルぶんずれて自己遮蔽やハローの原因になる。
-        // なお射影行列の_33/_43(深度のリニアライズ係数)はジッターでは変化しない
-        const DirectX::XMMATRIX viewMatrix = frameState.Camera.GetViewMatrix();
-        const DirectX::XMMATRIX jitteredProj =
-            frameState.Camera.GetProjectionMatrix() * DirectX::XMMatrixTranslation(jitterNdc.x, jitterNdc.y, 0.0f);
+        DecideFrameJitterAndCamera(frameState, frameContext);
 
         // --- メッシュレットLODの段を選ぶ入力を、このフレームぶん一度だけ確定させる ---
         //
@@ -3938,7 +3872,7 @@ namespace Kurenai
 
         // 【実体はRender()にある】frameContext.Constantsがこれを指す。元と同じく未初期化のまま
         // 受け取り、以降の代入で全フィールドを埋める
-        const DirectX::XMMATRIX viewProj = viewMatrix * jitteredProj;
+        const DirectX::XMMATRIX viewProj = frameContext.ViewMatrix * frameContext.JitteredProj;
         DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(viewProj));
 
         // 平面反射用の鏡映カメラ。水面平面 y=waterPlaneY に対する反射行列を、通常のView×Projへ
@@ -3952,7 +3886,7 @@ namespace Kurenai
             DirectX::XMMatrixReflect(DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, -waterPlaneY));
         // メインカメラと同じジッター済みProjを使う(PlanarReflection.hlsl冒頭参照。ジッターが
         // 異なると反射がメインの画面UVとサブピクセル単位でずれてしまう)
-        const DirectX::XMMATRIX reflectedViewProj = reflectMatrix * viewMatrix * jitteredProj;
+        const DirectX::XMMATRIX reflectedViewProj = reflectMatrix * frameContext.ViewMatrix * frameContext.JitteredProj;
         DirectX::XMVECTOR determinant;
         const DirectX::XMMATRIX invViewProj = DirectX::XMMatrixInverse(&determinant, viewProj);
         DirectX::XMStoreFloat4x4(&constants.InvViewProj, DirectX::XMMatrixTranspose(invViewProj));
@@ -3979,10 +3913,10 @@ namespace Kurenai
                   sunLighting.Color.z * effectiveExposure,
                   0.0f }
             : DirectX::XMFLOAT4{ 0.0f, 0.0f, 0.0f, 0.0f };
-        DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(viewMatrix));
+        DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(frameContext.ViewMatrix));
         // ジッター済みの射影行列を渡す。SSAO/SSILはこの行列でView空間の点を画面へ投影して
         // 深度バッファと突き合わせるため、深度を描いたときと同じ行列でなければサブピクセルぶんずれる
-        DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(jitteredProj));
+        DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(frameContext.JitteredProj));
         // rgb(環境光の色)にm_IBLSettings.AmbientScaleを乗算する。Enable IBL無効時のフォールバックアンビエント
         // (DeferredLighting.hlsl)の強度調整用で、alpha(dayFactor、IBLの夜間減光・背景スカイの
         // 昼夜ブレンドに使う)には掛けない
@@ -4125,12 +4059,12 @@ namespace Kurenai
         if (m_TAAPrevViewProjValid)
         {
             constants.PrevViewProj = m_TAAPrevViewProj;
-            constants.TAAParams = { jitterUv.x, jitterUv.y, m_TAAPrevJitterUv.x, m_TAAPrevJitterUv.y };
+            constants.TAAParams = { frameContext.JitterUv.x, frameContext.JitterUv.y, m_TAAPrevJitterUv.x, m_TAAPrevJitterUv.y };
         }
         else
         {
             constants.PrevViewProj = constants.ViewProj;
-            constants.TAAParams = { jitterUv.x, jitterUv.y, jitterUv.x, jitterUv.y };
+            constants.TAAParams = { frameContext.JitterUv.x, frameContext.JitterUv.y, frameContext.JitterUv.x, frameContext.JitterUv.y };
         }
 
         // DDGI(22章)。一度も焼けていない間はアトラスの中身が未定義なので無効にしておく
@@ -4259,7 +4193,7 @@ namespace Kurenai
         // 画面の高さ全体が 2*tan(fovY/2) なので、1画素あたりはそれを縦解像度で割ればよい。
         // 解像度やFOVを変えても星の見かけの下限が追従する
         DirectX::XMFLOAT4X4 projForPixelAngle;
-        DirectX::XMStoreFloat4x4(&projForPixelAngle, jitteredProj);
+        DirectX::XMStoreFloat4x4(&projForPixelAngle, frameContext.JitteredProj);
         const float pixelAngle =
             (projForPixelAngle._22 > 0.0f && m_RenderHeight > 0)
                 ? (2.0f / (projForPixelAngle._22 * static_cast<float>(m_RenderHeight)))
@@ -4344,7 +4278,7 @@ namespace Kurenai
         // 「深度バッファに関わる計算はすべて深度を描いたときと同じ行列から導く」という
         // 不変条件を1箇所も破らないため(将来ジッターの入れ方を変えたときに黙ってずれない)
         DirectX::XMFLOAT4X4 projectionForDepthLinearize;
-        DirectX::XMStoreFloat4x4(&projectionForDepthLinearize, jitteredProj);
+        DirectX::XMStoreFloat4x4(&projectionForDepthLinearize, frameContext.JitteredProj);
         const float depthLinearizeA = projectionForDepthLinearize._33;
         const float depthLinearizeB = projectionForDepthLinearize._43;
 
@@ -4476,15 +4410,9 @@ namespace Kurenai
         frameContext.ScreenSpaceSamplers = m_ScreenSpaceSamplers.get();
         frameContext.EffectiveExposure = effectiveExposure;
         frameContext.PlanarReflectionPassRuns = planarReflectionPassRuns;
-        frameContext.MegaLightsEffectiveTilesX = megaLightsEffectiveTilesX;
-        frameContext.MegaLightsEffectiveTilesY = megaLightsEffectiveTilesY;
-        frameContext.MegaLightsTileOffset = megaLightsTileOffset;
         frameContext.ManualExposureScale = manualExposureScale;
         frameContext.KeyReferenceEV100 = keyReferenceEV100;
-        frameContext.ViewMatrix = viewMatrix;
-        frameContext.JitteredProj = jitteredProj;
         frameContext.InvViewProj = invViewProj;
-        frameContext.JitterUv = jitterUv;
         frameContext.UsingProceduralSky = usingProceduralSky;
         frameContext.FogPassRuns = fogPassRuns;
         frameContext.DepthPrepassRuns = depthPrepassRuns;

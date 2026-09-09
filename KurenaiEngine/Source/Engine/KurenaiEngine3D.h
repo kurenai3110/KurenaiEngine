@@ -789,6 +789,12 @@ namespace Kurenai
         // これらを指す。この関数のローカルにすると graph.Execute() の時点で解放済みになるが、
         // 解放直後なら中身が残っていて同じ絵が出るため、採取では絶対に捕まらない。
         // 寿命を Render() のスコープに保つため、実体は呼び出し側に置く
+        // --- BuildFrameContext から切り出した組み立ての各段(段階7.5) ---
+        // 【定義は Rendering/RenderFrameBuild.cpp にある】呼ぶ順が実行順の一部で、
+        // 後段が前段の書いた frameContext のフィールドを読む。並べ替えないこと
+        void DecideFrameJitterAndCamera(
+            const FrameState& frameState, Rendering::RenderFrameContext& frameContext);
+
         void BuildFrameContext(
             const FrameState& frameState, RHI::IRHICommandList* commandList,
             const SunLighting& sunLighting, float effectiveExposure, float manualExposureScale,
