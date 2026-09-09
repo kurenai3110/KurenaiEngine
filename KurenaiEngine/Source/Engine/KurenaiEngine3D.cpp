@@ -1445,23 +1445,7 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetPassManifest(const wchar_t* path, int frames)
     {
-        if (path == nullptr || path[0] == L'\0' || frames < 1)
-        {
-            m_PassManifestPath.clear();
-            m_PassManifestTargetFrames = 1;
-            m_PassManifestIssuedFrames = 0;
-            m_PassManifestIssued = false;
-            Core::Logger::Error("KurenaiEngine3D", "パスマニフェストの出力設定が不正です");
-            return;
-        }
-
-        m_PassManifestPath = path;
-        m_PassManifestTargetFrames = static_cast<uint32_t>(frames);
-        m_PassManifestIssuedFrames = 0;
-        m_PassManifestIssued = false;
-        Core::Logger::Info(
-            "KurenaiEngine3D", "パスマニフェストの出力を設定しました: " + Core::WideToUtf8(path) +
-                " (frames=" + std::to_string(frames) + ")");
+        m_DumpService.SetPassManifest(path, frames);
     }
 
     void KurenaiEngine3D::SetMegaLightsSpatialIterations(int iterations)
@@ -2245,7 +2229,7 @@ namespace Kurenai
         m_TAAHistoryIndex = 0;
 
         // ポインタが作り直されたので、グラフィックスデバッガ向けの名前を焼き直す
-        m_DebugNamesDirty = true;
+        m_DumpService.MarkDebugNamesDirty();
 
         // A/B比較の記録用。どちらの構成で描かれたスクリーンショットなのかをログから追えるようにする
         Core::Logger::Info(
@@ -2282,7 +2266,7 @@ namespace Kurenai
         }
 
         // ポインタが作り直されたので、グラフィックスデバッガ向けの名前を焼き直す
-        m_DebugNamesDirty = true;
+        m_DumpService.MarkDebugNamesDirty();
 
         Core::Logger::Info(
             "KurenaiEngine3D",
