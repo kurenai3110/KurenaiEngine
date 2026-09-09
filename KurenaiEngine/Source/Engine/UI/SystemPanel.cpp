@@ -183,14 +183,14 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "垂直同期###EnableVSync", &m_Engine.GetSystemSettings().VSyncEnabled, Defaults::VSyncEnabled,
+            "垂直同期###EnableVSync", &m_Engine.GetSettings().System.VSyncEnabled, Defaults::VSyncEnabled,
             "Presentをディスプレイのリフレッシュに同期させる。ティアリングは消えるが遅延は増える");
 
         CheckboxEx(
-            "フレームレート制限###FixedFPS", &m_Engine.GetSystemSettings().FixedFPSEnabled, Defaults::FixedFPSEnabled,
+            "フレームレート制限###FixedFPS", &m_Engine.GetSettings().System.FixedFPSEnabled, Defaults::FixedFPSEnabled,
             "指定したフレームレートを超えないように待機を入れる");
 
-        if (m_Engine.GetSystemSettings().FixedFPSEnabled)
+        if (m_Engine.GetSettings().System.FixedFPSEnabled)
         {
             static const char* kTargetFPSNames[] = { "30", "60", "120" };
             static const float kTargetFPSValues[] = { 30.0f, 60.0f, 120.0f };
@@ -203,7 +203,7 @@ namespace Kurenai::UI
             int defaultIndex = 1;
             for (int i = 0; i < IM_ARRAYSIZE(kTargetFPSValues); ++i)
             {
-                if (kTargetFPSValues[i] == m_Engine.GetSystemSettings().TargetFPS)
+                if (kTargetFPSValues[i] == m_Engine.GetSettings().System.TargetFPS)
                 {
                     targetFPSIndex = i;
                 }
@@ -217,12 +217,12 @@ namespace Kurenai::UI
                     "目標フレームレート###TargetFPS", &targetFPSIndex, kTargetFPSNames, IM_ARRAYSIZE(kTargetFPSNames),
                     defaultIndex, "上限とするフレームレート"))
             {
-                m_Engine.GetSystemSettings().TargetFPS = kTargetFPSValues[targetFPSIndex];
+                m_Engine.GetSettings().System.TargetFPS = kTargetFPSValues[targetFPSIndex];
             }
         }
 
         CheckboxEx(
-            "性能をログに記録###FrameStatsLogging", &m_Engine.GetSystemSettings().FrameStatsLoggingEnabled,
+            "性能をログに記録###FrameStatsLogging", &m_Engine.GetSettings().System.FrameStatsLoggingEnabled,
             Defaults::FrameStatsLoggingEnabled,
             "FPS・CPU/GPUフレーム時間を1秒ごとにログファイルへ書き出す。"
             "このパネルの表示は実行中しか見えないため、後から実行同士を比較するにはこちらを使う");
@@ -299,8 +299,8 @@ namespace Kurenai::UI
 
         // 超解像が有効なときComboが指すのは出力解像度、無効なときは内部レンダー解像度。
         // どちらもm_Settings.PostProcess.UpscaleOutputWidth/Heightが追いかけているのでこれを見ればよい
-        const uint32_t comboWidth = m_Engine.GetPostProcessSettings().UpscaleOutputWidth;
-        const uint32_t comboHeight = m_Engine.GetPostProcessSettings().UpscaleOutputHeight;
+        const uint32_t comboWidth = m_Engine.GetSettings().PostProcess.UpscaleOutputWidth;
+        const uint32_t comboHeight = m_Engine.GetSettings().PostProcess.UpscaleOutputHeight;
 
         // 一覧に無い解像度(「ウィンドウサイズに合わせる」で設定した場合など)のときは-1のままにする。
         // ImGuiのComboは範囲外のインデックスを空表示として扱うため、そのままでも壊れない
@@ -321,8 +321,8 @@ namespace Kurenai::UI
         // 変更があった項目に関わらず、最終的にRequestUpscaleSettings()を1回だけ呼ぶ形に統一する。
         // 出力解像度・品質モード・有効/無効のどれが変わっても内部レンダー解像度の導出をやり直す
         // 必要があり、経路を分けると片方だけ更新し忘れる
-        bool upscaleEnabled = m_Engine.GetPostProcessSettings().UpscaleEnabled;
-        int qualityIndex = static_cast<int>(m_Engine.GetPostProcessSettings().UpscaleQuality);
+        bool upscaleEnabled = m_Engine.GetSettings().PostProcess.UpscaleEnabled;
+        int qualityIndex = static_cast<int>(m_Engine.GetSettings().PostProcess.UpscaleQuality);
         uint32_t outputWidth = comboWidth;
         uint32_t outputHeight = comboHeight;
         bool settingsChanged = false;
@@ -360,7 +360,7 @@ namespace Kurenai::UI
             }
 
             SliderFloatEx(
-                "シャープネス###UpscaleSharpness", &m_Engine.GetPostProcessSettings().UpscaleSharpness, 0.0f, 1.0f,
+                "シャープネス###UpscaleSharpness", &m_Engine.GetSettings().PostProcess.UpscaleSharpness, 0.0f, 1.0f,
                 Defaults::UpscaleSharpness, "%.2f", 0,
                 "RCASのシャープ化の強さ。0で無効。拡大後の出力解像度で効くため、"
                 "トーンマップ側のシャープネス(ポストプロセスパネルのTAAシャープネス)は"
@@ -389,9 +389,9 @@ namespace Kurenai::UI
             "(超解像が無効なら内部レンダー解像度がそのまま等倍になる)。"
             "押した時点で1回だけ適用され、その後のウィンドウリサイズには追従しない");
 
-        if (m_Engine.GetPostProcessSettings().UpscaleEnabled)
+        if (m_Engine.GetSettings().PostProcess.UpscaleEnabled)
         {
-            ImGui::Text("出力解像度: %u x %u", m_Engine.GetPostProcessSettings().UpscaleOutputWidth, m_Engine.GetPostProcessSettings().UpscaleOutputHeight);
+            ImGui::Text("出力解像度: %u x %u", m_Engine.GetSettings().PostProcess.UpscaleOutputWidth, m_Engine.GetSettings().PostProcess.UpscaleOutputHeight);
         }
         ImGui::Text("内部レンダー解像度: %u x %u", m_Engine.GetRenderWidth(), m_Engine.GetRenderHeight());
         ImGui::Text("ウィンドウ(クライアント領域): %u x %u", m_Engine.GetWidth(), m_Engine.GetHeight());

@@ -110,35 +110,35 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "スクリーンスペースシャドウを有効にする###EnableSSS", &m_Engine.GetShadowSettings().ScreenSpaceEnabled,
+            "スクリーンスペースシャドウを有効にする###EnableSSS", &m_Engine.GetSettings().Shadow.ScreenSpaceEnabled,
             Defaults::ScreenSpaceShadowEnabled, "無効にするとポイント/スポットライトの影が一切出なくなる");
 
-        ImGui::BeginDisabled(!m_Engine.GetShadowSettings().ScreenSpaceEnabled);
+        ImGui::BeginDisabled(!m_Engine.GetSettings().Shadow.ScreenSpaceEnabled);
         // 上限はScreenSpaceShadow.hlsliのkSSSMaxStepCountと揃える
         SliderIntEx(
-            "レイのステップ数###SSSSteps", &m_Engine.GetShadowSettings().ScreenSpaceStepCount, 1, 64,
+            "レイのステップ数###SSSSteps", &m_Engine.GetSettings().Shadow.ScreenSpaceStepCount, 1, 64,
             Defaults::ScreenSpaceShadowStepCount,
             "1本のレイを何回に分けて進めるか。多いほど細い遮蔽物を拾えるが負荷が上がる");
         SliderFloatEx(
-            "レイの最大長###SSSMaxRayLength", &m_Engine.GetShadowSettings().ScreenSpaceMaxRayLength, 0.05f, 20.0f,
+            "レイの最大長###SSSMaxRayLength", &m_Engine.GetSettings().Shadow.ScreenSpaceMaxRayLength, 0.05f, 20.0f,
             Defaults::ScreenSpaceShadowMaxRayLength, "%.2f", ImGuiSliderFlags_Logarithmic,
             "レイを飛ばすワールド距離の上限。長くすると遠くの遮蔽も拾えるが、"
             "同じステップ数ではサンプル間隔が粗くなる");
         SliderFloatEx(
-            "厚み###SSSThickness", &m_Engine.GetShadowSettings().ScreenSpaceThickness, 0.01f, 5.0f,
+            "厚み###SSSThickness", &m_Engine.GetSettings().Shadow.ScreenSpaceThickness, 0.01f, 5.0f,
             Defaults::ScreenSpaceShadowThickness, "%.3f", ImGuiSliderFlags_Logarithmic,
             "深度バッファの面をどれだけの厚みを持つ物体とみなすか。深度しか無いため厚みは推定するしかない");
         SliderFloatEx(
-            "法線バイアス###SSSNormalBias", &m_Engine.GetShadowSettings().ScreenSpaceNormalBias, 0.0f, 0.02f,
+            "法線バイアス###SSSNormalBias", &m_Engine.GetSettings().Shadow.ScreenSpaceNormalBias, 0.0f, 0.02f,
             Defaults::ScreenSpaceShadowNormalBias, "%.4f", 0,
             "レイの始点を法線方向へずらす量。自分自身を遮蔽物と誤検出するアクネを防ぐ");
         SliderFloatEx(
-            "画面端のフェード###SSSEdgeFade", &m_Engine.GetShadowSettings().ScreenSpaceEdgeFade, 0.01f, 0.5f,
+            "画面端のフェード###SSSEdgeFade", &m_Engine.GetSettings().Shadow.ScreenSpaceEdgeFade, 0.01f, 0.5f,
             Defaults::ScreenSpaceShadowEdgeFade, "%.3f", 0,
             "レイが画面外へ出る手前で影を薄くする幅。情報が無くなる境界で影が唐突に切れるのを防ぐ");
         // 0にすると全ライトで影が消える。ライトを増やしたときのコスト上限を決めるつまみ
         SliderIntEx(
-            "影を落とすライト数の上限###SSSMaxLights", &m_Engine.GetShadowSettings().ScreenSpaceMaxLightsPerPixel, 0, 16,
+            "影を落とすライト数の上限###SSSMaxLights", &m_Engine.GetSettings().Shadow.ScreenSpaceMaxLightsPerPixel, 0, 16,
             Defaults::ScreenSpaceShadowMaxLightsPerPixel,
             "1ピクセルあたり何灯までシャドウレイを飛ばすか。0にすると影が出なくなる。"
             "ライトを増やしたときの負荷の上限を決めるつまみ");
@@ -158,7 +158,7 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "タイルドライトカリングを有効にする###EnableLightCulling", &m_Engine.GetGeometrySettings().LightCullingEnabled,
+            "タイルドライトカリングを有効にする###EnableLightCulling", &m_Engine.GetSettings().Geometry.LightCullingEnabled,
             Defaults::LightCullingEnabled,
             "無効にすると各ピクセルがシーン中の全ライトをループする。画は変わらず負荷だけが変わる");
 
@@ -171,7 +171,7 @@ namespace Kurenai::UI
         // 有効にしていてもパスが積まれないことがあるので、その旨をここで断る。
         // このチェックボックスだけを見て「効いていない」と読まれないようにする
         if (m_Engine.ShouldRunMegaLights() &&
-            m_Engine.GetDebugViewSettings().View != DebugView::LightTiles)
+            m_Engine.GetSettings().DebugView.View != DebugView::LightTiles)
         {
             ImGui::TextWrapped(
                 "MegaLightsが有効なあいだ、直接光パスのライトループは止まっており"
@@ -201,7 +201,7 @@ namespace Kurenai::UI
         static const char* kModeNames[] = { "なし", "参照実装 (全灯総当たり)", "確率的サンプリング",
                                             "クアッド共有 (1画素1レイ)" };
 
-        int modeIndex = static_cast<int>(m_Engine.GetMegaLightsSettings().Mode);
+        int modeIndex = static_cast<int>(m_Engine.GetSettings().MegaLights.Mode);
         if (ComboEx(
                 "手法###MegaLightsMode", &modeIndex, kModeNames, IM_ARRAYSIZE(kModeNames),
                 Defaults::MegaLightsEnabled ? 1 : 0,
@@ -216,19 +216,19 @@ namespace Kurenai::UI
                 "レイは1画素1本のままで、影の縁が最大1画素ぼける偏りを受け入れる代わりに"
                 "コストを大きく下げる(UE5 MegaLights の DownsampleFactor=2 と同じ種類の近似)"))
         {
-            m_Engine.GetMegaLightsSettings().Mode = static_cast<MegaLightsMode>(modeIndex);
+            m_Engine.GetSettings().MegaLights.Mode = static_cast<MegaLightsMode>(modeIndex);
         }
 
         // 候補プールとRIS、そしてデノイザは確率的サンプリングとクアッド共有で共通。
         // 違うのは「1画素の推定量をどう良くするか」だけなので、操作もそこだけ分ける
         const bool megaLightsStochasticUI =
-            m_Engine.GetMegaLightsSettings().Mode == MegaLightsMode::Stochastic;
+            m_Engine.GetSettings().MegaLights.Mode == MegaLightsMode::Stochastic;
         const bool megaLightsQuadUI =
-            m_Engine.GetMegaLightsSettings().Mode == MegaLightsMode::QuadShared;
+            m_Engine.GetSettings().MegaLights.Mode == MegaLightsMode::QuadShared;
         if (megaLightsStochasticUI || megaLightsQuadUI)
         {
             SliderIntEx(
-                "初期候補数 M###MegaLightsSampleCount", &m_Engine.GetMegaLightsSettings().SampleCount, 1, 32,
+                "初期候補数 M###MegaLightsSampleCount", &m_Engine.GetSettings().MegaLights.SampleCount, 1, 32,
                 Defaults::MegaLightsSampleCount,
                 "1ピクセルあたりに候補プールから引く数。大きいほど寄与の大きい灯を引き当てやすく"
                 "なってノイズが減るが、候補ごとにBRDFを1回評価するぶん重くなる。\n\n"
@@ -238,7 +238,7 @@ namespace Kurenai::UI
             // 【つまみを動かすと定数バッファへ渡すKが変わる】書き手(候補プール)と
             // 読み手(Initial・空間再利用・デバッグ表示)がすべて同じメンバ変数から
             // Kを受け取るよう、UIも必ずセッターを通す
-            int poolCapacity = m_Engine.GetMegaLightsSettings().TilePoolCapacity;
+            int poolCapacity = m_Engine.GetSettings().MegaLights.TilePoolCapacity;
             if (SliderIntEx(
                     "候補プールの容量 K###MegaLightsTilePoolCapacity", &poolCapacity,
                     KurenaiEngine3D::kMegaLightsTilePoolMinCapacity,
@@ -258,7 +258,7 @@ namespace Kurenai::UI
             }
 
             // CLIのモード2も有効として表示する。UIで一度切った後に戻す場合は通常のHalton列へ戻す
-            bool tileJitterEnabled = m_Engine.GetMegaLightsSettings().TileJitterMode != 0;
+            bool tileJitterEnabled = m_Engine.GetSettings().MegaLights.TileJitterMode != 0;
             if (CheckboxEx(
                     "タイル格子ジッター###MegaLightsTileJitter", &tileJitterEnabled,
                     Defaults::MegaLightsTileJitterEnabled,
@@ -272,7 +272,7 @@ namespace Kurenai::UI
             }
 
             CheckboxEx(
-                "デノイザ###MegaLightsDenoise", &m_Engine.GetMegaLightsSettings().DenoiseEnabled,
+                "デノイザ###MegaLightsDenoise", &m_Engine.GetSettings().MegaLights.DenoiseEnabled,
                 Defaults::MegaLightsDenoiseEnabled,
                 "時間累積とエッジ停止付きa-trousで、出た色を空間・時間へならす。\n\n"
                 "【時空間再利用とは別物】あちらはリザーバ(どの灯を選ぶか)を混ぜて実効サンプル数を"
@@ -280,10 +280,10 @@ namespace Kurenai::UI
                 "【TAAの手前で落とすこと】TAAはノイズを信号の広がりと解釈して履歴を毎フレーム棄却"
                 "するので、ノイズを残したまま渡すとノイズもAAも両方失う");
 
-            if (m_Engine.GetMegaLightsSettings().DenoiseEnabled)
+            if (m_Engine.GetSettings().MegaLights.DenoiseEnabled)
             {
                 SliderIntEx(
-                    "a-trousの段数###MegaLightsDenoiseAtrous", &m_Engine.GetMegaLightsSettings().DenoiseAtrousPasses,
+                    "a-trousの段数###MegaLightsDenoiseAtrous", &m_Engine.GetSettings().MegaLights.DenoiseAtrousPasses,
                     0, 5, Defaults::MegaLightsDenoiseAtrousPasses,
                     "段ごとにステップ幅が倍になるので、4段で半径16画素ぶんに届く。0で時間累積のみ");
                 // 【いま効いている値そのものを触らせる】時間累積の上限は手法ごとに
@@ -293,8 +293,8 @@ namespace Kurenai::UI
                 SliderIntEx(
                     megaLightsQuadUI ? "時間累積の上限###MegaLightsQuadDenoiseFrames"
                                      : "時間累積の上限###MegaLightsDenoiseFrames",
-                    megaLightsQuadUI ? &m_Engine.GetMegaLightsSettings().QuadDenoiseMaxFrames
-                                     : &m_Engine.GetMegaLightsSettings().DenoiseMaxFrames,
+                    megaLightsQuadUI ? &m_Engine.GetSettings().MegaLights.QuadDenoiseMaxFrames
+                                     : &m_Engine.GetSettings().MegaLights.DenoiseMaxFrames,
                     1, 128,
                     megaLightsQuadUI ? Defaults::MegaLightsQuadDenoiseMaxFrames
                                      : Defaults::MegaLightsDenoiseMaxFrames,
@@ -310,7 +310,7 @@ namespace Kurenai::UI
             {
                 // 【つまみを動かすとリザーババッファを確保し直す】UI経路も
                 // SetMegaLightsQuadSamples を通し、確保と定数バッファがずれないようにする
-                int quadSamples = m_Engine.GetMegaLightsSettings().QuadSamplesPerPixel;
+                int quadSamples = m_Engine.GetSettings().MegaLights.QuadSamplesPerPixel;
                 if (SliderIntEx(
                         "1画素あたりの標本数###MegaLightsQuadSamples", &quadSamples, 1,
                         KurenaiEngine3D::kMegaLightsMaxSamplesPerPixel,
@@ -328,7 +328,7 @@ namespace Kurenai::UI
                 }
 
                 CheckboxEx(
-                    "クアッド共有###MegaLightsQuadShare", &m_Engine.GetMegaLightsSettings().QuadShareEnabled,
+                    "クアッド共有###MegaLightsQuadShare", &m_Engine.GetSettings().MegaLights.QuadShareEnabled,
                     Defaults::MegaLightsQuadShareEnabled,
                     "2x2クアッドの仲間が撃った影レイの結果を借りて、4標本を自分の面で"
                     "評価し直して平均する。追加のレイは1本も撃たない。\n\n"
@@ -338,7 +338,7 @@ namespace Kurenai::UI
                     "【切るのは陽性対照のため】切ると自分の標本だけを使う形になり、"
                     "確率的サンプリングから時間・空間再利用を外した構成と画素単位で一致するはず");
                 CheckboxEx(
-                    "クアッド層化###MegaLightsQuadStratify", &m_Engine.GetMegaLightsSettings().QuadStratify,
+                    "クアッド層化###MegaLightsQuadStratify", &m_Engine.GetSettings().MegaLights.QuadStratify,
                     Defaults::MegaLightsQuadStratify,
                     "クアッドの4画素へ候補プールのスロットを1/4ずつ割り当て、"
                     "クアッド全体でスロットを重複なく列挙させる。\n\n"
@@ -346,7 +346,7 @@ namespace Kurenai::UI
                     "スロットの選び方を変えても引かれる灯の分布は同じ。4人が同じ灯を引く確率が"
                     "下がるぶん、平均に入る標本の多様性が上がる");
                 CheckboxEx(
-                    "遮蔽キャッシュ###MegaLightsBlockedCache", &m_Engine.GetMegaLightsSettings().BlockedCacheEnabled,
+                    "遮蔽キャッシュ###MegaLightsBlockedCache", &m_Engine.GetSettings().MegaLights.BlockedCacheEnabled,
                     Defaults::MegaLightsBlockedCacheEnabled,
                     "遮蔽が確定した灯を目標関数から外すキャッシュ(16フレームに1回再検査する)。"
                     "影の縁で支配光を毎フレーム選んでは殺される、という空回りを防ぐ。\n\n"
@@ -357,7 +357,7 @@ namespace Kurenai::UI
             if (megaLightsStochasticUI)
             {
             CheckboxEx(
-                "時間再利用###MegaLightsTemporal", &m_Engine.GetMegaLightsSettings().TemporalEnabled,
+                "時間再利用###MegaLightsTemporal", &m_Engine.GetSettings().MegaLights.TemporalEnabled,
                 Defaults::MegaLightsTemporalEnabled,
                 "前フレームの自分が選んだ灯を、速度ベクトルで再投影して借りる。"
                 "実効サンプル数がフレーム方向に積み上がるので、影レイを増やさずに収束が速くなる。\n\n"
@@ -365,10 +365,10 @@ namespace Kurenai::UI
                 "1枚あたりの偏りも-3.5%から-0.1%になる。長時間の蓄積平均は良くならない"
                 "(フレーム間に相関が入るため)ので、効果を見るときは蓄積枚数を1にすること");
 
-            if (m_Engine.GetMegaLightsSettings().TemporalEnabled)
+            if (m_Engine.GetSettings().MegaLights.TemporalEnabled)
             {
                 SliderIntEx(
-                    "履歴のMの上限###MegaLightsTemporalMClamp", &m_Engine.GetMegaLightsSettings().TemporalMClamp,
+                    "履歴のMの上限###MegaLightsTemporalMClamp", &m_Engine.GetSettings().MegaLights.TemporalMClamp,
                     8, 640, Defaults::MegaLightsTemporalMClamp,
                     "履歴が「これまでに何個の候補から絞ったか」の上限。\n\n"
                     "【上げるほど収束は速いがゴーストが出る】灯を消しても明かりと影が残る。"
@@ -382,7 +382,7 @@ namespace Kurenai::UI
             }
 
             CheckboxEx(
-                "空間再利用###MegaLightsSpatial", &m_Engine.GetMegaLightsSettings().SpatialEnabled,
+                "空間再利用###MegaLightsSpatial", &m_Engine.GetSettings().MegaLights.SpatialEnabled,
                 Defaults::MegaLightsSpatialEnabled,
                 "近傍の画素が選んだ灯を借りて、自分の面で評価し直して結合する。"
                 "借りるのは「どの灯か」だけなので、影レイは増えない。\n\n"
@@ -392,19 +392,19 @@ namespace Kurenai::UI
                 "実測では球で0.0395に対し床は0.0052。曲面に固有ではなく、"
                 "平らな床でも法線の向き次第で4.2倍悪化する");
 
-            if (m_Engine.GetMegaLightsSettings().SpatialEnabled)
+            if (m_Engine.GetSettings().MegaLights.SpatialEnabled)
             {
                 SliderIntEx(
-                    "借りる近傍の数###MegaLightsSpatialNeighbors", &m_Engine.GetMegaLightsSettings().SpatialNeighborCount,
+                    "借りる近傍の数###MegaLightsSpatialNeighbors", &m_Engine.GetSettings().MegaLights.SpatialNeighborCount,
                     0, 16, Defaults::MegaLightsSpatialNeighborCount,
                     "増やすほどノイズは減るが、候補ごとにBRDFを1回評価するぶん重くなる。0で実質無効");
                 SliderIntEx(
-                    "近傍を探す半径###MegaLightsSpatialRadius", &m_Engine.GetMegaLightsSettings().SpatialRadius,
+                    "近傍を探す半径###MegaLightsSpatialRadius", &m_Engine.GetSettings().MegaLights.SpatialRadius,
                     1, 64, Defaults::MegaLightsSpatialRadius,
                     "広げると遠くの良いサンプルを拾えるが、深度・法線・材質の一致条件で"
                     "弾かれる割合も増える");
                 CheckboxEx(
-                    "初期可視レイ###MegaLightsInitialVisibility", &m_Engine.GetMegaLightsSettings().InitialVisibility,
+                    "初期可視レイ###MegaLightsInitialVisibility", &m_Engine.GetSettings().MegaLights.InitialVisibility,
                     Defaults::MegaLightsInitialVisibility,
                     "初期サンプルへ影レイを1本撃ち、遮蔽されていたらリザーバごと殺す"
                     "(RTXDI系では標準の段)。\n\n"
@@ -417,10 +417,10 @@ namespace Kurenai::UI
             }
         }
 
-        if (m_Engine.GetMegaLightsSettings().Mode != MegaLightsMode::Off)
+        if (m_Engine.GetSettings().MegaLights.Mode != MegaLightsMode::Off)
         {
             SliderIntEx(
-                "影レイ本数###MegaLightsShadowRayCount", &m_Engine.GetMegaLightsSettings().ShadowRayCount, 0, 16,
+                "影レイ本数###MegaLightsShadowRayCount", &m_Engine.GetSettings().MegaLights.ShadowRayCount, 0, 16,
                 Defaults::MegaLightsShadowRayCount,
                 "1灯あたりに撃つ影レイの本数。\n\n"
                 "【0にすると恒等テストになる】影を撃たず可視率1で評価するため、"
@@ -440,7 +440,7 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "深度プリパスを使う###DepthPrepass", &m_Engine.GetGeometrySettings().DepthPrepassEnabled, Defaults::DepthPrepassEnabled,
+            "深度プリパスを使う###DepthPrepass", &m_Engine.GetSettings().Geometry.DepthPrepassEnabled, Defaults::DepthPrepassEnabled,
             "G-Bufferを描く前に不透明ジオメトリの深度だけを先に埋め、隠れる画素の"
             "ピクセルシェーダー(6テクスチャのサンプルと6枚のレンダーターゲットへの書き込み)を"
             "早期Zで省く。ジオメトリを1周ぶん余計に描くのと引き換えなので、"
@@ -453,7 +453,7 @@ namespace Kurenai::UI
             "増幅/メッシュシェーダーを使うPSOがあるため、変換は同一のコードになり深度が一致する");
 
         CheckboxEx(
-            "メッシュ単位のフラスタムカリング###MeshCulling", &m_Engine.GetGeometrySettings().MeshCullingEnabled,
+            "メッシュ単位のフラスタムカリング###MeshCulling", &m_Engine.GetSettings().Geometry.MeshCullingEnabled,
             Defaults::MeshCullingEnabled,
             "モデル単位のカリングを通ったあとに、メッシュのワールドAABBでもう一段間引く。"
             "1モデルに数千メッシュを持つアセット(Emerald Square、Bistro、PLATEAUのLOD2タイル)では"
@@ -467,7 +467,7 @@ namespace Kurenai::UI
             "モデル単位のカリングは常に有効で、こちらでは切れない");
 
         CheckboxEx(
-            "インスタンシング###Instancing", &m_Engine.GetGeometrySettings().InstancingEnabled,
+            "インスタンシング###Instancing", &m_Engine.GetSettings().Geometry.InstancingEnabled,
             Defaults::InstancingEnabled,
             "同じ.kmodelを指すインスタンスをまとめ、1回のDrawIndexedで複数体を描く。"
             "インスタンスごとに違うワールド行列は、頂点シェーダー専用のStructuredBufferを"
@@ -526,7 +526,7 @@ namespace Kurenai::UI
 
         BeginParamGroup();
         SliderFloatEx(
-            "LODフェード時間###LODFadeDuration", &m_Engine.GetGeometrySettings().LODFadeDuration, 0.0f, 5.0f, 0.25f, "%.2f 秒", 0,
+            "LODフェード時間###LODFadeDuration", &m_Engine.GetSettings().Geometry.LODFadeDuration, 0.0f, 5.0f, 0.25f, "%.2f 秒", 0,
             "モデルLODの段を切り替えるとき、2段をクロスディザで重ねる時間。\n\n"
             "0にすると重ねずに即座に入れ替わる(ポップする)。\n\n"
             "【検証に使う】既定の0.25秒はフェードの見え方から決めた値ではない暫定値。"
@@ -534,7 +534,7 @@ namespace Kurenai::UI
             "2段が同じ画素を取り合っていないか(Zファイティング)、"
             "どちらも描かない画素が無いか(穴)をここで確かめる。");
         SliderFloatEx(
-            "LODヒステリシス###LODHysteresis", &m_Engine.GetGeometrySettings().LODHysteresis, 0.0f, 0.5f, 0.05f, "%.3f", 0,
+            "LODヒステリシス###LODHysteresis", &m_Engine.GetSettings().Geometry.LODHysteresis, 0.0f, 0.5f, 0.05f, "%.3f", 0,
             "切り替え距離の不感帯の幅(割合)。0.05なら切替点の±5%。\n\n"
             "0にすると切替点のちょうど上でカメラが揺れたときに段が毎フレーム往復し、"
             "画面がちらつく。A/B比較のたびに絵が変わって計測も濁る。");
@@ -565,7 +565,7 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "メッシュレット描画を有効にする###EnableMeshlet", &m_Engine.GetGeometrySettings().MeshletRenderingEnabled, true,
+            "メッシュレット描画を有効にする###EnableMeshlet", &m_Engine.GetSettings().Geometry.MeshletRenderingEnabled, true,
             "無効にすると従来の頂点シェーダー + DrawIndexedで描く。"
             "切り替えても見た目は一致するはずで、変わる場合はメッシュシェーダー側の変換が"
             "頂点シェーダーとずれている。\n\n"
@@ -576,7 +576,7 @@ namespace Kurenai::UI
             "使うPSOがあるため、変換が同一のコードになり深度が一致する");
 
         CheckboxEx(
-            "メッシュレットを色分けして表示###MeshletDebugView", &m_Engine.GetGeometrySettings().MeshletDebugViewEnabled, false,
+            "メッシュレットを色分けして表示###MeshletDebugView", &m_Engine.GetSettings().Geometry.MeshletDebugViewEnabled, false,
             "塊ごとに違う色でアルベドを塗る。分割のされ方を目で確かめるためのもので、"
             "法線・深度・モーションベクターは通常どおり書くため他のパスは破綻しない。"
             "灰色に見える面はメッシュレットを経由していない(メッシュレットが焼かれていない"
@@ -586,7 +586,7 @@ namespace Kurenai::UI
             "見ていることの確認になる");
 
         CheckboxEx(
-            "Hi-Zオクルージョンカリング###OcclusionCulling", &m_Engine.GetGeometrySettings().OcclusionCullingEnabled,
+            "Hi-Zオクルージョンカリング###OcclusionCulling", &m_Engine.GetSettings().Geometry.OcclusionCullingEnabled,
             Defaults::OcclusionCullingEnabled,
             "メッシュレットのバウンディング球を前フレームのHi-Zへ投影し、"
             "「視界内だが手前の何かに完全に隠れている」塊を落とす。"
@@ -599,7 +599,7 @@ namespace Kurenai::UI
             "間引き率はPerfログの「メッシュレットカリング」の行に出る");
 
         SliderFloatEx(
-            "オクルージョンの半径倍率###OcclusionCullRadiusScale", &m_Engine.GetGeometrySettings().OcclusionCullRadiusScale,
+            "オクルージョンの半径倍率###OcclusionCullRadiusScale", &m_Engine.GetSettings().Geometry.OcclusionCullRadiusScale,
             1.0f, 4.0f, Defaults::OcclusionCullRadiusScale, "%.2f", 0,
             "判定に使うバウンディング球をこの倍率で膨らませる。大きいほど間引きが減り、安全側になる。\n\n"
             "【1フレームぶんのカメラ移動はこの倍率とは別に補正されている】"
@@ -611,7 +611,7 @@ namespace Kurenai::UI
             "上げたときに間引き率が下がることを確認すれば、判定が実際に効いていることの証拠になる");
 
         CheckboxEx(
-            "カリングの間引き数を数える###MeshletCullStats", &m_Engine.GetGeometrySettings().MeshletCullStatsEnabled,
+            "カリングの間引き数を数える###MeshletCullStats", &m_Engine.GetSettings().Geometry.MeshletCullStatsEnabled,
             Defaults::MeshletCullStatsEnabled,
             "増幅シェーダーが判定数と間引き数を数え、数フレーム遅れでCPUへ読み戻して"
             "下に表示し、Perfログにも1秒ごとに残す。\n\n"
@@ -623,7 +623,7 @@ namespace Kurenai::UI
 
         CheckboxEx(
             "Hi-Zを深度プリパスから作る###HiZFromDepthPrepass",
-            &m_Engine.GetGeometrySettings().HiZFromDepthPrepassEnabled, Defaults::HiZFromDepthPrepass,
+            &m_Engine.GetSettings().Geometry.HiZFromDepthPrepassEnabled, Defaults::HiZFromDepthPrepass,
             "Hi-Zミップチェーンを深度プリパスの直後に、そのフレームの深度から作る。\n\n"
             "【入れるとG-Bufferの判定から1フレーム遅れが消える】投影に前フレームの行列を"
             "使う必要も、視差ぶんを保守的に膨らませる必要も無くなり、カメラが動いても"
@@ -635,7 +635,7 @@ namespace Kurenai::UI
             "プリパスとG-Bufferの間に入るぶん重なりが減り、深度バッファの状態遷移が1往復増える");
 
         CheckboxEx(
-            "モデル単位のGPUカリング###ModelCullGpu", &m_Engine.GetGeometrySettings().ModelCullGpuEnabled,
+            "モデル単位のGPUカリング###ModelCullGpu", &m_Engine.GetSettings().Geometry.ModelCullGpuEnabled,
             Defaults::ModelCullGpuEnabled,
             "コンピュートシェーダーが、描画候補のワールドAABBを視錐台とHi-Zで判定し、"
             "生き残りのExecuteIndirect引数と統計をGPU上に作る。\n\n"
@@ -646,7 +646,7 @@ namespace Kurenai::UI
             "総GPU時間のON/OFF差のほうが信用できる");
 
         CheckboxEx(
-            "カリング結果で間接描画する###ModelCullIndirect", &m_Engine.GetGeometrySettings().ModelCullIndirectEnabled,
+            "カリング結果で間接描画する###ModelCullIndirect", &m_Engine.GetSettings().Geometry.ModelCullIndirectEnabled,
             Defaults::ModelCullIndirectEnabled,
             "生き残った候補だけをExecuteIndirectで発行する。深度プリパスとG-Bufferの"
             "1モデル1ドロー経路が、CPUのループではなくこの引数で描かれるようになる。\n\n"
@@ -662,7 +662,7 @@ namespace Kurenai::UI
 
         BeginParamGroup();
         CheckboxEx(
-            "段を選ぶ###MeshletLOD", &m_Engine.GetGeometrySettings().MeshletLODEnabled, Defaults::MeshletLODEnabled,
+            "段を選ぶ###MeshletLOD", &m_Engine.GetSettings().Geometry.MeshletLODEnabled, Defaults::MeshletLODEnabled,
             "KurenaiPackerが焼いた離散LODの段から、増幅シェーダーがモデルのバウンディング球の"
             "投影サイズで1段を選ぶ。切ると常に原寸(段0)になる。\n\n"
             "【1つのモデル内で段は混ざらない】選択の入力はモデルの外接球とカメラだけで、"
@@ -673,7 +673,7 @@ namespace Kurenai::UI
             "段を持たないモデル(潰せる辺が無く1段しか焼かれなかったもの)では何も起きない");
 
         SliderFloatEx(
-            "段のしきい値の倍率###MeshletLODQuality", &m_Engine.GetGeometrySettings().MeshletLODQuality, 0.25f, 8.0f,
+            "段のしきい値の倍率###MeshletLODQuality", &m_Engine.GetSettings().Geometry.MeshletLODQuality, 0.25f, 8.0f,
             Defaults::MeshletLODQuality, "%.2f", 0,
             "段を落とす投影直径 = 倍率 x sqrt(4 x モデルのLOD0三角形数 / π) [画素]。"
             "大きいほど原寸を長く保つ。\n\n"
@@ -684,7 +684,7 @@ namespace Kurenai::UI
             "そこから先は原寸を保っても画面に出せる情報が増えない");
 
         SliderIntEx(
-            "段を固定###MeshletLODForced", &m_Engine.GetGeometrySettings().MeshletLODForcedLevel, -1, 3,
+            "段を固定###MeshletLODForced", &m_Engine.GetSettings().Geometry.MeshletLODForcedLevel, -1, 3,
             Defaults::MeshletLODForcedLevel,
             "-1で自動選択。0〜3を指定すると全モデルをその段に固定する。\n\n"
             "【対照実験に使う】自動のまま三角形数もフレーム時間も動かないとき、"
@@ -694,7 +694,7 @@ namespace Kurenai::UI
             "【段が無いメッシュは動かない】焼かれている段より粗い番号を指定しても、"
             "そのメッシュは自分の最も粗い段までしか下がらない(下がると画面から消えるため)");
         CheckboxEx(
-            "色分けを段ごとにする###MeshletLODDebugColor", &m_Engine.GetGeometrySettings().MeshletLODDebugColorEnabled, false,
+            "色分けを段ごとにする###MeshletLODDebugColor", &m_Engine.GetSettings().Geometry.MeshletLODDebugColorEnabled, false,
             "上の「メッシュレットを色分けして表示」を、塊ごとの色ではなく段ごとの色にする"
             "(詳細な順に緑→黄→橙→赤)。\n\n"
             "【1つのモデルが単色になるのが正しい】段はモデル単位で決まる。"
@@ -772,7 +772,7 @@ namespace Kurenai::UI
         // カリングの効き。**「間引き0」だけでは判定が働いていないのか本当に全部見えているのかを
         // 区別できない**ため、判定した数と併せて出す。オクルージョンは視錐台+コーンとは
         // 別に出す(俯瞰と街路で差が出ることが、判定が効いていることの証拠になる)
-        if (m_Engine.GetGeometrySettings().MeshletCullStatsEnabled)
+        if (m_Engine.GetSettings().Geometry.MeshletCullStatsEnabled)
         {
             const uint32_t tested = m_Engine.GetRenderStats().MeshletCullTested;
             if (tested > 0)
@@ -818,7 +818,7 @@ namespace Kurenai::UI
 
         CheckboxEx(
             "ソフトウェアラスタライザを実行する###EnableSoftwareRaster",
-            &m_Engine.GetGeometrySettings().SoftwareRasterEnabled, false,
+            &m_Engine.GetSettings().Geometry.SoftwareRasterEnabled, false,
             "有効にすると、G-Bufferパスの直後に専用のパス(SWRaster)が走る。"
             "出力はデバッグ表示の「SWラスタ」「SWラスタ - 深度 (生値)」「SWラスタ - 法線」で見る。"
             "無効の間はパスごと登録されないため、コストもVRAM以外は掛からない。\n\n"
@@ -828,7 +828,7 @@ namespace Kurenai::UI
 
         SliderIntEx(
             "巨大三角形のしきい値 (画素)###SWRasterLargeArea",
-            &m_Engine.GetGeometrySettings().SoftwareRasterLargeTriangleArea,
+            &m_Engine.GetSettings().Geometry.SoftwareRasterLargeTriangleArea,
             static_cast<int>(GeometrySettings::kSWRasterMinLargeTriangleArea),
             static_cast<int>(GeometrySettings::kSWRasterMaxLargeTriangleArea),
             static_cast<int>(GeometrySettings::kSWRasterDefaultLargeTriangleArea),
@@ -882,21 +882,21 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "AO / 間接光を有効にする###EnableAO", &m_Engine.GetAmbientOcclusionSettings().Enabled, Defaults::AOEnabled,
+            "AO / 間接光を有効にする###EnableAO", &m_Engine.GetSettings().AmbientOcclusion.Enabled, Defaults::AOEnabled,
             "遮蔽(アンビエントオクルージョン)と、手法によっては近傍サーフェスからの間接拡散光を計算する。"
             "無効にすると遮蔽なし・間接光なしのテクスチャがライティングパスへ渡る");
 
         // 遮蔽マップは上のAO/間接光とは別系統(アセットに焼き込まれた遮蔽)なので、
         // AOを切っていても操作できるよう早期returnより前に置く
         CheckboxEx(
-            "マテリアルの遮蔽マップを使う###UseOcclusionMap", &m_Engine.GetAmbientOcclusionSettings().OcclusionMapEnabled,
+            "マテリアルの遮蔽マップを使う###UseOcclusionMap", &m_Engine.GetSettings().AmbientOcclusion.OcclusionMapEnabled,
             Defaults::OcclusionMapEnabled,
             "アセットに焼き込まれた遮蔽(glTFのocclusionTexture)を間接光へ掛けるか。"
             "上のAO / 間接光とは独立した別系統で、そちらを無効にしても遮蔽マップは効き続ける。"
             "内容はデバッグ表示の「マテリアル」のBチャンネルで確認できる。"
             "反射プローブへ反映するにはプローブの焼き直しが必要(焼いた時点の値が入っているため)");
 
-        if (!m_Engine.GetAmbientOcclusionSettings().Enabled)
+        if (!m_Engine.GetSettings().AmbientOcclusion.Enabled)
         {
             EndParamGroup();
             return;
@@ -915,7 +915,7 @@ namespace Kurenai::UI
         const int techniqueCount =
             rtAvailable ? IM_ARRAYSIZE(kTechniqueNamesWithRT) : IM_ARRAYSIZE(kTechniqueNamesWithoutRT);
 
-        int techniqueIndex = static_cast<int>(m_Engine.GetAmbientOcclusionSettings().Technique);
+        int techniqueIndex = static_cast<int>(m_Engine.GetSettings().AmbientOcclusion.Technique);
         if (ComboEx(
                 "手法###Technique", &techniqueIndex, techniqueNames, techniqueCount,
                 static_cast<int>(AOTechnique::SSAO),
@@ -924,7 +924,7 @@ namespace Kurenai::UI
                 "レイトレーシングは同じものを深度バッファではなくシーン全体への交差判定で求めるため、"
                 "画面に映っていない遮蔽物・反射面も効く"))
         {
-            m_Engine.GetAmbientOcclusionSettings().Technique = static_cast<AOTechnique>(techniqueIndex);
+            m_Engine.GetSettings().AmbientOcclusion.Technique = static_cast<AOTechnique>(techniqueIndex);
         }
 
         if (!rtAvailable)
@@ -936,66 +936,66 @@ namespace Kurenai::UI
         // 右クリックは「既定値に戻す」ではなく「シーンから再計算」にする
         bool recalcRequested = false;
 
-        if (m_Engine.GetAmbientOcclusionSettings().Technique == AOTechnique::SSAO)
+        if (m_Engine.GetSettings().AmbientOcclusion.Technique == AOTechnique::SSAO)
         {
             SliderFloatSceneDependent(
-                "SSAO 半径###SSAORadius", &m_Engine.GetAmbientOcclusionSettings().SSAORadius, 0.01f, 5.0f, recalcRequested, "%.3f", 0,
+                "SSAO 半径###SSAORadius", &m_Engine.GetSettings().AmbientOcclusion.SSAORadius, 0.01f, 5.0f, recalcRequested, "%.3f", 0,
                 "遮蔽を探すサンプリング半径(ワールド単位)。シーン読み込み時にシーンの対角長から"
                 "自動設定されるため、既定値ではなく「シーンから再計算」で戻す");
             SliderFloatEx(
-                "SSAO 強度###SSAOPower", &m_Engine.GetAmbientOcclusionSettings().SSAOPower, 0.1f, 4.0f, Defaults::SSAOPower, "%.3f", 0,
+                "SSAO 強度###SSAOPower", &m_Engine.GetSettings().AmbientOcclusion.SSAOPower, 0.1f, 4.0f, Defaults::SSAOPower, "%.3f", 0,
                 "遮蔽率にかける指数。大きいほど陰影が濃くなる");
             SliderUIntEx(
-                "SSAO サンプル数###SSAOKernelSize", &m_Engine.GetAmbientOcclusionSettings().SSAOKernelSize, 1, 16, Defaults::SSAOKernelSize,
+                "SSAO サンプル数###SSAOKernelSize", &m_Engine.GetSettings().AmbientOcclusion.SSAOKernelSize, 1, 16, Defaults::SSAOKernelSize,
                 "1画素あたり半球状に何点サンプリングするか。AOパスのコストはほぼこの数に比例する"
                 "(実測: 16→4でAOパスが5.82ms→2.22ms)。減らすほど遮蔽の推定は粗くなるが、"
                 "画素ごとにカーネルをランダム回転させたうえで後段の4x4ブラーで均すため、"
                 "最終画にどれだけ差が出るかはSSAO半径と間接光の強さ次第");
         }
-        else if (m_Engine.GetAmbientOcclusionSettings().Technique == AOTechnique::Raytraced)
+        else if (m_Engine.GetSettings().AmbientOcclusion.Technique == AOTechnique::Raytraced)
         {
             SliderFloatSceneDependent(
-                "RT 最大距離###RTAOMaxDistance", &m_Engine.GetAmbientOcclusionSettings().RTAOMaxDistance, 0.05f, 10.0f, recalcRequested, "%.3f", 0,
+                "RT 最大距離###RTAOMaxDistance", &m_Engine.GetSettings().AmbientOcclusion.RTAOMaxDistance, 0.05f, 10.0f, recalcRequested, "%.3f", 0,
                 "遮蔽とバウンス光を探すレイの最大距離(ワールド単位)。シーン読み込み時に"
                 "シーンの対角長から自動設定される。これより遠くにある面は遮蔽物にならず、"
                 "間接光の光源にもならない");
             SliderIntEx(
-                "RT サンプル数###RTAOSampleCount", &m_Engine.GetAmbientOcclusionSettings().RTAOSampleCount, 1, 32, Defaults::RTAOSampleCount,
+                "RT サンプル数###RTAOSampleCount", &m_Engine.GetSettings().AmbientOcclusion.RTAOSampleCount, 1, 32, Defaults::RTAOSampleCount,
                 "1ピクセルあたりに半球へ撃つレイの本数。デノイザを持たずブラーだけで均すため、"
                 "少なすぎるとブラー後もノイズが残る");
             SliderFloatEx(
-                "RT 間接光の強さ###RTAOIntensity", &m_Engine.GetAmbientOcclusionSettings().RTAOIntensity, 0.0f, 8.0f, Defaults::RTAOIntensity,
+                "RT 間接光の強さ###RTAOIntensity", &m_Engine.GetSettings().AmbientOcclusion.RTAOIntensity, 0.0f, 8.0f, Defaults::RTAOIntensity,
                 "%.3f", 0,
                 "バウンス面から拾った間接拡散光にかける倍率。1.0が物理的に正しい値");
             SliderFloatEx(
-                "RT 遮蔽の強さ###RTAOPower", &m_Engine.GetAmbientOcclusionSettings().RTAOPower, 0.1f, 4.0f, Defaults::RTAOPower, "%.3f", 0,
+                "RT 遮蔽の強さ###RTAOPower", &m_Engine.GetSettings().AmbientOcclusion.RTAOPower, 0.1f, 4.0f, Defaults::RTAOPower, "%.3f", 0,
                 "遮蔽率にかける指数。大きいほど陰影が濃くなる");
             CheckboxEx(
-                "バウンス面に影を落とす###RTAOBounceShadowRay", &m_Engine.GetAmbientOcclusionSettings().RTAOBounceShadowRayEnabled,
+                "バウンス面に影を落とす###RTAOBounceShadowRay", &m_Engine.GetSettings().AmbientOcclusion.RTAOBounceShadowRayEnabled,
                 Defaults::RTAOBounceShadowRayEnabled,
                 "バウンス面から太陽へ影レイを撃つ。切ると日陰の面まで間接光を放つようになるが、その分速い");
         }
         else
         {
             SliderFloatSceneDependent(
-                "SSIL 半径###SSILRadius", &m_Engine.GetAmbientOcclusionSettings().SSILRadius, 0.01f, 5.0f, recalcRequested, "%.3f", 0,
+                "SSIL 半径###SSILRadius", &m_Engine.GetSettings().AmbientOcclusion.SSILRadius, 0.01f, 5.0f, recalcRequested, "%.3f", 0,
                 "間接光と遮蔽を探すサンプリング半径(ワールド単位)。シーン読み込み時に"
                 "シーンの対角長から自動設定される");
             SliderFloatSceneDependent(
-                "SSIL 厚み###SSILThickness", &m_Engine.GetAmbientOcclusionSettings().SSILThickness, 0.01f, 2.0f, recalcRequested, "%.3f", 0,
+                "SSIL 厚み###SSILThickness", &m_Engine.GetSettings().AmbientOcclusion.SSILThickness, 0.01f, 2.0f, recalcRequested, "%.3f", 0,
                 "深度バッファ上の1点が持つと仮定する奥行きの厚み。小さすぎると遮蔽が抜け、"
                 "大きすぎると本来遮蔽していない面まで遮蔽扱いになる");
             SliderFloatEx(
-                "SSIL 間接光の強さ###SSILIntensity", &m_Engine.GetAmbientOcclusionSettings().SSILIntensity, 0.0f, 8.0f, Defaults::SSILIntensity,
+                "SSIL 間接光の強さ###SSILIntensity", &m_Engine.GetSettings().AmbientOcclusion.SSILIntensity, 0.0f, 8.0f, Defaults::SSILIntensity,
                 "%.3f", 0, "近傍サーフェスから拾った間接拡散光にかける倍率");
             SliderFloatEx(
-                "SSIL 遮蔽の強さ###SSILPower", &m_Engine.GetAmbientOcclusionSettings().SSILPower, 0.1f, 4.0f, Defaults::SSILPower, "%.3f", 0,
+                "SSIL 遮蔽の強さ###SSILPower", &m_Engine.GetSettings().AmbientOcclusion.SSILPower, 0.1f, 4.0f, Defaults::SSILPower, "%.3f", 0,
                 "遮蔽率にかける指数。大きいほど陰影が濃くなる");
             SliderUIntEx(
-                "SSIL スライス数###SSILSlices", &m_Engine.GetAmbientOcclusionSettings().SSILSliceCount, 1, 8, Defaults::SSILSliceCount,
+                "SSIL スライス数###SSILSlices", &m_Engine.GetSettings().AmbientOcclusion.SSILSliceCount, 1, 8, Defaults::SSILSliceCount,
                 "半球を何枚の方位スライスに分けてサンプリングするか。多いほど品質が上がり負荷も上がる");
             SliderUIntEx(
-                "SSIL ステップ数###SSILSteps", &m_Engine.GetAmbientOcclusionSettings().SSILStepCount, 1, 16, Defaults::SSILStepCount,
+                "SSIL ステップ数###SSILSteps", &m_Engine.GetSettings().AmbientOcclusion.SSILStepCount, 1, 16, Defaults::SSILStepCount,
                 "1スライスあたり半径方向に何点サンプリングするか。多いほど品質が上がり負荷も上がる");
         }
 
@@ -1025,7 +1025,7 @@ namespace Kurenai::UI
         const char* const* modeNames = rtAvailable ? kModeNamesWithRT : kModeNamesWithoutRT;
         const int modeCount = rtAvailable ? IM_ARRAYSIZE(kModeNamesWithRT) : IM_ARRAYSIZE(kModeNamesWithoutRT);
 
-        int modeIndex = static_cast<int>(m_Engine.GetShadowSettings().Mode);
+        int modeIndex = static_cast<int>(m_Engine.GetSettings().Shadow.Mode);
         if (ComboEx(
                 "影の手法###ShadowMode", &modeIndex, modeNames, modeCount,
                 static_cast<int>(ShadowSettings::DefaultShadowMode(rtAvailable)),
@@ -1033,7 +1033,7 @@ namespace Kurenai::UI
                 "レイトレーシングはピクセルごとに太陽へ影レイを撃つため、カスケードの境界も"
                 "ピーターパン(接地部の浮き)もアクネも出ない"))
         {
-            m_Engine.GetShadowSettings().Mode = static_cast<ShadowMode>(modeIndex);
+            m_Engine.GetSettings().Shadow.Mode = static_cast<ShadowMode>(modeIndex);
         }
 
         if (!rtAvailable)
@@ -1041,22 +1041,22 @@ namespace Kurenai::UI
             ImGui::TextDisabled("レイトレーシングは利用できません(DX12かつDXR Tier 1.1が必要)");
         }
 
-        if (m_Engine.GetShadowSettings().Mode == ShadowMode::CascadedShadowMap)
+        if (m_Engine.GetSettings().Shadow.Mode == ShadowMode::CascadedShadowMap)
         {
             SliderFloatEx(
-                "PCSS ライトサイズ###ShadowLightSize", &m_Engine.GetShadowSettings().LightSize, 0.001f, 0.05f,
+                "PCSS ライトサイズ###ShadowLightSize", &m_Engine.GetSettings().Shadow.LightSize, 0.001f, 0.05f,
                 Defaults::ShadowLightSize, "%.4f", 0,
                 "シャドウマップUV空間でのブロッカーサーチ半径。大きいほど半影が広く柔らかくなる");
         }
-        else if (m_Engine.GetShadowSettings().Mode == ShadowMode::Raytraced)
+        else if (m_Engine.GetSettings().Shadow.Mode == ShadowMode::Raytraced)
         {
             SliderIntEx(
-                "RT サンプル数###RTShadowSampleCount", &m_Engine.GetShadowSettings().RTSampleCount, 1, 16,
+                "RT サンプル数###RTShadowSampleCount", &m_Engine.GetSettings().Shadow.RTSampleCount, 1, 16,
                 Defaults::RTShadowSampleCount,
                 "1ピクセルあたりに撃つ影レイの本数。デノイザを持たないため、太陽を大きくするほど"
                 "ここを増やさないと半影にノイズが出る");
             SliderFloatEx(
-                "RT 太陽の角半径###RTShadowSunAngularRadius", &m_Engine.GetShadowSettings().RTSunAngularRadiusDegrees,
+                "RT 太陽の角半径###RTShadowSunAngularRadius", &m_Engine.GetSettings().Shadow.RTSunAngularRadiusDegrees,
                 0.0f, 5.0f, Defaults::RTShadowSunAngularRadiusDegrees, "%.3f度", 0,
                 "太陽の見かけの半径。実際の太陽は視直径約0.53度なので既定値はその半分。"
                 "大きくすると半影が広く柔らかくなる");
@@ -1071,21 +1071,21 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "IBLを有効にする###EnableIBL", &m_Engine.GetIBLSettings().Enabled, Defaults::IBLEnabled,
+            "IBLを有効にする###EnableIBL", &m_Engine.GetSettings().IBL.Enabled, Defaults::IBLEnabled,
             "空(スカイボックス)を環境光源として使う。無効にすると代わりに一様な環境光を使う");
 
-        if (m_Engine.GetIBLSettings().Enabled)
+        if (m_Engine.GetSettings().IBL.Enabled)
         {
             SliderFloatEx(
-                "IBL 強度###IBLIntensity", &m_Engine.GetIBLSettings().Intensity, 0.0f, 2.0f, Defaults::IBLIntensity, "%.3f", 0,
+                "IBL 強度###IBLIntensity", &m_Engine.GetSettings().IBL.Intensity, 0.0f, 2.0f, Defaults::IBLIntensity, "%.3f", 0,
                 "環境光として加える量の倍率");
             CheckboxEx(
-                "専用イラディアンスマップを使う###UseDedicatedIrradiance", &m_Engine.GetIBLSettings().UseDedicatedIrradiance,
+                "専用イラディアンスマップを使う###UseDedicatedIrradiance", &m_Engine.GetSettings().IBL.UseDedicatedIrradiance,
                 Defaults::IBLUseDedicatedIrradiance,
                 "既定では拡散イラディアンスをプリフィルタ済み鏡面の最終ミップ(粗さ1)から得る。"
                 "これを有効にすると従来の専用イラディアンスマップをその場で焼いて切り替える(検証用)");
 
-            if (m_Engine.GetIBLSettings().UseDedicatedIrradiance)
+            if (m_Engine.GetSettings().IBL.UseDedicatedIrradiance)
             {
                 // 専用イラディアンスマップを焼く2つの経路(総当たり積分 / 球面調和関数L2)を
                 // A/B比較できるようにする。既定は総当たり積分(false)。
@@ -1096,7 +1096,7 @@ namespace Kurenai::UI
                 // 別の理由で空が焼き直されるまで切り替え前の経路の結果が出続ける
                 // ——つまりA/B比較のために付けたつまみが機能しない(実機で確認した)
                 if (CheckboxEx(
-                        "球面調和関数(SH)で焼く###UseSHIrradiance", &m_Engine.GetIBLSettings().UseSHIrradiance,
+                        "球面調和関数(SH)で焼く###UseSHIrradiance", &m_Engine.GetSettings().IBL.UseSHIrradiance,
                         Defaults::IBLUseSHIrradiance,
                         "拡散イラディアンスを球面調和関数L2(9項)で焼く高速な経路。理論上どんな照明でも"
                         "数%以内の誤差に収まるが、エミッシブ帯のような小さく明るい光源では暗部が"
@@ -1105,10 +1105,10 @@ namespace Kurenai::UI
                 {
                     m_Engine.GetIBLIrradianceBaked() = false;
                 }
-                if (m_Engine.GetIBLSettings().UseSHIrradiance)
+                if (m_Engine.GetSettings().IBL.UseSHIrradiance)
                 {
                     if (SliderFloatEx(
-                            "SHウィンドウ強度###SHWindowLambda", &m_Engine.GetIBLSettings().SHWindowLambda, 0.0f, 0.1f,
+                            "SHウィンドウ強度###SHWindowLambda", &m_Engine.GetSettings().IBL.SHWindowLambda, 0.0f, 0.1f,
                             Defaults::SHWindowLambda, "%.4f", 0,
                             "リンギング対策。大きくするほど高次バンドを減衰させ、ボケと引き換えに"
                             "暗部の負のオーバーシュートを抑える。0=無効"))
@@ -1121,19 +1121,19 @@ namespace Kurenai::UI
         else
         {
             SliderFloatEx(
-                "環境光の強さ###AmbientScale", &m_Engine.GetIBLSettings().AmbientScale, 0.0f, 3.0f, Defaults::AmbientScale, "%.3f", 0,
+                "環境光の強さ###AmbientScale", &m_Engine.GetSettings().IBL.AmbientScale, 0.0f, 3.0f, Defaults::AmbientScale, "%.3f", 0,
                 "IBLを使わないときの、方向を持たない一様な環境光の強さ");
         }
 
         // IBLの有効/無効どちらでも効くため、上の分岐の外に置く。
         // 「IBL 強度」が拡散と鏡面へ一様に掛かるのに対し、この2つは両者の比率を崩すためのもの
         SliderFloatEx(
-            "環境光の拡散倍率###AmbientDiffuseScale", &m_Engine.GetIBLSettings().AmbientDiffuseScale, 0.0f, 2.0f,
+            "環境光の拡散倍率###AmbientDiffuseScale", &m_Engine.GetSettings().IBL.AmbientDiffuseScale, 0.0f, 2.0f,
             Defaults::AmbientDiffuseScale, "%.3f", 0,
             "環境光(間接光)の拡散成分だけに掛かる倍率。0にすると環境からの照り返しが消え、"
             "映り込みだけが残る。直接光・自発光・SSILの間接光には掛からない");
         SliderFloatEx(
-            "環境光の鏡面倍率###AmbientSpecularScale", &m_Engine.GetIBLSettings().AmbientSpecularScale, 0.0f, 2.0f,
+            "環境光の鏡面倍率###AmbientSpecularScale", &m_Engine.GetSettings().IBL.AmbientSpecularScale, 0.0f, 2.0f,
             Defaults::AmbientSpecularScale, "%.3f", 0,
             "環境光(間接光)の鏡面成分だけに掛かる倍率。金属やガラスの映り込みの強さを、"
             "環境からの照り返しを保ったまま増減できる。SSRと反射プローブにも同じ倍率が効く");
@@ -1141,7 +1141,7 @@ namespace Kurenai::UI
         // bent normalによる遮蔽(34章)。ベイク済みのbent normalを持つモデルでのみ効く
         // (持たないマテリアルは黒1x1へフォールバックし、どのトグルでも見た目が変わらない)
         CheckboxEx(
-            "ディフューズAOにbent normalを使う###BentNormalAOSource", &m_Engine.GetAmbientOcclusionSettings().BentNormalAOSource,
+            "ディフューズAOにbent normalを使う###BentNormalAOSource", &m_Engine.GetSettings().AmbientOcclusion.BentNormalAOSource,
             Defaults::BentNormalAOSource,
             "拡散光の遮蔽を aoN = dot(N, bRaw) から求める。無効にすると従来のベイク済みAOを使う。"
             "どちらも同じ積分の別推定量なので、切り替えても見た目はほとんど変わらないのが正常");
@@ -1153,7 +1153,7 @@ namespace Kurenai::UI
                 "球冠交差",
                 "球面ガウス(推奨)",
             };
-            int mode = static_cast<int>(m_Engine.GetAmbientOcclusionSettings().SpecularOcclusion);
+            int mode = static_cast<int>(m_Engine.GetSettings().AmbientOcclusion.SpecularOcclusion);
             if (ComboEx(
                     "スペキュラ遮蔽の方式###SpecularOcclusionMode", &mode, kSpecularOcclusionModes,
                     IM_ARRAYSIZE(kSpecularOcclusionModes), Defaults::SpecularOcclusionMode,
@@ -1162,12 +1162,12 @@ namespace Kurenai::UI
                     "純黒へ潰れることがある(34.10節)。「球面ガウス」は同じ交差を柔らかい分布に"
                     "置き換えたもので、方向性を保ったまま潰れを避ける(34.11節)。既定は球面ガウス"))
             {
-                m_Engine.GetAmbientOcclusionSettings().SpecularOcclusion =
+                m_Engine.GetSettings().AmbientOcclusion.SpecularOcclusion =
                     static_cast<SpecularOcclusionMode>(mode);
             }
         }
         CheckboxEx(
-            "multi-bounce AO###MultiBounceAO", &m_Engine.GetAmbientOcclusionSettings().MultiBounceAOEnabled,
+            "multi-bounce AO###MultiBounceAO", &m_Engine.GetSettings().AmbientOcclusion.MultiBounceAOEnabled,
             Defaults::MultiBounceAOEnabled,
             "アルベドが明るいほどAOを弱める補正(Jimenez 2016)。物理的にはより正しいが"
             "見た目を大きく変えるため既定では無効");
@@ -1183,7 +1183,7 @@ namespace Kurenai::UI
                 "Series  1/(1-F0(1-Ess))",
                 "Kulla-Conty(加算ローブ)",
             };
-            int mode = static_cast<int>(m_Engine.GetReflectionSettings().SpecularCompensation);
+            int mode = static_cast<int>(m_Engine.GetSettings().Reflection.SpecularCompensation);
             if (ComboEx(
                     "スペキュラのエネルギー補正###SpecularEnergyCompensation", &mode, kCompensationModes,
                     IM_ARRAYSIZE(kCompensationModes), Defaults::SpecularCompensationMode,
@@ -1193,7 +1193,7 @@ namespace Kurenai::UI
                     "相反性を満たす代わりに直接光でライト1灯あたりLUTフェッチが1回増える。\n"
                     "既定のLinearは実使用域で最も真値に近い(14.9.8節)"))
             {
-                m_Engine.GetReflectionSettings().SpecularCompensation =
+                m_Engine.GetSettings().Reflection.SpecularCompensation =
                     static_cast<SpecularCompensationMode>(mode);
             }
         }
@@ -1218,10 +1218,10 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "DDGIを有効にする###EnableDDGI", &m_Engine.GetDDGISettings().Enabled, Defaults::DDGIEnabled,
+            "DDGIを有効にする###EnableDDGI", &m_Engine.GetSettings().DDGI.Enabled, Defaults::DDGIEnabled,
             "無効にすると拡散の環境光が従来どおりグローバルIBL/反射プローブのイラディアンスに戻る");
 
-        ImGui::BeginDisabled(!m_Engine.GetDDGISettings().Enabled);
+        ImGui::BeginDisabled(!m_Engine.GetSettings().DDGI.Enabled);
 
         // レイの取得。Raytracedはレイトレーシング非対応の環境(DX11、あるいはDXR Tier 1.1に
         // 達していないDX12)では選べないため、選択肢そのものを出さない
@@ -1237,7 +1237,7 @@ namespace Kurenai::UI
         const int ddgiRayModeCount =
             ddgiRtAvailable ? IM_ARRAYSIZE(kDDGIRayModeNamesWithRT) : IM_ARRAYSIZE(kDDGIRayModeNamesWithoutRT);
 
-        int ddgiRayModeIndex = static_cast<int>(m_Engine.GetDDGISettings().RayMode);
+        int ddgiRayModeIndex = static_cast<int>(m_Engine.GetSettings().DDGI.RayMode);
         if (ComboEx(
                 "レイの取得###DDGIRayMode", &ddgiRayModeIndex, ddgiRayModeNames, ddgiRayModeCount,
                 static_cast<int>(DDGISettings::DDGIRayModeForCapability(ddgiRtAvailable)),
@@ -1250,7 +1250,7 @@ namespace Kurenai::UI
                 "代わりに法線マップ・ベイク済みAO・bent normalはヒット面で引けないため、"
                 "その分だけラスタライズとは絵が違う"))
         {
-            m_Engine.GetDDGISettings().RayMode = static_cast<DDGIRayMode>(ddgiRayModeIndex);
+            m_Engine.GetSettings().DDGI.RayMode = static_cast<DDGIRayMode>(ddgiRayModeIndex);
             // 収束して停止しているときに切り替えても焼き直されるようにする
             // (再ベイク署名にはこのモードも混ぜてあるので通常は自動で倒れるが、
             //  つまみを触った直後に必ず動くほうが確かめやすい)
@@ -1262,9 +1262,9 @@ namespace Kurenai::UI
         {
             // 対照実験用のつまみ。切ると「影が落ちない」ラスタ経路と同じ状態になるので、
             // 振って絵が動くことがレイトレース経路が実際に走っている証拠になる
-            ImGui::BeginDisabled(m_Engine.GetDDGISettings().RayMode != DDGIRayMode::Raytraced);
+            ImGui::BeginDisabled(m_Engine.GetSettings().DDGI.RayMode != DDGIRayMode::Raytraced);
             if (CheckboxEx(
-                    "太陽の影レイを撃つ###DDGISunShadowRay", &m_Engine.GetDDGISettings().SunShadowRayEnabled, true,
+                    "太陽の影レイを撃つ###DDGISunShadowRay", &m_Engine.GetSettings().DDGI.SunShadowRayEnabled, true,
                     "レイトレース経路でのみ有効。切ると太陽の遮蔽を一切見なくなり、"
                     "ラスタ経路の既知の制約(カメラから遠いプローブに影が落ちない)と同じ状態になる。\n\n"
                     "常用は有効側。切り替えて絵と数値が動くことを確かめる対照実験のために置いてある"))
@@ -1277,7 +1277,7 @@ namespace Kurenai::UI
             // ラスタ経路では掛からない(αが常に0になるため)
             if (CheckboxEx(
                     "プローブ分類を有効にする###DDGIProbeClassification",
-                    &m_Engine.GetDDGISettings().ProbeClassificationEnabled, true,
+                    &m_Engine.GetSettings().DDGI.ProbeClassificationEnabled, true,
                     "壁や地面の内部に埋まってしまったプローブを、サンプリングから外す。\n\n"
                     "埋まったプローブは周囲のほとんどの方向で面の裏側しか見えず、"
                     "「そこには光が無い」という嘘の情報を周りの面へ配ってしまう。\n\n"
@@ -1287,9 +1287,9 @@ namespace Kurenai::UI
                 m_Engine.GetDDGIStableCycles() = 0;
             }
 
-            ImGui::BeginDisabled(!m_Engine.GetDDGISettings().ProbeClassificationEnabled);
+            ImGui::BeginDisabled(!m_Engine.GetSettings().DDGI.ProbeClassificationEnabled);
             SliderFloatEx(
-                "裏面率のしきい値###DDGIBackfaceThreshold", &m_Engine.GetDDGISettings().BackfaceThreshold, 0.0f, 1.0f, 0.5f,
+                "裏面率のしきい値###DDGIBackfaceThreshold", &m_Engine.GetSettings().DDGI.BackfaceThreshold, 0.0f, 1.0f, 0.5f,
                 "%.3f", 0,
                 "プローブから撃ったレイのうち、この割合を超えて「面の裏側」に当たったプローブを"
                 "信用しない。既定の0.5は「全レイの半分より多くが裏面 = そのプローブは外より内側にいる」"
@@ -1309,10 +1309,10 @@ namespace Kurenai::UI
         }
 
         SliderFloatEx(
-            "DDGI 強度###DDGIIntensity", &m_Engine.GetDDGISettings().Intensity, 0.0f, 2.0f, Defaults::DDGIIntensity, "%.3f", 0,
+            "DDGI 強度###DDGIIntensity", &m_Engine.GetSettings().DDGI.Intensity, 0.0f, 2.0f, Defaults::DDGIIntensity, "%.3f", 0,
             "拡散間接光の倍率。SSILと寄与が重なるぶんを実測で調整するためのつまみ");
         SliderIntEx(
-            "1フレームの更新プローブ数###DDGIProbesPerFrame", &m_Engine.GetDDGISettings().ProbesPerFrame, 1, 64,
+            "1フレームの更新プローブ数###DDGIProbesPerFrame", &m_Engine.GetSettings().DDGI.ProbesPerFrame, 1, 64,
             Defaults::DDGIProbesPerFrame,
             "多いほど光の変化への追従が速くなるが、1プローブにつきシーンを6回描くため負荷も比例して上がる");
 
@@ -1327,7 +1327,7 @@ namespace Kurenai::UI
             IM_ARRAYSIZE(kDDGIUpdateModeNames) == IM_ARRAYSIZE(kDDGIUpdateModeValues),
             "表示名と値の並びを一致させること");
 
-        int ddgiUpdateModeIndex = static_cast<int>(m_Engine.GetDDGISettings().UpdateMode);
+        int ddgiUpdateModeIndex = static_cast<int>(m_Engine.GetSettings().DDGI.UpdateMode);
         if (ComboEx(
                 "更新モード###DDGIUpdateMode", &ddgiUpdateModeIndex, kDDGIUpdateModeNames,
                 IM_ARRAYSIZE(kDDGIUpdateModeNames), static_cast<int>(DDGIUpdateMode::Always),
@@ -1344,14 +1344,14 @@ namespace Kurenai::UI
                 "(実測でGPU 40〜47ms・CPU 30msを占めていた)。"
                 "焼き上がりに影響する状態が変わると自動で再開する"))
         {
-            m_Engine.GetDDGISettings().UpdateMode = kDDGIUpdateModeValues[ddgiUpdateModeIndex];
+            m_Engine.GetSettings().DDGI.UpdateMode = kDDGIUpdateModeValues[ddgiUpdateModeIndex];
             // 「常時更新へ戻したのに止まったまま」を防ぐ(署名が変わるまで再開しないため)
             m_Engine.GetDDGIUpdateSuspended() = false;
             m_Engine.GetDDGIStableCycles() = 0;
         }
 
         CheckboxEx(
-            "1/2解像度で評価する###DDGIHalfResolution", &m_Engine.GetDDGISettings().HalfResolution, Defaults::DDGIHalfResolution,
+            "1/2解像度で評価する###DDGIHalfResolution", &m_Engine.GetSettings().DDGI.HalfResolution, Defaults::DDGIHalfResolution,
             "拡散間接光を内部レンダー解像度の1/2で求め、深度を見てアップサンプルする。"
             "実測(ProbeTest / 1280x720 / DX11)ではLightingパス23.9msのうちDDGIのサンプリングが"
             "10.2msを占めていた。\n\n"
@@ -1390,7 +1390,7 @@ namespace Kurenai::UI
         const char* const* modeNames = rtAvailable ? kModeNamesWithRT : kModeNamesWithoutRT;
         const int modeCount = rtAvailable ? IM_ARRAYSIZE(kModeNamesWithRT) : IM_ARRAYSIZE(kModeNamesWithoutRT);
 
-        int modeIndex = static_cast<int>(m_Engine.GetReflectionSettings().Mode);
+        int modeIndex = static_cast<int>(m_Engine.GetSettings().Reflection.Mode);
         if (ComboEx(
                 "反射の手法###ReflectionMode", &modeIndex, modeNames, modeCount,
                 // 戻る先はエンジンの既定ではなく「このシーンを読み込んだ直後」
@@ -1400,7 +1400,7 @@ namespace Kurenai::UI
                 "レイトレーシングはシーン全体へレイを飛ばすため画面外のものも映るが、"
                 "ヒット面のテクスチャは読めないためマテリアルの定数色になる"))
         {
-            m_Engine.GetReflectionSettings().Mode = static_cast<ReflectionMode>(modeIndex);
+            m_Engine.GetSettings().Reflection.Mode = static_cast<ReflectionMode>(modeIndex);
         }
 
         if (!rtAvailable)
@@ -1410,33 +1410,33 @@ namespace Kurenai::UI
 
         bool recalcRequested = false;
 
-        if (m_Engine.GetReflectionSettings().Mode == ReflectionMode::ScreenSpace)
+        if (m_Engine.GetSettings().Reflection.Mode == ReflectionMode::ScreenSpace)
         {
             SliderFloatSceneDependent(
-                "SSR 最大距離###SSRMaxDistance", &m_Engine.GetReflectionSettings().SSRMaxDistance, 0.1f, 100.0f, recalcRequested, "%.3f", 0,
+                "SSR 最大距離###SSRMaxDistance", &m_Engine.GetSettings().Reflection.SSRMaxDistance, 0.1f, 100.0f, recalcRequested, "%.3f", 0,
                 "反射レイを追跡する最大距離(ワールド単位)。シーン読み込み時に対角長から自動設定される");
             SliderFloatSceneDependent(
-                "SSR 厚み###SSRThickness", &m_Engine.GetReflectionSettings().SSRThickness, 0.01f, 2.0f, recalcRequested, "%.3f", 0,
+                "SSR 厚み###SSRThickness", &m_Engine.GetSettings().Reflection.SSRThickness, 0.01f, 2.0f, recalcRequested, "%.3f", 0,
                 "深度バッファ上の1点が持つと仮定する奥行きの厚み。ヒット判定の許容量になる");
             SliderFloatEx(
-                "SSR 粗さのしきい値###SSRRoughnessCutoff", &m_Engine.GetReflectionSettings().SSRRoughnessCutoff, 0.05f, 1.0f,
+                "SSR 粗さのしきい値###SSRRoughnessCutoff", &m_Engine.GetSettings().Reflection.SSRRoughnessCutoff, 0.05f, 1.0f,
                 Defaults::SSRRoughnessCutoff, "%.3f", 0,
                 "この粗さを超えるマテリアルではSSRを行わない。粗い面ではノイズが目立ち負荷に見合わないため");
         }
-        else if (m_Engine.GetReflectionSettings().Mode == ReflectionMode::Raytraced)
+        else if (m_Engine.GetSettings().Reflection.Mode == ReflectionMode::Raytraced)
         {
             SliderFloatSceneDependent(
-                "RT 最大距離###RTReflectionMaxDistance", &m_Engine.GetReflectionSettings().RTReflectionMaxDistance, 1.0f, 500.0f,
+                "RT 最大距離###RTReflectionMaxDistance", &m_Engine.GetSettings().Reflection.RTReflectionMaxDistance, 1.0f, 500.0f,
                 recalcRequested, "%.3f", 0,
                 "反射レイを追跡する最大距離(ワールド単位)。シーン読み込み時に対角長から自動設定される。"
                 "短くすると速くなるが、本来映るはずの遠景が空に置き換わる");
             SliderFloatEx(
-                "RT 粗さのしきい値###RTReflectionRoughnessCutoff", &m_Engine.GetReflectionSettings().RTReflectionRoughnessCutoff,
+                "RT 粗さのしきい値###RTReflectionRoughnessCutoff", &m_Engine.GetSettings().Reflection.RTReflectionRoughnessCutoff,
                 0.05f, 1.0f, Defaults::RTReflectionRoughnessCutoff, "%.3f", 0,
                 "この粗さを超えるマテリアルではレイを撃たない。鏡面レイ1本しか撃たないため、"
                 "粗い面では反射プローブ/IBLに任せたほうが正しい");
             CheckboxEx(
-                "反射先に影を落とす###RTReflectionShadowRay", &m_Engine.GetReflectionSettings().RTReflectionShadowRayEnabled,
+                "反射先に影を落とす###RTReflectionShadowRay", &m_Engine.GetSettings().Reflection.RTReflectionShadowRayEnabled,
                 Defaults::RTReflectionShadowRayEnabled,
                 "反射に映る面から太陽へ影レイを撃つ。切ると反射の中だけ影が消えるが、その分速い");
         }
@@ -1465,12 +1465,12 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "水面アニメを止める###FreezeWaterTime", &m_Engine.GetWaterSettings().TimeFrozen, Defaults::WaterTimeFrozen,
+            "水面アニメを止める###FreezeWaterTime", &m_Engine.GetSettings().Water.TimeFrozen, Defaults::WaterTimeFrozen,
             "水面法線マップのスクロールを止める。A/B比較などスクロールが揺れると困る場面で使う");
 
         CheckboxEx(
             "水面の反射に解析的な空を使う###WaterAnalyticSkyReflection",
-            &m_Engine.GetWaterSettings().AnalyticSkyReflection, Defaults::WaterAnalyticSkyReflection,
+            &m_Engine.GetSettings().Water.AnalyticSkyReflection, Defaults::WaterAnalyticSkyReflection,
             "水面のSSRレイが画面外へ抜けた、または最大距離まで判定がつかなかったとき、"
             "プリフィルタ済み鏡面IBL(128pxベースのキューブマップをラフネス由来のミップで引く)の"
             "代わりに、Perez分布(手続き空)を画面解像度で直接評価した空を映す。"
@@ -1485,14 +1485,14 @@ namespace Kurenai::UI
         // (KurenaiEngine3D::RenderThreadMainのTimeParams構築箇所、Water.hlslのPSMain参照)。
         // つまみ自体はScene::WaterWaveScale等から読み込める値をUIで確認・上書きできるよう用意してある
         SliderFloatEx(
-            "波のスケール###WaterWaveScale", &m_Engine.GetWaterSettings().WaveScale, 1.0f, 64.0f, Defaults::WaterWaveScale,
+            "波のスケール###WaterWaveScale", &m_Engine.GetSettings().Water.WaveScale, 1.0f, 64.0f, Defaults::WaterWaveScale,
             "%.2f", ImGuiSliderFlags_Logarithmic,
             "水面法線マップのタイリングスケール。値が大きいほど波紋の繰り返しが細かくなる");
         SliderFloatEx(
-            "波の速度###WaterWaveSpeed", &m_Engine.GetWaterSettings().WaveSpeed, 0.0f, 1.0f, Defaults::WaterWaveSpeed, "%.3f", 0,
+            "波の速度###WaterWaveSpeed", &m_Engine.GetSettings().Water.WaveSpeed, 0.0f, 1.0f, Defaults::WaterWaveSpeed, "%.3f", 0,
             "水面法線マップのスクロール速度。m_WaterScrollOffsetの進行速度に直接効く");
         SliderFloatEx(
-            "波の強さ###WaterWaveStrength", &m_Engine.GetWaterSettings().WaveStrength, 0.0f, 1.0f, Defaults::WaterWaveStrength,
+            "波の強さ###WaterWaveStrength", &m_Engine.GetSettings().Water.WaveStrength, 0.0f, 1.0f, Defaults::WaterWaveStrength,
             "%.3f", 0, "波打ちの振幅。0で波が完全に消え平坦な鏡面、1で最大の揺らぎになる");
 
         // --- 水中項 ---
@@ -1503,18 +1503,18 @@ namespace Kurenai::UI
             "見下ろすと水の色、すれすれだと鏡になる切り替わりはFresnelの式(DeferredLighting.hlsl)が"
             "そのまま担当する");
         SliderFloatEx(
-            "水体の色 R###WaterBodyColorR", &m_Engine.GetWaterSettings().BodyColor.x, 0.0f, 0.5f, Defaults::WaterBodyColorR,
+            "水体の色 R###WaterBodyColorR", &m_Engine.GetSettings().Water.BodyColor.x, 0.0f, 0.5f, Defaults::WaterBodyColorR,
             "%.4f", 0, "水体の拡散反射色(リニア)の赤成分");
         SliderFloatEx(
-            "水体の色 G###WaterBodyColorG", &m_Engine.GetWaterSettings().BodyColor.y, 0.0f, 0.5f, Defaults::WaterBodyColorG,
+            "水体の色 G###WaterBodyColorG", &m_Engine.GetSettings().Water.BodyColor.y, 0.0f, 0.5f, Defaults::WaterBodyColorG,
             "%.4f", 0, "水体の拡散反射色(リニア)の緑成分");
         SliderFloatEx(
-            "水体の色 B###WaterBodyColorB", &m_Engine.GetWaterSettings().BodyColor.z, 0.0f, 0.5f, Defaults::WaterBodyColorB,
+            "水体の色 B###WaterBodyColorB", &m_Engine.GetSettings().Water.BodyColor.z, 0.0f, 0.5f, Defaults::WaterBodyColorB,
             "%.4f", 0, "水体の拡散反射色(リニア)の青成分");
 
         // --- 平面反射 ---
         CheckboxEx(
-            "平面反射を有効にする###PlanarReflectionEnabled", &m_Engine.GetReflectionSettings().PlanarEnabled,
+            "平面反射を有効にする###PlanarReflectionEnabled", &m_Engine.GetSettings().Reflection.PlanarEnabled,
             Defaults::PlanarReflectionEnabled,
             "水面に不透明ジオメトリの鏡像を映す専用のフォワードパス(鏡映カメラで景色を描き直す)。"
             "効果が出るのは上の「反射」セクションで手法にSSRを選んだときだけ"
@@ -1528,7 +1528,7 @@ namespace Kurenai::UI
             int resolutionIndex = kDefaultResolutionIndex;
             for (int i = 0; i < IM_ARRAYSIZE(kPlanarReflectionResolutionValues); ++i)
             {
-                if (m_Engine.GetReflectionSettings().PlanarResolutionScale == kPlanarReflectionResolutionValues[i])
+                if (m_Engine.GetSettings().Reflection.PlanarResolutionScale == kPlanarReflectionResolutionValues[i])
                 {
                     resolutionIndex = i;
                     break;
@@ -1549,7 +1549,7 @@ namespace Kurenai::UI
         }
 
         SliderFloatEx(
-            "波による歪み###PlanarReflectionDistortion", &m_Engine.GetReflectionSettings().PlanarDistortion, 0.0f, 0.1f,
+            "波による歪み###PlanarReflectionDistortion", &m_Engine.GetSettings().Reflection.PlanarDistortion, 0.0f, 0.1f,
             Defaults::PlanarReflectionDistortion, "%.4f", 0,
             "波の法線ベクトル(N.xz)を画面UVのずらし量に変換する係数。0で歪みなし(完全な鏡)、"
             "大きいほど波打ちが強く見える");
@@ -1578,14 +1578,14 @@ namespace Kurenai::UI
         // 立てないと、無効にした直後もIBLが「有効だったときの暗さ」のまま次の自然な再ベイク
         // (太陽が動く・露出が変わる等)まで取り残されてしまうため、被覆率スライダーと同じ扱いにする
         if (CheckboxEx(
-                "雲を有効にする###CloudEnabled", &m_Engine.GetCloudSettings().Enabled, Defaults::CloudEnabled,
+                "雲を有効にする###CloudEnabled", &m_Engine.GetSettings().Cloud.Enabled, Defaults::CloudEnabled,
                 "無効にすると被覆率0と同じ扱いになり、Sky.hlsli側の雲の計算(密度・自己影・位相関数)を"
                 "一切行わない"))
         {
             m_Engine.GetSkyBakeDirty() = true;
         }
         CheckboxEx(
-            "雲を止める(凍結)###FreezeCloudTime", &m_Engine.GetCloudSettings().TimeFrozen, Defaults::CloudTimeFrozen,
+            "雲を止める(凍結)###FreezeCloudTime", &m_Engine.GetSettings().Cloud.TimeFrozen, Defaults::CloudTimeFrozen,
             "風によるノイズのスクロールを止める。積雲・巻雲の両方に効く(片方にしか効かないと"
             "A/B比較でスクロールが揺れる側だけ残ってしまい対照が取れなくなるため)。"
             "水面の「水面アニメを止める」と同じ位置づけ");
@@ -1597,7 +1597,7 @@ namespace Kurenai::UI
         // プリフィルタ36回のディスパッチ)が余計に走ってしまう(m_Settings.Sky.ProceduralEnabledトグルと
         // 同じ判断基準)
         if (SliderFloatEx(
-                "被覆率###CloudCoverage", &m_Engine.GetCloudSettings().Coverage, 0.0f, 1.0f, Defaults::CloudCoverage, "%.2f", 0,
+                "被覆率###CloudCoverage", &m_Engine.GetSettings().Cloud.Coverage, 0.0f, 1.0f, Defaults::CloudCoverage, "%.2f", 0,
                 "0=雲なし、1=全天が雲。IBLキューブへ焼く天頂輝度にだけ、この値から求めた平均透過率を"
                 "掛けて全体を暗くする(背景・水面反射に見える空自体は減光しない。二重に暗くなるのを"
                 "避けるため)"))
@@ -1606,49 +1606,49 @@ namespace Kurenai::UI
         }
 
         SliderFloatEx(
-            "雲底の高度###CloudAltitude", &m_Engine.GetCloudSettings().Altitude, 200.0f, 5000.0f, Defaults::CloudAltitude,
+            "雲底の高度###CloudAltitude", &m_Engine.GetSettings().Cloud.Altitude, 200.0f, 5000.0f, Defaults::CloudAltitude,
             "%.0f m", 0, "雲底の高さ(ワールドYの絶対高度)。雲層は世界に固定されており、カメラを"
             "上下させると雲との高度差が実際に変わる。値を大きくすると地平線際の雲がより遠くに、"
             "小さくすると近くに見える");
         SliderFloatEx(
-            "UVスケール###CloudUvScale", &m_Engine.GetCloudSettings().UvScale, 1.0f / 8000.0f, 1.0f / 500.0f,
+            "UVスケール###CloudUvScale", &m_Engine.GetSettings().Cloud.UvScale, 1.0f / 8000.0f, 1.0f / 500.0f,
             Defaults::CloudUvScale, "%.6f", ImGuiSliderFlags_Logarithmic,
             "ワールド1mあたりのノイズ空間の距離。大きいほど雲の塊(1個あたり)が小さく見える");
         SliderFloatEx(
-            "雲の種類###CloudTypeBias", &m_Engine.GetCloudSettings().TypeBias, 0.0f, 1.0f, Defaults::CloudTypeBias,
+            "雲の種類###CloudTypeBias", &m_Engine.GetSettings().Cloud.TypeBias, 0.0f, 1.0f, Defaults::CloudTypeBias,
             "%.2f", 0, "場所ごとの雲の背の高さをどちらへ寄せるか。0で層雲(薄いシート)、0.5で積雲、"
             "1で雄大積雲。空全体が同じ種類になるのではなく、種類の場が低い周波数で分布している"
             "ぶんを丸ごとずらす。厚み(Thickness)がスラブの上限で、種類はその何割まで使うかを決める");
         SliderFloatEx(
-            "密度###CloudDensity", &m_Engine.GetCloudSettings().Density, 0.0f, 30.0f, Defaults::CloudDensity, "%.2f", 0,
+            "密度###CloudDensity", &m_Engine.GetSettings().Cloud.Density, 0.0f, 30.0f, Defaults::CloudDensity, "%.2f", 0,
             "消散係数。ビアの法則(exp(-density*経路長))で透過率を決める。大きいほど雲が不透明になり"
             "自己影も濃くなる");
         SliderFloatEx(
-            "風速###CloudWindSpeed", &m_Engine.GetCloudSettings().WindSpeed, 0.0f, 30.0f, Defaults::CloudWindSpeed, "%.2f m/s",
+            "風速###CloudWindSpeed", &m_Engine.GetSettings().Cloud.WindSpeed, 0.0f, 30.0f, Defaults::CloudWindSpeed, "%.2f m/s",
             0, "雲のノイズを流す速度。実世界の速度[m/s]として扱える");
         SliderFloatEx(
-            "風向###CloudWindDirection", &m_Engine.GetCloudSettings().WindDirectionDegrees, 0.0f, 360.0f,
+            "風向###CloudWindDirection", &m_Engine.GetSettings().Cloud.WindDirectionDegrees, 0.0f, 360.0f,
             Defaults::CloudWindDirectionDegrees, "%.1f deg", 0,
             "風が吹いていく向き。太陽の方位角と同じ規約(X軸0度、Z軸(+方向)90度)。"
             "巻雲(下記)も同じ風向を共有する(速度・UVスケールだけ別に持つ)");
         SliderFloatEx(
-            "前方散乱g###CloudForwardG", &m_Engine.GetCloudSettings().ForwardG, 0.0f, 0.95f, Defaults::CloudForwardG, "%.2f", 0,
+            "前方散乱g###CloudForwardG", &m_Engine.GetSettings().Cloud.ForwardG, 0.0f, 0.95f, Defaults::CloudForwardG, "%.2f", 0,
             "Henyey-Greensteinの非対称パラメータ。大きいほど太陽を直視する方向で雲の縁が強く光る"
             "(半逆光のシルバーライニング効果)");
 
         CheckboxEx(
-            "ボリュームとして描く###CloudVolumetric", &m_Engine.GetCloudSettings().Volumetric, Defaults::CloudVolumetric,
+            "ボリュームとして描く###CloudVolumetric", &m_Engine.GetSettings().Cloud.Volumetric, Defaults::CloudVolumetric,
             "積雲を雲底から雲頂までのスラブとしてレイマーチする。切ると従来の厚みゼロの"
             "平面レイヤーへ戻るので、見た目と負荷をそのまま比べられる");
-        if (m_Engine.GetCloudSettings().Volumetric)
+        if (m_Engine.GetSettings().Cloud.Volumetric)
         {
             SliderFloatEx(
-                "厚み###CloudThickness", &m_Engine.GetCloudSettings().Thickness, 100.0f, 3000.0f, Defaults::CloudThickness,
+                "厚み###CloudThickness", &m_Engine.GetSettings().Cloud.Thickness, 100.0f, 3000.0f, Defaults::CloudThickness,
                 "%.0f m", 0,
                 "雲底から雲頂までの厚み。目安は扁平雲(humilis)が約400m、並雲(mediocris)が約1000m、"
                 "雄大積雲(congestus)が約2500m。厚いほど縦に伸びた入道雲になる");
             SliderUIntEx(
-                "レイマーチ段数###CloudRaymarchSteps", &m_Engine.GetCloudSettings().RaymarchSteps, 1,
+                "レイマーチ段数###CloudRaymarchSteps", &m_Engine.GetSettings().Cloud.RaymarchSteps, 1,
                 KurenaiEngine3D::kCloudRaymarchStepsMax, Defaults::CloudRaymarchSteps,
                 "雲底から雲頂までを何段に分けて積分するか。雲パスのコストの主なつまみで、"
                 "1段ごとにウェザーマップのfBm(4オクターブ)と3Dノイズ2枚を引くため、"
@@ -1665,13 +1665,13 @@ namespace Kurenai::UI
         // 巻雲の被覆率もIBLキューブの明るさ(平均透過率)に効くため、積雲のCloudCoverageと同じ判断基準で
         // 変わったときだけ再ベイクを要求する
         if (CheckboxEx(
-                "巻雲を有効にする###CirrusEnabled", &m_Engine.GetCloudSettings().CirrusEnabled, Defaults::CirrusEnabled,
+                "巻雲を有効にする###CirrusEnabled", &m_Engine.GetSettings().Cloud.CirrusEnabled, Defaults::CirrusEnabled,
                 "無効にすると被覆率0と同じ扱いになり、Sky.hlsli側の巻雲の計算を一切行わない"))
         {
             m_Engine.GetSkyBakeDirty() = true;
         }
         if (SliderFloatEx(
-                "被覆率###CirrusCoverage", &m_Engine.GetCloudSettings().CirrusCoverage, 0.0f, 1.0f, Defaults::CirrusCoverage, "%.2f",
+                "被覆率###CirrusCoverage", &m_Engine.GetSettings().Cloud.CirrusCoverage, 0.0f, 1.0f, Defaults::CirrusCoverage, "%.2f",
                 0,
                 "0=巻雲なし、1=全天が巻雲。IBLキューブへ焼く天頂輝度にだけ、この値から求めた"
                 "平均透過率(積雲との積)を掛けて全体を暗くする"))
@@ -1679,23 +1679,23 @@ namespace Kurenai::UI
             m_Engine.GetSkyBakeDirty() = true;
         }
         SliderFloatEx(
-            "雲底の高度###CirrusAltitude", &m_Engine.GetCloudSettings().CirrusAltitude, 3000.0f, 15000.0f, Defaults::CirrusAltitude,
+            "雲底の高度###CirrusAltitude", &m_Engine.GetSettings().Cloud.CirrusAltitude, 3000.0f, 15000.0f, Defaults::CirrusAltitude,
             "%.0f m", 0,
             "雲底の高さ(ワールドYの絶対高度。積雲と同じ規約)。巻雲の高度帯として一般に言われる目安"
             "(だいたい5,000〜13,000m)");
         SliderFloatEx(
-            "UVスケール###CirrusUvScale", &m_Engine.GetCloudSettings().CirrusUvScale, 1.0f / 12000.0f, 1.0f / 1000.0f,
+            "UVスケール###CirrusUvScale", &m_Engine.GetSettings().Cloud.CirrusUvScale, 1.0f / 12000.0f, 1.0f / 1000.0f,
             Defaults::CirrusUvScale, "%.6f", ImGuiSliderFlags_Logarithmic,
             "ワールド1mあたりのノイズ空間の距離。積雲より小さめが自然(巻雲は1つ1つの塊が大きく広がるため)");
         SliderFloatEx(
-            "密度###CirrusDensity", &m_Engine.GetCloudSettings().CirrusDensity, 0.0f, 5.0f, Defaults::CirrusDensity, "%.2f", 0,
+            "密度###CirrusDensity", &m_Engine.GetSettings().Cloud.CirrusDensity, 0.0f, 5.0f, Defaults::CirrusDensity, "%.2f", 0,
             "消散係数。巻雲は光学的に薄いため積雲より1桁小さい値を想定している");
         SliderFloatEx(
-            "風速###CirrusWindSpeed", &m_Engine.GetCloudSettings().CirrusWindSpeed, 0.0f, 60.0f, Defaults::CirrusWindSpeed,
+            "風速###CirrusWindSpeed", &m_Engine.GetSettings().Cloud.CirrusWindSpeed, 0.0f, 60.0f, Defaults::CirrusWindSpeed,
             "%.2f m/s", 0, "巻雲のノイズを流す速度。高層ほど風が速いという一般的な傾向に合わせ"
             "積雲より速めにしてある");
         SliderFloatEx(
-            "異方性(筋状)###CirrusAnisotropy", &m_Engine.GetCloudSettings().CirrusAnisotropy, 1.0f, 8.0f, Defaults::CirrusAnisotropy,
+            "異方性(筋状)###CirrusAnisotropy", &m_Engine.GetSettings().Cloud.CirrusAnisotropy, 1.0f, 8.0f, Defaults::CirrusAnisotropy,
             "%.2f", 0, "fBmのUV(U方向)を伸ばして筋状にする倍率。1.0で積雲と同じ等方形状になる");
 
         EndParamGroup();
@@ -1710,20 +1710,20 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "星を描く###StarsEnabled", &m_Engine.GetStarsSettings().Enabled, Defaults::StarsEnabled,
+            "星を描く###StarsEnabled", &m_Engine.GetSettings().Stars.Enabled, Defaults::StarsEnabled,
             "昼は太陽の仰角で完全に0までフェードするので、無効にしても昼のシーンの絵は変わらない");
 
         SliderFloatEx(
-            "密度###StarsDensity", &m_Engine.GetStarsSettings().Density, 1.0f, 256.0f, Defaults::StarsDensity, "%.0f", 0,
+            "密度###StarsDensity", &m_Engine.GetSettings().Stars.Density, 1.0f, 256.0f, Defaults::StarsDensity, "%.0f", 0,
             "空を分割するセルの細かさ。1セルにつき星1個なので、大きいほど星が増える");
 
         SliderFloatEx(
-            "明るさ###StarsBrightness", &m_Engine.GetStarsSettings().Brightness, 0.0f, 20.0f, Defaults::StarsBrightness, "%.2f", 0,
+            "明るさ###StarsBrightness", &m_Engine.GetSettings().Stars.Brightness, 0.0f, 20.0f, Defaults::StarsBrightness, "%.2f", 0,
             "星の明るさ倍率。星は見た目だけの項で、夜空の目標照度(星明かりの照度)には影響しないため、"
             "ここを上げても風景の明るさは変わらない");
 
         SliderFloatEx(
-            "またたき###StarsTwinkle", &m_Engine.GetStarsSettings().Twinkle, 0.0f, 1.0f, Defaults::StarsTwinkle, "%.2f", 0,
+            "またたき###StarsTwinkle", &m_Engine.GetSettings().Stars.Twinkle, 0.0f, 1.0f, Defaults::StarsTwinkle, "%.2f", 0,
             "またたきの強さ。既定は0(無効)。上げるとTAAがちらつきとして拾い、"
             "A/B比較のスクリーンショットの再現性も落ちる");
 
@@ -1742,11 +1742,11 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "大気遠近を有効にする###FogEnabled", &m_Engine.GetFogSettings().Enabled, Defaults::FogEnabled,
+            "大気遠近を有効にする###FogEnabled", &m_Engine.GetSettings().Fog.Enabled, Defaults::FogEnabled,
             "無効にするとパス自体が実行されず、反射パスの出力がそのままTAA(またはトーンマップ)へ渡る"
             "(密度を0にした場合とも数値上区別が付かないため、切り分け用にトグルを分けている)");
         SliderFloatEx(
-            "消散係数###FogDensity", &m_Engine.GetFogSettings().Density, 0.0f, 0.002f, Defaults::FogDensity, "%.5f",
+            "消散係数###FogDensity", &m_Engine.GetSettings().Fog.Density, 0.0f, 0.002f, Defaults::FogDensity, "%.5f",
             ImGuiSliderFlags_Logarithmic,
             "基準高度(下記)での消散係数[1/m]。大きいほど濃い霧になる。"
             "気象学的視程Vとは Koschmieder の V = 3.912 / 消散係数 で結び付くので、"
@@ -1755,13 +1755,13 @@ namespace Kurenai::UI
             "上限を0.002に留めてあるのは、これより濃いと600m先の地物すら見えず"
             "屋外の風景として成立しないため");
         SliderFloatEx(
-            "スケールハイト###FogScaleHeight", &m_Engine.GetFogSettings().ScaleHeight, 10.0f, 5000.0f, Defaults::FogScaleHeight,
+            "スケールハイト###FogScaleHeight", &m_Engine.GetSettings().Fog.ScaleHeight, 10.0f, 5000.0f, Defaults::FogScaleHeight,
             "%.0f m", 0, "霧の層の厚み。大きいほど高い高度まで霧が及ぶ");
         SliderFloatEx(
-            "基準高度###FogRefHeight", &m_Engine.GetFogSettings().RefHeight, -500.0f, 500.0f, Defaults::FogRefHeight, "%.0f m",
+            "基準高度###FogRefHeight", &m_Engine.GetSettings().Fog.RefHeight, -500.0f, 500.0f, Defaults::FogRefHeight, "%.0f m",
             0, "消散係数(上記)を定義する高さ(ワールドY)。既定は水面の高さに合わせている");
         SliderFloatEx(
-            "不透明度の上限###FogMaxOpacity", &m_Engine.GetFogSettings().MaxOpacity, 0.0f, 1.0f, Defaults::FogMaxOpacity, "%.2f",
+            "不透明度の上限###FogMaxOpacity", &m_Engine.GetSettings().Fog.MaxOpacity, 0.0f, 1.0f, Defaults::FogMaxOpacity, "%.2f",
             0, "1.0で遠方が完全に空の色まで行く。下げると最遠方でもうっすら元の色が透けて残る");
 
         EndParamGroup();

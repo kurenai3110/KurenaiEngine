@@ -47,25 +47,25 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         static const char* kTonemapCurveNames[] = { "Reinhard", "ACES", "AgX" };
-        int curveIndex = static_cast<int>(m_Engine.GetPostProcessSettings().Curve);
+        int curveIndex = static_cast<int>(m_Engine.GetSettings().PostProcess.Curve);
         if (ComboEx(
                 "カーブ###TonemapCurve", &curveIndex, kTonemapCurveNames, IM_ARRAYSIZE(kTonemapCurveNames),
                 static_cast<int>(TonemapCurve::AgX),
                 "HDRの輝度を表示可能な範囲へ写す曲線。既定のAgXは、飽和した明るい色でACESに出る"
                 "色相シフト(赤→オレンジ)を避けられる。Reinhardは比較用のリファレンス"))
         {
-            m_Engine.GetPostProcessSettings().Curve = static_cast<TonemapCurve>(curveIndex);
+            m_Engine.GetSettings().PostProcess.Curve = static_cast<TonemapCurve>(curveIndex);
         }
 
         SliderFloatEx(
-            "薄明視###MesopicVision", &m_Engine.GetPostProcessSettings().MesopicStrength, 0.0f, 1.0f, Defaults::MesopicStrength, "%.2f", 0,
+            "薄明視###MesopicVision", &m_Engine.GetSettings().PostProcess.MesopicStrength, 0.0f, 1.0f, Defaults::MesopicStrength, "%.2f", 0,
             "暗所視の再現量。0で無効。実際の輝度が0.01cd/m^2を下回ると桿体だけの視覚になり色が"
             "判別できなくなる(3cd/m^2以上は通常の錐体視のまま。間は対数で補間)。"
             "桿体の分光感度が短波長寄りなので、赤は沈み青は明るく見える(プルキンエ現象)。"
             "露出を下げるだけでは「暗いが色鮮やかな夜」になり肉眼の見え方と合わない");
 
         CheckboxEx(
-            "出力ディザリング###OutputDithering", &m_Engine.GetPostProcessSettings().DitherEnabled, Defaults::DitherEnabled,
+            "出力ディザリング###OutputDithering", &m_Engine.GetSettings().PostProcess.DitherEnabled, Defaults::DitherEnabled,
             "最終的な8bit量子化の直前に微小なノイズを加え、暗部グラデーションのバンディングを解消する。"
             "暗部のバンディングは中間バッファの精度ではなくこの8bit量子化が主因であることを実測で確認済み");
 
@@ -77,7 +77,7 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         if (CheckboxEx(
-                "TAAを有効にする###EnableTAA", &m_Engine.GetPostProcessSettings().TAAEnabled, Defaults::TAAEnabled,
+                "TAAを有効にする###EnableTAA", &m_Engine.GetSettings().PostProcess.TAAEnabled, Defaults::TAAEnabled,
                 "毎フレーム投影行列を1ピクセル未満だけずらし、モーションベクターで前フレームの結果を"
                 "再投影して蓄積する。斜めエッジのジャギーと、スクリーンスペース系パスの"
                 "サンプリングノイズが時間方向に平均されて消える"))
@@ -87,26 +87,26 @@ namespace Kurenai::UI
             m_Engine.GetTAAHistoryValid().store(false, std::memory_order_relaxed);
         }
 
-        if (m_Engine.GetPostProcessSettings().TAAEnabled)
+        if (m_Engine.GetSettings().PostProcess.TAAEnabled)
         {
             SliderFloatEx(
-                "履歴ブレンド率###TAABlendWeight", &m_Engine.GetPostProcessSettings().TAABlendWeight, 0.02f, 0.5f, Defaults::TAABlendWeight,
+                "履歴ブレンド率###TAABlendWeight", &m_Engine.GetSettings().PostProcess.TAABlendWeight, 0.02f, 0.5f, Defaults::TAABlendWeight,
                 "%.3f", 0,
                 "今フレームの色を混ぜる割合。小さいほど多くのフレームが平均されて滑らかになるが、"
                 "遮蔽が変わったときの追従が遅くなり残像が出やすくなる。"
                 "フレームレートに対して固定の割合なので、fpsが変わると残像の長さも変わる");
             SliderFloatEx(
-                "ジッター強度###TAAJitterScale", &m_Engine.GetPostProcessSettings().TAAJitterScale, 0.0f, 1.5f, Defaults::TAAJitterScale,
+                "ジッター強度###TAAJitterScale", &m_Engine.GetSettings().PostProcess.TAAJitterScale, 0.0f, 1.5f, Defaults::TAAJitterScale,
                 "%.2f", 0,
                 "サンプル位置を散らす幅の倍率(1.0でピクセル内いっぱい)。0にすると時間方向の"
                 "スーパーサンプリング効果だけが消え、再投影と蓄積によるノイズ低減は残る");
             SliderFloatEx(
-                "シャープネス###TAASharpness", &m_Engine.GetPostProcessSettings().TAASharpness, 0.0f, 1.0f, Defaults::TAASharpness, "%.2f", 0,
+                "シャープネス###TAASharpness", &m_Engine.GetSettings().PostProcess.TAASharpness, 0.0f, 1.0f, Defaults::TAASharpness, "%.2f", 0,
                 "蓄積で失われる高域を戻す量。上げすぎると輪郭に白いふちが出る。"
                 "トーンマップ後の最終出力にのみ掛かるため、上げてもちらつきは増えない");
 
             SliderFloatEx(
-                "静止時のちらつき抑制###TAAAntiFlicker", &m_Engine.GetPostProcessSettings().TAAAntiFlicker, 0.0f, 1.0f,
+                "静止時のちらつき抑制###TAAAntiFlicker", &m_Engine.GetSettings().PostProcess.TAAAntiFlicker, 0.0f, 1.0f,
                 Defaults::TAAAntiFlicker, "%.2f", 0,
                 "止まっている画素に限って履歴ブレンド率を下げ、履歴の棄却判定を緩める。"
                 "速度0の画素では再投影のずれが原理的に起きないため棄却は害にしかならず、"
@@ -115,7 +115,7 @@ namespace Kurenai::UI
 
         using TAAClipMode = Kurenai::TAAClipMode;
             static const char* kClipModeNames[] = { "クリップしない (検証用)", "分散のみ", "分散 + 近傍の最小最大" };
-            int clipModeIndex = static_cast<int>(m_Engine.GetPostProcessSettings().TAAClip);
+            int clipModeIndex = static_cast<int>(m_Engine.GetSettings().PostProcess.TAAClip);
             if (ComboEx(
                     "履歴の棄却方法###TAAClipMode", &clipModeIndex, kClipModeNames, IM_ARRAYSIZE(kClipModeNames),
                     static_cast<int>(TAAClipMode::Clamped),
@@ -123,13 +123,13 @@ namespace Kurenai::UI
                     "狭いほどゴーストに強いが、判定の箱がジッターで毎フレーム動くぶんちらつきが増える。"
                     "「クリップしない」は原因の切り分け用で、常用するとゴーストが激しく出る"))
             {
-                m_Engine.GetPostProcessSettings().TAAClip = static_cast<TAAClipMode>(clipModeIndex);
+                m_Engine.GetSettings().PostProcess.TAAClip = static_cast<TAAClipMode>(clipModeIndex);
             }
 
-            if (m_Engine.GetPostProcessSettings().TAAClip != TAAClipMode::None)
+            if (m_Engine.GetSettings().PostProcess.TAAClip != TAAClipMode::None)
             {
                 SliderFloatEx(
-                    "履歴の許容幅###TAAClipGamma", &m_Engine.GetPostProcessSettings().TAAClipGamma, 0.5f, 3.0f, Defaults::TAAClipGamma,
+                    "履歴の許容幅###TAAClipGamma", &m_Engine.GetSettings().PostProcess.TAAClipGamma, 0.5f, 3.0f, Defaults::TAAClipGamma,
                     "%.2f", 0,
                     "近傍の標準偏差の何倍まで履歴を許容するか。下げるとゴーストに強くなる代わりに"
                     "細い構造物(アンテナ・手すり・窓枠)のちらつきが増える");
@@ -144,21 +144,21 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "ブルームを有効にする###EnableBloom", &m_Engine.GetPostProcessSettings().BloomEnabled, Defaults::BloomEnabled,
+            "ブルームを有効にする###EnableBloom", &m_Engine.GetSettings().PostProcess.BloomEnabled, Defaults::BloomEnabled,
             "明るい部分の光がにじむレンズ散乱を再現する");
 
-        if (m_Engine.GetPostProcessSettings().BloomEnabled)
+        if (m_Engine.GetSettings().PostProcess.BloomEnabled)
         {
             SliderFloatEx(
-                "強さ###BloomStrength", &m_Engine.GetPostProcessSettings().BloomStrength, 0.0f, 0.5f, Defaults::BloomStrength, "%.3f", 0,
+                "強さ###BloomStrength", &m_Engine.GetSettings().PostProcess.BloomStrength, 0.0f, 0.5f, Defaults::BloomStrength, "%.3f", 0,
                 "元の映像へブルームを合成する比率");
             SliderFloatEx(
-                "しきい値###BloomThreshold", &m_Engine.GetPostProcessSettings().BloomThreshold, 0.0f, 8.0f, Defaults::BloomThreshold, "%.2f",
+                "しきい値###BloomThreshold", &m_Engine.GetSettings().PostProcess.BloomThreshold, 0.0f, 8.0f, Defaults::BloomThreshold, "%.2f",
                 0,
                 "この輝度を超えた分だけをブルームの元にする。物理的にはレンズ散乱なので全輝度に"
                 "かかるのが正しく、既定は低めにしてある");
             SliderFloatEx(
-                "ソフトニー###BloomSoftKnee", &m_Engine.GetPostProcessSettings().BloomSoftKnee, 0.0f, 1.0f, Defaults::BloomSoftKnee, "%.2f",
+                "ソフトニー###BloomSoftKnee", &m_Engine.GetSettings().PostProcess.BloomSoftKnee, 0.0f, 1.0f, Defaults::BloomSoftKnee, "%.2f",
                 0, "しきい値付近の切れ方の滑らかさ。0で硬く切り、1で緩やかに立ち上がる");
         }
 
@@ -170,59 +170,59 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         CheckboxEx(
-            "自動露出を有効にする###EnableAutoExposure", &m_Engine.GetPostProcessSettings().AutoExposureEnabled, Defaults::AutoExposureEnabled,
+            "自動露出を有効にする###EnableAutoExposure", &m_Engine.GetSettings().PostProcess.AutoExposureEnabled, Defaults::AutoExposureEnabled,
             "画面の輝度分布から露出を自動で決める。無効にするとライティングパネルのEV100が"
             "そのまま最終露出になる");
 
-        if (m_Engine.GetPostProcessSettings().AutoExposureEnabled)
+        if (m_Engine.GetSettings().PostProcess.AutoExposureEnabled)
         {
             SliderFloatEx(
-                "EV100 下限###AEMinEV100", &m_Engine.GetPostProcessSettings().AutoExposureMinEV100, -8.0f, 20.0f,
+                "EV100 下限###AEMinEV100", &m_Engine.GetSettings().PostProcess.AutoExposureMinEV100, -8.0f, 20.0f,
                 Defaults::AutoExposureMinEV100, "%.1f", 0, "自動露出が選べるEV100の下限(暗い側の限界)");
             SliderFloatEx(
-                "EV100 上限###AEMaxEV100", &m_Engine.GetPostProcessSettings().AutoExposureMaxEV100, -8.0f, 20.0f,
+                "EV100 上限###AEMaxEV100", &m_Engine.GetSettings().PostProcess.AutoExposureMaxEV100, -8.0f, 20.0f,
                 Defaults::AutoExposureMaxEV100, "%.1f", 0, "自動露出が選べるEV100の上限(明るい側の限界)");
             SliderFloatEx(
-                "露出補正###AECompensation", &m_Engine.GetPostProcessSettings().AutoExposureCompensation, -4.0f, 4.0f,
+                "露出補正###AECompensation", &m_Engine.GetSettings().PostProcess.AutoExposureCompensation, -4.0f, 4.0f,
                 Defaults::AutoExposureCompensation, "%.2f EV", 0,
                 "自動で決まった露出へ加えるオフセット。写真の露出補正と同じ意味で、"
                 "+1で1段(2倍)明るくなる");
             SliderFloatEx(
-                "測光上限(基準EVから)###AEKeyCeiling", &m_Engine.GetPostProcessSettings().AutoExposureKeyCeilingEV, -4.0f, 16.0f,
+                "測光上限(基準EVから)###AEKeyCeiling", &m_Engine.GetSettings().PostProcess.AutoExposureKeyCeilingEV, -4.0f, 16.0f,
                 Defaults::AutoExposureKeyCeilingEV, "%.2f EV", 0,
                 "測光値が「シーンの基準EV」から何段上まで行くのを許すか。基準EVは太陽・月・空の照度から"
                 "求めるため画面の構図に依存しない。小さくするほど、空が画面に占める割合で露出が振れるのを"
                 "抑えられる。16まで上げるとヒストグラムだけで決まる挙動に戻る。屋内が暗くならないよう、"
                 "止めるのは上側だけ(下限はEV100 下限が効く)");
             SliderFloatEx(
-                "夜のロールオフ###AENightRolloff", &m_Engine.GetPostProcessSettings().AutoExposureNightRolloffEV, 0.0f, 8.0f,
+                "夜のロールオフ###AENightRolloff", &m_Engine.GetSettings().PostProcess.AutoExposureNightRolloffEV, 0.0f, 8.0f,
                 Defaults::AutoExposureNightRolloffEV, "%.2f EV", 0,
                 "暗いシーンをわざと暗いまま写す量。自動露出は測ったものを中庸なグレーへ持ち上げるため、"
                 "0にすると夜が昼と同じ明るさで出る。測定EV100が下側の折れ点以下で最大、"
                 "上側の折れ点以上で0、間は線形。薄明視とセットで意味を持つ");
             SliderFloatEx(
-                "ロールオフ 暗側の折れ点###AENightRolloffDark", &m_Engine.GetPostProcessSettings().AutoExposureNightRolloffDarkEV100, -8.0f,
+                "ロールオフ 暗側の折れ点###AENightRolloffDark", &m_Engine.GetSettings().PostProcess.AutoExposureNightRolloffDarkEV100, -8.0f,
                 8.0f, Defaults::AutoExposureNightRolloffDarkEV100, "%.1f", 0,
                 "測定EV100がこれ以下なら夜のロールオフが最大量かかる。既定の-2は満月の夜の地表のすぐ上");
             SliderFloatEx(
-                "ロールオフ 明側の折れ点###AENightRolloffBright", &m_Engine.GetPostProcessSettings().AutoExposureNightRolloffBrightEV100,
+                "ロールオフ 明側の折れ点###AENightRolloffBright", &m_Engine.GetSettings().PostProcess.AutoExposureNightRolloffBrightEV100,
                 -8.0f, 20.0f, Defaults::AutoExposureNightRolloffBrightEV100, "%.1f", 0,
                 "測定EV100がこれ以上なら夜のロールオフは掛からない。既定の10は曇天の屋外あたり");
             SliderFloatEx(
-                "明順応の速さ###AESpeedUp", &m_Engine.GetPostProcessSettings().AutoExposureSpeedUp, 0.1f, 10.0f, Defaults::AutoExposureSpeedUp,
+                "明順応の速さ###AESpeedUp", &m_Engine.GetSettings().PostProcess.AutoExposureSpeedUp, 0.1f, 10.0f, Defaults::AutoExposureSpeedUp,
                 "%.2f", 0, "暗い場所から明るい場所へ移ったときに露出が追従する速さ");
             SliderFloatEx(
-                "暗順応の速さ###AESpeedDown", &m_Engine.GetPostProcessSettings().AutoExposureSpeedDown, 0.1f, 10.0f,
+                "暗順応の速さ###AESpeedDown", &m_Engine.GetSettings().PostProcess.AutoExposureSpeedDown, 0.1f, 10.0f,
                 Defaults::AutoExposureSpeedDown, "%.2f", 0,
                 "明るい場所から暗い場所へ移ったときに露出が追従する速さ。実際の目と同様、"
                 "明順応より遅くするのが自然");
             SliderFloatEx(
-                "測光 下側除外率###AELowPercentile", &m_Engine.GetPostProcessSettings().AutoExposureLowPercentile, 0.0f, 1.0f,
+                "測光 下側除外率###AELowPercentile", &m_Engine.GetSettings().PostProcess.AutoExposureLowPercentile, 0.0f, 1.0f,
                 Defaults::AutoExposureLowPercentile, "%.2f", 0,
                 "輝度ヒストグラムの下側何割を露出の平均から除外するか。暗すぎる画素に露出が"
                 "引きずられるのを防ぐ");
             SliderFloatEx(
-                "測光 上側除外位置###AEHighPercentile", &m_Engine.GetPostProcessSettings().AutoExposureHighPercentile, 0.0f, 1.0f,
+                "測光 上側除外位置###AEHighPercentile", &m_Engine.GetSettings().PostProcess.AutoExposureHighPercentile, 0.0f, 1.0f,
                 Defaults::AutoExposureHighPercentile, "%.2f", 0,
                 "輝度ヒストグラムのどこまでを露出の平均に使うか。これより上のハイライトは除外され、"
                 "小さな光源に露出が引きずられるのを防ぐ");

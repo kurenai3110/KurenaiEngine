@@ -466,23 +466,9 @@ namespace Kurenai
         // 要るものかを確かめること。
         // UIが書き換えるものは非const参照(アドレスを渡す/直接代入するため)、読むだけのものは
         // const(値またはconst参照)で返す。
-        AmbientOcclusionSettings& GetAmbientOcclusionSettings() { return m_Settings.AmbientOcclusion; }
-        CloudSettings& GetCloudSettings() { return m_Settings.Cloud; }
-        DDGISettings& GetDDGISettings() { return m_Settings.DDGI; }
-        DebugViewSettings& GetDebugViewSettings() { return m_Settings.DebugView; }
-        EmissiveLightSettings& GetEmissiveLightSettings() { return m_Settings.EmissiveLight; }
-        FogSettings& GetFogSettings() { return m_Settings.Fog; }
-        GeometrySettings& GetGeometrySettings() { return m_Settings.Geometry; }
-        IBLSettings& GetIBLSettings() { return m_Settings.IBL; }
-        MegaLightsSettings& GetMegaLightsSettings() { return m_Settings.MegaLights; }
-        PostProcessSettings& GetPostProcessSettings() { return m_Settings.PostProcess; }
-        ReflectionProbeSettings& GetReflectionProbeSettings() { return m_Settings.ReflectionProbe; }
-        ReflectionSettings& GetReflectionSettings() { return m_Settings.Reflection; }
-        ShadowSettings& GetShadowSettings() { return m_Settings.Shadow; }
-        SkySettings& GetSkySettings() { return m_Settings.Sky; }
-        StarsSettings& GetStarsSettings() { return m_Settings.Stars; }
-        SystemSettings& GetSystemSettings() { return m_Settings.System; }
-        WaterSettings& GetWaterSettings() { return m_Settings.Water; }
+        // 【必ず参照で返すこと】UIはここへ直接書き込む。値で返すと一時オブジェクトを
+        // 掴んで操作が効かなくなるが、**コンパイルは通ってしまう**
+        Settings::EngineSettings& GetSettings() { return m_Settings; }
 
         std::vector<Assets::Light>& GetLights() { return m_Lights; }
         int& GetSelectedLightIndex() { return m_SelectedLightIndex; }

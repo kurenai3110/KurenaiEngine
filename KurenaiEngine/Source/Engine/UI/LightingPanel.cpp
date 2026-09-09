@@ -63,28 +63,28 @@ namespace Kurenai::UI
         BeginParamGroup();
 
         SliderFloatEx(
-            "時刻###TimeOfDay", &m_Engine.GetSkySettings().TimeOfDay, 0.0f, 24.0f, Defaults::TimeOfDay, "%.2f h", 0,
+            "時刻###TimeOfDay", &m_Engine.GetSettings().Sky.TimeOfDay, 0.0f, 24.0f, Defaults::TimeOfDay, "%.2f h", 0,
             "1日のうちの時刻。太陽高度と空の色がこれで決まる");
         CheckboxEx(
-            "自動で進める###AutoAdvance", &m_Engine.GetSkySettings().TimeAutoAdvance, Defaults::TimeAutoAdvance,
+            "自動で進める###AutoAdvance", &m_Engine.GetSettings().Sky.TimeAutoAdvance, Defaults::TimeAutoAdvance,
             "時刻を実時間に応じて自動で進める");
-        if (m_Engine.GetSkySettings().TimeAutoAdvance)
+        if (m_Engine.GetSettings().Sky.TimeAutoAdvance)
         {
             SliderFloatEx(
-                "進む速さ###TimeSpeed", &m_Engine.GetSkySettings().TimeAdvanceSpeed, 0.1f, 10.0f, Defaults::TimeAdvanceSpeed,
+                "進む速さ###TimeSpeed", &m_Engine.GetSettings().Sky.TimeAdvanceSpeed, 0.1f, 10.0f, Defaults::TimeAdvanceSpeed,
                 "%.1f h/s", 0, "実時間1秒あたりに進むシーン内の時間");
         }
         SliderFloatEx(
-            "方位角###SunAzimuth", &m_Engine.GetSkySettings().SunAzimuthDegrees, 0.0f, 360.0f, Defaults::SunAzimuthDegrees, "%.1f deg",
+            "方位角###SunAzimuth", &m_Engine.GetSettings().Sky.SunAzimuthDegrees, 0.0f, 360.0f, Defaults::SunAzimuthDegrees, "%.1f deg",
             0, "太陽が昇る方位。時刻と組み合わせて太陽の向きが決まる");
         // 月の位置は時刻に連動しない(実際の月は太陽と独立した周期で動くため)。平行光源の枠は
         // 太陽と共有しており、太陽が沈むと支配ライトが月へ切り替わる。
         // 月を動かすと夜空の目標照度が変わるため、空を焼き直す必要がある
         bool moonMoved = SliderFloatEx(
-            "月の方位角###MoonAzimuth", &m_Engine.GetSkySettings().MoonAzimuthDegrees, 0.0f, 360.0f, Defaults::MoonAzimuthDegrees,
+            "月の方位角###MoonAzimuth", &m_Engine.GetSettings().Sky.MoonAzimuthDegrees, 0.0f, 360.0f, Defaults::MoonAzimuthDegrees,
             "%.1f deg", 0, "月の方位。時刻に連動しないため、任意の月齢・任意の時刻の見え方を作れる");
         moonMoved |= SliderFloatEx(
-            "月の仰角###MoonElevation", &m_Engine.GetSkySettings().MoonElevationDegrees, -90.0f, 90.0f,
+            "月の仰角###MoonElevation", &m_Engine.GetSettings().Sky.MoonElevationDegrees, -90.0f, 90.0f,
             Defaults::MoonElevationDegrees, "%.1f deg", 0, "月の高さ。0度以下なら地平線下にあり月光は出ない");
         if (moonMoved)
         {
@@ -94,14 +94,14 @@ namespace Kurenai::UI
         // 太陽だけを消して環境光のみで照らす状態を作る(White Furnace Testが使う)。
         // 時刻を夜にする方法と違い、環境光の明るさは下がらない
         CheckboxEx(
-            "太陽光を有効にする###EnableSun", &m_Engine.GetSkySettings().SunEnabled, Defaults::SunEnabled,
+            "太陽光を有効にする###EnableSun", &m_Engine.GetSettings().Sky.SunEnabled, Defaults::SunEnabled,
             "無効にすると環境光だけで照らした状態になる。時刻を夜にする方法と違い、環境光の明るさは下がらない");
 
         // 手続き空(Perez分布をGPUで評価)。無効にするとオフラインで焼いたSky.ddsへ戻る。
         // .ksceneがスカイボックスを明示しているシーン(White Furnace Test)では、
         // このトグルに関わらず常にそのDDSが使われる
         if (CheckboxEx(
-                "手続き空###ProceduralSky", &m_Engine.GetSkySettings().ProceduralEnabled, Defaults::ProceduralSkyEnabled,
+                "手続き空###ProceduralSky", &m_Engine.GetSettings().Sky.ProceduralEnabled, Defaults::ProceduralSkyEnabled,
                 "空をGPU上で毎回生成する。無効にするとオフラインで焼いたSky.ddsを使う。"
                 "スカイボックスを明示しているシーンでは、この設定に関わらずそのテクスチャが使われる"))
         {
@@ -112,14 +112,14 @@ namespace Kurenai::UI
         // タービディティ(Preetham xyYモデルの大気の濁り具合)。変更時にm_SkyBakeDirtyを
         // 直接ここで立てず、Render()側のturbidityMoved判定(exposureMovedと同じ形)に任せる
         SliderFloatEx(
-            "タービディティ###SkyTurbidity", &m_Engine.GetSkySettings().Turbidity, 1.7f, 10.0f, Defaults::SkyTurbidity, "%.2f",
+            "タービディティ###SkyTurbidity", &m_Engine.GetSettings().Sky.Turbidity, 1.7f, 10.0f, Defaults::SkyTurbidity, "%.2f",
             0,
             "Preethamモデルの大気の濁り具合。値が大きいほど地平線が白く霞み、天頂の青が薄くなる。"
             "1.7が最も澄んだ空、10が霞んだ空に近い");
         // 空の彩度(アート指定)。タービディティと同じくPreethamの色度を動かすため、
         // Render()側のsaturationMoved判定でベイクが焼き直される
         SliderFloatEx(
-            "空の彩度###SkySaturation", &m_Engine.GetSkySettings().Saturation, 0.0f, 2.0f, Defaults::SkySaturation, "%.2f",
+            "空の彩度###SkySaturation", &m_Engine.GetSettings().Sky.Saturation, 0.0f, 2.0f, Defaults::SkySaturation, "%.2f",
             0,
             "物理量ではないアート指定。1.0でPreethamの色度そのまま、上げるほど空が鮮やかになる"
             "(色度図上で白色点から遠ざける倍率なので色相は変わらない)。"
@@ -129,7 +129,7 @@ namespace Kurenai::UI
         // 表示の切り替えでしかないため、上の「手続き空」トグルと違ってm_SkyBakeDirty等の
         // ベイク用フラグは立てない
         CheckboxEx(
-            "空の背景を解析評価する###AnalyticSkyBackground", &m_Engine.GetSkySettings().AnalyticBackground,
+            "空の背景を解析評価する###AnalyticSkyBackground", &m_Engine.GetSettings().Sky.AnalyticBackground,
             Defaults::SkyAnalyticBackground,
             "背景(深度が無い画素)をキューブマップのサンプルではなく、Perez分布を画面解像度で"
             "直接評価して描く。キューブマップは256px/面しかなく背景としては拡大表示されるため、"
@@ -137,12 +137,12 @@ namespace Kurenai::UI
             "常にキューブマップのままで、この設定の影響を受けない。手続き空が無効なときは、"
             "この設定に関わらず常にキューブマップが使われる");
         SliderFloatEx(
-            "EV100###SceneExposure", &m_Engine.GetPostProcessSettings().SceneExposureEV100, -8.0f, 20.0f, Defaults::SceneExposureEV100, "%.2f",
+            "EV100###SceneExposure", &m_Engine.GetSettings().PostProcess.SceneExposureEV100, -8.0f, 20.0f, Defaults::SceneExposureEV100, "%.2f",
             0,
             "実在の写真露出値。太陽・環境光・ポイント/スポットライトすべてに一様にかかるシーン全体の露出。"
             "自動露出が有効なときは、バッファの数値レンジを決める基準値として働く");
         SliderFloatEx(
-            "自発光の強度###EmissiveIntensity", &m_Engine.GetEmissiveLightSettings().Intensity, 0.0f, 64.0f, Defaults::EmissiveIntensity,
+            "自発光の強度###EmissiveIntensity", &m_Engine.GetSettings().EmissiveLight.Intensity, 0.0f, 64.0f, Defaults::EmissiveIntensity,
             "%.2fx", ImGuiSliderFlags_Logarithmic,
             "シーン全体の自発光にかける倍率。glTFのemissiveFactorは通常1.0以下に収まるため、"
             "アセットを作り直さずにHDRな自発光(照明器具のにじみ)を作るための倍率");
@@ -161,7 +161,7 @@ namespace Kurenai::UI
     void LightingPanel::DrawEmissiveLightControls()
     {
         const bool enabledMoved = CheckboxEx(
-            "エミッシブを光源にする###EmissiveLights", &m_Engine.GetEmissiveLightSettings().LightsEnabled,
+            "エミッシブを光源にする###EmissiveLights", &m_Engine.GetSettings().EmissiveLight.LightsEnabled,
             Defaults::EmissiveLightsEnabled,
             "自発光メッシュから「光源のかたまり」を起こし、GPULight(型3)として直接光へ流す。"
             "**既定は無効**(既存シーンの絵を変えないため)。有効にすると明るさが増える。"
@@ -175,20 +175,20 @@ namespace Kurenai::UI
         ImGui::BeginDisabled(!hasProxy);
 
         const bool cutoffMoved = SliderFloatEx(
-            "打ち切り照度###EmissiveLightsCutoff", &m_Engine.GetEmissiveLightSettings().LightsCutoffIrradiance,
+            "打ち切り照度###EmissiveLightsCutoff", &m_Engine.GetSettings().EmissiveLight.LightsCutoffIrradiance,
             1e-5f, 1e-1f, Defaults::EmissiveLightsCutoffIrradiance, "%.5f", ImGuiSliderFlags_Logarithmic,
             "この照度まで落ちる距離をRangeにする。窓関数が持ち込む絶対誤差はτの1.09倍を超えない"
             "ので、安全率を掛けずτひとつで縛れる。**上げるとRangeが縮む** ―― 1タイル64灯の"
             "上限に当たったときは、採用数を減らすよりこちらを上げるほうがエネルギーを捨てずに済む");
 
         const bool maxMoved = SliderIntEx(
-            "採用数の上限###EmissiveLightsMax", &m_Engine.GetEmissiveLightSettings().LightsMaxCount, 1, 1024,
+            "採用数の上限###EmissiveLightsMax", &m_Engine.GetSettings().EmissiveLight.LightsMaxCount, 1, 1024,
             Defaults::EmissiveLightsMaxCount,
             "GPUへ送るプロキシ数の上限。手置きライトとは別枠で管理される。"
             "**切り捨てはエネルギーを捨てる** ―― 上限に当たったら、まずクラスタの併合を疑うこと");
 
         const bool ddgiMoved = CheckboxEx(
-            "DDGIにも自発光を加算する###EmissiveLightsDDGI", &m_Engine.GetEmissiveLightSettings().LightsDoubleCountGI,
+            "DDGIにも自発光を加算する###EmissiveLightsDDGI", &m_Engine.GetSettings().EmissiveLight.LightsDoubleCountGI,
             Defaults::EmissiveLightsDoubleCountGI,
             "オンにすると、光源にした発光面をDDGIのプローブも「明るい面」として焼き込む"
             "(=同じ発光を二重に数える)。既定はオフ(抑止)。"

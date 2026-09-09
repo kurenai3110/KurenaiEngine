@@ -628,7 +628,7 @@ namespace Kurenai::Passes
             totalTriangles,
             static_cast<uint32_t>(meshInfos.size()),
             static_cast<uint32_t>(std::clamp(
-                m_Engine.GetGeometrySettings().SoftwareRasterLargeTriangleArea,
+                m_Engine.GetSettings().Geometry.SoftwareRasterLargeTriangleArea,
                 static_cast<int>(GeometrySettings::kSWRasterMinLargeTriangleArea),
                 static_cast<int>(GeometrySettings::kSWRasterMaxLargeTriangleArea))),
         };
