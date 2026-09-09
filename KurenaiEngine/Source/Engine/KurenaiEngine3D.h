@@ -44,6 +44,7 @@
 #include "Rendering/ShadowConstants.h"
 #include "Rendering/MeshletLODFrameConstants.h"
 #include "Rendering/GeometryDrawTypes.h"
+#include "Rendering/DroneShowSystem.h"
 #include "Rendering/FrameHistoryState.h"
 #include "Rendering/SceneDrawList.h"
 #include "Scene/EmissiveLightSet.h"
@@ -416,7 +417,7 @@ namespace Kurenai
 
         // 再生中のショーを差し替える(エディタのプレビュー用。ファイルを書かずに絵へ反映する)。
         // 【SetExtraImGuiCallbackで登録したコールバックの中から呼ぶこと】どちらもRenderスレッドで
-        // 走るため、この経路なら同期が要らない。別スレッドから呼ぶとm_DroneShowを
+        // 走るため、この経路なら同期が要らない。別スレッドから呼ぶとm_Drones.Showを
         // 描画中に書き換えることになる
         void ApplyDroneShowData(const Assets::ShowData& data);
 
@@ -1075,63 +1076,9 @@ namespace Kurenai
 
         // 半透明フォワードパスのシェーダーとPSO2本はPasses/LightingPassesへ移した
 
-        // --- ドローンショー(発光点の描画) ---------------------------------------------
-        // 夜空を編隊飛行する多数のドローンを、1機につきカメラ正対のビルボード1枚として
-        // 加算合成で描く。編隊の生成と時間補間はDroneShow.h/.cppが持ち、ここは描画だけを担う。
-        //
-        // 頂点バッファを持たず、Draw(6 * 機体数, 0)とSV_VertexIDでクアッドを展開する
-        // (理由はShaders/3D/DroneShow.hlsl冒頭)。機体データはm_DroneShowResources.Bufferから
-        // 頂点シェーダーが直接読む(SetVertexShaderResourceBuffer)。
-        //
-        // 【PSOは1本でよい】平面反射(鏡映カメラ)でもこれをそのまま使う。メッシュ描画のように
-        // ワインディングを反転したPSOを別に持つ必要は無い ―― 理由はPSO生成箇所のコメント
-        std::unique_ptr<RHI::IRHIShader> m_DroneShowVertexShader;
-        std::unique_ptr<RHI::IRHIShader> m_DroneShowPixelShader;
-        // PSO・定数バッファ・機体データは本描画と平面反射の2群が同じものを使うため、
-        // 持ち主を Rendering/DroneShowResources.h へ移した
-        Rendering::DroneShowResources m_DroneShowResources;
-        // 1フレームぶんの機体の状態。毎フレームDroneShow::Evaluateが書き、
-        // グラフ構築前に1回だけm_DroneShowResources.BufferへUpdateBufferする
-        // (m_SceneGPUResources.LightBufferと同じ理由: 本描画と平面反射の2パスから読まれるため、
-        //  パスの中で更新すると先に走る側が未更新の内容を読む)
-        std::vector<GPUDrone> m_DroneInstances;
-        // 機体を光源として送るときの、間引いた灯。毎フレームDroneShow::BuildLightSamplesが書き、
-        // gpuLightsの組み立てで手置きライト・エミッシブプロキシの後ろへ連結する
-        std::vector<DroneLightSample> m_DroneLightSamples;
-        // 再生器。編隊の点そのものはここが持つ(.kshowから読み込む)
-        DroneShow m_DroneShow;
-
-        // ショーの進行時刻[秒]。RenderThreadMainがm_CloudScrollOffsetと同じ場所で進める
-        float m_DroneShowTime = 0.0f;
-
-        // --- .ksceneが持つパラメータ ---
-        //
-        // 【ショーの中身に属する値はここに無い】機体数・保持/変形秒・明るさ・ビルボード半径・
-        // 揺れ・再生速度・種はすべて.kshowが持つ(m_DroneShow.Data()から読む)。
-        // シーンが決めてよいのは「出すかどうか」と「どこにどの大きさで置くか」だけで、
-        // 同じショーを別のシーンへ置けるのはこの分担があるため
-        bool m_DroneShowEnabled = Defaults::DroneShowEnabled;
-        DirectX::XMFLOAT3 m_DroneShowCenter{
-            Defaults::DroneShowCenterX, Defaults::DroneShowCenterY, Defaults::DroneShowCenterZ };
-        float m_DroneShowScale = Defaults::DroneShowScale;
-        // 遠方の機体が1画素を割ってTAAのジッターでちらつくのを防ぐ、画面上の最小半径(NDC単位)。
-        // 【これだけはシーンにもショーにも持たせない】ショーの表現ではなく描画側の下限で、
-        // 「1画素を割ったらちらつく」という事実はどのシーン・どのショーでも変わらないため
-        float m_DroneShowMinScreenRadius = Defaults::DroneShowMinScreenRadius;
-        // 機体を光源としても送るか。シーンが決める(「出すか」の一種)
-        bool m_DroneShowCastLight = Defaults::DroneShowCastLight;
-        // 灯の明るさの倍率。1.0がスプライトから導いた物理的な値で、演出用にシーンが上げられる
-        float m_DroneShowCastLightScale = Defaults::DroneShowCastLightScale;
-        // 光源として送る灯の数と、Rangeを逆算する打ち切り照度[lx]。
-        // 【これらもシーンにもショーにも持たせない】MinScreenRadiusと同じで、
-        // タイルライトカリングの容量という描画側の事情で決まる値だから
-        int m_DroneShowLightSampleCount = Defaults::DroneShowLightSampleCount;
-        float m_DroneShowLightCutoffLux = Defaults::DroneShowLightCutoffLux;
-        // 実際に送った灯の数。ログとUIの表示用
-        uint32_t m_DroneShowLightUsedCount = 0;
-        // 容量超過の警告と実効値ログを、それぞれ1回だけ出すためのフラグ
-        bool m_DroneShowLightTileOverflowLogged = false;
-        bool m_DroneShowLightValuesLogged = false;
+        // ドローンショーの一式(資源・機体データ・設定)。
+        // 生成位置を動かせない理由は Rendering/DroneShowSystem.h
+        Rendering::DroneShowSystem m_Drones;
 
         // Hi-Zのミップ段数と「1回でも構築されたか」は Passes::GeometryPasses が持つ
         // (構築するのがHi-Zパス自身のため)。デバッグ表示で確認するミップレベルは

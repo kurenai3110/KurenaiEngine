@@ -504,17 +504,17 @@ namespace Kurenai
         droneShowVsDesc.Stage = RHI::ShaderStage::Vertex;
         droneShowVsDesc.FilePath = shaderDirectory + L"DroneShow.kshader";
         droneShowVsDesc.EntryPoint = "VSMain";
-        m_DroneShowVertexShader = m_Device->CreateShader(droneShowVsDesc);
+        m_Drones.VertexShader = m_Device->CreateShader(droneShowVsDesc);
 
         RHI::ShaderDesc droneShowPsDesc;
         droneShowPsDesc.Stage = RHI::ShaderStage::Pixel;
         droneShowPsDesc.FilePath = shaderDirectory + L"DroneShow.kshader";
         droneShowPsDesc.EntryPoint = "PSMain";
-        m_DroneShowPixelShader = m_Device->CreateShader(droneShowPsDesc);
+        m_Drones.PixelShader = m_Device->CreateShader(droneShowPsDesc);
 
         RHI::PipelineStateDesc droneShowPipelineDesc;
-        droneShowPipelineDesc.VertexShader = m_DroneShowVertexShader.get();
-        droneShowPipelineDesc.PixelShader = m_DroneShowPixelShader.get();
+        droneShowPipelineDesc.VertexShader = m_Drones.VertexShader.get();
+        droneShowPipelineDesc.PixelShader = m_Drones.PixelShader.get();
         droneShowPipelineDesc.Topology = RHI::PrimitiveTopology::TriangleList;
         // SceneColorと平面反射(m_RenderTargets.PlanarReflectionColor)はどちらもR16G16B16A16_Floatなので、
         // 同じPSOを両方のパスで使える
@@ -543,18 +543,18 @@ namespace Kurenai
         // という作り方をしている(DroneShow.hlslのVSMain)。四隅のオフセットは鏡映行列を
         // 一度も通らないので、Viewが鏡映を含んでいてもクアッド自身の巻きは変わらない。
         // 反転したPSOで描くと1機残らず裏面として捨てられ、水面に何も映らなくなる
-        m_DroneShowResources.PipelineState = m_Device->CreatePipelineState(droneShowPipelineDesc);
+        m_Drones.Resources.PipelineState = m_Device->CreatePipelineState(droneShowPipelineDesc);
 
         RHI::BufferDesc droneShowConstantBufferDesc;
         droneShowConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         droneShowConstantBufferDesc.SizeInBytes = sizeof(Passes::DroneShowConstants);
-        m_DroneShowResources.ConstantBuffer = m_Device->CreateBuffer(droneShowConstantBufferDesc);
+        m_Drones.Resources.ConstantBuffer = m_Device->CreateBuffer(droneShowConstantBufferDesc);
 
         RHI::BufferDesc droneBufferDesc;
         droneBufferDesc.Usage = RHI::BufferUsage::StructuredReadOnly;
         droneBufferDesc.SizeInBytes = sizeof(GPUDrone) * kMaxDrones;
         droneBufferDesc.StrideInBytes = sizeof(GPUDrone);
-        m_DroneShowResources.Buffer = m_Device->CreateBuffer(droneBufferDesc);
+        m_Drones.Resources.Buffer = m_Device->CreateBuffer(droneBufferDesc);
 
         m_GeometryPasses->CreateHiZResources(*m_Device, shaderDirectory);
 
@@ -2796,7 +2796,7 @@ namespace Kurenai
         // 登録したコールバックの中から呼ぶこと)。
         // 時刻は戻さない ―― プレビュー中に点をいじるたびにショーが先頭へ飛ぶと、
         // 「いま見ている瞬間の形」を直せなくなるため
-        m_DroneShow.SetData(data);
+        m_Drones.Show.SetData(data);
     }
 
     void KurenaiEngine3D::TickFrame()
@@ -2925,12 +2925,12 @@ namespace Kurenai
             // 仮数は24bitなので、1日(86,400秒)積むとULPが約0.010秒になり、60fpsのdt(0.0167秒)が
             // まともに積めなくなってショーが止まる。以前はUIの「ショー時刻」スライダーで
             // 手動で戻せることを逃げ道にしていたが、そのUIごと無くなったのでここで閉じる
-            m_DroneShowTime += renderDeltaTime * m_DroneShow.Data().Speed;
-            const float showLoopDuration = m_DroneShow.LoopDuration();
+            m_Drones.Time += renderDeltaTime * m_Drones.Show.Data().Speed;
+            const float showLoopDuration = m_Drones.Show.LoopDuration();
             if (showLoopDuration > 0.0f)
             {
                 // 未初期化(LoopDuration()==0)のときに割るとNaNになるのでガードする
-                m_DroneShowTime = std::fmod(m_DroneShowTime, showLoopDuration);
+                m_Drones.Time = std::fmod(m_Drones.Time, showLoopDuration);
             }
 
             // m_Scene・ポストプロセスのパラメータ・UIの状態はすべてこのRenderスレッド専有に

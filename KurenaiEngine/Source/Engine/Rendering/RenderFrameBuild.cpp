@@ -157,18 +157,18 @@ namespace Kurenai
         // 【ライトリストの組み立てより前でなければならない】機体を光源として送るので、
         // ここが後ろにあると灯が1フレーム遅れる(編隊が動いている間ずっと、光だけが
         // 前フレームの位置から当たり続ける)。GPUバッファへの転送は下のグラフ構築直前のまま。
-        // m_DroneShowTimeの更新はRenderThreadMainで既に済んでいる
-        m_DroneInstances.clear();
-        if (m_DroneShowEnabled)
+        // m_Drones.Timeの更新はRenderThreadMainで既に済んでいる
+        m_Drones.Instances.clear();
+        if (m_Drones.Enabled)
         {
-            m_DroneShow.Evaluate(m_DroneShowTime, m_DroneShowCenter, m_DroneShowScale, m_DroneInstances);
-            // 【バッファの容量を超える機体は描かない】m_DroneShowResources.BufferはkMaxDrones分を固定確保して
+            m_Drones.Show.Evaluate(m_Drones.Time, m_Drones.Center, m_Drones.Scale, m_Drones.Instances);
+            // 【バッファの容量を超える機体は描かない】m_Drones.Resources.BufferはkMaxDrones分を固定確保して
             // いるので、それを超えた分をUpdateBufferへ渡すと書き込みが範囲外になる。
             // .kshowの機体数はエディタ側で上限を掛けているが、外から来たファイルでも
             // 壊れないよう、ここで切り詰める(光源を作るのも切り詰めた後の配列から)
-            if (m_DroneInstances.size() > Rendering::kMaxDrones)
+            if (m_Drones.Instances.size() > Rendering::kMaxDrones)
             {
-                m_DroneInstances.resize(Rendering::kMaxDrones);
+                m_Drones.Instances.resize(Rendering::kMaxDrones);
             }
         }
     }
@@ -181,12 +181,12 @@ namespace Kurenai
         // ライトリストとまったく同じ理由でグラフ構築の前に1回だけ更新する。このバッファは
         // 本描画パスと平面反射パスの2箇所から読まれるため、パスの中で更新すると
         // 先に走る側が未更新の内容を読んでしまう。
-        // 【m_DroneInstancesを作るのはここではない】ライトリストの組み立てが機体の位置を要るため、
+        // 【m_Drones.Instancesを作るのはここではない】ライトリストの組み立てが機体の位置を要るため、
         // Evaluateはそれより前(gpuLightsの直前)へ移してある。ここは転送だけ
-        if (m_DroneShowEnabled && !m_DroneInstances.empty())
+        if (m_Drones.Enabled && !m_Drones.Instances.empty())
         {
             commandList->UpdateBuffer(
-                m_DroneShowResources.Buffer.get(), m_DroneInstances.data(), m_DroneInstances.size() * sizeof(GPUDrone));
+                m_Drones.Resources.Buffer.get(), m_Drones.Instances.data(), m_Drones.Instances.size() * sizeof(GPUDrone));
         }
     }
     // t8のライトリストを組み立てる。作者が置いた灯 → 自発光のプロキシ → ドローンの灯 の順に
@@ -374,16 +374,16 @@ namespace Kurenai
         // Passes::DroneShowConstants.Params0.x = Brightness * effectiveExposure として露出を通っており、
         // 単位系としては手置きライト(カンデラ)の側にいる。**ここは掛ける側が正しい**。
         // 向こうの慣習を写すと桁で外す(docs/ImplementationDetail.md 62.4の表)
-        m_DroneShowLightUsedCount = 0;
-        if (m_DroneShowEnabled && m_DroneShowCastLight && !m_DroneInstances.empty())
+        m_Drones.LightUsedCount = 0;
+        if (m_Drones.Enabled && m_Drones.CastLight && !m_Drones.Instances.empty())
         {
             // 手置き+プロキシを押し出さないよう、残り容量だけを使う
             const size_t budget =
                 (gpuLights.size() < Rendering::kMaxLights) ? (Rendering::kMaxLights - gpuLights.size()) : 0u;
             const uint32_t sampleCount = static_cast<uint32_t>(
-                std::min<size_t>(budget, static_cast<size_t>(std::max(0, m_DroneShowLightSampleCount))));
+                std::min<size_t>(budget, static_cast<size_t>(std::max(0, m_Drones.LightSampleCount))));
 
-            m_DroneShow.BuildLightSamples(m_DroneInstances, sampleCount, m_DroneLightSamples);
+            m_Drones.Show.BuildLightSamples(m_Drones.Instances, sampleCount, m_Drones.LightSamples);
 
             // 【bakedLightCountを添字に使い回さない】あちらは「焼き込みに入れてよい灯の数」で、
             // 容量超過の切り詰めが走ると意味が変わる(下の再代入を参照)。
@@ -391,12 +391,12 @@ namespace Kurenai
             const size_t firstDroneLightIndex = gpuLights.size();
 
             const float exposure = ComputeExposure(m_EffectiveExposureEV100);
-            const float cutoffLux = std::max(m_DroneShowLightCutoffLux, 1e-9f);
+            const float cutoffLux = std::max(m_Drones.LightCutoffLux, 1e-9f);
             // 演出用の倍率。1.0がスプライトから導いた物理的な値。
             // 【Rangeにも効かせる】強くした灯を同じRangeで打ち切ると、届くはずの距離で
             // 切れて「明るくしたのに広がらない」になる。下でpeakから解き直すので自動的に効く
-            const float lightScale = std::max(m_DroneShowCastLightScale, 0.0f);
-            for (const DroneLightSample& rawSample : m_DroneLightSamples)
+            const float lightScale = std::max(m_Drones.CastLightScale, 0.0f);
+            for (const DroneLightSample& rawSample : m_Drones.LightSamples)
             {
                 DroneLightSample sample = rawSample;
                 sample.Intensity = { rawSample.Intensity.x * lightScale, rawSample.Intensity.y * lightScale,
@@ -429,44 +429,44 @@ namespace Kurenai
                 light.Params = { 0.0f, static_cast<float>(kLightShadowRaytraced), sample.SourceRadius, 0.0f };
                 gpuLights.push_back(light);
             }
-            m_DroneShowLightUsedCount = static_cast<uint32_t>(m_DroneLightSamples.size());
+            m_Drones.LightUsedCount = static_cast<uint32_t>(m_Drones.LightSamples.size());
 
             // 【「効いていない」と「暗すぎて見えない」を切り分ける】エミッシブ光源と同じ理由で、
             // 実際に送った灯数と代表1灯の実効値を1回だけ出す
-            if (!m_DroneShowLightValuesLogged && m_DroneShowLightUsedCount > 0)
+            if (!m_Drones.LightValuesLogged && m_Drones.LightUsedCount > 0)
             {
                 float totalCd = 0.0f;
-                for (const DroneLightSample& sample : m_DroneLightSamples)
+                for (const DroneLightSample& sample : m_Drones.LightSamples)
                 {
                     totalCd += std::max({ sample.Intensity.x, sample.Intensity.y, sample.Intensity.z });
                 }
                 const GPULight& first = gpuLights[firstDroneLightIndex];
                 Core::Logger::Info(
                     "KurenaiEngine3D",
-                    "ドローンを光源として送信: " + std::to_string(m_DroneShowLightUsedCount) + "灯(機体 " +
-                        std::to_string(m_DroneInstances.size()) + "機) / 倍率 " +
-                        std::to_string(m_DroneShowCastLightScale) + " / 総光度(RGBの最大の和。倍率込み) " +
-                        std::to_string(totalCd * m_DroneShowCastLightScale) + "cd / 先頭の灯 露出後の強さ " +
+                    "ドローンを光源として送信: " + std::to_string(m_Drones.LightUsedCount) + "灯(機体 " +
+                        std::to_string(m_Drones.Instances.size()) + "機) / 倍率 " +
+                        std::to_string(m_Drones.CastLightScale) + " / 総光度(RGBの最大の和。倍率込み) " +
+                        std::to_string(totalCd * m_Drones.CastLightScale) + "cd / 先頭の灯 露出後の強さ " +
                         std::to_string(std::max({ first.ColorRange.x, first.ColorRange.y, first.ColorRange.z })) +
                         " Range " + std::to_string(first.ColorRange.w) + "m 半径 " +
                         std::to_string(first.Params.z) + "m");
-                m_DroneShowLightValuesLogged = true;
+                m_Drones.LightValuesLogged = true;
             }
 
-            // 【条件をbudgetで見る】m_DroneShowLightUsedCount == 0 で判定すると、
+            // 【条件をbudgetで見る】m_Drones.LightUsedCount == 0 で判定すると、
             // 灯数の設定を0にしただけのときにも「容量を使い切っています」と誤報する
-            if (budget == 0u && !m_DroneShowLightTileOverflowLogged)
+            if (budget == 0u && !m_Drones.LightTileOverflowLogged)
             {
                 Core::Logger::Warning(
                     "KurenaiEngine3D",
                     "ドローンを光源として送れませんでした(ライトの容量" + std::to_string(Rendering::kMaxLights) +
                         "灯を手置きライトとエミッシブ光源で使い切っています)");
-                m_DroneShowLightTileOverflowLogged = true;
+                m_Drones.LightTileOverflowLogged = true;
             }
         }
         else
         {
-            m_DroneLightSamples.clear();
+            m_Drones.LightSamples.clear();
         }
     }
 
@@ -1279,11 +1279,11 @@ namespace Kurenai
         frameContext.Targets = &m_RenderTargets;
         frameContext.GI = &m_GIResources;
         frameContext.ProbeBakeSignature = ComputeProbeBakeSignature();
-        frameContext.DroneShow = &m_DroneShowResources;
+        frameContext.DroneShow = &m_Drones.Resources;
         // 【述語をここで1回だけ決める】本描画と平面反射の2群が同じ判定を見る必要がある
-        frameContext.DroneShowRuns = m_DroneShowEnabled && !m_DroneInstances.empty();
-        frameContext.DroneCount = static_cast<uint32_t>(m_DroneInstances.size());
-        frameContext.DroneShowBrightness = m_DroneShow.Data().Brightness;
-        frameContext.DroneShowMinScreenRadius = m_DroneShowMinScreenRadius;
+        frameContext.DroneShowRuns = m_Drones.Enabled && !m_Drones.Instances.empty();
+        frameContext.DroneCount = static_cast<uint32_t>(m_Drones.Instances.size());
+        frameContext.DroneShowBrightness = m_Drones.Show.Data().Brightness;
+        frameContext.DroneShowMinScreenRadius = m_Drones.MinScreenRadius;
     }
 }

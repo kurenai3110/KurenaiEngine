@@ -723,24 +723,24 @@ namespace Kurenai
         if (m_Scene.HasStarsTwinkle)    { m_Settings.Stars.Twinkle = m_Scene.StarsTwinkle; }
         // ドローンショー。[Cloud]/[Fog]と同じく指定されたキーだけを上書きする。
         // ショーの中身(点・機体数・秒数・明るさ)は.kshowが持ち、Loaderスレッドで読み込み済み
-        if (m_Scene.HasDroneShowEnabled) { m_DroneShowEnabled = m_Scene.DroneShowEnabled; }
+        if (m_Scene.HasDroneShowEnabled) { m_Drones.Enabled = m_Scene.DroneShowEnabled; }
         if (m_Scene.HasDroneShowCenter)
         {
-            m_DroneShowCenter = { m_Scene.DroneShowCenter[0], m_Scene.DroneShowCenter[1], m_Scene.DroneShowCenter[2] };
+            m_Drones.Center = { m_Scene.DroneShowCenter[0], m_Scene.DroneShowCenter[1], m_Scene.DroneShowCenter[2] };
         }
-        if (m_Scene.HasDroneShowScale)          { m_DroneShowScale = m_Scene.DroneShowScale; }
-        if (m_Scene.HasDroneShowCastLight)      { m_DroneShowCastLight = m_Scene.DroneShowCastLight; }
-        if (m_Scene.HasDroneShowCastLightScale) { m_DroneShowCastLightScale = m_Scene.DroneShowCastLightScale; }
+        if (m_Scene.HasDroneShowScale)          { m_Drones.Scale = m_Scene.DroneShowScale; }
+        if (m_Scene.HasDroneShowCastLight)      { m_Drones.CastLight = m_Scene.DroneShowCastLight; }
+        if (m_Scene.HasDroneShowCastLightScale) { m_Drones.CastLightScale = m_Scene.DroneShowCastLightScale; }
         // 実効値のログと容量の警告はシーンごとに1回ずつ出す(シーンが変われば灯の値も変わる)
-        m_DroneShowLightValuesLogged = false;
-        m_DroneShowLightTileOverflowLogged = false;
+        m_Drones.LightValuesLogged = false;
+        m_Drones.LightTileOverflowLogged = false;
         // 【Formationsが空でもSetDataを呼ぶ】呼ばなければ前のシーンのショーがそのまま残る。
         // 空を渡せばDroneShow側がエラーを出してm_HasDataをfalseにするので、
         // 「ショーを持たないシーンへ切り替えたのに前の編隊が飛び続ける」を構造的に防げる
-        m_DroneShow.SetData(m_Scene.DroneShowData);
+        m_Drones.Show.SetData(m_Scene.DroneShowData);
         // シーンを跨いでショーの進行が引き継がれると、切り替えるたびに違う編隊から始まって
         // A/B比較の対照が取れなくなる(EV100が引き継がれるのと同じ落とし穴)。必ず0へ戻す
-        m_DroneShowTime = 0.0f;
+        m_Drones.Time = 0.0f;
 
         // 【ドローンショーの有無で反射手法を書き換えてはいけない】
         // 1つの機能の有効/無効が、それとは別の機能の設定(反射手法)を黙って書き換えると、
