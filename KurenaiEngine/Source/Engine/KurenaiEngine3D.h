@@ -820,6 +820,15 @@ namespace Kurenai
             Rendering::RenderFrameContext& frameContext, std::vector<GPULight>& gpuLights,
             ShaderInterop::FrameConstants& constants, Passes::LightingConstants& lightingConstants,
             size_t& bakedLightCount);
+        void ResolveOcclusionCullingFrameState(
+            RHI::IRHICommandList* commandList, const DirectX::XMFLOAT3& cameraPosition,
+            Rendering::RenderFrameContext& frameContext, std::vector<GPULight>& gpuLights,
+            ShaderInterop::FrameConstants& constants, Passes::LightingConstants& lightingConstants);
+        void FillFrameContextSnapshot(
+            const SunLighting& sunLighting, float effectiveExposure, float manualExposureScale,
+            float keyReferenceEV100, const DirectX::XMFLOAT3& cameraPosition,
+            Rendering::RenderFrameContext& frameContext, std::vector<GPULight>& gpuLights,
+            ShaderInterop::FrameConstants& constants, Passes::LightingConstants& lightingConstants);
 
         void BuildFrameContext(
             const FrameState& frameState, RHI::IRHICommandList* commandList,
