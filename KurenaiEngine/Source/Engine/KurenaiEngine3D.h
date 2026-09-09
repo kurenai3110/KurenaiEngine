@@ -47,6 +47,7 @@
 #include "Rendering/SceneDrawList.h"
 #include "Scene/EmissiveLightSet.h"
 #include "Scene/ModelStreamingState.h"
+#include "Scene/RaytracingRebuildState.h"
 #include "Rendering/CubeFaceMath.h"
 #include "Passes/DDGIConstants.h"
 #include "Passes/EnvironmentConstants.h"
@@ -2100,37 +2101,9 @@ namespace Kurenai
         // **この位置から動かさないこと**(破棄順の理由は Scene/ModelStreamingState.h)
         Scene::ModelStreamingState m_Streaming;
 
-        // --- レイトレーシングを常駐の増減へ追随させる ----------------------------------------
-        //
-        // 常駐が変わるとBLAS/TLASと統合バッファが実態と食い違う。作り直して追随させる。
-        // 最後の増減からこの時間だけ静かなら作り直す(走行中は毎フレーム変わりうるため)
-        bool m_RaytracingRebuildPending = false;
-        std::chrono::steady_clock::time_point m_RaytracingRebuildAfter{};
-        static constexpr float kRaytracingRebuildQuietSeconds = 0.5f;
-        std::mutex m_RaytracingRebuiltMutex;
-        std::unique_ptr<Assets::RaytracingScene> m_RaytracingRebuilt;
-        uint64_t m_RaytracingRebuiltGeneration = 0;
-        bool m_RaytracingRebuildRequested = false;   // m_LoadRequestMutexで保護
-        // 再構築が走っている間はtrue。立っている間はRenderスレッド側の差し込みと破棄を見送る。
-        // Loaderスレッドが m_Scene を走査している最中に書き換えると走査中のコンテナが変わるため
-        std::atomic<bool> m_RaytracingRebuildInFlight{ false };
-        // 差し替えた旧RaytracingSceneの破棄待ち。モデルと同じくフレームを寝かせる。
-        //
-        // 【Renderスレッドで破棄してはいけない】RaytracingSceneが持つBLAS/TLASと統合バッファの
-        // ディスクリプタは、ロックを持たないアセット用ヒープ(DX12Device::GetAssetSrvCpuHeap)
-        // から取られている。Loaderスレッドがストリーミングで確保している最中にRenderスレッドが
-        // 解放するとフリーリストが壊れる。寝かせたあとはLoaderスレッドへ渡すこと
-        struct PendingRaytracingRelease
-        {
-            std::unique_ptr<Assets::RaytracingScene> Scene;
-            uint32_t FramesRemaining = 0;
-        };
-        std::vector<PendingRaytracingRelease> m_RaytracingPendingRelease;
-        std::mutex m_RaytracingReleaseMutex;
-        std::vector<std::unique_ptr<Assets::RaytracingScene>> m_RaytracingRelease;
-        // 統計。0なら一度も作り直していない
-        uint64_t m_RaytracingRebuildCount = 0;
-        double m_RaytracingRebuildLastMs = 0.0;
+        // --- レイトレーシングを常駐の増減へ追随させる ---
+        // **この位置から動かさないこと**(破棄順の理由は Scene/RaytracingRebuildState.h)
+        Scene::RaytracingRebuildState m_RaytracingRebuild;
 
 
         // パス別のドローコール数の集計(1フレーム分)。フラスタムカリングの統計と同じく

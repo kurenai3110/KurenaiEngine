@@ -190,7 +190,7 @@ namespace Kurenai
                 m_Streaming.ResidentCount, m_Streaming.TargetCount, m_Scene.StreamingDistance,
                 static_cast<unsigned long long>(m_Streaming.LoadedTotal),
                 static_cast<unsigned long long>(m_Streaming.EvictedTotal),
-                static_cast<unsigned long long>(m_RaytracingRebuildCount), m_RaytracingRebuildLastMs);
+                static_cast<unsigned long long>(m_RaytracingRebuild.RebuildCount), m_RaytracingRebuild.RebuildLastMs);
             Core::Logger::Info("Perf", streamText);
         }
 
