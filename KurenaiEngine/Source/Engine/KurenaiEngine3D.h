@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "Diagnostics/CullStatsReadback.h"
+#include "Diagnostics/FrameStatsLogger.h"
 #include "GI/DDGIGrid.h"
 #include "Settings/EngineSettings.h"
 #include "DroneShow.h"
@@ -1064,8 +1065,6 @@ namespace Kurenai
         // まとめた数と減らせたドロー数の両方を出す
         uint32_t m_InstancedBatchCount = 0;
         uint32_t m_InstancedInstanceCount = 0;
-        uint64_t m_FrameStatsInstancedBatchSum = 0;
-        uint64_t m_FrameStatsInstancedInstanceSum = 0;
 
         // 起動時に決まる能力値(メッシュシェーダー・レイトレーシング等)。詳細は
         // Diagnostics/RenderCapabilities.h
@@ -2185,14 +2184,7 @@ namespace Kurenai
 
         // 性能ログ(LogFrameStatsIfDue)の有効/無効はm_Settings.System.FrameStatsLoggingEnabledへ移した。
         // 集計状態はすべてRenderスレッドのみが読み書きするため追加の排他制御は不要
-        std::chrono::steady_clock::time_point m_FrameStatsWindowStart;
-        uint32_t m_FrameStatsFrameCount = 0;
-        // 集計期間中の合計。平均を出すためにフレーム数で割る
-        double m_FrameStatsCPUTimeSumMs = 0.0;
-        double m_FrameStatsGPUTimeSumMs = 0.0;
-        double m_FrameStatsGPUWaitSumMs = 0.0;
-        // 平均だけではスパイクが埋もれるため、集計期間中のフレーム間隔の最悪値も残す
-        float m_FrameStatsWorstFrameTimeMs = 0.0f;
+        Diagnostics::FrameStatsLogger m_FrameStats;
 
         // モデル単位フラスタムカリングの統計(1フレーム分)。フレーム先頭でリセットし、
         // LogFrameStatsIfDueが集計期間の合計として出す。
@@ -2229,14 +2221,6 @@ namespace Kurenai
         // 【0なら一度も切り替わっていない】LODが効いているかはここでしか分からない
         // (フェード中のインスタンス数はm_RenderStats.LODFadingCountへ出す。UIが読む完成値のため)
         uint32_t m_LODSwitchCount = 0;
-        uint64_t m_FrameStatsLODSwitchSum = 0;
-        // 【瞬間値ではなく積算する】m_RenderStats.LODFadingCountをそのままログへ出していたときは、
-        // 集計期間(1秒)の最終フレームの値だけを見ていた。既定のフェードは0.25秒なので
-        // 構造的にほぼ必ず取りこぼし、「フェードが一度も実行されていない」のか
-        // 「実行されたが見ていないだけ」なのかを区別できなかった(実際に取りこぼした)。
-        // 期間中の「フェード中インスタンス×フレーム」を足し込めば、0.25秒のフェードでも
-        // 14フレームぶんとして必ず現れる
-        uint64_t m_FrameStatsLODFadingSum = 0;
         // カメラ位置から各インスタンスの段を決め、フェードを進める。
         // レンダーグラフの構築より前に1フレーム1回だけ呼ぶこと ―― パスごとに測り直すと
         // 深度プリパスとG-Bufferが違う段を選び、画面に穴が開く
@@ -2368,16 +2352,6 @@ namespace Kurenai
         uint64_t m_StreamingEvictedTotal = 0;
         uint32_t m_StreamingResidentCount = 0;
         uint32_t m_StreamingTargetCount = 0;
-        // 集計期間中の合計(平均はフレーム数で割って出す)
-        uint64_t m_FrameStatsCullTestedSum = 0;
-        uint64_t m_FrameStatsCullCulledSum = 0;
-        // メッシュレット単位のカリング(増幅シェーダー)の集計。上のCPU側とは別の行に出す ――
-        // 粒度(モデル単位 / メッシュレット単位)も判定の種類も違うので、混ぜると読めなくなる。
-        // 読み戻せなかったフレームは足さないため、フレーム数も別に数える
-        uint64_t m_FrameStatsMeshletTestedSum = 0;
-        uint64_t m_FrameStatsMeshletFrustumCulledSum = 0;
-        uint64_t m_FrameStatsMeshletOcclusionCulledSum = 0;
-        uint32_t m_FrameStatsMeshletSampleCount = 0;
 
         // パス別のドローコール数の集計(1フレーム分)。フラスタムカリングの統計と同じく
         // フレーム先頭でリセットし、LogFrameStatsIfDueが集計期間の平均として出す。
@@ -2393,9 +2367,6 @@ namespace Kurenai
         // 直前に描き終えたフレームの値はm_RenderStats.DrawCalls*LastFrameへ出す。
         // **UIパネルはこちらを読むこと** ―― パス群のカウンタはフレーム先頭で0に戻るため、
         // Renderの外で描かれるUIからは常に0に見える
-        uint64_t m_FrameStatsDrawCallsGBufferSum = 0;
-        uint64_t m_FrameStatsDrawCallsShadowSum = 0;
-        uint64_t m_FrameStatsDrawCallsDepthPrepassSum = 0;
 
         // メッシュ単位フラスタムカリングの統計(1フレーム分)。上のモデル単位とまったく同じ扱い。
         //
@@ -2413,8 +2384,6 @@ namespace Kurenai
         // 完成した最後のフレームの値はm_RenderStats.FrustumCullTestedLastFrame等へ出す。
         // UIパネルはRenderの外で描かれるため、上のカウンタをそのまま読むと
         // リセット直後の0になる(ドローコール数のm_RenderStats.DrawCalls*LastFrameと同じ)
-        uint64_t m_FrameStatsMeshCullTestedSum = 0;
-        uint64_t m_FrameStatsMeshCullCulledSum = 0;
 
         bool m_MouseCaptured = false;
         POINT m_MouseCaptureCenter{};

@@ -463,10 +463,10 @@ namespace Kurenai
                 m_RenderStats.MeshletCullFrustumCulled = counters[1];
                 m_RenderStats.MeshletCullOcclusionCulled = counters[2];
 
-                m_FrameStatsMeshletTestedSum += m_RenderStats.MeshletCullTested;
-                m_FrameStatsMeshletFrustumCulledSum += m_RenderStats.MeshletCullFrustumCulled;
-                m_FrameStatsMeshletOcclusionCulledSum += m_RenderStats.MeshletCullOcclusionCulled;
-                ++m_FrameStatsMeshletSampleCount;
+                m_FrameStats.AddMeshletSample(
+                    m_RenderStats.MeshletCullTested,
+                    m_RenderStats.MeshletCullFrustumCulled,
+                    m_RenderStats.MeshletCullOcclusionCulled);
             }
         }
         else

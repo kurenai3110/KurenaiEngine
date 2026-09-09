@@ -807,29 +807,26 @@ namespace Kurenai
         }
 
         const auto now = std::chrono::steady_clock::now();
-        if (m_FrameStatsFrameCount == 0)
-        {
-            m_FrameStatsWindowStart = now;
-        }
 
-        ++m_FrameStatsFrameCount;
-        m_FrameStatsCPUTimeSumMs += m_RenderStats.CPUFrameTimeMs;
-        m_FrameStatsGPUTimeSumMs += m_GPUProfiler ? m_GPUProfiler->GetTotalFrameTimeMs() : 0.0f;
-        m_FrameStatsGPUWaitSumMs += m_Device->GetLastFrameGPUWaitTimeMs();
-        m_FrameStatsWorstFrameTimeMs = std::max(m_FrameStatsWorstFrameTimeMs, renderDeltaTime * 1000.0f);
-        m_FrameStatsCullTestedSum += m_FrustumCullTested;
-        m_FrameStatsCullCulledSum += m_FrustumCullCulled;
-        m_FrameStatsLODSwitchSum += m_LODSwitchCount;
-        m_FrameStatsLODFadingSum += m_RenderStats.LODFadingCount;
-        m_FrameStatsMeshCullTestedSum += m_MeshCullTested;
-        m_FrameStatsMeshCullCulledSum += m_MeshCullCulled;
-        m_FrameStatsDrawCallsGBufferSum += m_GeometryPasses->GetDrawCallsGBuffer();
-        m_FrameStatsDrawCallsShadowSum += m_ShadowPasses->GetDrawCalls();
-        m_FrameStatsDrawCallsDepthPrepassSum += m_GeometryPasses->GetDrawCallsDepthPrepass();
-        m_FrameStatsInstancedBatchSum += m_InstancedBatchCount;
-        m_FrameStatsInstancedInstanceSum += m_InstancedInstanceCount;
+        Diagnostics::FrameStatsLogger::FrameSample sample;
+        sample.CPUFrameTimeMs = m_RenderStats.CPUFrameTimeMs;
+        sample.GPUTimeMs = m_GPUProfiler ? m_GPUProfiler->GetTotalFrameTimeMs() : 0.0f;
+        sample.GPUWaitMs = m_Device->GetLastFrameGPUWaitTimeMs();
+        sample.FrameTimeMs = renderDeltaTime * 1000.0f;
+        sample.FrustumCullTested = m_FrustumCullTested;
+        sample.FrustumCullCulled = m_FrustumCullCulled;
+        sample.LODSwitchCount = m_LODSwitchCount;
+        sample.LODFadingCount = m_RenderStats.LODFadingCount;
+        sample.MeshCullTested = m_MeshCullTested;
+        sample.MeshCullCulled = m_MeshCullCulled;
+        sample.DrawCallsGBuffer = m_GeometryPasses->GetDrawCallsGBuffer();
+        sample.DrawCallsShadow = m_ShadowPasses->GetDrawCalls();
+        sample.DrawCallsDepthPrepass = m_GeometryPasses->GetDrawCallsDepthPrepass();
+        sample.InstancedBatchCount = m_InstancedBatchCount;
+        sample.InstancedInstanceCount = m_InstancedInstanceCount;
+        m_FrameStats.AddFrame(now, sample);
 
-        const float elapsedSeconds = std::chrono::duration<float>(now - m_FrameStatsWindowStart).count();
+        const float elapsedSeconds = m_FrameStats.GetElapsedSeconds(now);
         if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
         {
             return;
@@ -837,8 +834,8 @@ namespace Kurenai
 
         // 集計期間の実測フレーム数から求める。m_RenderStats.FPS(指数移動平均)と違い、この値は
         // 期間中に落ちたフレームがそのまま反映される
-        const float averageFPS = static_cast<float>(m_FrameStatsFrameCount) / std::max(elapsedSeconds, 1e-6f);
-        const double frameCount = static_cast<double>(m_FrameStatsFrameCount);
+        const float averageFPS = static_cast<float>(m_FrameStats.GetFrameCount()) / std::max(elapsedSeconds, 1e-6f);
+        const double frameCount = static_cast<double>(m_FrameStats.GetFrameCount());
 
         char buffer[256];
         std::snprintf(
@@ -849,12 +846,12 @@ namespace Kurenai
             m_RenderHeight,
             m_GraphicsAPI == GraphicsAPI::DX12 ? "DX12" : "DX11",
             averageFPS,
-            m_FrameStatsFrameCount,
+            m_FrameStats.GetFrameCount(),
             elapsedSeconds,
-            m_FrameStatsCPUTimeSumMs / frameCount,
-            m_FrameStatsGPUTimeSumMs / frameCount,
-            m_FrameStatsGPUWaitSumMs / frameCount,
-            m_FrameStatsWorstFrameTimeMs);
+            m_FrameStats.GetCPUTimeSumMs() / frameCount,
+            m_FrameStats.GetGPUTimeSumMs() / frameCount,
+            m_FrameStats.GetGPUWaitSumMs() / frameCount,
+            m_FrameStats.GetWorstFrameTimeMs());
         Core::Logger::Info("Perf", buffer);
 
         // パス別の内訳。どのパスを削れば効くのかは合計値からは分からないため、
@@ -930,13 +927,13 @@ namespace Kurenai
         // ―― あるいは片方が一度も実行されていないのか ―― が読めなくなる
         const auto logCullStats = [this](const char* label, uint64_t testedSum, uint64_t culledSum)
         {
-            if (testedSum == 0 || m_FrameStatsFrameCount == 0)
+            if (testedSum == 0 || m_FrameStats.GetFrameCount() == 0)
             {
                 // 判定が1回も走っていない。「間引き0」と区別が付くよう、行そのものを出さない
                 return;
             }
-            const double testedPerFrame = static_cast<double>(testedSum) / m_FrameStatsFrameCount;
-            const double culledPerFrame = static_cast<double>(culledSum) / m_FrameStatsFrameCount;
+            const double testedPerFrame = static_cast<double>(testedSum) / m_FrameStats.GetFrameCount();
+            const double culledPerFrame = static_cast<double>(culledSum) / m_FrameStats.GetFrameCount();
             const double ratio = 100.0 * static_cast<double>(culledSum) / static_cast<double>(testedSum);
 
             char cullText[224];
@@ -945,8 +942,8 @@ namespace Kurenai
                 label, testedPerFrame, culledPerFrame, ratio);
             Core::Logger::Info("Perf", cullText);
         };
-        logCullStats("フラスタムカリング(モデル単位)", m_FrameStatsCullTestedSum, m_FrameStatsCullCulledSum);
-        logCullStats("フラスタムカリング(メッシュ単位)", m_FrameStatsMeshCullTestedSum, m_FrameStatsMeshCullCulledSum);
+        logCullStats("フラスタムカリング(モデル単位)", m_FrameStats.GetCullTestedSum(), m_FrameStats.GetCullCulledSum());
+        logCullStats("フラスタムカリング(メッシュ単位)", m_FrameStats.GetMeshCullTestedSum(), m_FrameStats.GetMeshCullCulledSum());
 
         // モデルLOD。【切り替え0回なら一度も効いていない】距離のしきい値が実際の
         // カメラの動く範囲から外れているか、そもそもLODPathが指定されていない
@@ -955,8 +952,8 @@ namespace Kurenai
             std::snprintf(
                 lodText, sizeof(lodText),
                 "  モデルLOD: 切り替え %llu回 / フェード %llu インスタンス×フレーム [いずれも集計期間の合計]",
-                static_cast<unsigned long long>(m_FrameStatsLODSwitchSum),
-                static_cast<unsigned long long>(m_FrameStatsLODFadingSum));
+                static_cast<unsigned long long>(m_FrameStats.GetLODSwitchSum()),
+                static_cast<unsigned long long>(m_FrameStats.GetLODFadingSum()));
             Core::Logger::Info("Perf", lodText);
         }
 
@@ -978,17 +975,17 @@ namespace Kurenai
 
         // パス別のドローコール数。**「G-Bufferは減ったがシャドウは減っていない」**のような
         // 片手落ちは合計値では見えない(シャドウはカスケード4回ぶんが積み上がる)
-        if (m_FrameStatsFrameCount > 0)
+        if (m_FrameStats.GetFrameCount() > 0)
         {
-            const double frames = static_cast<double>(m_FrameStatsFrameCount);
+            const double frames = static_cast<double>(m_FrameStats.GetFrameCount());
             char drawText[224];
             std::snprintf(
                 drawText, sizeof(drawText),
                 "  ドローコール: G-Buffer %.1f / シャドウ %.1f (4カスケード計) / 深度プリパス %.1f "
                 "[1フレームあたり]",
-                static_cast<double>(m_FrameStatsDrawCallsGBufferSum) / frames,
-                static_cast<double>(m_FrameStatsDrawCallsShadowSum) / frames,
-                static_cast<double>(m_FrameStatsDrawCallsDepthPrepassSum) / frames);
+                static_cast<double>(m_FrameStats.GetDrawCallsGBufferSum()) / frames,
+                static_cast<double>(m_FrameStats.GetDrawCallsShadowSum()) / frames,
+                static_cast<double>(m_FrameStats.GetDrawCallsDepthPrepassSum()) / frames);
             Core::Logger::Info("Perf", drawText);
         }
 
@@ -996,15 +993,15 @@ namespace Kurenai
         // 「バッチ0」は「まとめられる相手がいない」のか「一度も実行されていない」のかを
         // 区別できないので、まとめた数(バッチ)とまとめた対象(インスタンス)の両方を出す。
         // まとめたことで減ったドロー数は (インスタンス数 - バッチ数) x そのモデルのメッシュ数
-        if (m_FrameStatsFrameCount > 0 && m_FrameStatsInstancedBatchSum > 0)
+        if (m_FrameStats.GetFrameCount() > 0 && m_FrameStats.GetInstancedBatchSum() > 0)
         {
-            const double frames = static_cast<double>(m_FrameStatsFrameCount);
+            const double frames = static_cast<double>(m_FrameStats.GetFrameCount());
             char instText[192];
             std::snprintf(
                 instText, sizeof(instText),
                 "  インスタンシング: バッチ %.1f / まとめたインスタンス %.1f [1フレームあたり・2組の合計]",
-                static_cast<double>(m_FrameStatsInstancedBatchSum) / frames,
-                static_cast<double>(m_FrameStatsInstancedInstanceSum) / frames);
+                static_cast<double>(m_FrameStats.GetInstancedBatchSum()) / frames,
+                static_cast<double>(m_FrameStats.GetInstancedInstanceSum()) / frames);
             Core::Logger::Info("Perf", instText);
         }
 
@@ -1032,12 +1029,12 @@ namespace Kurenai
         // 【オクルージョンを視錐台+コーンと分けて出す】完了条件がここにある ――
         // 俯瞰(遮蔽が少ない)と街路(遮蔽が多い)でオクルージョンの割合に差が出ることが、
         // 判定が実際に効いていることの証拠になる。合算すると視錐台の変動に埋もれて分からない
-        if (m_FrameStatsMeshletSampleCount > 0 && m_FrameStatsMeshletTestedSum > 0)
+        if (m_FrameStats.GetMeshletSampleCount() > 0 && m_FrameStats.GetMeshletTestedSum() > 0)
         {
-            const double samples = static_cast<double>(m_FrameStatsMeshletSampleCount);
-            const double tested = static_cast<double>(m_FrameStatsMeshletTestedSum);
-            const double frustumRatio = 100.0 * static_cast<double>(m_FrameStatsMeshletFrustumCulledSum) / tested;
-            const double occlusionRatio = 100.0 * static_cast<double>(m_FrameStatsMeshletOcclusionCulledSum) / tested;
+            const double samples = static_cast<double>(m_FrameStats.GetMeshletSampleCount());
+            const double tested = static_cast<double>(m_FrameStats.GetMeshletTestedSum());
+            const double frustumRatio = 100.0 * static_cast<double>(m_FrameStats.GetMeshletFrustumCulledSum()) / tested;
+            const double occlusionRatio = 100.0 * static_cast<double>(m_FrameStats.GetMeshletOcclusionCulledSum()) / tested;
 
             char meshletCullText[256];
             std::snprintf(
@@ -1045,9 +1042,9 @@ namespace Kurenai
                 "  メッシュレットカリング: 判定 %.1f / 視錐台+コーン %.1f (%.1f%%) / オクルージョン %.1f (%.1f%%)"
                 " [1フレームあたり・%u フレーム分]",
                 tested / samples,
-                static_cast<double>(m_FrameStatsMeshletFrustumCulledSum) / samples, frustumRatio,
-                static_cast<double>(m_FrameStatsMeshletOcclusionCulledSum) / samples, occlusionRatio,
-                m_FrameStatsMeshletSampleCount);
+                static_cast<double>(m_FrameStats.GetMeshletFrustumCulledSum()) / samples, frustumRatio,
+                static_cast<double>(m_FrameStats.GetMeshletOcclusionCulledSum()) / samples, occlusionRatio,
+                m_FrameStats.GetMeshletSampleCount());
             Core::Logger::Info("Perf", meshletCullText);
         }
 
@@ -1109,26 +1106,7 @@ namespace Kurenai
             }
         }
 
-        m_FrameStatsFrameCount = 0;
-        m_FrameStatsCPUTimeSumMs = 0.0;
-        m_FrameStatsGPUTimeSumMs = 0.0;
-        m_FrameStatsGPUWaitSumMs = 0.0;
-        m_FrameStatsWorstFrameTimeMs = 0.0f;
-        m_FrameStatsCullTestedSum = 0;
-        m_FrameStatsCullCulledSum = 0;
-        m_FrameStatsLODSwitchSum = 0;
-        m_FrameStatsLODFadingSum = 0;
-        m_FrameStatsMeshCullTestedSum = 0;
-        m_FrameStatsMeshCullCulledSum = 0;
-        m_FrameStatsDrawCallsGBufferSum = 0;
-        m_FrameStatsDrawCallsShadowSum = 0;
-        m_FrameStatsDrawCallsDepthPrepassSum = 0;
-        m_FrameStatsInstancedBatchSum = 0;
-        m_FrameStatsInstancedInstanceSum = 0;
-        m_FrameStatsMeshletTestedSum = 0;
-        m_FrameStatsMeshletFrustumCulledSum = 0;
-        m_FrameStatsMeshletOcclusionCulledSum = 0;
-        m_FrameStatsMeshletSampleCount = 0;
+        m_FrameStats.Reset();
 
         // テクスチャの常駐ミップの内訳。**サイズ帯ごとに分けて出す** ――
         // 64KBタイルはBC7で256x256テクセルを覆うため、ミップ/タイル単位の制御が効くのは
