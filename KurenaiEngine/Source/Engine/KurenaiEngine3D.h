@@ -794,6 +794,20 @@ namespace Kurenai
         // 後段が前段の書いた frameContext のフィールドを読む。並べ替えないこと
         void DecideFrameJitterAndCamera(
             const FrameState& frameState, Rendering::RenderFrameContext& frameContext);
+        void UpdateMeshletLODFrame(const FrameState& frameState);
+        void EvaluateDroneShowFrame();
+        void UploadDroneInstances(RHI::IRHICommandList* commandList);
+        void BuildGpuLightList(
+            std::vector<GPULight>& gpuLights, const DirectX::XMFLOAT3& cameraPosition,
+            size_t& bakedLightCount);
+        void AppendEmissiveProxyLights(
+            std::vector<GPULight>& gpuLights, const DirectX::XMFLOAT3& cameraPosition,
+            size_t manualLightCount, size_t& bakedLightCount);
+        void AppendDroneLights(
+            std::vector<GPULight>& gpuLights, const DirectX::XMFLOAT3& cameraPosition);
+        void ClampLightsToCapacity(
+            std::vector<GPULight>& gpuLights, const DirectX::XMFLOAT3& cameraPosition,
+            size_t& bakedLightCount);
 
         void BuildFrameContext(
             const FrameState& frameState, RHI::IRHICommandList* commandList,
