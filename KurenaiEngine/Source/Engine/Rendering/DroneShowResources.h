@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 
 #include "RHI/IRHIDevice.h"
@@ -21,6 +22,11 @@
 
 namespace Kurenai::Rendering
 {
+    // ドローンショーの機体数の上限。下の Buffer をこの容量で固定確保する
+    // (32バイト×4096 = 128KB。DEFAULTヒープ本体とステージングリングを足しても
+    //  1.3MB程度で、機体数を増減しても作り直さずに済む)
+    inline constexpr uint32_t kMaxDrones = 4096;
+
     struct DroneShowResources
     {
         // 頂点バッファを持たず、Draw(6 * 機体数, 0)とSV_VertexIDでクアッドを展開する

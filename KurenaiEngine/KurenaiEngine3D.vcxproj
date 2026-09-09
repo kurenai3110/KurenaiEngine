@@ -124,6 +124,10 @@
     <ClInclude Include="Source\Engine\Passes\LightingConstants.h" />
     <ClInclude Include="Source\Engine\Passes\LightingPasses.h" />
     <ClInclude Include="Source\Engine\Rendering\GPULight.h" />
+    <ClInclude Include="Source\Engine\Rendering\CloudTransmittance.h" />
+    <ClInclude Include="Source\Engine\Rendering\GPULightBuild.h" />
+    <ClInclude Include="Source\Engine\Rendering\GPUReflectionProbe.h" />
+    <ClInclude Include="Source\Engine\Rendering\SampleSequence.h" />
     <ClInclude Include="Source\Engine\Passes\ReflectionConstants.h" />
     <ClInclude Include="Source\Engine\Passes\ReflectionPasses.h" />
     <ClInclude Include="Source\Engine\Passes\ReflectionProbePasses.h" />

@@ -34,7 +34,11 @@
 #include "Passes/PresentPass.h"
 #include "Rendering/ExposureMath.h"
 #include "Rendering/CubeFaceMath.h"
+#include "Rendering/CloudTransmittance.h"
 #include "Rendering/GPULight.h"
+#include "Rendering/GPULightBuild.h"
+#include "Rendering/GPUReflectionProbe.h"
+#include "Rendering/SampleSequence.h"
 #include "Rendering/GeometryDrawLoop.h"
 #include "Rendering/ObjectConstants.h"
 #include "Rendering/SunLighting.h"
@@ -57,31 +61,15 @@ namespace Kurenai
         // 視錐台カリングの一式は Rendering/GeometryDrawLoop.h へ移した。
         // 描画パスの共通ループ(ForEachGeometryDraw)と同じ場所にある必要がある
         using Rendering::FrustumPlanes;
+        using Rendering::ComputeCloudAverageTransmittance;
+        using Rendering::kMaxDrones;
+        using Rendering::kMaxLights;
+        using Rendering::kTAAJitterSampleCount;
+        using Rendering::MakeGPULight;
+        using Rendering::RadicalInverse;
         using Rendering::ExtractFrustumPlanes;
         using Rendering::IsAABBVisible;
         using Rendering::IsMeshVisibleWithStats;
-
-        // TAAのジッターに使う低食い違い量列(Halton列)。基数baseのradical inverse、
-        // すなわちindexを基数base表記にして小数点の左右を反転した値を返す([0,1)に収まる)。
-        // 乱数と違い、少ない点数でも区間内へ均等に散らばるのが要点で、8フレームぶん取れば
-        // ピクセル内に8点が偏りなく配置される
-        float RadicalInverse(uint32_t index, uint32_t base)
-        {
-            float result = 0.0f;
-            float fraction = 1.0f / static_cast<float>(base);
-            while (index > 0)
-            {
-                result += static_cast<float>(index % base) * fraction;
-                index /= base;
-                fraction /= static_cast<float>(base);
-            }
-            return result;
-        }
-
-        // TAAのジッター周期(フレーム数)。長いほど多くのサンプル位置を踏めるが、
-        // その分だけ収束に時間がかかり、カメラが動いている間の見た目が不安定になる。
-        // 8はUnreal Engine等でも使われる実用的な妥協点
-        constexpr uint32_t kTAAJitterSampleCount = 8;
 
         // モデル描画(G-Bufferパス)の頂点入力レイアウト。PSOの作り直し
         // (CreatePrecisionDependentPipelineStates)からも使うため関数にしてある
@@ -115,26 +103,6 @@ namespace Kurenai
         // シャドウパスの各カスケード描画専用(FrameConstantsとは別バッファ)。
         // 宣言は ShaderInterop/CascadeConstants.h に1本だけ置いている
         using ShaderInterop::CascadeConstants;
-
-        // DeferredLighting.hlsl側のstruct GPUReflectionProbeと並び・ストライド(48バイト)を
-        // 一致させる必要がある
-        struct alignas(16) GPUReflectionProbe
-        {
-            DirectX::XMFLOAT4 PositionRadius; // xyz=ワールド座標(Box形状では箱の中心), w=Sphere形状の影響半径
-            DirectX::XMFLOAT4 BoxExtents;     // xyz=Box形状の各軸の半径(ハーフエクステント), w=ブレンド距離
-            DirectX::XMFLOAT4 ShapeParams;    // x=形状(0=Sphere,1=Box), y=sin(Yaw), z=cos(Yaw), w=未使用
-        };
-        // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
-        // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
-        // HLSL側を直さないかぎり黙って別の値を読むことになる。
-        // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)。
-        //
-        // 【これが守るのはC++側だけ】HLSLの宣言と突き合わせているわけではない。
-        // ここが落ちたら「HLSL側も同じだけ動かせ」という合図として使う
-        static_assert(offsetof(GPUReflectionProbe, PositionRadius) == 0, "PositionRadius のレイアウトが変わっている");
-        static_assert(offsetof(GPUReflectionProbe, BoxExtents) == 16, "BoxExtents のレイアウトが変わっている");
-        static_assert(offsetof(GPUReflectionProbe, ShapeParams) == 32, "ShapeParams のレイアウトが変わっている");
-        static_assert(sizeof(GPUReflectionProbe) == 48, "GPUReflectionProbe の総サイズが変わっている");
 
         // 直射日光の照度 kSunIlluminanceLux は Rendering/SunLighting.h へ移した。
         // 可変プリ露出を決める UpdateEffectiveExposure が別の翻訳単位にあり、そこからも引くため
@@ -179,48 +147,6 @@ namespace Kurenai
         // ずれるとCPU側で巻き戻した位置とシェーダー側の周期境界が食い違い、風が吹くたびに
         // 雲がジャンプする
         constexpr float kCloudNoisePeriod = 256.0f;
-
-        // 被覆率から求める全天の平均透過率(判断B)。IBL用キューブマップには雲を焼き込まない
-        // (Sky.hlsliの雲セクション、判断Aのコメント参照)ため、被覆率が上がってもキューブの
-        // 明るさが晴天のまま据え置かれてしまう。これを補うため、キューブへ焼く天頂輝度にだけ
-        // この平均透過率を掛けて全体を暗くする。
-        // 【物理的な導出ではない】実際の曇天は多重散乱・雲の厚みで複雑に減光するが、ここでは
-        // 「被覆率0で1.0(無変化)、被覆率1でkCloudOvercastTransmittanceまで直線的に落ちる」という
-        // 単純な線形補間で済ませている。目的はIBLの明るさが被覆率に応じて定性的に下がることであり、
-        // 精密な値は求めていない(実測で調整可能)
-        constexpr float kCloudOvercastTransmittance = 0.35f;
-
-        // 巻雲側の「全天が巻雲のときの透過率」。積雲のkCloudOvercastTransmittance(0.35)より
-        // 1に近い値にしてある。巻雲は光学的に薄く(CirrusDensityが積雲の1桁下)、全天を覆っても
-        // 積雲ほど大きくは減光しないという定性的な近似であり、精密な値は求めていない
-        // (実測で調整可能)
-        constexpr float kCirrusOvercastTransmittance = 0.75f;
-
-        // 1層ぶんの「被覆率→平均透過率」の線形補間。ComputeCloudAverageTransmittanceが
-        // 積雲・巻雲の両方でこの1つの式を共有する
-        float ComputeCloudLayerTransmittance(bool layerEnabled, float coverage, float overcastTransmittance)
-        {
-            if (!layerEnabled)
-            {
-                return 1.0f;
-            }
-            const float clampedCoverage = std::clamp(coverage, 0.0f, 1.0f);
-            // lerp(1.0f, overcastTransmittance, clampedCoverage)と同じ
-            return 1.0f + (overcastTransmittance - 1.0f) * clampedCoverage;
-        }
-
-        // 被覆率から求める全天の平均透過率(判断B)。巻雲(2層目)も加味し、
-        // T = T_cumulus(積雲の被覆率) * T_cirrus(巻雲の被覆率) という2層の積で求める。
-        // 巻雲を無効化・被覆率0にした場合はT_cirrus=1.0になり、積雲だけの値になる
-        float ComputeCloudAverageTransmittance(
-            bool cloudEnabled, float coverage, bool cirrusEnabled, float cirrusCoverage)
-        {
-            const float cumulusTransmittance =
-                ComputeCloudLayerTransmittance(cloudEnabled, coverage, kCloudOvercastTransmittance);
-            const float cirrusTransmittance =
-                ComputeCloudLayerTransmittance(cirrusEnabled, cirrusCoverage, kCirrusOvercastTransmittance);
-            return cumulusTransmittance * cirrusTransmittance;
-        }
 
         // 環境の照度[lx]から「そのシーンの基準EV100」を求める。
         //
@@ -462,75 +388,10 @@ namespace Kurenai
         // 同名の .hlsli と1対1で対応させている(食い違いはあちらのstatic_assertが止める)
         using ShaderInterop::MegaLightsStochasticConstants;
 
-        // t5の構造化バッファに詰めるライトの最大数。実データ(BistroInterior.fbxで4灯)に対しては
-        // 十分すぎる余裕を持たせてあるが、構造化バッファなのでこの容量自体がGPU時間へ影響することはない
-        // (シェーダはLightCount.xまでしかループしないため)
-        constexpr uint32_t kMaxLights = 1024;
-
-        // MegaLightsTilePool.hlsl の kMegaLightsMaxLights と同じ値。あちらはライトごとの重みを
-        // groupshared配列に置くためコンパイル時定数である必要があり、C++からの受け渡しでは代用できない。
-        //
-        // 【なぜ静的検査で縛るのか】候補プールは走査するライト数をこの値で頭打ちにするが、
-        // タイルライトカリング(LightCulling.hlsl)は頭打ちしない。kMaxLightsをこれより大きくすると、
-        // **判定を共有しているのに定義域だけが黙ってずれる**(あぶれた灯はカリングには入るが
-        // 候補プールには入らない)。到達判定の共有では防げない食い違いなので、ここで止める
-        constexpr uint32_t kMegaLightsTilePoolMaxLights = 1024;
-        static_assert(
-            kMaxLights <= kMegaLightsTilePoolMaxLights,
-            "kMaxLightsを増やすなら MegaLightsTilePool.hlsl の kMegaLightsMaxLights も同じ値へ上げること"
-            "(候補プールが走査するライト数の上限。超えるとタイルライトカリングと定義域がずれる)");
-
-        // ドローンショーの機体数の上限。構造化バッファをこの容量で固定確保する
-        // (32バイト×4096 = 128KB。DEFAULTヒープ本体とステージングリングを足しても
-        //  1.3MB程度で、機体数を増減しても作り直さずに済む)
-        constexpr uint32_t kMaxDrones = 4096;
-
         // kLightTileSize / kLightTileCapacity / kLightTileStride はKurenaiEngine3Dのstatic constexprへ
         // 移した(DebugViewPanelがヒートマップの上限として参照するため)。定義はKurenaiEngine3D.h
 
         // SWRasterConstants / SWRasterMeshInfo は Passes/GeometryConstants.h へ移した
-
-        // Assets::LightをGPU側のGPULightへ変換する。カンデラ/ルクスの測光量にEV100露出を直接掛けて
-        // 表示レンジへ変換する(設計判断は「強度の単位」節を参照)。Frostbiteのスポット角度減衰用
-        // lightAngleScale/lightAngleOffsetもここでCPU事前計算する
-        GPULight MakeGPULight(const Assets::Light& light, float exposureEV100)
-        {
-            const float exposure = ComputeExposure(exposureEV100);
-            const float radiance = light.Intensity * exposure;
-
-            GPULight gpuLight{};
-            gpuLight.PositionType = { light.Position[0], light.Position[1], light.Position[2], static_cast<float>(light.Type) };
-            gpuLight.ColorRange = { light.Color[0] * radiance, light.Color[1] * radiance, light.Color[2] * radiance, light.Range };
-
-            float angleScale = 0.0f;
-            float angleOffset = 0.0f;
-            if (light.Type == Assets::LightType::Spot)
-            {
-                // Frostbiteのスポット減衰式: t = saturate(dot(spotDir,-L)*scale + offset), atten = t*t
-                const float cosOuter = std::cos(light.SpotOuterConeAngle);
-                const float cosInner = std::cos(light.SpotInnerConeAngle);
-                angleScale = 1.0f / std::max(0.001f, cosInner - cosOuter);
-                angleOffset = -cosOuter * angleScale;
-            }
-            gpuLight.DirectionAngle = { light.Direction[0], light.Direction[1], light.Direction[2], angleScale };
-            // Params.y = このライトが影を落とすか。ライトごとに切れるようにしてあるのは、
-            // ピクセルあたりのシャドウレイ数に上限(Passes::LightingConstants.LightCount.y)があり、
-            // 「影を出したいライト」に予算を回せるようにするため
-            // Params.z = 光源そのものの半径[m]。0なら点光源。予約枠だった zw のうち z を使う。
-            // 【平行光には入れない】太陽は MegaLights の対象外で、円盤サンプリングは
-            // RTShadow.hlsl が別に持っている
-            const float sourceRadius =
-                (light.Type == Assets::LightType::Directional) ? 0.0f : std::max(0.0f, light.SourceRadius);
-            // Params.y は影のフラグ。**bit0 = スクリーンスペースシャドウ / bit1 = レイトレース影レイ**
-            // (Shaders/3D/LightAttenuation.hlsli と一致させること)。作者が置いたライトは
-            // 両方を立てる ―― 1つの真偽値だった頃と挙動が変わらない。
-            // 【リテラルで 3.0f と書かない】ビットの定義を変えたときに追随しない
-            const float shadowFlags = light.CastShadow
-                                          ? static_cast<float>(kLightShadowScreenSpace | kLightShadowRaytraced)
-                                          : 0.0f;
-            gpuLight.Params = { angleOffset, shadowFlags, sourceRadius, 0.0f };
-            return gpuLight;
-        }
 
     }
 
@@ -3467,11 +3328,12 @@ namespace Kurenai
         AdvanceFrameHistory();
     }
 
-    // 【この翻訳単位に置いてある】Aブロック・Dブロック・EブロックはRendering/RenderFrame.cppへ
-    // 移したが、ここだけは移せない。組み立ての本体がこのファイルの無名名前空間にある
+    // 【依存していた型と定数は Rendering/ へ出した】以前ここには「無名名前空間の
     // kMaxLights / kMaxDrones / kTAAJitterSampleCount / RadicalInverse / MakeGPULight /
-    // ComputeCloudAverageTransmittance / GPUReflectionProbe に依存しており、
-    // それらを外へ出すのは所有権の話で、Render()の分割とは別の関心事になるため
+    // ComputeCloudAverageTransmittance / GPUReflectionProbe に依存しているので
+    // この翻訳単位から移せない」と書いてあった。段階7.5でそれらを
+    // SampleSequence.h / GPULightBuild.h / GPUReflectionProbe.h / CloudTransmittance.h /
+    // DroneShowResources.h へ移したので、この関数を割って外へ出せるようになっている
     void KurenaiEngine3D::BuildFrameContext(
         const KurenaiEngine3D::FrameState& frameState, RHI::IRHICommandList* commandList,
         const SunLighting& sunLighting, float effectiveExposure, float manualExposureScale,
