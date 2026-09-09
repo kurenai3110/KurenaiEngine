@@ -166,6 +166,7 @@
     <ClCompile Include="Source\Engine\Diagnostics\RenderDumpService.cpp" />
     <ClCompile Include="Source\Engine\Diagnostics\CullStatsReadback.cpp" />
     <ClCompile Include="Source\Engine\Diagnostics\FrameStatsLogger.cpp" />
+    <ClCompile Include="Source\Engine\Diagnostics\PerfLogging.cpp" />
     <ClCompile Include="Source\Engine\GI\DDGISystem.cpp" />
     <ClCompile Include="Source\Engine\GI\DDGIGrid.cpp" />
     <ClCompile Include="Source\Engine\Scene\ModelResidencySystem.cpp" />

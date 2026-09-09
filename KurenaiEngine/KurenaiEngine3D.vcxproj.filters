@@ -195,6 +195,9 @@
     <ClCompile Include="Source\Engine\Diagnostics\FrameStatsLogger.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Engine\Diagnostics\PerfLogging.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
     <ClCompile Include="Source\Engine\GI\DDGISystem.cpp">
       <Filter>Source\Engine</Filter>
     </ClCompile>
