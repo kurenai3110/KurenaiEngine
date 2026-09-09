@@ -101,7 +101,7 @@ namespace Kurenai
 
         // UIパネルもRenderスレッドで動くため、ここは単なるRenderスレッド内の受け渡しでよい。
         // 実際の発注はUpdateSceneStreaming(フレーム先頭)がまとめて行う
-        m_PendingSceneRequest = static_cast<int>(sceneIndex);
+        m_SceneLoad.PendingSceneRequest = static_cast<int>(sceneIndex);
     }
 
     uint64_t KurenaiEngine3D::GetCurrentSceneFileWriteTime() const
@@ -128,7 +128,7 @@ namespace Kurenai
     void KurenaiEngine3D::UpdateSceneHotReloadWatch()
     {
         // 読み込み中・要求が既に積まれている場合は何もしない(多重発注を避ける)
-        if (!m_Settings.System.SceneAutoReloadEnabled || m_SceneLoadInFlight || m_PendingSceneRequest >= 0)
+        if (!m_Settings.System.SceneAutoReloadEnabled || m_SceneLoad.InFlight || m_SceneLoad.PendingSceneRequest >= 0)
         {
             return;
         }
@@ -225,10 +225,10 @@ namespace Kurenai
             std::vector<Scene::ModelStreamingState::StreamingRequest> streamingRequests;
             bool raytracingRebuild = false;
             {
-                std::unique_lock<std::mutex> lock(m_LoadRequestMutex);
-                m_LoadRequestCV.wait(lock, [this] {
-                    if (m_LoadRequestSceneIndex >= 0 || !m_Streaming.Requests.empty() ||
-                        m_RaytracingRebuild.RebuildRequested || m_StopLoaderThread)
+                std::unique_lock<std::mutex> lock(m_SceneLoad.RequestMutex);
+                m_SceneLoad.RequestCV.wait(lock, [this] {
+                    if (m_SceneLoad.RequestSceneIndex >= 0 || !m_Streaming.Requests.empty() ||
+                        m_RaytracingRebuild.RebuildRequested || m_SceneLoad.StopThread)
                     {
                         return true;
                     }
@@ -247,12 +247,12 @@ namespace Kurenai
                     std::lock_guard<std::mutex> rtLock(m_RaytracingRebuild.ReleaseMutex);
                     return !m_RaytracingRebuild.Release.empty();
                 });
-                if (m_StopLoaderThread && m_LoadRequestSceneIndex < 0)
+                if (m_SceneLoad.StopThread && m_SceneLoad.RequestSceneIndex < 0)
                 {
                     break;
                 }
-                sceneIndex = m_LoadRequestSceneIndex;
-                m_LoadRequestSceneIndex = -1;
+                sceneIndex = m_SceneLoad.RequestSceneIndex;
+                m_SceneLoad.RequestSceneIndex = -1;
                 // 【シーン切り替えが来たら、溜まっているストリーミング発注は捨てる】
                 // それらは切り替え前のシーンのもので、読んでも差し込む先が無い
                 if (sceneIndex >= 0)
@@ -415,15 +415,15 @@ namespace Kurenai
         // 【ログにも出す】UIを開いていない・F1で隠している・ヘッドレスに近い確認では
         // 画面の表示が見えない。一定間隔でログへ落としておけば後からでも追える。
         // 1件ごとに出すと767行になるため、間隔を空けて間引く
-        m_SceneLoadProgressLoaded.store(0, std::memory_order_relaxed);
-        m_SceneLoadProgressTotal.store(0, std::memory_order_relaxed);
+        m_SceneLoad.ProgressLoaded.store(0, std::memory_order_relaxed);
+        m_SceneLoad.ProgressTotal.store(0, std::memory_order_relaxed);
         const std::wstring& progressSceneFileName = m_SceneFilePaths[sceneIndex];
         auto lastProgressLogTime = std::chrono::steady_clock::now();
         const auto onProgress =
             [this, &lastProgressLogTime, &progressSceneFileName](size_t loadedModels, size_t totalModels)
         {
-            m_SceneLoadProgressLoaded.store(static_cast<uint32_t>(loadedModels), std::memory_order_relaxed);
-            m_SceneLoadProgressTotal.store(static_cast<uint32_t>(totalModels), std::memory_order_relaxed);
+            m_SceneLoad.ProgressLoaded.store(static_cast<uint32_t>(loadedModels), std::memory_order_relaxed);
+            m_SceneLoad.ProgressTotal.store(static_cast<uint32_t>(totalModels), std::memory_order_relaxed);
 
             const auto now = std::chrono::steady_clock::now();
             const bool isFirstOrLast = (loadedModels == 0) || (loadedModels == totalModels);
@@ -851,13 +851,13 @@ namespace Kurenai
         // 【読み出しはLoaderスレッドに相乗りする】専用スレッドは立てない(TextureStreaming.h参照)。
         // 要求が積まれたらLoaderスレッドを起こす必要があるので、その手段を渡しておく
         m_TextureStreaming.SetRequestNotifier([this] {
-            // 【notifyの前に必ずm_LoadRequestMutexを取る】Loaderスレッドは
+            // 【notifyの前に必ずm_SceneLoad.RequestMutexを取る】Loaderスレッドは
             // このミューテックスを持ったまま述語を評価してからwaitへ入る。
             // 取らずにnotifyすると、述語がfalseと出てからwaitへ入るまでの隙間に通知が落ちる。
             // カメラが止まっていてモデルの発注が無いシーンでは、
             // 次に起こす材料が他に無いのでミップの差し替えがそのまま止まる
-            { std::lock_guard<std::mutex> lock(m_LoadRequestMutex); }
-            m_LoadRequestCV.notify_one();
+            { std::lock_guard<std::mutex> lock(m_SceneLoad.RequestMutex); }
+            m_SceneLoad.RequestCV.notify_one();
         });
         m_TextureStreaming.Build(m_Scene, *m_Device);
 

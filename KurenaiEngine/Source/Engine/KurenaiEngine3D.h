@@ -48,6 +48,7 @@
 #include "Scene/EmissiveLightSet.h"
 #include "Scene/ModelStreamingState.h"
 #include "Scene/RaytracingRebuildState.h"
+#include "Scene/SceneLoadHandoff.h"
 #include "Rendering/CubeFaceMath.h"
 #include "Passes/DDGIConstants.h"
 #include "Passes/EnvironmentConstants.h"
@@ -504,8 +505,8 @@ namespace Kurenai
         // std::atomicは呼び出し側が使っているメモリオーダーの書き方(.load/.store)を
         // そのまま維持できるよう、値ではなくatomicへの参照を返す
         std::atomic<bool>& GetTAAHistoryValid() { return m_TAAHistoryValid; }
-        std::atomic<uint32_t>& GetSceneLoadProgressLoaded() { return m_SceneLoadProgressLoaded; }
-        std::atomic<uint32_t>& GetSceneLoadProgressTotal() { return m_SceneLoadProgressTotal; }
+        std::atomic<uint32_t>& GetSceneLoadProgressLoaded() { return m_SceneLoad.ProgressLoaded; }
+        std::atomic<uint32_t>& GetSceneLoadProgressTotal() { return m_SceneLoad.ProgressTotal; }
 
         uint32_t GetHiZMipLevels() const;
         const std::vector<Assets::EmissiveProxy>& GetEmissiveProxies() const { return m_EmissiveLights.Proxies; }
@@ -528,9 +529,9 @@ namespace Kurenai
         uint32_t GetDDGIProbeCount() const { return m_GIResources.DDGIProbeCount; }
         bool GetDDGIWarmingUp() const;
         ReflectionMode GetSceneDefaultReflectionMode() const { return m_SceneDefaultReflectionMode; }
-        bool GetSceneLoadInFlight() const { return m_SceneLoadInFlight; }
+        bool GetSceneLoadInFlight() const { return m_SceneLoad.InFlight; }
         const std::vector<std::wstring>& GetSceneDisplayNames() const { return m_SceneDisplayNames; }
-        size_t GetSceneLoadingIndex() const { return m_SceneLoadingIndex; }
+        size_t GetSceneLoadingIndex() const { return m_SceneLoad.LoadingIndex; }
         const QualitySettings& GetQualitySettings() const { return m_Settings.Quality; }
         uint32_t GetLightTileCountX() const { return m_RenderTargets.LightTileCountX; }
         uint32_t GetLightTileCountY() const { return m_RenderTargets.LightTileCountY; }
@@ -1891,30 +1892,9 @@ namespace Kurenai
 
         // --- シーン読み込みのハンドオフ -------------------------------------------------------
 
-        std::thread m_LoaderThread;
-
-        // Renderスレッド専有。ScenePanelが押されたときに積まれ、UpdateSceneStreamingが消費する。
-        // -1は「要求なし」。UIもRenderスレッドで動くため、これはatomicである必要がない
-        int m_PendingSceneRequest = -1;
-        // Renderスレッド専有。Loaderスレッドへ発注してから完成品を受け取るまでtrue。
-        // 多重発注を防ぐために見る
-        bool m_SceneLoadInFlight = false;
-        // Renderスレッド専有。いまLoaderスレッドが読んでいるシーンの番号(m_SceneDisplayNamesの添字)。
-        // 進捗表示にシーン名を出すために持つ ―― m_CurrentSceneIndexは読み込みが完了するまで
-        // 旧シーンを指したままで、m_PendingSceneRequestは発注した時点で-1へ戻る
-        size_t m_SceneLoadingIndex = 0;
-
-        // シーン読み込みの進捗(読み終えたモデル数 / [Model]の総数)。
-        //
-        // 【なぜ要るか】読み込み中は旧シーンを先に手放すため画面にはUIとスカイボックスしか出ない
-        // (UpdateSceneStreamingのコメント参照)。767モデルのシーンでは数十秒かかり、
-        // m_SceneLoadInFlightのboolだけでは「進んでいる」と「固まった」を区別できない。
-        //
-        // 【atomicにする理由】書き手はLoaderスレッド(Assets::LoadSceneのコールバック)、
-        // 読み手はRenderスレッド(UIManagerの進捗ウィンドウ)で、フレーム境界の受け渡しに
-        // 乗らない唯一の値のため。表示だけに使うのでmemory_order_relaxedで足りる
-        std::atomic<uint32_t> m_SceneLoadProgressLoaded{ 0 };
-        std::atomic<uint32_t> m_SceneLoadProgressTotal{ 0 };
+        // シーン読み込みのハンドオフ一式。
+        // **この位置から動かさないこと**(破棄順の理由は Scene/SceneLoadHandoff.h)
+        Scene::SceneLoadHandoff m_SceneLoad;
 
         // --- .ksceneのホットリロード -----------------------------------------------------
         //
@@ -1935,12 +1915,6 @@ namespace Kurenai
         // Render()のフレーム時間ではなく自前のsteady_clockで測るのは、この関数が
         // フレーム時間の更新より前に呼ばれる位置にあり、呼び出し順への依存を作らないため
         std::chrono::steady_clock::time_point m_NextSceneWatchTime{};
-
-        // Render → Loader の要求。-1は「要求なし」
-        std::mutex m_LoadRequestMutex;
-        std::condition_variable m_LoadRequestCV;
-        int m_LoadRequestSceneIndex = -1;
-        bool m_StopLoaderThread = false;
 
         // Render → Loader の破棄依頼(RetiredAssetsのコメント参照)
         std::mutex m_RetiredAssetsMutex;
@@ -2096,7 +2070,7 @@ namespace Kurenai
         // UpdateModelStreamingの後にフレーム1回だけ呼ぶ
         void UpdateRaytracingRebuild();
 
-        // Render → Loader の読み込み発注。m_LoadRequestMutexで保護し、
+        // Render → Loader の読み込み発注。m_SceneLoad.RequestMutexで保護し、
         // モデルのストリーミングの受け渡し一式。
         // **この位置から動かさないこと**(破棄順の理由は Scene/ModelStreamingState.h)
         Scene::ModelStreamingState m_Streaming;

@@ -28,7 +28,7 @@ namespace Kurenai::Scene
         std::mutex RebuiltMutex;
         std::unique_ptr<Assets::RaytracingScene> Rebuilt;
         uint64_t RebuiltGeneration = 0;
-        bool RebuildRequested = false;   // m_LoadRequestMutexで保護
+        bool RebuildRequested = false;   // m_SceneLoad.RequestMutexで保護
         // 再構築が走っている間はtrue。立っている間はRenderスレッド側の差し込みと破棄を見送る。
         // Loaderスレッドが m_Scene を走査している最中に書き換えると走査中のコンテナが変わるため
         std::atomic<bool> RebuildInFlight{ false };

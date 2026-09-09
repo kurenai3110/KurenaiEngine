@@ -2704,7 +2704,7 @@ namespace Kurenai
     {
         // シーン読み込み専用スレッドを起動する。ファイルI/O・デコード・アセット由来のGPUリソースの
         // 作成と破棄をこのスレッドが担い、読み込み中もRenderスレッドがフレームを進められるようにする
-        m_LoaderThread = std::thread(&KurenaiEngine3D::LoaderThreadMain, this);
+        m_SceneLoad.Thread = std::thread(&KurenaiEngine3D::LoaderThreadMain, this);
 
         // 描画専用スレッドを起動する。以後このスレッドがRender()の呼び出しとPresentを担当し、
         // 呼び出し元スレッド(以下Updateスレッド)はPumpMessages/Updateに専念する
@@ -2739,11 +2739,11 @@ namespace Kurenai
         // 新しい破棄依頼が積まれることはない。Loaderは終了前に残った破棄依頼を片付けるため、
         // アセット用ディスクリプタヒープを触るのはこのスレッドだけ、という不変条件が保たれる
         {
-            std::lock_guard<std::mutex> lock(m_LoadRequestMutex);
-            m_StopLoaderThread = true;
+            std::lock_guard<std::mutex> lock(m_SceneLoad.RequestMutex);
+            m_SceneLoad.StopThread = true;
         }
-        m_LoadRequestCV.notify_one();
-        m_LoaderThread.join();
+        m_SceneLoad.RequestCV.notify_one();
+        m_SceneLoad.Thread.join();
 
         // Loaderが作り終えていたが取り込まれなかったシーンをここで解放する。
         // この時点で動いているのはこのスレッドだけなので、どのヒープを触っても競合しない

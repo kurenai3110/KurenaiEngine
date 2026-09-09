@@ -27,18 +27,18 @@ namespace Kurenai
         if (loaded)
         {
             ApplyLoadedScene(*loaded);
-            m_SceneLoadInFlight = false;
+            m_SceneLoad.InFlight = false;
         }
 
         // --- 保留中の切り替え要求をLoaderスレッドへ発注する ---
-        // 読み込み中は発注しない(最後の要求はm_PendingSceneRequestに残るので取りこぼさない)
-        if (m_PendingSceneRequest < 0 || m_SceneLoadInFlight)
+        // 読み込み中は発注しない(最後の要求はm_SceneLoad.PendingSceneRequestに残るので取りこぼさない)
+        if (m_SceneLoad.PendingSceneRequest < 0 || m_SceneLoad.InFlight)
         {
             return;
         }
 
-        const size_t sceneIndex = static_cast<size_t>(m_PendingSceneRequest);
-        m_PendingSceneRequest = -1;
+        const size_t sceneIndex = static_cast<size_t>(m_SceneLoad.PendingSceneRequest);
+        m_SceneLoad.PendingSceneRequest = -1;
 
         // 【WaitForGPUIdleより前に止める】テクスチャストリーミングのワーカーは
         // 旧シーンのIRHITexture*を掴んだままGPUリソースを作っている。旧シーンを手放す前に
@@ -64,13 +64,13 @@ namespace Kurenai
         RetireAssets(std::move(retired));
 
         {
-            std::lock_guard<std::mutex> lock(m_LoadRequestMutex);
-            m_LoadRequestSceneIndex = static_cast<int>(sceneIndex);
+            std::lock_guard<std::mutex> lock(m_SceneLoad.RequestMutex);
+            m_SceneLoad.RequestSceneIndex = static_cast<int>(sceneIndex);
         }
-        m_LoadRequestCV.notify_one();
-        m_SceneLoadInFlight = true;
+        m_SceneLoad.RequestCV.notify_one();
+        m_SceneLoad.InFlight = true;
         // 進捗表示にシーン名を出すために、いま読ませているシーンを控える
-        m_SceneLoadingIndex = sceneIndex;
+        m_SceneLoad.LoadingIndex = sceneIndex;
     }
 
     void KurenaiEngine3D::BuildInstanceBatches(RHI::IRHICommandList* commandList)
@@ -442,7 +442,7 @@ namespace Kurenai
                         m_RaytracingRebuild.Release.push_back(std::move(scene));
                     }
                 }
-                m_LoadRequestCV.notify_one();
+                m_SceneLoad.RequestCV.notify_one();
             }
         }
 
@@ -454,10 +454,10 @@ namespace Kurenai
         m_RaytracingRebuild.RebuildPending = false;
         m_RaytracingRebuild.RebuildInFlight.store(true, std::memory_order_release);
         {
-            std::lock_guard<std::mutex> lock(m_LoadRequestMutex);
+            std::lock_guard<std::mutex> lock(m_SceneLoad.RequestMutex);
             m_RaytracingRebuild.RebuildRequested = true;
         }
-        m_LoadRequestCV.notify_one();
+        m_SceneLoad.RequestCV.notify_one();
     }
 
     void KurenaiEngine3D::UpdateModelStreaming(const DirectX::XMFLOAT3& cameraPosition)
@@ -503,7 +503,7 @@ namespace Kurenai
                     }
                 }
                 // Loaderスレッドが寝ていると破棄が溜まり続けるので起こす
-                m_LoadRequestCV.notify_one();
+                m_SceneLoad.RequestCV.notify_one();
             }
         }
 
@@ -725,14 +725,14 @@ namespace Kurenai
         const size_t requestCount = (std::min)(candidates.size(), kMaxStreamingRequestsPerFrame);
 
         {
-            std::lock_guard<std::mutex> lock(m_LoadRequestMutex);
+            std::lock_guard<std::mutex> lock(m_SceneLoad.RequestMutex);
             for (size_t i = 0; i < requestCount; ++i)
             {
                 m_Streaming.Requests.push_back({ *candidates[i].Path, m_Streaming.Generation });
                 m_Streaming.InFlight.insert(*candidates[i].Path);
             }
         }
-        m_LoadRequestCV.notify_one();
+        m_SceneLoad.RequestCV.notify_one();
     }
 
     uint32_t KurenaiEngine3D::GetLODDraws(size_t instanceIndex, LODDraw (&outDraws)[2]) const
