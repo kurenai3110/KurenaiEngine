@@ -27,7 +27,7 @@
 #error "ProbeShading.hlsli をインクルードする前に KURENAI_PROBE_*_REGISTER をすべて定義すること"
 #endif
 
-// DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
+// PunctualLighting.hlsli の struct GPULight と並び・ストライド(64バイト)を一致させる必要がある
 struct GPULight
 {
     float4 PositionType;

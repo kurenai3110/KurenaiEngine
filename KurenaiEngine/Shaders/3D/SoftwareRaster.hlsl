@@ -26,7 +26,9 @@
 
 #include "SoftwareRasterCommon.hlsli"
 
-// C++側のディスパッチ数計算(KurenaiEngine3D.cpp)と一致させること
+// C++側 Passes/GeometryConstants.h の kSWRasterGroupSize と一致させること
+// (GeometryPasses.cpp のディスパッチ数計算がこの値で割る)。
+// 下の KURENAI_SWRASTER_LARGE_GROUP_SIZE(256)にはC++側の相方が無く、このファイル内で完結する
 #define KURENAI_SWRASTER_GROUP_SIZE 64
 #define KURENAI_SWRASTER_LARGE_GROUP_SIZE 256
 

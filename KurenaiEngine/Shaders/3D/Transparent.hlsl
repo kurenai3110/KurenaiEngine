@@ -45,7 +45,7 @@ static const float PI = 3.14159265359f;
 // 実質未使用だが、同じルートシグネチャ/定数バッファを共有するため並び順を合わせる)。
 #include "ObjectConstants.hlsli"
 
-// DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
+// PunctualLighting.hlsli の struct GPULight と並び・ストライド(64バイト)を一致させる必要がある
 struct GPULight
 {
     float4 PositionType;
