@@ -5,12 +5,21 @@
 #include <string>
 
 #include "Core/Logger.h"
+// パス群のベイク状態と能力を問い合わせるため、前方宣言では足りない
+#include "../Passes/DDGIPasses.h"
+#include "../Passes/EnvironmentPasses.h"
+#include "../Passes/GeometryPasses.h"
+#include "../Passes/ReflectionProbePasses.h"
+#include "../ShaderInterop/FrameConstants.h"
 
+#include "CloudTransmittance.h"
 #include "DroneShowResources.h"
 #include "GPULight.h"
 #include "GPULightBuild.h"
+#include "GPUReflectionProbe.h"
 #include "RenderFrameContext.h"
 #include "SampleSequence.h"
+#include "SunLighting.h"
 
 // BuildFrameContext から切り出した、フレームの値を組み立てる各段(段階7.5)。
 // KurenaiEngine3D のメンバ関数のまま、翻訳単位だけをここへ分けている
@@ -505,5 +514,542 @@ namespace Kurenai
                 m_LightOverflowLogged = true;
             }
         }
+    }
+    // このフレームの空の状態を確定させる。
+    //
+    // 【FrameConstants より前に呼ぶこと】constants.SkyParams.y が UsingProceduralSky を要る
+    void KurenaiEngine3D::ResolveSkyFrameState(
+        const SunLighting& sunLighting, Rendering::RenderFrameContext& frameContext)
+    {
+        // このフレームで空として使うキューブマップ。手続き空(SkyGenerate)か.ksceneのDDSかが
+        // ここで確定する。**RenderGraphのReads宣言と実際のバインドの両方でこのローカルを使うこと**
+        // (ActiveSkyTexture()を都度呼ぶと両者が食い違って依存解決が壊れる)。
+        // 【ここで確定させる理由】この下のFrameConstants(constants.SkyParams.y)が
+        // usingProceduralSkyを必要とするため、FrameConstantsを埋めるより前に確定させる
+        frameContext.SkyTexture = ActiveSkyTexture();
+        frameContext.UsingProceduralSky = (frameContext.SkyTexture == m_SkyResources.ProceduralSkyTexture.get());
+
+        // 太陽が閾値以上動いていたら手続き空を焼き直す。毎フレーム焼くと
+        // 空生成6回+プリフィルタ36回のディスパッチが常時走って無駄になる。
+        // 空はプリ露出済みの値で焼かれるため、実効プリ露出が動いたときも焼き直す必要がある
+        // (焼き直さないと空だけ古い露出のまま取り残される)
+        if (frameContext.UsingProceduralSky && !m_SkyBakeDirty)
+        {
+            const DirectX::XMVECTOR current = DirectX::XMLoadFloat3(&sunLighting.SunPosition);
+            const DirectX::XMVECTOR baked = DirectX::XMLoadFloat3(&m_LastBakedSunPosition);
+            const float cosAngle = DirectX::XMVectorGetX(DirectX::XMVector3Dot(current, baked));
+            const bool sunMoved =
+                cosAngle < std::cos(DirectX::XMConvertToRadians(m_SkySettings.BakeAngleThresholdDegrees));
+            // 露出が0.05段(約3.5%)以上動いたら焼き直す。時刻変化に伴う露出の追従でも
+            // 動くため、太陽の角度閾値とあわせて実質的に連続した更新になる
+            const bool exposureMoved =
+                std::abs(m_EffectiveExposureEV100 - m_LastBakedExposureEV100) > 0.05f;
+            // タービディティが動いたら焼き直す。PreethamのxyYモデルの形自体が変わるため、
+            // exposureMovedと同じ形の判定をここへ追加する
+            const bool turbidityMoved = std::abs(m_SkySettings.Turbidity - m_LastBakedTurbidity) > 0.01f;
+            // 空の彩度(アート指定)もPreethamの色度を動かすため、タービディティと同じ扱いで焼き直す
+            const bool saturationMoved = std::abs(m_SkySettings.Saturation - m_LastBakedSkySaturation) > 0.005f;
+            // 雲のパラメータが動いたら焼き直す(P18)。
+            //
+            // 【なぜ要るか】ここまでの4つは晴天の空の形を決める値だけで、雲は「晴天の空を
+            // 変えない」ため入っていなかった。P18でSkyIntegrateが雲込みの空の照度を積むように
+            // なったので、被覆率を動かしても焼き直しが走らないと**古い被覆率で積んだ
+            // CloudSkyLightが残り続ける**。実際これで被覆率0でも比が1にならず、雲を持たない
+            // シーンの遠景が動いた(切り分け: SkyIntegrateへ1を直書きした絵と、消費側で1へ
+            // 潰した絵は画素まで一致した=経路は正しく、値だけが古かった)。
+            //
+            // 【風のスクロールを入れない】スクロール量は毎フレーム動くので、入れると毎フレーム
+            // 焼き直しになる。求めているのは半球平均なので、雲の場が平行移動しても値はほとんど
+            // 変わらない。同じ理由でカメラ位置も入れない。
+            //
+            // 【IBLの雲減光もこれで直る】m_ActiveCloudTransmittance(キューブへ焼く平均透過率)も
+            // このブロックの中でしか更新されないため、被覆率を動かしても環境光が追従しない
+            // という同じ形の取りこぼしがあった
+            const CloudBakeSignature cloudSignature = MakeCloudBakeSignature();
+            const bool cloudChanged = !m_HasBakedCloudSignature
+                                      || cloudSignature != m_LastBakedCloudSignature;
+            if (sunMoved || exposureMoved || turbidityMoved || saturationMoved || cloudChanged)
+            {
+                m_SkyBakeDirty = true;
+            }
+        }
+
+        // このフレームで手続き空を焼くかどうか。下のSkyGenerateパス登録とキャッシュ更新の
+        // 両方をこのフラグで判定する
+        frameContext.BakeSkyThisFrame = frameContext.UsingProceduralSky && m_SkyBakeDirty;
+
+        // このフレームでSkyIntegrateパス(m_SkyResources.ParametersBufferへ書く)を実行するかどうか。
+        // 通常はbakeSkyThisFrameと同じタイミングだが、m_SkyResources.ParametersBufferが一度も書かれていない
+        // 場合はusingProceduralSkyがfalse(.ksceneのDDSスカイボックス使用時)でも1回だけ実行する。
+        //
+        // 【なぜCPU側からのゼロ初期化ではなくこの形にしたのか】DX12のStructuredRWバッファは
+        // UAV/SRVでのGPUアクセス専用にDEFAULTヒープへ作成されており、CPUから書き込むための
+        // マップ済みポインタ・ステージングリングを一切持たない(m_SkyResources.ParametersBuffer作成箇所の
+        // コメント参照)。そのためUpdateBufferでのゼロ埋めはDX12でクラッシュする。GPU側のパスを
+        // 1回だけ走らせれば、DX11/DX12のどちらでも安全に(積分結果自体は使われないが)未初期化状態を
+        // 解消できる。太陽方向・目標照度はusingProceduralSkyに関わらず既に計算済みのsunLightingを
+        // そのまま使えるため、余分な分岐を増やさずに済む
+        frameContext.SkyIntegrateThisFrame = frameContext.BakeSkyThisFrame || !m_EnvironmentPasses->IsSkyParametersBufferInitialized();
+
+        // --- 空パラメータ(tintと天頂輝度)の確定はGPU側(SkyIntegrate.hlsl)で行う ---
+        // 【なぜベイクと同じタイミングか】背景の解析評価(DeferredLighting.hlsl)は、下のFrameConstants
+        // (SkySunDirection)とm_SkyResources.ParametersBuffer(SkyIntegrate.hlslの出力)を組み合わせて使う。
+        // ベイクと同じタイミングでSkyIntegrateパスを実行することで、背景とキューブマップ
+        // (IBL・反射)が常に同一の空パラメータを見る。毎フレーム走らせると、太陽の角度閾値で
+        // ベイクを間引いている間だけ背景とIBLの空がずれてしまう。実際のディスパッチとcbuffer更新は
+        // 下のSkyIntegrateパス登録側で行うため、ここではフラグ更新のみ済ませる
+        if (frameContext.BakeSkyThisFrame)
+        {
+            // 雲(判断B)による平均透過率をベイクと同じタイミングで確定させ、メンバへキャッシュする。
+            // **この値はm_SkyResources.ParametersBuffer側の天頂輝度には掛けない**——キューブへ焼く
+            // Passes::SkyBakeConstants::CloudTransmittance(下のSkyGenerateパス参照)にだけ掛ける。
+            // SkyParametersBufferの天頂輝度を減光すると、雲の隙間から見える青空まで暗くなり、
+            // Sky.hlsli側のSkyColorがそこへさらに雲を重ねることで二重に暗くなってしまう
+            m_ActiveCloudTransmittance = Rendering::ComputeCloudAverageTransmittance(
+                m_CloudSettings.Enabled, m_CloudSettings.Coverage, m_CloudSettings.CirrusEnabled, m_CloudSettings.CirrusCoverage);
+
+            // P18: この焼き直しがどの雲パラメータで行われたかを覚えておく。
+            // 上の焼き直し判定(cloudChanged)がこれと比べる
+            m_LastBakedCloudSignature = MakeCloudBakeSignature();
+            m_HasBakedCloudSignature = true;
+
+            // 空が変わったのでプリフィルタ済み鏡面も焼き直す必要がある。
+            // 焼き直し要否のフラグ更新はここ(キャッシュを書いた場所)に一本化し、
+            // 下のSkyGenerateパス登録側では行わない(二重更新・更新漏れを避けるため)
+            m_SkyBakeDirty = false;
+            m_LastBakedSunPosition = sunLighting.SunPosition;
+            m_LastBakedExposureEV100 = m_EffectiveExposureEV100;
+            m_LastBakedTurbidity = m_SkySettings.Turbidity;
+            m_LastBakedSkySaturation = m_SkySettings.Saturation;
+            m_EnvironmentPasses->GetIBLBaked() = false;
+            m_EnvironmentPasses->GetIBLIrradianceBaked() = false;
+        }
+    }
+
+    // このフレームに「何を描くか」の述語をまとめて確定させる。
+    //
+    // 【FrameConstants より前に呼ぶこと】定数バッファの更新はパス登録より前に一度だけ行うので、
+    // パスを積むかどうかの判断もそこより前で確定していなければならない
+    void KurenaiEngine3D::ResolveFrameDrawDecisions(Rendering::RenderFrameContext& frameContext)
+    {
+        // 平面反射: 水面インスタンスを探し、その高さ(ワールドY)を水面の平面とする。
+        // 水面メッシュはローカルY=0の水平な板(Tools/generate_water_plane.py参照)なので、
+        // ワールド変換の平行移動Y(instance.World._24。転置済みのため列に入っている。
+        // Transparentパスの距離ソートと同じ規約)がそのまま水面の高さになる。
+        // 複数の水面インスタンスが異なる高さで見つかった場合は最初のものだけを使い、警告を1度だけ出す
+        // (「水面は単一の水平な平面である」という前提を明示する)
+        
+        
+        for (const auto& instance : m_Scene.Instances)
+        {
+            if (!instance.IsWater)
+            {
+                continue;
+            }
+            const float instanceWaterY = instance.World._24;
+            if (!frameContext.HasWaterInstance)
+            {
+                frameContext.HasWaterInstance = true;
+                frameContext.WaterPlaneY = instanceWaterY;
+            }
+            else if (std::abs(instanceWaterY - frameContext.WaterPlaneY) > 0.01f && !m_PlanarReflectionMultipleWaterLogged)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "複数の水面インスタンスが異なる高さ(Y=" + std::to_string(frameContext.WaterPlaneY) + "とY=" +
+                        std::to_string(instanceWaterY) +
+                        ")で見つかりました。平面反射は最初の水面のみを使用します"
+                        "(水面は単一の水平な平面である前提のため)");
+                m_PlanarReflectionMultipleWaterLogged = true;
+            }
+        }
+        // このフレームで平面反射パスを実行するか。
+        // 【反射の手法がSSRのときだけ実行する】このパスの出力(m_RenderTargets.PlanarReflectionColor)を読むのは
+        // SSR.hlslだけである。手法がRaytracedやOffのときに走らせても、不透明メッシュ全体を
+        // もう1回フォワードで描いた結果を誰も読まないまま捨てることになる
+        // (DXR対応環境ではDefaultReflectionModeがRaytracedを返すため、この条件が無いと
+        //  DX12では常に丸ごと無駄になる。実測でもDX12起動時に水面へ映っていたのはRT反射の結果で、
+        //  平面反射パスの出力ではなかった)
+        frameContext.PlanarReflectionPassRuns =
+            m_ReflectionSettings.PlanarEnabled && frameContext.HasWaterInstance && m_ReflectionSettings.Mode == ReflectionMode::ScreenSpace;
+
+        // 大気遠近パスを実行するか。UIで無効化されているか、密度が0以下(効果が無い)なら
+        // パス自体を登録しない(GetActiveReflectionOutput()の結果がそのままTAA/Tonemapへ渡る)。
+        // 手続き空が無効なシーンかどうかの判断(FogParams0.w)はパスの実行有無とは別に、
+        // 下のconstants.FogParams0組み立て時にusingProceduralSkyを見て決める
+        // (SSRパスのwaterAnalyticSkyFlagと同じ、パスの実行可否とシェーダー内の有効フラグを分ける設計)
+        frameContext.FogPassRuns = m_FogSettings.Enabled && m_FogSettings.Density > 0.0f;
+
+        // メッシュレット(増幅シェーダー + メッシュシェーダー)経路でG-Bufferを描くか。
+        // メッシュシェーダー非対応のデバイスではPSOが作られないためnullptrになる。
+        //
+        // 【他の「PassRuns」と並べてここに置く理由】この値はG-Bufferパスの登録時だけでなく、
+        // その手前で書き上げるFrameConstantsも見る(オクルージョンカリングの有効フラグ)。
+        // 定数バッファの更新はパス登録より前に一度だけ行うため、判断もそこより前で確定させる
+        frameContext.MeshletPathActive =
+            m_GeometrySettings.MeshletRenderingEnabled && m_GeometryPasses->HasMeshletPipelineState();
+
+        // 増幅シェーダーのHi-Zオクルージョンカリング(Stage 5-2)をこのフレームで行うか。
+        // 判定を書いてあるのは増幅シェーダーだけなので、メッシュレット経路に乗らないフレームでは
+        // 1つも間引けず、Hi-Zを構築する意味も無い(下のHi-Zパスの登録条件がこれを見る)
+        frameContext.OcclusionCullingActive = m_GeometrySettings.OcclusionCullingEnabled && frameContext.MeshletPathActive;
+
+        // メッシュレットカリングの統計をこのフレームで数えるか。
+        // 増幅シェーダーが走らなければ数える相手がいない
+        frameContext.MeshletCullStatsActive =
+            m_GeometrySettings.MeshletCullStatsEnabled && frameContext.MeshletPathActive
+            && m_GeometryPasses->HasMeshletCullStatsBuffer();
+    }
+
+    // FrameConstants と LightingConstants を埋める。
+    //
+    // 【引数が多いのは分割の結果】13引数の BuildFrameContext を割った先なので当然で、
+    // 無理に減らすために一時 struct を増やさない
+    void KurenaiEngine3D::FillFrameConstants(
+        const KurenaiEngine3D::FrameState& frameState, RHI::IRHICommandList* commandList,
+        const SunLighting& sunLighting, float effectiveExposure, float manualExposureScale,
+        float keyReferenceEV100, const DirectX::XMFLOAT3& cameraPosition,
+        const float (&cascadeSplits)[kCascadeCount],
+        const DirectX::XMMATRIX (&cascadeViewProj)[kCascadeCount],
+        Rendering::RenderFrameContext& frameContext, std::vector<GPULight>& gpuLights,
+        ShaderInterop::FrameConstants& constants, Passes::LightingConstants& lightingConstants,
+        size_t& bakedLightCount)
+    {
+        // 【実体はRender()にある】frameContext.Constantsがこれを指す。元と同じく未初期化のまま
+        // 受け取り、以降の代入で全フィールドを埋める
+        frameContext.ViewProj = frameContext.ViewMatrix * frameContext.JitteredProj;
+        DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(frameContext.ViewProj));
+
+        // 平面反射用の鏡映カメラ。水面平面 y=frameContext.WaterPlaneY に対する反射行列を、通常のView×Projへ
+        // 左から掛ける(PlanarReflection.hlsl冒頭参照)。XMMatrixReflectが受け取る平面の規約は
+        // 「点PがAx+By+Cz+D=0を満たす」形(ドキュメント準拠)で、これは
+        // FrameConstants.PlanarReflectionPlaneのSV_ClipDistance計算(dot(worldPos, xyz) + w)と
+        // 完全に同じ規約なので、同じベクトル(0,1,0,-frameContext.WaterPlaneY)がどちらにもそのまま使える
+        // (水面より上のworldPosでdot結果が正になることも、この式から導ける)。
+        // 水面が無いシーンでもwaterPlaneY=0で計算はできるが、パスを登録しないため使われない
+        frameContext.ReflectMatrix =
+            DirectX::XMMatrixReflect(DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, -frameContext.WaterPlaneY));
+        // メインカメラと同じジッター済みProjを使う(PlanarReflection.hlsl冒頭参照。ジッターが
+        // 異なると反射がメインの画面UVとサブピクセル単位でずれてしまう)
+        frameContext.ReflectedViewProj = frameContext.ReflectMatrix * frameContext.ViewMatrix * frameContext.JitteredProj;
+        DirectX::XMVECTOR determinant;
+        frameContext.InvViewProj = DirectX::XMMatrixInverse(&determinant, frameContext.ViewProj);
+        DirectX::XMStoreFloat4x4(&constants.InvViewProj, DirectX::XMMatrixTranspose(frameContext.InvViewProj));
+        for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
+        {
+            DirectX::XMStoreFloat4x4(&constants.CascadeViewProj[cascade], DirectX::XMMatrixTranspose(cascadeViewProj[cascade]));
+        }
+        // 【DDGIのクリップマップの追従中心をここで固定する】このあと組み立てるFrameConstantsの
+        // 各LODの原点も、後段のプローブのキャプチャ位置も、すべてこの値を基準に決まる。
+        // 1フレームの途中で動かすと「シェーダーが見ている格子」と「実際に焼いた位置」が
+        // 食い違い、間接光が別の場所のものになる
+        m_DDGIFollowCenter = DirectX::XMFLOAT3{ cameraPosition.x, cameraPosition.y, cameraPosition.z };
+
+        constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
+        constants.LightDirection = { sunLighting.Direction.x, sunLighting.Direction.y, sunLighting.Direction.z, 0.0f };
+        // 太陽を無効にする場合は色をゼロにするだけでよい(シェーダー側は太陽の寄与に
+        // LightColor.rgbを乗算するため、これで完全に消える)。TimeOfDayを夜にする方法と違い
+        // 昼度(AmbientColor.a)は下がらないので、環境光だけで照らす状態を作れる
+        // sunLighting.Color は絶対的な測光量[lx]なので、ここで実効プリ露出を掛けて表示レンジへ移す
+        constants.LightColor = m_SkySettings.SunEnabled
+            ? DirectX::XMFLOAT4{
+                  sunLighting.Color.x * effectiveExposure,
+                  sunLighting.Color.y * effectiveExposure,
+                  sunLighting.Color.z * effectiveExposure,
+                  0.0f }
+            : DirectX::XMFLOAT4{ 0.0f, 0.0f, 0.0f, 0.0f };
+        DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(frameContext.ViewMatrix));
+        // ジッター済みの射影行列を渡す。SSAO/SSILはこの行列でView空間の点を画面へ投影して
+        // 深度バッファと突き合わせるため、深度を描いたときと同じ行列でなければサブピクセルぶんずれる
+        DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(frameContext.JitteredProj));
+        // rgb(環境光の色)にm_IBLSettings.AmbientScaleを乗算する。Enable IBL無効時のフォールバックアンビエント
+        // (DeferredLighting.hlsl)の強度調整用で、alpha(dayFactor、IBLの夜間減光・背景スカイの
+        // 昼夜ブレンドに使う)には掛けない
+        constants.AmbientColor =
+        {
+            sunLighting.Ambient.x * m_IBLSettings.AmbientScale * effectiveExposure,
+            sunLighting.Ambient.y * m_IBLSettings.AmbientScale * effectiveExposure,
+            sunLighting.Ambient.z * m_IBLSettings.AmbientScale * effectiveExposure,
+            sunLighting.Ambient.w,
+        };
+        constants.CascadeSplits = { cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3] };
+        const float iblIntensity = m_IBLSettings.Enabled ? m_IBLSettings.Intensity : 0.0f;
+        const float specularEnergyCompensation = static_cast<float>(m_ReflectionSettings.SpecularCompensation);
+        constants.ShadowParams = {
+            m_ShadowSettings.LightSize,
+            static_cast<float>(kIBLPrefilterMipLevels - 1),
+            iblIntensity,
+            specularEnergyCompensation,
+        };
+        constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
+        constants.IBLParams = {
+            m_IBLSettings.UseDedicatedIrradiance ? 1.0f : 0.0f,
+            m_IBLSettings.AmbientDiffuseScale,
+            m_IBLSettings.AmbientSpecularScale,
+            0.0f,
+        };
+        constants.OcclusionParams = {
+            m_AmbientOcclusionSettings.BentNormalAOSource ? 1.0f : 0.0f,
+            static_cast<float>(m_AmbientOcclusionSettings.SpecularOcclusion),
+            m_AmbientOcclusionSettings.MultiBounceAOEnabled ? 1.0f : 0.0f,
+            0.0f };
+
+        // 空の解析評価用。DeferredLighting.hlslが背景画素でSky.hlsliのSkyColorを画面解像度で
+        // 評価するために使う。ティントと天頂輝度はm_SkyResources.ParametersBuffer(直近の手続き空ベイクで
+        // SkyIntegrate.hlslが書いた値。上のbakeSkyThisFrameブロック参照)にあり、DeferredLighting.hlsl/
+        // SSR.hlslがStructuredBufferとして直接読むため、ここでFrameConstantsへは詰めない。
+        // SunDirectionはここで毎フレーム最新のsunLightingから渡す
+        // (太陽は角度閾値以下でも連続的に動くため。天頂輝度・色味と違い積分を伴わず、
+        // 毎フレーム渡してもコストが無い)。
+        // 正規化はSkyGenerate.hlsl側の慣習(呼び出し側=シェーダのSkyParameters組み立て時に
+        // normalizeする)に合わせ、C++側では正規化しない(DeferredLighting.hlsl側で行う)
+        constants.SkySunDirection = {
+            sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
+        };
+        // 太陽照度と空照度の比。Sky.hlsliのEvaluateCloudLayerが雲の明るさの基準を
+        // 「空の天頂輝度」から「太陽の照度」へ切り替えるために使う(雲を照らしているのは
+        // 空ではなく太陽であるため。詳細はSky.hlsli側のkCumulusSingleScatterScale等のコメント参照)。
+        // SkyIlluminanceLuxが0近傍(理論上は起こらないが)のときのゼロ除算を避けてある
+        const float sunToSkyIlluminanceRatio =
+            (sunLighting.SkyIlluminanceLux > 1e-6f)
+                ? (sunLighting.KeyIlluminanceLux / sunLighting.SkyIlluminanceLux)
+                : 0.0f;
+        constants.SkyParams = {
+            // x=未使用(天頂輝度はSkyParametersBufferにある)
+            0.0f,
+            // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、この設定に関わらず
+            // 常にキューブマップを使う。DDSは任意の絵でPerezモデルとは無関係なため、
+            // 解析評価してはいけない
+            (m_SkySettings.AnalyticBackground && frameContext.UsingProceduralSky) ? 1.0f : 0.0f,
+            // z=太陽照度/空照度比(SunToSkyIlluminanceRatio、雲の明るさの基準に使う)
+            sunToSkyIlluminanceRatio,
+            0.0f,
+        };
+
+        // === 実効プリ露出が大きく動いたら、更新モードに関わらずプローブを焼き直す(19.14節) ===
+        // 下のProbeParams2.wは「焼いた時点の露出→現在の露出」の換算倍率で、これだけでも
+        // プローブの値の解釈は常に正しくなる。ただし換算はあくまで**焼いた時点の環境**を
+        // 正しい明るさで見せるだけなので、昼に焼いたプローブを夜の場面へ持ち込めば
+        // 「夜の部屋に昼の環境が正しい明るさで映り込む」ことになり、換算前より派手に破綻する
+        // (実測: ProbeTestを夜にしたときの平均輝度が213.6→253.9、白飽和78%)。
+        //
+        // 実効プリ露出が大きく動くのは時刻が大きく動いたときなので、そのときは環境そのものが
+        // 古くなっている。Bakedモードが凍結すると宣言しているのはライトやマテリアルの編集に
+        // 対してであって、場面全体の明るさが2倍以上変わってもなお昼の映り込みを保持することでは
+        // ない。手続き空が同じ理由で焼き直しているのと揃える(閾値は空の0.05段よりずっと粗く
+        // 取ってある。フルベイクはプローブ数×6面の描画になるため)。
+        // Realtimeは毎フレーム焼き直しているので対象外
+        if (m_ReflectionProbeSettings.UpdateMode != ProbeUpdateMode::Realtime && m_ReflectionProbePasses->GetProbeBaked() &&
+            !m_GIResources.ReflectionProbes.empty() &&
+            std::abs(m_EffectiveExposureEV100 - m_ReflectionProbePasses->GetProbeBakedExposureEV100()) > kProbeRebakeExposureEV)
+        {
+            m_ReflectionProbePasses->GetProbeBakeRequested() = true;
+            // このフレームの後半で今の露出で焼かれるため、換算倍率もここで合わせておく。
+            // ここで合わせないと、焼き直したフレームだけ1フレーム古い倍率が掛かって明滅する
+            m_ReflectionProbePasses->GetProbeBakedExposureEV100() = m_EffectiveExposureEV100;
+        }
+
+        // 反射プローブの影響範囲をt13のStructuredBufferへ渡す。まだ一度も焼けていない場合
+        // (まだ焼けていない)や機能を無効にしている場合はプローブ数を0にして、シェーダー側の
+        // 選択ループ自体を回さない=中身が未定義のキューブマップを引かせないようにする
+        std::vector<GPUReflectionProbe> gpuProbes;
+        if (m_ReflectionProbeSettings.Enabled && m_ReflectionProbePasses->GetProbeBaked())
+        {
+            gpuProbes.reserve(m_GIResources.ReflectionProbes.size());
+            for (const Assets::ReflectionProbe& probe : m_GIResources.ReflectionProbes)
+            {
+                // Yawはシェーダー側で毎ピクセル三角関数を回さずに済むよう、ここでsin/cosへ展開しておく
+                const float yawRadians = DirectX::XMConvertToRadians(probe.YawDegrees);
+                const bool isBox = probe.Shape == Assets::ReflectionProbeShape::Box;
+
+                GPUReflectionProbe gpuProbe{};
+                gpuProbe.PositionRadius = { probe.Position[0], probe.Position[1], probe.Position[2], probe.Radius };
+                gpuProbe.BoxExtents = {
+                    probe.BoxExtents[0], probe.BoxExtents[1], probe.BoxExtents[2], probe.BlendDistance
+                };
+                gpuProbe.ShapeParams = {
+                    isBox ? 1.0f : 0.0f, std::sin(yawRadians), std::cos(yawRadians), 0.0f
+                };
+                gpuProbes.push_back(gpuProbe);
+            }
+        }
+        if (!gpuProbes.empty())
+        {
+            commandList->UpdateBuffer(m_GIResources.ProbeBuffer.get(), gpuProbes.data(), sizeof(GPUReflectionProbe) * gpuProbes.size());
+        }
+
+        const float probeInfluenceDebug = (m_DebugViewSettings.View == DebugView::ProbeInfluence) ? 1.0f : 0.0f;
+        constants.ProbeParams = {
+            static_cast<float>(gpuProbes.size()),
+            probeInfluenceDebug,
+            m_ReflectionProbeSettings.ParallaxCorrectionEnabled ? 1.0f : 0.0f,
+            m_ReflectionProbeSettings.BlendingEnabled ? 1.0f : 0.0f,
+        };
+        constants.ProbeParams2 = {
+            m_ReflectionProbeSettings.DepthParallaxEnabled ? 1.0f : 0.0f,
+            m_ReflectionProbeSettings.OcclusionEnabled ? 1.0f : 0.0f,
+            static_cast<float>(kProbeCaptureSize),
+            // 焼いた時点の実効プリ露出から現在の実効プリ露出への換算倍率
+            // (ReflectionProbePasses::m_ProbeBakedExposureEV100のコメント参照)。ComputeExposure(ev)=1/(1.2*2^ev)
+            // なので、比は 2^(焼いたEV - 現在のEV) になる。
+            // フルベイクが走るフレームだけは1フレームぶん古い倍率になるが、それが問題になるのは
+            // 「焼き直しと大きな露出変化が同じフレームで起きる」ときだけで、シーン読み込み時は
+            // 上のm_EffectiveExposureInitialized=falseで露出が既に確定しているため起きない
+            std::exp2(m_ReflectionProbePasses->GetProbeBakedExposureEV100() - m_EffectiveExposureEV100),
+        };
+
+        // モーションベクター用の前フレーム情報。初回フレームは前フレームの行列が未定義なので、
+        // 今フレームと同じものを入れて速度を0にしておく。そうしないとゴミの速度が速度バッファへ
+        // 焼き込まれ、画面全体が一度だけゴーストする
+        if (m_TAAPrevViewProjValid)
+        {
+            constants.PrevViewProj = m_TAAPrevViewProj;
+            constants.TAAParams = { frameContext.JitterUv.x, frameContext.JitterUv.y, m_TAAPrevJitterUv.x, m_TAAPrevJitterUv.y };
+        }
+        else
+        {
+            constants.PrevViewProj = constants.ViewProj;
+            constants.TAAParams = { frameContext.JitterUv.x, frameContext.JitterUv.y, frameContext.JitterUv.x, frameContext.JitterUv.y };
+        }
+
+        // DDGI(22章)。一度も焼けていない間はアトラスの中身が未定義なので無効にしておく
+        // (反射プローブの「一度でも焼けたか」と同じ方針)
+        const bool ddgiActive = m_DDGISettings.Enabled && m_GIResources.HasGIVolume && m_DDGIPasses->IsBaked();
+        constants.DDGIParams0 = {
+            m_GIResources.GIVolume.Origin[0], m_GIResources.GIVolume.Origin[1], m_GIResources.GIVolume.Origin[2],
+            ddgiActive ? 1.0f : 0.0f,
+        };
+        constants.DDGIParams1 = {
+            m_GIResources.GIVolume.ProbeSpacing[0], m_GIResources.GIVolume.ProbeSpacing[1], m_GIResources.GIVolume.ProbeSpacing[2],
+            m_GIResources.GIVolume.NormalBias,
+        };
+        constants.DDGIParams2 = {
+            static_cast<float>(m_GIResources.GIVolume.ProbeCounts[0]),
+            static_cast<float>(m_GIResources.GIVolume.ProbeCounts[1]),
+            static_cast<float>(m_GIResources.GIVolume.ProbeCounts[2]),
+            m_GIResources.GIVolume.ViewBias,
+        };
+        constants.DDGIParams3 = {
+            static_cast<float>(kDDGIIrradianceTexels),
+            static_cast<float>(kDDGIDistanceTexels),
+            m_DDGISettings.Intensity,
+            static_cast<float>(kDDGIProbeBorder),
+        };
+        // y = DeferredLightingがDDGIを低解像度パス(DDGIResolve)から引くか。
+        // 【パスが実際に走る条件と一致させること】走らないのに1を渡すと、前フレームの
+        // (あるいは未初期化の)低解像度バッファを読んで間接光が固まる/壊れる。
+        // 条件はDDGIResolveパスの登録側(ddgiResolvePassRuns)と同じものを並べている
+        const bool ddgiHalfResolutionActive =
+            m_DDGISettings.HalfResolution && m_GIResources.DDGIResolveTexture && m_DDGISettings.Enabled && m_GIResources.HasGIVolume && m_DDGIPasses->IsBaked();
+        // プローブ分類のしきい値。裏面の情報を持てるのはレイトレース経路だけなので、
+        // ラスタ経路では分類そのものを無効(0)にして従来どおりの挙動に保つ
+        // (ラスタ経路のαは常に0なのでどのしきい値でも有効側に倒れるが、
+        //  「分類は掛かっていない」ことを値として明示しておく)
+        const float ddgiBackfaceThreshold =
+            (m_DDGISettings.ProbeClassificationEnabled && ShouldRunRaytracedDDGITrace()) ? m_DDGISettings.BackfaceThreshold : 0.0f;
+        constants.DDGIParams4 = {
+            effectiveExposure, ddgiHalfResolutionActive ? 1.0f : 0.0f,
+            static_cast<float>(m_DDGILODCount), ddgiBackfaceThreshold
+        };
+
+        // クリップマップLODの各段の原点と、トロイダルaddressingの基準になる格子座標。
+        // 使わない段も0で埋めておく(未初期化のまま渡すと、段数を増やした瞬間に
+        // ゴミを読んで見当違いの場所からプローブを引く)
+        static_assert(
+            ShaderInterop::kDDGILODCount == kDDGIMaxLODCount,
+            "FrameConstantsのDDGILOD配列の要素数とkDDGIMaxLODCountを一致させること"
+            "(ずれるとcbufferのレイアウトが静かに食い違う)");
+        for (uint32_t lod = 0; lod < kDDGIMaxLODCount; ++lod)
+        {
+            if (m_GIResources.HasGIVolume && lod < m_DDGILODCount)
+            {
+                const DirectX::XMFLOAT3 lodOrigin = ComputeDDGILODOrigin(lod);
+                const DirectX::XMINT3 lodBase = ComputeDDGILODBaseIndex(lod);
+                constants.DDGILODOrigin[lod] = { lodOrigin.x, lodOrigin.y, lodOrigin.z, 0.0f };
+                constants.DDGILODBase[lod] = {
+                    static_cast<float>(lodBase.x), static_cast<float>(lodBase.y),
+                    static_cast<float>(lodBase.z), 0.0f
+                };
+            }
+            else
+            {
+                constants.DDGILODOrigin[lod] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                constants.DDGILODBase[lod] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            }
+        }
+        // 水面。スクロール位相はRenderThreadMainがm_WaterSettings.TimeFrozen/m_WaterSettings.WaveSpeedに
+        // 応じて毎フレーム進める(m_SkySettings.TimeOfDayの自動進行と同じ場所・同じ方式)。
+        // y=波のスケール倍率(m_WaterSettings.WaveScale)、z=波の強さ(m_WaterSettings.WaveStrength、0〜1)を
+        // Water.hlslへ渡す(UIのスライダーが見た目へ反映されるようにするため)
+        constants.TimeParams = { m_WaterScrollOffset, m_WaterSettings.WaveScale, m_WaterSettings.WaveStrength, 0.0f };
+
+        // 雲。DeferredLighting.hlsl(背景)とSSR.hlsl(水面反射)の両方が同じ値を読むため、
+        // ここで一度だけ組み立てる。m_CloudSettings.Enabled=falseのときはCloudParams0.xへ0を渡し、
+        // Sky.hlsli側のSkyColorが早期脱出する経路(判断C)を通す
+        constants.CloudParams0 = {
+            m_CloudSettings.Enabled ? m_CloudSettings.Coverage : 0.0f,
+            m_CloudSettings.Altitude,
+            m_CloudSettings.UvScale,
+            m_CloudSettings.Density,
+        };
+        // wには積雲の厚み[m]を詰めてある(FrameConstantsを増やさずに済ませるため)。
+        // 0ならシェーダー側はレイマーチせず平面として扱う
+        constants.CloudParams1 = {
+            m_CloudScrollOffset.x, m_CloudScrollOffset.y, m_CloudSettings.ForwardG,
+            m_CloudSettings.Volumetric ? m_CloudSettings.Thickness : 0.0f,
+        };
+        // 巻雲。積雲と同じ理由でここで一度だけ組み立てる。m_CloudSettings.CirrusEnabled=falseのときは
+        // CloudParams2.xへ0を渡し、Sky.hlsli側のSkyColorが早期脱出する経路(判断C)を通す
+        constants.CloudParams2 = {
+            m_CloudSettings.CirrusEnabled ? m_CloudSettings.CirrusCoverage : 0.0f,
+            m_CloudSettings.CirrusAltitude,
+            m_CloudSettings.CirrusUvScale,
+            m_CloudSettings.CirrusDensity,
+        };
+        constants.CloudParams3 = { m_CirrusScrollOffset.x, m_CirrusScrollOffset.y, m_CloudSettings.CirrusAnisotropy, m_CloudSettings.TypeBias };
+        // 平面反射(P6)。このフィールドを参照するのはPlanarReflection.hlslだけで、そちらは
+        // 専用のm_PlanarReflectionConstantBufferで明示的に上書きした値を使う
+        // (Passes/ReflectionPassesが持つ)。共有のm_FrameConstantBufferにも一貫した値を入れておく
+        constants.PlanarReflectionPlane = { 0.0f, 1.0f, 0.0f, frameContext.HasWaterInstance ? -frameContext.WaterPlaneY : 0.0f };
+
+        // 大気遠近。AerialPerspective.hlsl/PlanarReflection.hlslの両方が読む。
+        // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、m_FogSettings.Enabledの値に関わらず
+        // 常に無効化する――DDSは任意の絵でPerezモデルとは無関係なため、in-scatter項の
+        // 解析評価(SkyColor)をしてはいけない(SSRパスのwaterAnalyticSkyFlagと同じ判断)
+        const float fogEnabledFlag = (m_FogSettings.Enabled && m_FogSettings.Density > 0.0f && frameContext.UsingProceduralSky) ? 1.0f : 0.0f;
+        constants.FogParams0 = { m_FogSettings.Density, m_FogSettings.ScaleHeight, m_FogSettings.RefHeight, fogEnabledFlag };
+        constants.FogParams1 = { m_FogSettings.MaxOpacity, 0.0f, 0.0f, 0.0f };
+        // 水中項。Water.hlslのPSMainが読む
+        constants.WaterBodyColor = { m_WaterSettings.BodyColor.x, m_WaterSettings.BodyColor.y, m_WaterSettings.BodyColor.z, 0.0f };
+
+        // 星空。
+        // 【昼は強度0にしてしまう】星は太陽が地平線下にあるときしか見えない。ここで0に
+        // 落としておけば、Sky.hlsli側は最初のif文で抜けるので昼のシーンの絵は1画素も動かない
+        // (m_StarsSettings.Enabledを切ったときとまったく同じ経路を通る)。
+        // sunLighting.SunPositionは太陽が「ある」向きなので、yが負なら地平線下。
+        // 仰角0度から-8度にかけて滑らかに立ち上げ、市民薄明のあいだに星が出そろう形にする
+        const float sunElevationSin = sunLighting.SunPosition.y;
+        const float starsNightFactor = std::clamp((-sunElevationSin - 0.005f) * 8.0f, 0.0f, 1.0f);
+        // 手続き空を使わないシーン(DDSスカイボックス指定)ではSkyColorの解析評価自体を
+        // 通らないため、フォグの有効フラグと同じ判断で0にしておく
+        const float starsIntensity =
+            (m_StarsSettings.Enabled && frameContext.UsingProceduralSky) ? (m_StarsSettings.Brightness * starsNightFactor) : 0.0f;
+        // 1画素が張る角度[rad]。射影行列の_22 = 1/tan(fovY/2) から
+        // 画面の高さ全体が 2*tan(fovY/2) なので、1画素あたりはそれを縦解像度で割ればよい。
+        // 解像度やFOVを変えても星の見かけの下限が追従する
+        DirectX::XMFLOAT4X4 projForPixelAngle;
+        DirectX::XMStoreFloat4x4(&projForPixelAngle, frameContext.JitteredProj);
+        const float pixelAngle =
+            (projForPixelAngle._22 > 0.0f && m_RenderHeight > 0)
+                ? (2.0f / (projForPixelAngle._22 * static_cast<float>(m_RenderHeight)))
+                : 0.001f;
+        constants.StarsParams = { starsIntensity, m_StarsSettings.Density, m_StarsSettings.Twinkle, pixelAngle };
+
+        // 積雲のボリュームレイマーチの段数。シェーダー側でも上限へ丸めるが、
+        // 0以下を渡すと「コンパイル時の既定を使う」の意味になってしまうため下限はここで効かせる
+        constants.CloudQualityParams = {
+            static_cast<float>(std::clamp(m_CloudSettings.RaymarchSteps, 1u, kCloudRaymarchStepsMax)),
+            0.0f, 0.0f, 0.0f
+        };
     }
 }

@@ -808,6 +808,18 @@ namespace Kurenai
         void ClampLightsToCapacity(
             std::vector<GPULight>& gpuLights, const DirectX::XMFLOAT3& cameraPosition,
             size_t& bakedLightCount);
+        void ResolveSkyFrameState(
+            const SunLighting& sunLighting, Rendering::RenderFrameContext& frameContext);
+        void ResolveFrameDrawDecisions(Rendering::RenderFrameContext& frameContext);
+        void FillFrameConstants(
+            const FrameState& frameState, RHI::IRHICommandList* commandList,
+            const SunLighting& sunLighting, float effectiveExposure, float manualExposureScale,
+            float keyReferenceEV100, const DirectX::XMFLOAT3& cameraPosition,
+            const float (&cascadeSplits)[kCascadeCount],
+            const DirectX::XMMATRIX (&cascadeViewProj)[kCascadeCount],
+            Rendering::RenderFrameContext& frameContext, std::vector<GPULight>& gpuLights,
+            ShaderInterop::FrameConstants& constants, Passes::LightingConstants& lightingConstants,
+            size_t& bakedLightCount);
 
         void BuildFrameContext(
             const FrameState& frameState, RHI::IRHICommandList* commandList,

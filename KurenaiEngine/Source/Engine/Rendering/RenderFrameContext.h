@@ -185,6 +185,10 @@ namespace Kurenai::Rendering
         DirectX::XMMATRIX ReflectedViewProj{};
 
         // 水面の高さ[m]。鏡映の基準になる平面
+        // 水面インスタンスが1つでもあるか。FrameConstants の PlanarReflectionPlane が
+        // 「平面が有効か」の判定に使う。**WaterPlaneY だけでは区別できない**
+        // (水面が無いシーンでも 0 で計算は通るため)
+        bool HasWaterInstance = false;
         float WaterPlaneY = 0.0f;
 
         // 主カメラの位置とジッタ無しのビュー射影
