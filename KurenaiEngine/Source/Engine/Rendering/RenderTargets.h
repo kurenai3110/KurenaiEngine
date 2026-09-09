@@ -70,7 +70,7 @@ namespace Kurenai::Rendering
         // Tonemapの出力(LDR)。内部レンダー解像度で、超解像の出力とは作り直す契機が違う
         std::unique_ptr<RHI::IRHITexture> TonemapTexture;
         // TAAの履歴2枚。読みながら同じテクスチャへ書けないので毎フレーム役割を入れ替える
-        // (どちらが今フレームの書き込み先かはKurenaiEngine3D::m_TAAHistoryIndexが持つ)
+        // (どちらが今フレームの書き込み先かはKurenaiEngine3D::m_History.HistoryIndexが持つ)
         std::unique_ptr<RHI::IRHITexture> TAAHistory[2];
         // 階層深度。ミップ段数はKurenaiEngine3D側が決めてCreateHiZへ渡す
         std::unique_ptr<RHI::IRHITexture> HiZTexture;

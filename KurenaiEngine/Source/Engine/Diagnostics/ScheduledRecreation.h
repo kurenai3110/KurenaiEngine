@@ -19,7 +19,7 @@ namespace Kurenai
 
     struct ScheduledRecreation
     {
-        uint32_t Frame = 0; // m_TAAFrameIndex がこの値以上になった最初のフレームで発火
+        uint32_t Frame = 0; // m_History.FrameIndex がこの値以上になった最初のフレームで発火
         ScheduledRecreationKind Kind = ScheduledRecreationKind::RenderResolution;
         uint32_t Width = 0; // RenderResolution / UpscaleOutput
         uint32_t Height = 0;

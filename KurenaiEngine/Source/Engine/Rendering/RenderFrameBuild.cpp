@@ -44,7 +44,7 @@ namespace Kurenai
 {
     // フレームのジッターと、カメラ由来の行列を確定させる。
     //
-    // 【最初に呼ぶこと】m_TAAFrameIndex の前進がここの最初の実行文で、
+    // 【最初に呼ぶこと】m_History.FrameIndex の前進がここの最初の実行文で、
     // MegaLights のタイル格子ジッターと TAA のサブピクセルジッターの両方が
     // この番号から導かれる。呼ぶ位置が下がると、両者が別のフレーム番号を見る
     void KurenaiEngine3D::DecideFrameJitterAndCamera(
@@ -54,9 +54,9 @@ namespace Kurenai
         // 投影行列を1ピクセル未満だけずらして、同じ画素が毎フレームわずかに違う位置をサンプルする
         // ようにする。TAAが複数フレームぶんを蓄積することで実質的なスーパーサンプリングになる。
         // TAA無効時はジッターも必ず0にすること(ジッターだけ残ると画面が振動するだけになる)
-        ++m_TAAFrameIndex;
+        ++m_History.FrameIndex;
         // 【前進の直後に載せること】下げると、パス群だけが1つ古い番号を見る
-        frameContext.FrameIndex = m_TAAFrameIndex;
+        frameContext.FrameIndex = m_History.FrameIndex;
 
         // --- MegaLights候補プールのタイル格子ジッター ---
         // 書き手・Initial/Spatial・Presentへ配る値をここで一度だけ決める。
@@ -68,10 +68,10 @@ namespace Kurenai
             // Halton(2,3)を16段階へ量子化する。RadicalInverseは[0,1)だが、丸め誤差でも
             // 16にならないようタイル幅-1で明示的に押さえる
             megaLightsTileOffset.x = std::min<uint32_t>(
-                static_cast<uint32_t>(Rendering::RadicalInverse(m_TAAFrameIndex, 2u) * Passes::kLightTileSize),
+                static_cast<uint32_t>(Rendering::RadicalInverse(m_History.FrameIndex, 2u) * Passes::kLightTileSize),
                 Passes::kLightTileSize - 1u);
             megaLightsTileOffset.y = std::min<uint32_t>(
-                static_cast<uint32_t>(Rendering::RadicalInverse(m_TAAFrameIndex, 3u) * Passes::kLightTileSize),
+                static_cast<uint32_t>(Rendering::RadicalInverse(m_History.FrameIndex, 3u) * Passes::kLightTileSize),
                 Passes::kLightTileSize - 1u);
         }
         frameContext.MegaLightsTileOffset = megaLightsTileOffset;
@@ -87,7 +87,7 @@ namespace Kurenai
         {
             // Halton列の添字は1から始める。添字0はradical inverseの定義上どの基数でも0となり、
             // オフセットがピクセルの角(-0.5, -0.5)へ偏ってしまう
-            const uint32_t haltonIndex = (m_TAAFrameIndex % Rendering::kTAAJitterSampleCount) + 1;
+            const uint32_t haltonIndex = (m_History.FrameIndex % Rendering::kTAAJitterSampleCount) + 1;
             jitterOffsetPixels.x =
                 (Rendering::RadicalInverse(haltonIndex, 2) - 0.5f) * m_Settings.PostProcess.TAAJitterScale;
             jitterOffsetPixels.y =
@@ -904,10 +904,10 @@ namespace Kurenai
         // モーションベクター用の前フレーム情報。初回フレームは前フレームの行列が未定義なので、
         // 今フレームと同じものを入れて速度を0にしておく。そうしないとゴミの速度が速度バッファへ
         // 焼き込まれ、画面全体が一度だけゴーストする
-        if (m_TAAPrevViewProjValid)
+        if (m_History.PrevViewProjValid)
         {
-            constants.PrevViewProj = m_TAAPrevViewProj;
-            constants.TAAParams = { frameContext.JitterUv.x, frameContext.JitterUv.y, m_TAAPrevJitterUv.x, m_TAAPrevJitterUv.y };
+            constants.PrevViewProj = m_History.PrevViewProj;
+            constants.TAAParams = { frameContext.JitterUv.x, frameContext.JitterUv.y, m_History.PrevJitterUv.x, m_History.PrevJitterUv.y };
         }
         else
         {
@@ -1068,7 +1068,7 @@ namespace Kurenai
         // 本物である」ことの両方が要る。どちらかが欠けたフレームでは判定を丸ごと止める ――
         // 初回フレームや解像度変更の直後にここを通すと、未定義の深度で視界内をまとめて消す
         frameContext.OcclusionCullEnabledThisFrame =
-            frameContext.OcclusionCullingActive && m_GeometryPasses->IsHiZValid() && m_TAAPrevViewProjValid;
+            frameContext.OcclusionCullingActive && m_GeometryPasses->IsHiZValid() && m_History.PrevViewProjValid;
 
         // 深度プリパスが走るなら、その深度からHi-Zを作れる。**そのフレームのG-Bufferは
         // 前フレームのHi-Zを待たなくてよい** ―― 上の2条件はどちらも要らなくなる。
@@ -1084,11 +1084,11 @@ namespace Kurenai
         // 保守側(間引きすぎない側)へ倒せる。前フレームが無いフレームでは0でよい
         // (そのフレームは上のフラグで判定自体が止まっている)
         frameContext.CameraMoveDistance = 0.0f;
-        if (m_TAAPrevViewProjValid)
+        if (m_History.PrevViewProjValid)
         {
-            const float dx = cameraPosition.x - m_PrevCameraPosition.x;
-            const float dy = cameraPosition.y - m_PrevCameraPosition.y;
-            const float dz = cameraPosition.z - m_PrevCameraPosition.z;
+            const float dx = cameraPosition.x - m_History.PrevCameraPosition.x;
+            const float dy = cameraPosition.y - m_History.PrevCameraPosition.y;
+            const float dz = cameraPosition.z - m_History.PrevCameraPosition.z;
             frameContext.CameraMoveDistance = std::sqrt(dx * dx + dy * dy + dz * dz);
         }
 
@@ -1243,10 +1243,10 @@ namespace Kurenai
         // 【ここで有効性を解決する】無効なフレームに何を配るかを1箇所で決めておく。
         // 群ごとに判定を書くと、片方だけ条件を変えたときに静かに食い違う
         frameContext.TAAPrevViewProj =
-            m_TAAPrevViewProjValid ? m_TAAPrevViewProj : DirectX::XMFLOAT4X4{};
-        frameContext.TAAPrevJitterUv = m_TAAPrevJitterUv;
-        frameContext.TAAPrevEffectiveExposureEV100 = m_TAAPrevEffectiveExposureEV100;
-        frameContext.TAAHistoryIndex = m_TAAHistoryIndex;
+            m_History.PrevViewProjValid ? m_History.PrevViewProj : DirectX::XMFLOAT4X4{};
+        frameContext.TAAPrevJitterUv = m_History.PrevJitterUv;
+        frameContext.TAAPrevEffectiveExposureEV100 = m_History.PrevEffectiveExposureEV100;
+        frameContext.TAAHistoryIndex = m_History.HistoryIndex;
         frameContext.DeltaTime = m_RenderDeltaTime;
         frameContext.ActiveCloudTransmittance = m_ActiveCloudTransmittance;
         frameContext.RenderWidth = m_RenderWidth;

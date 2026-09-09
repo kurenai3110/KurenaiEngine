@@ -79,7 +79,7 @@ namespace Kurenai
 
         // ここでは要求だけを積み、実際の作り直しは従来どおり後段のUpdateSceneStreamingと
         // バッファ精度/解像度の作り直しブロックへ集約する。作り直しの契機を散らさないためこの位置に置く。
-        m_Recreations.Apply(*this, m_TAAFrameIndex);
+        m_Recreations.Apply(*this, m_History.FrameIndex);
 
         // Loaderスレッドが出来上がったシーンを置いていれば取り込み、保留中の切り替え要求があれば発注する。
         // 旧シーンの破棄(WaitForGPUIdleを伴う)もここで行うため、このフレームのGPUコマンドを
@@ -525,17 +525,17 @@ namespace Kurenai
         // --- 次フレームがこのフレームを「前フレーム」として参照するための状態を確定させる ---
         // 早期returnより後のここで行うことで、描画を行わなかったフレームでは前フレームの状態が
         // そのまま保たれ、履歴テクスチャの中身と行列の対応が1フレームずれない
-        m_TAAPrevViewProj = constants.ViewProj;
-        m_TAAPrevJitterUv = jitterUv;
+        m_History.PrevViewProj = constants.ViewProj;
+        m_History.PrevJitterUv = jitterUv;
         // Hi-Zオクルージョンカリングが「1フレームぶんの視差ずれ」を見積もるのに使う。
-        // m_TAAPrevViewProjと同じ場所・同じタイミングで書くので有効性の管理も同じで済む
-        m_PrevCameraPosition = { constants.CameraPosition.x, constants.CameraPosition.y, constants.CameraPosition.z };
-        m_TAAPrevViewProjValid = true;
+        // m_History.PrevViewProjと同じ場所・同じタイミングで書くので有効性の管理も同じで済む
+        m_History.PrevCameraPosition = { constants.CameraPosition.x, constants.CameraPosition.y, constants.CameraPosition.z };
+        m_History.PrevViewProjValid = true;
     }
 
     void KurenaiEngine3D::AdvanceFrameHistory()
     {
-        m_TAAPrevEffectiveExposureEV100 = m_EffectiveExposureEV100;
+        m_History.PrevEffectiveExposureEV100 = m_EffectiveExposureEV100;
 
         // MegaLightsの時間再利用も同じ場所でping-pongを反転する。
         // 今フレームの書き込み先が、次フレームでは履歴(読み込み元)になる
@@ -569,13 +569,13 @@ namespace Kurenai
         if (m_Settings.PostProcess.TAAEnabled)
         {
             // 今フレームの書き込み先が、次フレームでは履歴(読み込み元)になる
-            m_TAAHistoryIndex ^= 1u;
-            m_TAAHistoryValid.store(true, std::memory_order_relaxed);
+            m_History.HistoryIndex ^= 1u;
+            m_History.HistoryValid.store(true, std::memory_order_relaxed);
         }
         else
         {
             // 無効の間は履歴を更新していないので、再度有効化されたときに古い絵が混ざらないよう落としておく
-            m_TAAHistoryValid.store(false, std::memory_order_relaxed);
+            m_History.HistoryValid.store(false, std::memory_order_relaxed);
         }
     }
 }

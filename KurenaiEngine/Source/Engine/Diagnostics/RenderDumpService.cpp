@@ -88,10 +88,10 @@ namespace Kurenai
             { "UpscaleTexture", m_RenderTargets.UpscaleTexture.get() },
             { "UpscaleSharpTexture", m_RenderTargets.UpscaleSharpTexture.get() },
             { "ExposureTexture", m_RenderTargets.ExposureTexture.get() },
-            // TAAの履歴。今フレームの書き込み先が m_TAAHistoryIndex なので、
+            // TAAの履歴。今フレームの書き込み先が m_History.HistoryIndex なので、
             // 「前フレームの履歴」を見たいときは Prev のほうを指定する
-            { "TAAHistory", m_RenderTargets.TAAHistory[m_TAAHistoryIndex].get() },
-            { "TAAHistoryPrev", m_RenderTargets.TAAHistory[m_TAAHistoryIndex ^ 1u].get() },
+            { "TAAHistory", m_RenderTargets.TAAHistory[m_History.HistoryIndex].get() },
+            { "TAAHistoryPrev", m_RenderTargets.TAAHistory[m_History.HistoryIndex ^ 1u].get() },
             // 自前ソフトウェアラスタライザ
             { "SoftwareRasterColor", m_RenderTargets.SoftwareRasterColor.get() },
             { "SoftwareRasterDepth", m_RenderTargets.SoftwareRasterDepth.get() },
@@ -118,17 +118,17 @@ namespace Kurenai
 
     void KurenaiEngine3D::IssueTextureDumps(Core::RenderGraph& graph)
     {
-        m_DumpService.IssueTextureDumps(graph, BuildDumpableTextureTable(), m_TAAFrameIndex, *m_Device);
+        m_DumpService.IssueTextureDumps(graph, BuildDumpableTextureTable(), m_History.FrameIndex, *m_Device);
     }
 
     void KurenaiEngine3D::ResolveTextureDumps()
     {
         m_DumpService.ResolveTextureDumps(
-            m_TAAFrameIndex, m_Window.get(), m_GraphicsAPI == GraphicsAPI::DX12);
+            m_History.FrameIndex, m_Window.get(), m_GraphicsAPI == GraphicsAPI::DX12);
     }
 
     void KurenaiEngine3D::WritePassManifestIfDue(Core::RenderGraph& graph)
     {
-        m_DumpService.WritePassManifestIfDue(graph, m_TAAFrameIndex, m_GraphicsAPI == GraphicsAPI::DX12);
+        m_DumpService.WritePassManifestIfDue(graph, m_History.FrameIndex, m_GraphicsAPI == GraphicsAPI::DX12);
     }
 }

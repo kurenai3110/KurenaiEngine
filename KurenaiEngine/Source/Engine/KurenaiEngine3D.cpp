@@ -1695,7 +1695,7 @@ namespace Kurenai
         {
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                "MegaLightsのタイル格子ジッター: 有効 (m_TAAFrameIndexのHalton(2,3)を16段階へ量子化)");
+                "MegaLightsのタイル格子ジッター: 有効 (m_History.FrameIndexのHalton(2,3)を16段階へ量子化)");
         }
         else if (m_Settings.MegaLights.TileJitterMode == 2)
         {
@@ -2099,7 +2099,7 @@ namespace Kurenai
 
             m_RenderTargets.CreateGBufferBentNormal(*m_Device, width, height);
 
-            // m_TAAHistoryIndexが今フレームの書き込み先。
+            // m_History.HistoryIndexが今フレームの書き込み先。
             m_RenderTargets.CreateTAAHistory(*m_Device, width, height);
 
             const uint32_t hiZMipLevels = ComputeMipLevelCount(width, height);
@@ -2225,8 +2225,8 @@ namespace Kurenai
         // 履歴バッファを作り直した直後は中身が未定義なので、TAAへ「今フレームは履歴を使うな」と伝える。
         // fp16の未初期化領域はNaNのことがあり、lerp(NaN, x, 1.0)もNaNになるため、
         // ブレンド率を0にするだけでは足りず「サンプルそのものを行わない」必要がある(TAA.hlsl参照)
-        m_TAAHistoryValid = false;
-        m_TAAHistoryIndex = 0;
+        m_History.HistoryValid = false;
+        m_History.HistoryIndex = 0;
 
         // ポインタが作り直されたので、グラフィックスデバッガ向けの名前を焼き直す
         m_DumpService.MarkDebugNamesDirty();
