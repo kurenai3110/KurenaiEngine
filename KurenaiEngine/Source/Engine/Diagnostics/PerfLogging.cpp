@@ -187,9 +187,9 @@ namespace Kurenai
                 streamText, sizeof(streamText),
                 "  ストリーミング: 常駐 %u / 範囲内 %u (距離 %.0fm) / 読み込み累計 %llu件 / 破棄累計 %llu件"
                 " / RT再構築 %llu回(直近 %.1fms)",
-                m_StreamingResidentCount, m_StreamingTargetCount, m_Scene.StreamingDistance,
-                static_cast<unsigned long long>(m_StreamingLoadedTotal),
-                static_cast<unsigned long long>(m_StreamingEvictedTotal),
+                m_Streaming.ResidentCount, m_Streaming.TargetCount, m_Scene.StreamingDistance,
+                static_cast<unsigned long long>(m_Streaming.LoadedTotal),
+                static_cast<unsigned long long>(m_Streaming.EvictedTotal),
                 static_cast<unsigned long long>(m_RaytracingRebuildCount), m_RaytracingRebuildLastMs);
             Core::Logger::Info("Perf", streamText);
         }

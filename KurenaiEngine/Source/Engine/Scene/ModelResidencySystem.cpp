@@ -401,10 +401,10 @@ namespace Kurenai
                 rebuilt = std::move(m_RaytracingRebuilt);
                 generation = m_RaytracingRebuiltGeneration;
             }
-            if (rebuilt && generation == m_StreamingGeneration)
+            if (rebuilt && generation == m_Streaming.Generation)
             {
                 auto retired = std::make_unique<Assets::RaytracingScene>(std::move(m_SceneGPUResources.RaytracingScene));
-                m_RaytracingPendingRelease.push_back({ std::move(retired), kStreamingReleaseDelayFrames });
+                m_RaytracingPendingRelease.push_back({ std::move(retired), Scene::ModelStreamingState::kReleaseDelayFrames });
                 m_SceneGPUResources.RaytracingScene = std::move(*rebuilt);
                 ++m_RaytracingRebuildCount;
             }
@@ -462,16 +462,16 @@ namespace Kurenai
 
     void KurenaiEngine3D::UpdateModelStreaming(const DirectX::XMFLOAT3& cameraPosition)
     {
-        m_StreamingResidentCount = 0;
-        m_StreamingTargetCount = 0;
+        m_Streaming.ResidentCount = 0;
+        m_Streaming.TargetCount = 0;
 
         // 破棄待ちを1フレーム進める。0になったものだけLoaderスレッドへ渡す。
         // 【ストリーミングを使わないシーンでも回す】シーンを切り替えた直後に、
         // 前のシーンで積んだ分が残っていることがある
-        if (!m_StreamingPendingRelease.empty())
+        if (!m_Streaming.PendingRelease.empty())
         {
             std::vector<std::shared_ptr<Assets::Model>> ready;
-            for (PendingModelRelease& pending : m_StreamingPendingRelease)
+            for (Scene::ModelStreamingState::PendingModelRelease& pending : m_Streaming.PendingRelease)
             {
                 if (pending.FramesRemaining > 0)
                 {
@@ -487,19 +487,19 @@ namespace Kurenai
                 }
                 ready.push_back(std::move(pending.Model));
             }
-            m_StreamingPendingRelease.erase(
+            m_Streaming.PendingRelease.erase(
                 std::remove_if(
-                    m_StreamingPendingRelease.begin(), m_StreamingPendingRelease.end(),
-                    [](const PendingModelRelease& pending) { return !pending.Model; }),
-                m_StreamingPendingRelease.end());
+                    m_Streaming.PendingRelease.begin(), m_Streaming.PendingRelease.end(),
+                    [](const Scene::ModelStreamingState::PendingModelRelease& pending) { return !pending.Model; }),
+                m_Streaming.PendingRelease.end());
 
             if (!ready.empty())
             {
                 {
-                    std::lock_guard<std::mutex> lock(m_StreamingReleaseMutex);
+                    std::lock_guard<std::mutex> lock(m_Streaming.ReleaseMutex);
                     for (std::shared_ptr<Assets::Model>& model : ready)
                     {
-                        m_StreamingRelease.push_back(std::move(model));
+                        m_Streaming.Release.push_back(std::move(model));
                     }
                 }
                 // Loaderスレッドが寝ていると破棄が溜まり続けるので起こす
@@ -514,31 +514,31 @@ namespace Kurenai
 
         // --- Loaderスレッドが仕上げたものを取り込む -----------------------------------------
         {
-            std::vector<StreamingLoaded> loaded;
+            std::vector<Scene::ModelStreamingState::StreamingLoaded> loaded;
             {
-                std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
-                loaded.swap(m_StreamingLoaded);
+                std::lock_guard<std::mutex> lock(m_Streaming.LoadedMutex);
+                loaded.swap(m_Streaming.Loaded);
             }
             // 再構築中はLoaderスレッドが m_Scene を走査しているので差し込まない
             if (m_RaytracingRebuildInFlight.load(std::memory_order_acquire))
             {
-                std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
-                for (StreamingLoaded& item : loaded)
+                std::lock_guard<std::mutex> lock(m_Streaming.LoadedMutex);
+                for (Scene::ModelStreamingState::StreamingLoaded& item : loaded)
                 {
-                    m_StreamingLoaded.push_back(std::move(item));
+                    m_Streaming.Loaded.push_back(std::move(item));
                 }
                 loaded.clear();
             }
 
-            for (StreamingLoaded& item : loaded)
+            for (Scene::ModelStreamingState::StreamingLoaded& item : loaded)
             {
-                m_StreamingInFlight.erase(item.Path);
+                m_Streaming.InFlight.erase(item.Path);
                 // 【古い世代は捨てる】シーンを切り替えた後に前のシーンのモデルが届くことがある
-                if (item.Generation != m_StreamingGeneration || !item.Model)
+                if (item.Generation != m_Streaming.Generation || !item.Model)
                 {
                     continue;
                 }
-                ++m_StreamingLoadedTotal;
+                ++m_Streaming.LoadedTotal;
                 RequestRaytracingRebuild();
                 // 同じパスを指すすべての段へ差し込む(モデル共有。2-1と同じ考え方)
                 auto shared = std::shared_ptr<const Assets::Model>(item.Model);
@@ -612,7 +612,7 @@ namespace Kurenai
             const size_t levelIndex = (level < instance.ModelPaths.size()) ? level : 0u;
             instance.Residency =
                 instance.IsLODLoaded(levelIndex)                             ? Assets::ResidencyState::Loaded
-                : (m_StreamingInFlight.count(instance.ModelPaths[levelIndex]) != 0)
+                : (m_Streaming.InFlight.count(instance.ModelPaths[levelIndex]) != 0)
                                                                             ? Assets::ResidencyState::Loading
                                                                             : Assets::ResidencyState::Unloaded;
 
@@ -638,16 +638,16 @@ namespace Kurenai
             {
                 continue;
             }
-            ++m_StreamingTargetCount;
+            ++m_Streaming.TargetCount;
 
             if (instance.IsLODLoaded(levelIndex))
             {
-                ++m_StreamingResidentCount;
+                ++m_Streaming.ResidentCount;
                 continue;
             }
 
             const std::wstring& path = instance.ModelPaths[levelIndex];
-            if (m_StreamingInFlight.count(path) != 0)
+            if (m_Streaming.InFlight.count(path) != 0)
             {
                 continue;
             }
@@ -702,10 +702,10 @@ namespace Kurenai
                 // 発注済みのものは破棄待ちの側(IsModelBusy)で待つ
                 m_TextureStreaming.DetachModel(*cached->second);
                 // 実体はここで消さず、GPUが読み終わるまで寝かせる
-                m_StreamingPendingRelease.push_back(
-                    { std::move(cached->second), kStreamingReleaseDelayFrames });
+                m_Streaming.PendingRelease.push_back(
+                    { std::move(cached->second), Scene::ModelStreamingState::kReleaseDelayFrames });
                 m_Scene.ModelCache.erase(cached);
-                ++m_StreamingEvictedTotal;
+                ++m_Streaming.EvictedTotal;
                 RequestRaytracingRebuild();
             }
         }
@@ -728,8 +728,8 @@ namespace Kurenai
             std::lock_guard<std::mutex> lock(m_LoadRequestMutex);
             for (size_t i = 0; i < requestCount; ++i)
             {
-                m_StreamingRequests.push_back({ *candidates[i].Path, m_StreamingGeneration });
-                m_StreamingInFlight.insert(*candidates[i].Path);
+                m_Streaming.Requests.push_back({ *candidates[i].Path, m_Streaming.Generation });
+                m_Streaming.InFlight.insert(*candidates[i].Path);
             }
         }
         m_LoadRequestCV.notify_one();

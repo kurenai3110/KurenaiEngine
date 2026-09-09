@@ -199,14 +199,14 @@ namespace Kurenai
         };
 
         // ストリーミングで遠ざかったモデルの破棄。Renderスレッドが
-        // kStreamingReleaseDelayFrames フレーム寝かせたものだけがここへ来る
+        // Scene::ModelStreamingState::kReleaseDelayFrames フレーム寝かせたものだけがここへ来る
         // (RetiredAssetsと違いWaitForGPUIdleは通っていない。遅延がその代わり)
         const auto destroyStreamedModels = [this]()
         {
             std::vector<std::shared_ptr<Assets::Model>> release;
             {
-                std::lock_guard<std::mutex> lock(m_StreamingReleaseMutex);
-                release.swap(m_StreamingRelease);
+                std::lock_guard<std::mutex> lock(m_Streaming.ReleaseMutex);
+                release.swap(m_Streaming.Release);
             }
             // releaseのデストラクタでGPUリソースが解放される
 
@@ -222,12 +222,12 @@ namespace Kurenai
         for (;;)
         {
             int sceneIndex = -1;
-            std::vector<StreamingRequest> streamingRequests;
+            std::vector<Scene::ModelStreamingState::StreamingRequest> streamingRequests;
             bool raytracingRebuild = false;
             {
                 std::unique_lock<std::mutex> lock(m_LoadRequestMutex);
                 m_LoadRequestCV.wait(lock, [this] {
-                    if (m_LoadRequestSceneIndex >= 0 || !m_StreamingRequests.empty() ||
+                    if (m_LoadRequestSceneIndex >= 0 || !m_Streaming.Requests.empty() ||
                         m_RaytracingRebuildRequested || m_StopLoaderThread)
                     {
                         return true;
@@ -241,8 +241,8 @@ namespace Kurenai
                     // 破棄だけが積まれている場合も起きる(読み込みが止まっている間に
                     // 破棄が溜まり続けると、遠ざかったモデルのVRAMが解放されない)
                     {
-                        std::lock_guard<std::mutex> releaseLock(m_StreamingReleaseMutex);
-                        if (!m_StreamingRelease.empty()) { return true; }
+                        std::lock_guard<std::mutex> releaseLock(m_Streaming.ReleaseMutex);
+                        if (!m_Streaming.Release.empty()) { return true; }
                     }
                     std::lock_guard<std::mutex> rtLock(m_RaytracingReleaseMutex);
                     return !m_RaytracingRelease.empty();
@@ -257,7 +257,7 @@ namespace Kurenai
                 // それらは切り替え前のシーンのもので、読んでも差し込む先が無い
                 if (sceneIndex >= 0)
                 {
-                    m_StreamingRequests.clear();
+                    m_Streaming.Requests.clear();
                     // 切り替え前のシーンへの再構築要求は無意味。
                     // 【フラグを降ろすのを忘れない】立てたままだとRenderスレッドの
                     // 差し込みと破棄が永久に止まる
@@ -266,7 +266,7 @@ namespace Kurenai
                 }
                 else
                 {
-                    streamingRequests.swap(m_StreamingRequests);
+                    streamingRequests.swap(m_Streaming.Requests);
                     raytracingRebuild = m_RaytracingRebuildRequested;
                     m_RaytracingRebuildRequested = false;
                 }
@@ -286,17 +286,17 @@ namespace Kurenai
             // --- ストリーミングの読み込み ---------------------------------------------------
             if (!streamingRequests.empty())
             {
-                if (!m_StreamingTexturePool)
+                if (!m_Streaming.TexturePool)
                 {
-                    m_StreamingTexturePool = std::make_unique<Assets::SharedTexturePool>();
+                    m_Streaming.TexturePool = std::make_unique<Assets::SharedTexturePool>();
                 }
-                for (const StreamingRequest& request : streamingRequests)
+                for (const Scene::ModelStreamingState::StreamingRequest& request : streamingRequests)
                 {
                     std::shared_ptr<Assets::Model> model;
                     try
                     {
                         model = std::make_shared<Assets::Model>(
-                            Assets::LoadModel(*m_Device, request.Path, m_StreamingTexturePool.get()));
+                            Assets::LoadModel(*m_Device, request.Path, m_Streaming.TexturePool.get()));
                     }
                     catch (const std::exception& error)
                     {
@@ -307,10 +307,10 @@ namespace Kurenai
                                 error.what() + ")");
                     }
                     {
-                        std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
+                        std::lock_guard<std::mutex> lock(m_Streaming.LoadedMutex);
                         // 失敗しても空のまま返す。Renderスレッドが「発注中」から外せないと
                         // 同じものを永久に再発注し続ける
-                        m_StreamingLoaded.push_back({ request.Path, std::move(model), request.Generation });
+                        m_Streaming.Loaded.push_back({ request.Path, std::move(model), request.Generation });
                     }
                     // 1件読むごとにミップの差し替えを挟む(このループの外のコメント参照)
                     m_TextureStreaming.ProcessRequests(*m_Device, kTextureRequestsPerSlice);
@@ -343,7 +343,7 @@ namespace Kurenai
                     std::lock_guard<std::mutex> lock(m_RaytracingRebuiltMutex);
                     m_RaytracingRebuildLastMs = elapsedMs;
                     m_RaytracingRebuilt = std::move(rebuilt);
-                    m_RaytracingRebuiltGeneration = m_StreamingGeneration;
+                    m_RaytracingRebuiltGeneration = m_Streaming.Generation;
                 }
                 // 【成否にかかわらず必ず降ろす】
                 m_RaytracingRebuildInFlight.store(false, std::memory_order_release);
@@ -387,7 +387,7 @@ namespace Kurenai
 
         // ストリーミング用の共有テクスチャも、確保したのと同じLoaderスレッドで解放する
         // (アセット用ディスクリプタヒープはロックを持たない。RetiredAssetsのコメント参照)
-        m_StreamingTexturePool.reset();
+        m_Streaming.TexturePool.reset();
 
         if (SUCCEEDED(comResult))
         {
@@ -570,8 +570,8 @@ namespace Kurenai
 
         // ストリーミングの状態もシーンに紐づく。世代を進めることで、切り替え前に発注して
         // まだ届いていない完成品を確実に捨てる(そのまま差し込むと別シーンのモデルが混ざる)
-        ++m_StreamingGeneration;
-        m_StreamingInFlight.clear();
+        ++m_Streaming.Generation;
+        m_Streaming.InFlight.clear();
         m_RaytracingRebuildPending = false;
         {
             // 【ここでresetしてはいけない】Renderスレッドでの解放になる。
@@ -588,8 +588,8 @@ namespace Kurenai
             }
         }
         {
-            std::lock_guard<std::mutex> lock(m_StreamingLoadedMutex);
-            m_StreamingLoaded.clear();
+            std::lock_guard<std::mutex> lock(m_Streaming.LoadedMutex);
+            m_Streaming.Loaded.clear();
         }
 
         // モデルLODの状態はシーンに紐づくので必ず捨てる。
