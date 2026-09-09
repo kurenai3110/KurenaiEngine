@@ -28,6 +28,18 @@
 #ifndef KURENAI_SAMPLERS_HLSLI
 #define KURENAI_SAMPLERS_HLSLI
 
+// このヘッダーが宣言している役割の数。エンジンが1回でバインドするテーブルの幅でもある。
+//
+// 【下の SamplerState の宣言本数と一致させること】ここが実際の宣言数より小さいと、
+// CreateSamplerSet が超過分を**切り捨てて**しまい、DX11は正しく動くのにDX12でだけ
+// サンプラーが既定のものに差し替わる、という片側だけ静かに壊れる形になる。
+//
+// 【機械で守れるのはC++側との一致だけ】ファイル末尾の #if が突き合わせるのは
+// この #define と Source/Library/RHI/RHIBindingLimits.h の kSamplerSlotCount であって、
+// **下の宣言を数えているわけではない。** s4 を足してこの値を5にしなければ素通りする。
+// 正規表現でHLSLを読んで宣言を数える案は、条件付きコンパイルを取りこぼすので採っていない
+#define KURENAI_SAMPLER_SLOT_COUNT 4
+
 // タイリングするマテリアルテクスチャ用。UVが[0,1]の外へ出ることを前提とした繰り返しと、
 // 浅い角度で見る床・路面のボケを抑える異方性フィルタリングが要る。
 // キューブマップ(スカイボックス・IBL)もここを使う。TextureCubeはハードウェアが面をまたいで
@@ -73,5 +85,11 @@ SamplerState DataSampler : register(s2);
 // 異方性フィルタではなくLinearなのは、ボリュームをレイマーチで等方的に刻んで引くため
 // 画面空間の勾配に沿った異方性が意味を持たないから(かつ3Dの異方性フィルタは高価)
 SamplerState VolumeSampler : register(s3);
+
+// --- C++側(RHI/RHIBindingLimits.h)との突き合わせ。パッカー経由のときだけ有効になる ---
+// -D が来ない経路(shader-check スキルが fxc/dxc を直接叩く場合)では丸ごと飛ぶ
+#if defined(KURENAI_EXPECT_SAMPLER_SLOT_COUNT) && (KURENAI_SAMPLER_SLOT_COUNT != KURENAI_EXPECT_SAMPLER_SLOT_COUNT)
+#error "KURENAI_SAMPLER_SLOT_COUNT が Source/Library/RHI/RHIBindingLimits.h と食い違っている"
+#endif
 
 #endif // KURENAI_SAMPLERS_HLSLI

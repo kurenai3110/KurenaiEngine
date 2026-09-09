@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "Assets/ModelPackage.h"
+
 // スレッドグループのサイズ。**C++側ではここが唯一の定義。**
 //
 // 以前は KurenaiEngine3D.cpp の中に「GBufferMeshlet.hlslと一致させること」という
@@ -21,6 +23,24 @@ namespace Kurenai::ShaderInterop
     // C++側は「モデル全体のメッシュレット数 ÷ これ」を起動グループ数にする。
     // GroupSizes.hlsli の KURENAI_AMPLIFICATION_GROUP_SIZE と一致させること
     constexpr uint32_t kAmplificationGroupSize = 32;
+
+    // メッシュシェーダーの1グループのスレッド数。1スレッドが頂点1つと三角形1つを担当する。
+    //
+    // 【C++はこの値でディスパッチしない】numthreads の値であって、起動グループ数の
+    // 割り算には使わない。それでもここに置くのは、下の static_assert で
+    // 「メッシュレットの上限以上あること」を機械で守るため。
+    // GroupSizes.hlsli の KURENAI_MESH_GROUP_SIZE と一致させること
+    constexpr uint32_t kMeshGroupSize = 128;
+
+    // 1スレッドが頂点1つと三角形1つを担当するので、メッシュレットの上限より小さいと
+    // 頂点か三角形が出力されないまま欠ける。**絵には「一部の面が消える」形でしか出ない**
+    static_assert(kMeshGroupSize >= Assets::kMeshletMaxVertices, "メッシュグループが頂点の上限に足りない");
+    static_assert(kMeshGroupSize >= Assets::kMeshletMaxTriangles, "メッシュグループが三角形の上限に足りない");
+
+    // ソフトウェアラスタライザ(SoftwareRaster.hlsl)の1グループのスレッド数。
+    // C++側が「三角形数 ÷ これ」でディスパッチする(GeometryPasses.cpp)。
+    // SoftwareRaster.hlsl の KURENAI_SWRASTER_GROUP_SIZE と一致させること
+    constexpr uint32_t kSWRasterGroupSize = 64;
 
     // モデル単位のカリング(ModelCull.hlsl)の1グループのスレッド数。
     // GroupSizes.hlsli の KURENAI_MODEL_CULL_GROUP_SIZE と一致させること

@@ -6,6 +6,7 @@
 #include <DirectXMath.h>
 
 #include "RHI/IRHIBuffer.h"
+#include "ShaderInterop/GroupSizes.h"
 #include "RHI/IRHICommandList.h"
 
 // Hi-Z とモデル単位GPUカリングの、C++側の cbuffer の写しと候補レコード(段階6)。
@@ -147,8 +148,9 @@ namespace Kurenai::Passes
         // 1フレームに扱えるメッシュレコード数の上限。Bistro Exteriorで約400
         inline constexpr uint32_t kSWRasterMaxMeshes = 2048;
         // CSRasterの1グループのスレッド数。SoftwareRaster.hlslの
-        // KURENAI_SWRASTER_GROUP_SIZEと一致させること
-        inline constexpr uint32_t kSWRasterGroupSize = 64;
+        // 【定義は ShaderInterop/GroupSizes.h】ここはその別名。
+        // HLSL側との一致はパッカーの -D と #error が機械で守る
+        inline constexpr uint32_t kSWRasterGroupSize = ShaderInterop::kSWRasterGroupSize;
         // Dispatchの1次元あたりの上限(65535)に収めるための2D分解の刻み
         inline constexpr uint32_t kSWRasterMaxGroupsPerAxis = 32768;
         // 自前ソフトウェアラスタライザ用。Shaders/3D/SoftwareRasterCommon.hlsliの

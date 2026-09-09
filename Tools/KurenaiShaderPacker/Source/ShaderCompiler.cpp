@@ -1,5 +1,6 @@
 #include "ShaderCompiler.h"
 #include "ShaderInterop/GroupSizes.h"
+#include "RHI/RHIBindingLimits.h"
 
 #include <d3dcompiler.h>
 #include <dxcapi.h>
@@ -13,7 +14,7 @@
 
 using Microsoft::WRL::ComPtr;
 
-// C++側(KurenaiEngine/Source/Engine/ShaderInterop/GroupSizes.h)が持つ値を、
+// C++側が持つ値を、
 // KURENAI_EXPECT_* として HLSL へ渡す。受け取った GroupSizes.hlsli は自分の #define と
 // 突き合わせ、食い違っていれば #error でこのコンパイルを落とす。
 //
@@ -21,21 +22,25 @@ using Microsoft::WRL::ComPtr;
 // fxc/dxc を直接叩く場合)でも HLSL 単体でコンパイルできる必要があるため。
 // 実数値は両方に置いたまま、一致だけを機械で確かめる。
 //
-// 【ここへ足すときは3箇所そろえる】GroupSizes.h の定数・GroupSizes.hlsli の #define と #if・
-// この表。1つでも欠けると、その値は黙って照合されなくなる
+// 【ここへ足すときは3箇所そろえる】C++側の定数・HLSL側の #define と #if・この表。
+// 1つでも欠けると、その値は黙って照合されなくなる。
+// 出所はグループサイズが ShaderInterop/GroupSizes.h、スロット数が RHI/RHIBindingLimits.h
 namespace
 {
-    struct GroupSizeExpectation
+    struct ShaderConstantExpectation
     {
         const wchar_t* Name;
         uint32_t Value;
     };
 
-    const GroupSizeExpectation kGroupSizeExpectations[] = {
+    const ShaderConstantExpectation kShaderConstantExpectations[] = {
         { L"KURENAI_EXPECT_AMPLIFICATION_GROUP_SIZE",   Kurenai::ShaderInterop::kAmplificationGroupSize },
         { L"KURENAI_EXPECT_MODEL_CULL_GROUP_SIZE",      Kurenai::ShaderInterop::kModelCullGroupSize },
         { L"KURENAI_EXPECT_SWRASTER_RESOLVE_GROUP_SIZE", Kurenai::ShaderInterop::kSWRasterResolveGroupSize },
         { L"KURENAI_EXPECT_INDIRECT_ARG_STRIDE",        Kurenai::ShaderInterop::kDispatchMeshIndirectArgStride },
+        { L"KURENAI_EXPECT_MESH_GROUP_SIZE",           Kurenai::ShaderInterop::kMeshGroupSize },
+        { L"KURENAI_EXPECT_SWRASTER_GROUP_SIZE",       Kurenai::ShaderInterop::kSWRasterGroupSize },
+        { L"KURENAI_EXPECT_SAMPLER_SLOT_COUNT",        Kurenai::RHI::RHIBindingLimits::kSamplerSlotCount },
     };
 }
 namespace Kurenai::ShaderPacker
@@ -336,14 +341,14 @@ namespace Kurenai::ShaderPacker
         // スレッドグループサイズの突き合わせ用。値そのものは HLSL 側にもあり、
         // ここで渡すのは「C++側はこう思っている」という期待値だけ(上の表のコメント参照)
         std::vector<std::wstring> expectationValues;
-        expectationValues.reserve(std::size(kGroupSizeExpectations));
-        for (const GroupSizeExpectation& expectation : kGroupSizeExpectations)
+        expectationValues.reserve(std::size(kShaderConstantExpectations));
+        for (const ShaderConstantExpectation& expectation : kShaderConstantExpectations)
         {
             expectationValues.push_back(std::to_wstring(expectation.Value));
         }
-        for (size_t i = 0; i < std::size(kGroupSizeExpectations); ++i)
+        for (size_t i = 0; i < std::size(kShaderConstantExpectations); ++i)
         {
-            defines.push_back(DxcDefine{ kGroupSizeExpectations[i].Name, expectationValues[i].c_str() });
+            defines.push_back(DxcDefine{ kShaderConstantExpectations[i].Name, expectationValues[i].c_str() });
         }
 
         ComPtr<IDxcOperationResult> operationResult;
@@ -431,9 +436,9 @@ namespace Kurenai::ShaderPacker
         // D3D_SHADER_MACRO は UTF-8 の char* なので、ワイド文字の名前を変換して持ち替える
         std::vector<std::string> macroNames;
         std::vector<std::string> macroValues;
-        macroNames.reserve(std::size(kGroupSizeExpectations));
-        macroValues.reserve(std::size(kGroupSizeExpectations));
-        for (const GroupSizeExpectation& expectation : kGroupSizeExpectations)
+        macroNames.reserve(std::size(kShaderConstantExpectations));
+        macroValues.reserve(std::size(kShaderConstantExpectations));
+        for (const ShaderConstantExpectation& expectation : kShaderConstantExpectations)
         {
             macroNames.push_back(Core::WideToUtf8(expectation.Name));
             macroValues.push_back(std::to_string(expectation.Value));
