@@ -1,7 +1,6 @@
 // スレッドグループのサイズと、間接引数の刻み。**HLSL側ではここが唯一の定義。**
 //
-// 以前は GBufferMeshlet.hlsl と ShadowMeshlet.hlsl が増幅32・メッシュ128を
-// それぞれ #define しており、片方だけ直すと静かに食い違う状態だった。
+// 別々に #define していた頃の経緯は docs/ImplementationHistory.md 84章。
 //
 // 【C++側は Source/Engine/ShaderInterop/GroupSizes.h が持ち、一致は機械で確かめる】
 // KurenaiShaderPacker が C++ 側の値を KURENAI_EXPECT_* として -D で渡してくるので、

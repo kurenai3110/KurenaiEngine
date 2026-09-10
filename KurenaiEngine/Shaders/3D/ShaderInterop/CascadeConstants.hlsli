@@ -1,5 +1,5 @@
 // シャドウパスの各カスケード描画専用の定数バッファ。**唯一の宣言。**
-// 以前は Shadow.hlsl と ShadowMeshlet.hlsl が別々に宣言していた。
+// 別々に宣言していた頃の経緯は docs/ImplementationHistory.md 83章。
 // 各フィールドの意味は Source/Engine/ShaderInterop/CascadeConstants.h にある
 
 #ifndef KURENAI_SHADERINTEROP_CASCADECONSTANTS_HLSLI

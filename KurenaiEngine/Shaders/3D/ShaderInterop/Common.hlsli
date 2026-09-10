@@ -1,8 +1,7 @@
 // FrameConstants を読む小さな共有ヘルパ。**それぞれこのリポジトリで唯一の定義。**
 //
-// 以前は ReconstructWorldPos が 19 本のシェーダーに同じ式で書かれていた。式そのものは
-// 短いが、19 本のうち一部だけを直せば静かに食い違う ―― 実際に const の有無と
-// 中間変数の名前だけが違う 2 系統に分かれていた。
+// 式が短いぶん、複製の一部だけを直しても目で気付きにくい
+// (散っていた頃の本数と食い違いは docs/ImplementationHistory.md 82章)。
 
 #ifndef KURENAI_SHADERINTEROP_COMMON_HLSLI
 #define KURENAI_SHADERINTEROP_COMMON_HLSLI

@@ -1,11 +1,7 @@
 // DDGIの拡散間接光だけを低解像度で評価するパス。Lightingパスの直前に走る。
 //
-// 【なぜ分離したか】ProbeTest / 1280x720 / DX11 / Release の実測(A/B)では、
-// Lightingパス23.9msの内訳は
-//   ・DDGIのサンプリング                                  約10.2ms (43%)
-//   ・その他のEvaluateIBL(反射プローブ + 鏡面IBL + BRDF)  約 7.6ms (32%)
-//   ・残り(背景の空合成 + G-Buffer読み + 直接光合成)      約 6.1ms (26%)
-// で、DDGIのサンプリングが単独最大だった。SampleDDGIIrradianceは1画素あたり
+// 【なぜ分離したか】Lightingパスの内訳を測るとDDGIのサンプリングが単独最大だった
+// (実測は docs/ImplementationHistory.md 41.15)。SampleDDGIIrradianceは1画素あたり
 // 周囲8プローブを走査し、各プローブでチェビシェフ可視性(距離アトラス)とイラディアンスの
 // 2回サンプルを行う ―― つまり1画素16サンプル + 相応の演算になる。
 //

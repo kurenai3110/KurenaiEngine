@@ -3,11 +3,9 @@
 
 // ライト1灯ぶんのデータ。**HLSL側ではここが唯一の宣言。**
 //
-// 以前は PunctualLighting.hlsli / ProbeShading.hlsli / PlanarReflection.hlsl /
-// Transparent.hlsl の4か所が同じ並びを別々に宣言しており、そのうえ
-// PunctualLighting.hlsli と ProbeShading.hlsli は「同名の struct を二重に宣言するので
-// 同時にインクルードできない」という制約を生んでいた。並びを1本へ寄せると、
-// 手で4か所を揃える義務も、同時インクルードの制約も消える。
+// 並びを1本へ寄せてあるので、手で複数箇所を揃える義務も、同名の struct を二重に
+// 宣言することによる「同時にインクルードできない」制約も無い
+// (散っていた頃の経緯は docs/ImplementationHistory.md 84章)。
 //
 // 【C++側は Source/Engine/Rendering/GPULight.h が持つ】ストライド64バイトの一致は
 // あちらの static_assert が見ている。**並びを変えるときは両方を直すこと。**

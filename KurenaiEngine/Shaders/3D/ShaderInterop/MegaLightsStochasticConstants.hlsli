@@ -3,10 +3,9 @@
 // 【各フィールドの意味はここに書かない】唯一の出所は
 // KurenaiEngine/Source/Engine/ShaderInterop/MegaLightsStochasticConstants.h。
 //
-// 以前は Initial / Temporal / Spatial / Shade / Resolve の 5 本が、この宣言を
-// 「先頭からの前方一致」として手で再宣言していた。深さは 3〜7 フィールドとばらついており、
-// C++側の途中へフィールドを挿すと後ろを宣言している側が静かにずれる。
-// いまはどれも全フィールドを宣言するので、この壊れ方は起きない。
+// **どのシェーダーも全フィールドを宣言すること。** 先頭からの前方一致で再宣言すると、
+// C++側の途中へフィールドを挿したときに後ろを宣言している側が静かにずれる
+// (実際にそうなっていた頃の経緯は docs/ImplementationHistory.md 83章)。
 // C++との一致は向こうの offsetof の static_assert が守っている
 
 #ifndef KURENAI_SHADERINTEROP_MEGALIGHTSSTOCHASTICCONSTANTS_HLSLI
