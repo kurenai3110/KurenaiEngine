@@ -1078,6 +1078,13 @@ namespace Kurenai
         using InstanceBatch = Rendering::InstanceBatch;
         // バッチを組み直す(レンダーグラフの構築より前に1フレーム1回。UpdateModelLODの後)
         void BuildInstanceBatches(RHI::IRHICommandList* commandList);
+        // 1つの組(段の選び方)ぶんのバッチを作る。
+        // modelOf: そのインスタンスがこの組で描く段を返す。nullptrならこの組の対象外。
+        // groups: 呼び出しをまたいで使い回す作業領域(確保をやり直さないため引数で受ける)
+        void BuildInstanceBatchesFor(
+            const std::function<const Assets::Model*(size_t)>& modelOf,
+            std::vector<std::pair<Rendering::InstanceGroupKey, std::vector<size_t>>>& groups,
+            std::vector<Rendering::InstanceBatch>& outBatches, std::vector<uint8_t>& outBatched);
 
         // --- ジオメトリ描画ループの共通化(Rendering/GeometryDrawLoop.h) --------------------
         //

@@ -73,6 +73,134 @@ namespace Kurenai
         m_SceneLoad.LoadingIndex = sceneIndex;
     }
 
+    void KurenaiEngine3D::BuildInstanceBatchesFor(
+        const std::function<const Assets::Model*(size_t)>& modelOf,
+        std::vector<std::pair<Rendering::InstanceGroupKey, std::vector<size_t>>>& groups,
+        std::vector<Rendering::InstanceBatch>& outBatches, std::vector<uint8_t>& outBatched)
+    {
+        groups.clear();
+        for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
+        {
+            const Assets::ModelInstance& instance = m_Scene.Instances[i];
+            const Assets::Model* const model = modelOf(i);
+            if (!model)
+            {
+                continue;
+            }
+            // メッシュシェーダー経路はDispatchMeshで描くのでまとめられない
+            if (ShouldUseModelMeshletPath(instance, *model))
+            {
+                continue;
+            }
+
+            const Rendering::InstanceGroupKey key{ model, instance.IsMirrored, instance.IsWater };
+            bool found = false;
+            for (auto& group : groups)
+            {
+                if (group.first == key)
+                {
+                    group.second.push_back(i);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                groups.push_back({ key, { i } });
+            }
+        }
+
+        // 【空間セルでソートしてから刻む】上限なしで1バッチにすると、広く散らばった
+        // グループが1つの巨大AABBになり、どのパスからも一度も間引かれなくなる。
+        // セルの幅はシーン対角の1/64を目安にする(バッチの粒度がシーンの規模に追随する)
+        const float diagonalX = m_Scene.BoundsMax[0] - m_Scene.BoundsMin[0];
+        const float diagonalY = m_Scene.BoundsMax[1] - m_Scene.BoundsMin[1];
+        const float diagonalZ = m_Scene.BoundsMax[2] - m_Scene.BoundsMin[2];
+        const float diagonal =
+            std::sqrt(diagonalX * diagonalX + diagonalY * diagonalY + diagonalZ * diagonalZ);
+        const float cellSize = std::max(diagonal / 64.0f, 1.0f);
+
+        for (auto& group : groups)
+        {
+            if (group.second.size() < 2)
+            {
+                // まとめる相手がいない。従来どおり個別に描く(コマンド列は今までと同一)
+                continue;
+            }
+
+            std::stable_sort(
+                group.second.begin(), group.second.end(),
+                [this, cellSize](size_t a, size_t b)
+                {
+                    const auto cell = [this, cellSize](size_t index, int axis)
+                    {
+                        const float center =
+                            (m_Scene.Instances[index].WorldBoundsMin[axis]
+                             + m_Scene.Instances[index].WorldBoundsMax[axis]) * 0.5f;
+                        return static_cast<int64_t>(std::floor(center / cellSize));
+                    };
+                    // Z→X→Y の順に見る。格子状の配置ではこれで行ごとにまとまる
+                    const int axes[3] = { 2, 0, 1 };
+                    for (const int axis : axes)
+                    {
+                        const int64_t ca = cell(a, axis);
+                        const int64_t cb = cell(b, axis);
+                        if (ca != cb)
+                        {
+                            return ca < cb;
+                        }
+                    }
+                    return a < b;
+                });
+
+            for (size_t offset = 0; offset < group.second.size(); offset += Rendering::SceneDrawList::kMaxInstancesPerBatch)
+            {
+                const size_t count = std::min<size_t>(Rendering::SceneDrawList::kMaxInstancesPerBatch, group.second.size() - offset);
+                if (count < 2)
+                {
+                    // 刻んだ余りが1体だけになった場合。まとめる意味が無いので個別へ回す
+                    continue;
+                }
+
+                InstanceBatch batch;
+                batch.Model = group.first.Model;
+                batch.IsMirrored = group.first.IsMirrored;
+                batch.IsWater = group.first.IsWater;
+                batch.InstanceBase = static_cast<uint32_t>(m_DrawList.InstanceRecords.size());
+                batch.InstanceCount = static_cast<uint32_t>(count);
+                batch.RepresentativeIndex = group.second[offset];
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    batch.WorldBoundsMin[axis] = (std::numeric_limits<float>::max)();
+                    batch.WorldBoundsMax[axis] = std::numeric_limits<float>::lowest();
+                }
+
+                for (size_t k = 0; k < count; ++k)
+                {
+                    const size_t instanceIndex = group.second[offset + k];
+                    const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
+
+                    GPUModelInstance record{};
+                    record.World = instance.World;
+                    record.NormalMatrix = instance.NormalMatrix;
+                    record.TangentSignFlip = instance.TangentSignFlip;
+                    m_DrawList.InstanceRecords.push_back(record);
+
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        batch.WorldBoundsMin[axis] =
+                            std::min(batch.WorldBoundsMin[axis], instance.WorldBoundsMin[axis]);
+                        batch.WorldBoundsMax[axis] =
+                            std::max(batch.WorldBoundsMax[axis], instance.WorldBoundsMax[axis]);
+                    }
+                    outBatched[instanceIndex] = 1u;
+                }
+
+                outBatches.push_back(batch);
+            }
+        }
+    }
+
     void KurenaiEngine3D::BuildInstanceBatches(RHI::IRHICommandList* commandList)
     {
         m_DrawList.BatchesCurrentLOD.clear();
@@ -88,156 +216,13 @@ namespace Kurenai
             return;
         }
 
-        // グループ化のキー。ワインディング(IsMirrored)と水面(IsWater)はパイプラインステートが
-        // 分かれるため、違うものを同じドローへまとめてはいけない
-        struct GroupKey
-        {
-            const Assets::Model* Model;
-            bool IsMirrored;
-            bool IsWater;
-            bool operator==(const GroupKey& other) const
-            {
-                return Model == other.Model && IsMirrored == other.IsMirrored && IsWater == other.IsWater;
-            }
-        };
-
         // キーごとのインスタンス番号。シーンの並び順で走査するので、同じシーンなら毎フレーム同じ順になる
         // (順序が揺れるとフレーム間でバッチの内容が変わり、A/B比較の再現性が落ちる)
-        std::vector<std::pair<GroupKey, std::vector<size_t>>> groups;
-
-        // 1つの組(段の選び方)ぶんのバッチを作る。
-        // modelOf: そのインスタンスがこの組で描く段を返す。nullptrならこの組の対象外
-        const auto buildFor =
-            [this, &groups](
-                const std::function<const Assets::Model*(size_t)>& modelOf,
-                std::vector<InstanceBatch>& outBatches, std::vector<uint8_t>& outBatched)
-        {
-            groups.clear();
-            for (size_t i = 0; i < m_Scene.Instances.size(); ++i)
-            {
-                const Assets::ModelInstance& instance = m_Scene.Instances[i];
-                const Assets::Model* const model = modelOf(i);
-                if (!model)
-                {
-                    continue;
-                }
-                // メッシュシェーダー経路はDispatchMeshで描くのでまとめられない
-                if (ShouldUseModelMeshletPath(instance, *model))
-                {
-                    continue;
-                }
-
-                const GroupKey key{ model, instance.IsMirrored, instance.IsWater };
-                bool found = false;
-                for (auto& group : groups)
-                {
-                    if (group.first == key)
-                    {
-                        group.second.push_back(i);
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found)
-                {
-                    groups.push_back({ key, { i } });
-                }
-            }
-
-            // 【空間セルでソートしてから刻む】上限なしで1バッチにすると、広く散らばった
-            // グループが1つの巨大AABBになり、どのパスからも一度も間引かれなくなる。
-            // セルの幅はシーン対角の1/64を目安にする(バッチの粒度がシーンの規模に追随する)
-            const float diagonalX = m_Scene.BoundsMax[0] - m_Scene.BoundsMin[0];
-            const float diagonalY = m_Scene.BoundsMax[1] - m_Scene.BoundsMin[1];
-            const float diagonalZ = m_Scene.BoundsMax[2] - m_Scene.BoundsMin[2];
-            const float diagonal =
-                std::sqrt(diagonalX * diagonalX + diagonalY * diagonalY + diagonalZ * diagonalZ);
-            const float cellSize = std::max(diagonal / 64.0f, 1.0f);
-
-            for (auto& group : groups)
-            {
-                if (group.second.size() < 2)
-                {
-                    // まとめる相手がいない。従来どおり個別に描く(コマンド列は今までと同一)
-                    continue;
-                }
-
-                std::stable_sort(
-                    group.second.begin(), group.second.end(),
-                    [this, cellSize](size_t a, size_t b)
-                    {
-                        const auto cell = [this, cellSize](size_t index, int axis)
-                        {
-                            const float center =
-                                (m_Scene.Instances[index].WorldBoundsMin[axis]
-                                 + m_Scene.Instances[index].WorldBoundsMax[axis]) * 0.5f;
-                            return static_cast<int64_t>(std::floor(center / cellSize));
-                        };
-                        // Z→X→Y の順に見る。格子状の配置ではこれで行ごとにまとまる
-                        const int axes[3] = { 2, 0, 1 };
-                        for (const int axis : axes)
-                        {
-                            const int64_t ca = cell(a, axis);
-                            const int64_t cb = cell(b, axis);
-                            if (ca != cb)
-                            {
-                                return ca < cb;
-                            }
-                        }
-                        return a < b;
-                    });
-
-                for (size_t offset = 0; offset < group.second.size(); offset += Rendering::SceneDrawList::kMaxInstancesPerBatch)
-                {
-                    const size_t count = std::min<size_t>(Rendering::SceneDrawList::kMaxInstancesPerBatch, group.second.size() - offset);
-                    if (count < 2)
-                    {
-                        // 刻んだ余りが1体だけになった場合。まとめる意味が無いので個別へ回す
-                        continue;
-                    }
-
-                    InstanceBatch batch;
-                    batch.Model = group.first.Model;
-                    batch.IsMirrored = group.first.IsMirrored;
-                    batch.IsWater = group.first.IsWater;
-                    batch.InstanceBase = static_cast<uint32_t>(m_DrawList.InstanceRecords.size());
-                    batch.InstanceCount = static_cast<uint32_t>(count);
-                    batch.RepresentativeIndex = group.second[offset];
-                    for (int axis = 0; axis < 3; ++axis)
-                    {
-                        batch.WorldBoundsMin[axis] = (std::numeric_limits<float>::max)();
-                        batch.WorldBoundsMax[axis] = std::numeric_limits<float>::lowest();
-                    }
-
-                    for (size_t k = 0; k < count; ++k)
-                    {
-                        const size_t instanceIndex = group.second[offset + k];
-                        const Assets::ModelInstance& instance = m_Scene.Instances[instanceIndex];
-
-                        GPUModelInstance record{};
-                        record.World = instance.World;
-                        record.NormalMatrix = instance.NormalMatrix;
-                        record.TangentSignFlip = instance.TangentSignFlip;
-                        m_DrawList.InstanceRecords.push_back(record);
-
-                        for (int axis = 0; axis < 3; ++axis)
-                        {
-                            batch.WorldBoundsMin[axis] =
-                                std::min(batch.WorldBoundsMin[axis], instance.WorldBoundsMin[axis]);
-                            batch.WorldBoundsMax[axis] =
-                                std::max(batch.WorldBoundsMax[axis], instance.WorldBoundsMax[axis]);
-                        }
-                        outBatched[instanceIndex] = 1u;
-                    }
-
-                    outBatches.push_back(batch);
-                }
-            }
-        };
+        std::vector<std::pair<Rendering::InstanceGroupKey, std::vector<size_t>>> groups;
 
         // 組1: そのフレームに選ばれた段(深度プリパス / G-Buffer / 平面反射)。
         // フェード中(段が2つ)は個別に描くのでバッチへ入れない
-        buildFor(
+        BuildInstanceBatchesFor(
             [this](size_t i) -> const Assets::Model*
             {
                 LODDraw draws[2];
@@ -257,12 +242,12 @@ namespace Kurenai
                 }
                 return draws[0].Model;
             },
-            m_DrawList.BatchesCurrentLOD, m_DrawList.BatchedCurrentLOD);
+            groups, m_DrawList.BatchesCurrentLOD, m_DrawList.BatchedCurrentLOD);
 
         // 組2: 常に最も粗い段(シャドウ / 反射プローブ)
-        buildFor(
+        BuildInstanceBatchesFor(
             [this](size_t i) -> const Assets::Model* { return GetCoarsestLOD(m_Scene.Instances[i]); },
-            m_DrawList.BatchesCoarsestLOD, m_DrawList.BatchedCoarsestLOD);
+            groups, m_DrawList.BatchesCoarsestLOD, m_DrawList.BatchedCoarsestLOD);
 
         m_DrawList.InstancedBatchCount =
             static_cast<uint32_t>(m_DrawList.BatchesCurrentLOD.size() + m_DrawList.BatchesCoarsestLOD.size());

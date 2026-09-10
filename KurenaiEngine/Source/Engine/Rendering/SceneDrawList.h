@@ -29,6 +29,19 @@ namespace Kurenai::Rendering
     };
     static_assert(sizeof(GPUModelInstance) == 144, "GPUModelInstanceはHLSL側と同じ144バイトであること");
 
+    // バッチのグループ化キー。ワインディング(IsMirrored)と水面(IsWater)はパイプライン
+    // ステートが分かれるため、違うものを同じドローへまとめてはいけない
+    struct InstanceGroupKey
+    {
+        const Assets::Model* Model = nullptr;
+        bool IsMirrored = false;
+        bool IsWater = false;
+        bool operator==(const InstanceGroupKey& other) const
+        {
+            return Model == other.Model && IsMirrored == other.IsMirrored && IsWater == other.IsWater;
+        }
+    };
+
     struct InstanceBatch
     {
         // このバッチが描く段。同じ段を選んだインスタンスだけをまとめる
