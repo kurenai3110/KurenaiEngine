@@ -1640,6 +1640,368 @@ namespace Kurenai::Assets
             }
         }
 
+        // モデル1件ぶんの配置を決める。パスの解決・実体(またはヘッダ)の取得・変換行列・
+        // インスタンスとシーンのAABBまで。行列と行列式は後段が使うので参照で返す
+        void BuildInstancePlacement(
+            RHI::IRHIDevice& device, const ParsedModelEntry& parsedModel, const std::wstring& sceneFilePath,
+            const std::wstring& assetRootDirectory, bool streaming, Scene& scene, ModelInstance& instance,
+            bool& boundsInitialized, DirectX::XMMATRIX& outWorldMathSpace,
+            DirectX::XMMATRIX& outNormalMathSpace, float& outDeterminant)
+        {
+            const std::wstring normalizedPath = NormalizePathSeparators(parsedModel.Path);
+            if (IsPathEscaping(normalizedPath))
+            {
+                throw std::runtime_error(
+                    "[Model]Pathがルート外を指しています(絶対パスまたは'..'は使用できません): " +
+                    WideToUtf8(parsedModel.Path) + " (" + WideToUtf8(sceneFilePath) + ")");
+            }
+
+            const std::wstring fullModelPath = assetRootDirectory + normalizedPath;
+
+            // 同じ.kmodelを指すインスタンスは実体を共有する。読み込みは初回だけで、
+            // 2回目以降はキャッシュの共有参照を配るだけになる(VRAMの二重常駐を避ける)。
+            //
+            // 1x1のフォールバックはシーン全体で1組を共有する(モデルごとに作ると
+            // 671モデルのシーンで2000個超の個別リソースになる。ModelLoader.hのコメント参照)
+
+            const auto acquireModel = [&device, &scene, streaming](const std::wstring& path)
+                -> std::shared_ptr<const Model>
+            {
+                if (streaming)
+                {
+                    return nullptr;
+                }
+                auto cached = scene.ModelCache.find(path);
+                if (cached == scene.ModelCache.end())
+                {
+                    auto loaded = std::make_shared<Model>(LoadModel(device, path, &scene.SharedTextures));
+                    cached = scene.ModelCache.emplace(path, std::move(loaded)).first;
+                }
+                return cached->second;
+            };
+
+            instance.Model = acquireModel(fullModelPath);
+            instance.ModelPaths.push_back(fullModelPath);
+            instance.IsWater = parsedModel.Water;
+
+            // モデルLODの2段目以降。同じ粗いモデルを多数のタイルが共有する使い方
+            // (PLATEAUのLOD1タイルなど)を想定しているので、ここもキャッシュを通す
+            instance.LODModels.reserve(parsedModel.LODPaths.size());
+            instance.LODDistances = parsedModel.LODDistances;
+            for (const std::wstring& lodPath : parsedModel.LODPaths)
+            {
+                const std::wstring normalizedLODPath = NormalizePathSeparators(lodPath);
+                if (IsPathEscaping(normalizedLODPath))
+                {
+                    throw std::runtime_error(
+                        "[Model]LODPathがルート外を指しています(絶対パスまたは'..'は使用できません): " +
+                        WideToUtf8(lodPath) + " (" + WideToUtf8(sceneFilePath) + ")");
+                }
+                const std::wstring fullLODPath = assetRootDirectory + normalizedLODPath;
+                instance.LODModels.push_back(acquireModel(fullLODPath));
+                instance.ModelPaths.push_back(fullLODPath);
+            }
+
+            using namespace DirectX;
+            const XMMATRIX scaleMatrix = XMMatrixScaling(parsedModel.Scale[0], parsedModel.Scale[1], parsedModel.Scale[2]);
+            const XMMATRIX rotationMatrix = XMMatrixRotationRollPitchYaw(
+                XMConvertToRadians(parsedModel.RotationEulerDegrees[0]),
+                XMConvertToRadians(parsedModel.RotationEulerDegrees[1]),
+                XMConvertToRadians(parsedModel.RotationEulerDegrees[2]));
+            const XMMATRIX translationMatrix = XMMatrixTranslation(parsedModel.Translation[0], parsedModel.Translation[1], parsedModel.Translation[2]);
+            // 合成順はS(スケール)→R(回転)→T(平行移動)。行ベクトル規約(p' = p * World)のため
+            // この掛け算順でスケール→回転→平行移動の順に適用される
+            const XMMATRIX worldMathSpace = scaleMatrix * rotationMatrix * translationMatrix;
+
+            const float determinant = XMVectorGetX(XMMatrixDeterminant(worldMathSpace));
+            instance.TangentSignFlip = determinant < 0.0f ? -1.0f : 1.0f;
+            // ミラーリングは三角形のワインディングも反転させるため、描画時に表裏判定を
+            // 入れ替えたパイプラインを選ぶ必要がある(KurenaiEngine3D::Renderの各ジオメトリパス)
+            instance.IsMirrored = determinant < 0.0f;
+
+            // 法線用行列はWorldの3x3部分の逆転置(inverse-transpose)。回転+非一様スケールが
+            // 組み合わさった場合に法線が歪むのを防ぐ(ModelSource.cppの同種の処理と同じ理由)。
+            // 特異行列(スケール0など)で逆行列が求まらない場合は3x3部分をそのまま使う簡易
+            // フォールバックとする
+            XMMATRIX normalMathSpace = worldMathSpace;
+            if (determinant != 0.0f)
+            {
+                normalMathSpace = XMMatrixTranspose(XMMatrixInverse(nullptr, worldMathSpace));
+            }
+
+            // FrameConstants(ViewProj等)と同じく、HLSL側のmul(vec, matrix)(行ベクトル)規約に
+            // 合わせて転置して格納する
+            XMStoreFloat4x4(&instance.World, XMMatrixTranspose(worldMathSpace));
+            XMStoreFloat4x4(&instance.NormalMatrix, XMMatrixTranspose(normalMathSpace));
+
+            // モデルのローカル空間AABB(8頂点)をWorldで変換し、シーン全体のAABBへ合成する。
+            // 軸並行のまま変換前のmin/maxだけを使うと回転時に不正確になるため、必ず8頂点全てを変換する。
+            //
+            // 【常に.kmodelのヘッダから取る】ストリーミング時は実体が無いのでヘッダしか無いが、
+            // 常駐時もヘッダを使う。両方の経路でシーンAABB(=farZ)と初期カメラが1ビットも
+            // 変わらないことを保証するため ―― 片方だけModel::BoundsMinから取ると、
+            // 「ストリーミングを付けたら遠景の描画距離が変わった」という分かりにくい差が生まれる
+            // (ModelLoaderがヘッダの値をそのままModelへ写しているので、値自体は同じ)
+            const ModelHeaderInfo headerInfo = ReadModelHeader(fullModelPath);
+            if (streaming && headerInfo.LightCount > 0)
+            {
+                // ストリーミング時はモデル埋め込みライトをシーンのライト一覧へ合成できない
+                // (実体を読むまでライトの位置が分からず、破棄で消えてしまうため)
+                Core::Logger::Warning(
+                    "SceneLoader",
+                    "ストリーミング対象の.kmodelに埋め込みライトが" + std::to_string(headerInfo.LightCount) +
+                        "件ありますが、無視されます: " + WideToUtf8(fullModelPath));
+            }
+            // インスタンス自身のワールドAABBも同じループで求める(フラスタムカリング用)
+            bool instanceBoundsInitialized = false;
+            for (int cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
+            {
+                const XMVECTOR corner = XMVectorSet(
+                    (cornerIndex & 1) ? headerInfo.BoundsMax[0] : headerInfo.BoundsMin[0],
+                    (cornerIndex & 2) ? headerInfo.BoundsMax[1] : headerInfo.BoundsMin[1],
+                    (cornerIndex & 4) ? headerInfo.BoundsMax[2] : headerInfo.BoundsMin[2],
+                    1.0f);
+                const XMVECTOR transformed = XMVector3TransformCoord(corner, worldMathSpace);
+                XMFLOAT3 transformedFloat3;
+                XMStoreFloat3(&transformedFloat3, transformed);
+
+                if (!boundsInitialized)
+                {
+                    scene.BoundsMin[0] = scene.BoundsMax[0] = transformedFloat3.x;
+                    scene.BoundsMin[1] = scene.BoundsMax[1] = transformedFloat3.y;
+                    scene.BoundsMin[2] = scene.BoundsMax[2] = transformedFloat3.z;
+                    boundsInitialized = true;
+                }
+                else
+                {
+                    scene.BoundsMin[0] = std::min(scene.BoundsMin[0], transformedFloat3.x);
+                    scene.BoundsMin[1] = std::min(scene.BoundsMin[1], transformedFloat3.y);
+                    scene.BoundsMin[2] = std::min(scene.BoundsMin[2], transformedFloat3.z);
+                    scene.BoundsMax[0] = std::max(scene.BoundsMax[0], transformedFloat3.x);
+                    scene.BoundsMax[1] = std::max(scene.BoundsMax[1], transformedFloat3.y);
+                    scene.BoundsMax[2] = std::max(scene.BoundsMax[2], transformedFloat3.z);
+                }
+
+                const float cornerXYZ[3] = { transformedFloat3.x, transformedFloat3.y, transformedFloat3.z };
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    if (!instanceBoundsInitialized)
+                    {
+                        instance.WorldBoundsMin[axis] = cornerXYZ[axis];
+                        instance.WorldBoundsMax[axis] = cornerXYZ[axis];
+                    }
+                    else
+                    {
+                        instance.WorldBoundsMin[axis] = std::min(instance.WorldBoundsMin[axis], cornerXYZ[axis]);
+                        instance.WorldBoundsMax[axis] = std::max(instance.WorldBoundsMax[axis], cornerXYZ[axis]);
+                    }
+                }
+                instanceBoundsInitialized = true;
+            }
+
+            // 後段(メッシュAABB・埋め込みライト・自発光プロキシ)が同じ行列を使う
+            outWorldMathSpace = worldMathSpace;
+            outNormalMathSpace = normalMathSpace;
+            outDeterminant = determinant;
+        }
+
+        // 配置が決まったインスタンスに、メッシュ単位のAABB・モデル埋め込みのライト・
+        // 自発光メッシュから起こした光源プロキシを足す
+        void BuildInstanceLightsAndProxies(
+            const ParsedModelEntry& parsedModel, bool streaming, const DirectX::XMMATRIX& worldMathSpace,
+            const DirectX::XMMATRIX& normalMathSpace, float determinant, Scene& scene, ModelInstance& instance,
+            bool& sceneEmissiveNonUniformLogged)
+        {
+            using namespace DirectX;
+
+            // メッシュごとのワールドAABB(メッシュ単位フラスタムカリング用)。
+            // インスタンスのAABBとまったく同じ手順を、Mesh::BoundsMin/Max(.kmodel v10が持つ
+            // メッシュ単位のローカルAABB)に対して繰り返す。
+            //
+            // 【ここでも8頂点すべてを変換する】回転が入ると軸並行でなくなるため、
+            // min/maxだけを変換して包絡を取ってはいけない(上のインスタンスAABBと同じ理由)。
+            // 【毎フレームやらない】Worldは読み込み後に変化しない(書き込みはこの1箇所のみ)
+            //
+            // 【ストリーミング時は作れない】実体を読んでいないのでメッシュ単位のAABBが無い。
+            // 空のままにしておくと IsMeshVisibleWithStats(KurenaiEngine3D.cpp)が
+            // 間引かない側へ倒す。あとから読み込まれた実体のぶんも同じ扱いになる
+            if (instance.Model)
+            {
+                const Model& boundsModel = *instance.Model;
+                instance.MeshWorldBoundsList.resize(boundsModel.Meshes.size());
+                for (size_t meshIndex = 0; meshIndex < boundsModel.Meshes.size(); ++meshIndex)
+                {
+                    const Mesh& sourceMesh = boundsModel.Meshes[meshIndex];
+                    MeshWorldBounds& meshBounds = instance.MeshWorldBoundsList[meshIndex];
+
+                    for (int cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
+                    {
+                        const XMVECTOR corner = XMVectorSet(
+                            (cornerIndex & 1) ? sourceMesh.BoundsMax[0] : sourceMesh.BoundsMin[0],
+                            (cornerIndex & 2) ? sourceMesh.BoundsMax[1] : sourceMesh.BoundsMin[1],
+                            (cornerIndex & 4) ? sourceMesh.BoundsMax[2] : sourceMesh.BoundsMin[2],
+                            1.0f);
+                        XMFLOAT3 transformedFloat3;
+                        XMStoreFloat3(&transformedFloat3, XMVector3TransformCoord(corner, worldMathSpace));
+
+                        const float cornerXYZ[3] = { transformedFloat3.x, transformedFloat3.y, transformedFloat3.z };
+                        for (int axis = 0; axis < 3; ++axis)
+                        {
+                            if (cornerIndex == 0)
+                            {
+                                meshBounds.Min[axis] = cornerXYZ[axis];
+                                meshBounds.Max[axis] = cornerXYZ[axis];
+                            }
+                            else
+                            {
+                                meshBounds.Min[axis] = std::min(meshBounds.Min[axis], cornerXYZ[axis]);
+                                meshBounds.Max[axis] = std::max(meshBounds.Max[axis], cornerXYZ[axis]);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // モデルファイル埋め込みのライト(glTFのKHR_lights_punctual・FBXのライトノード由来、
+            // ModelLoader.cppがModel::Lightsへ読み込み済み)をInstance::Worldでワールド空間へ変換して
+            // シーン全体のライト一覧へ追加する。Positionは平行移動を含む点として、Directionは
+            // 平行移動を含まない方向ベクトルとして変換する必要があるため、それぞれ
+            // XMVector3TransformCoord/TransformNormalを使い分ける(法線のような逆転置は不要。
+            // 接線ベクトルの変換(GBuffer.hlsl)と同じ理由)
+            // 【ストリーミング時は合成しない】実体が無いのでライトの位置が分からず、
+            // 仮に読めても破棄のたびに消えることになる。ヘッダのLightCountで警告済み
+            const std::vector<Light> emptyLights;
+            for (const Light& localLight : (streaming ? emptyLights : instance.Model->Lights))
+            {
+                Light worldLight = localLight;
+
+                const XMVECTOR localPosition = XMVectorSet(localLight.Position[0], localLight.Position[1], localLight.Position[2], 0.0f);
+                const XMVECTOR worldPosition = XMVector3TransformCoord(localPosition, worldMathSpace);
+                XMFLOAT3 worldPositionFloat3;
+                XMStoreFloat3(&worldPositionFloat3, worldPosition);
+                worldLight.Position[0] = worldPositionFloat3.x;
+                worldLight.Position[1] = worldPositionFloat3.y;
+                worldLight.Position[2] = worldPositionFloat3.z;
+
+                const XMVECTOR localDirection = XMVectorSet(localLight.Direction[0], localLight.Direction[1], localLight.Direction[2], 0.0f);
+                const XMVECTOR worldDirection = XMVector3Normalize(XMVector3TransformNormal(localDirection, worldMathSpace));
+                XMFLOAT3 worldDirectionFloat3;
+                XMStoreFloat3(&worldDirectionFloat3, worldDirection);
+                worldLight.Direction[0] = worldDirectionFloat3.x;
+                worldLight.Direction[1] = worldDirectionFloat3.y;
+                worldLight.Direction[2] = worldDirectionFloat3.z;
+
+                scene.Lights.push_back(worldLight);
+            }
+
+            // エミッシブなメッシュから起こした光源のかたまり(Mesh::EmissiveClusters、
+            // モデルのローカル空間)をワールド空間へ移す。
+            //
+            // 【Lights とは別の配列へ入れる】作者が置いたライトと自動生成の光源を同じ配列に
+            // すると、ImGui のライト一覧から消せてしまい元のメッシュと食い違う。
+            // ライト数の上限に当たったときの詰める順序も分ける必要がある。
+            //
+            // 【ストリーミング時は作らない】埋め込みライトと同じ理由(上のコメント参照)。
+            // 実体が無いので位置が分からず、破棄のたびに消えることになる。
+            //
+            // 【モデルLODの段0からしか取らない】粗い段で面積が変わると、段が切り替わった
+            // 瞬間に光量が跳ねる。instance.Model は常に段0(LODModels は見ない)
+            if (!streaming && instance.Model)
+            {
+                // 非一様スケールの度合い。面積と半径の換算はここが1に近いことを前提にしている
+                const XMVECTOR scaleRow0 = worldMathSpace.r[0];
+                const XMVECTOR scaleRow1 = worldMathSpace.r[1];
+                const XMVECTOR scaleRow2 = worldMathSpace.r[2];
+                const float axisLength[3] = {
+                    XMVectorGetX(XMVector3Length(scaleRow0)),
+                    XMVectorGetX(XMVector3Length(scaleRow1)),
+                    XMVectorGetX(XMVector3Length(scaleRow2)),
+                };
+                const float maxAxis = std::max({ axisLength[0], axisLength[1], axisLength[2] });
+                const float minAxis = std::min({ axisLength[0], axisLength[1], axisLength[2] });
+                const bool nonUniform = (minAxis > 1e-6f) && ((maxAxis / minAxis) > 1.01f);
+
+                // 等方スケール s なら |det|^(1/3) = s。長さの換算はこれでよい
+                const float absDeterminant = std::fabs(determinant);
+                const float lengthScale =
+                    (absDeterminant > 0.0f) ? std::cbrt(absDeterminant) : 1.0f;
+
+                for (size_t meshIndex = 0; meshIndex < instance.Model->Meshes.size(); ++meshIndex)
+                {
+                    const Mesh& sourceMesh = instance.Model->Meshes[meshIndex];
+                    for (size_t clusterIndex = 0; clusterIndex < sourceMesh.EmissiveClusters.size();
+                         ++clusterIndex)
+                    {
+                        const EmissiveCluster& cluster = sourceMesh.EmissiveClusters[clusterIndex];
+
+                        EmissiveProxy proxy;
+                        const XMVECTOR localCentroid =
+                            XMVectorSet(cluster.Centroid[0], cluster.Centroid[1], cluster.Centroid[2], 0.0f);
+                        XMFLOAT3 worldCentroid;
+                        XMStoreFloat3(&worldCentroid, XMVector3TransformCoord(localCentroid, worldMathSpace));
+                        proxy.Position[0] = worldCentroid.x;
+                        proxy.Position[1] = worldCentroid.y;
+                        proxy.Position[2] = worldCentroid.z;
+
+                        // 【法線は逆転置で移す】すぐ上の埋め込みライトの Direction は
+                        // 「光の進行方向」なので World でそのまま回してよいが、こちらは
+                        // **面の法線**である。同じ扱いにすると非一様スケールで黙ってずれる
+                        const XMVECTOR localNormal = XMVectorSet(
+                            cluster.AverageNormal[0], cluster.AverageNormal[1], cluster.AverageNormal[2], 0.0f);
+                        XMFLOAT3 worldNormal;
+                        XMStoreFloat3(
+                            &worldNormal, XMVector3Normalize(XMVector3TransformNormal(localNormal, normalMathSpace)));
+                        proxy.Direction[0] = worldNormal.x;
+                        proxy.Direction[1] = worldNormal.y;
+                        proxy.Direction[2] = worldNormal.z;
+
+                        // 面積の換算 A_world = A_local * |det(M)| * |M^-T n|。
+                        // 等方スケール s では s^2 へ縮退する(平面のかたまりでは厳密、
+                        // 閉じた形では平均法線1本で代表しているので近似)
+                        const float normalStretch =
+                            XMVectorGetX(XMVector3Length(XMVector3TransformNormal(localNormal, normalMathSpace)));
+                        proxy.Area = cluster.Area * absDeterminant * normalStretch;
+                        proxy.SourceRadius = cluster.SourceRadius * lengthScale;
+                        // κ は形の性質なので、等方スケールでは不変。非一様では近似
+                        proxy.Directionality = cluster.Directionality;
+
+                        // 【シーン全体の倍率も露出も掛けない】倍率は毎フレームのライトリスト
+                        // 構築で掛ける(掛けてしまうとImGuiのスライダーが効かなくなる)。
+                        // 露出はそもそも掛けてはいけない(G-Bufferのエミッシブが露出を通らない)
+                        for (int channel = 0; channel < 3; ++channel)
+                        {
+                            proxy.RadianceBase[channel] =
+                                sourceMesh.EmissiveFactor[channel] * sourceMesh.EmissiveTextureAverage[channel];
+                        }
+
+                        proxy.InstanceIndex = static_cast<uint32_t>(scene.Instances.size());
+                        proxy.MeshIndex = static_cast<uint32_t>(meshIndex);
+                        proxy.ClusterIndex = static_cast<uint32_t>(clusterIndex);
+                        scene.EmissiveProxies.push_back(proxy);
+                    }
+                }
+
+                // 【ずれても「少し明るい/暗い」だけなので絵からは分からない】だから警告を出す
+                if (nonUniform && !sceneEmissiveNonUniformLogged && !instance.Model->Meshes.empty())
+                {
+                    bool hasCluster = false;
+                    for (const Mesh& m : instance.Model->Meshes)
+                    {
+                        if (!m.EmissiveClusters.empty()) { hasCluster = true; break; }
+                    }
+                    if (hasCluster)
+                    {
+                        Core::Logger::Warning(
+                            "SceneLoader",
+                            "非一様スケールのインスタンスにエミッシブ光源があります。面積と半径の換算が"
+                            "近似になります(軸長の比 " + std::to_string(maxAxis / std::max(minAxis, 1e-6f)) +
+                                "): " + WideToUtf8(parsedModel.Path));
+                        sceneEmissiveNonUniformLogged = true;
+                    }
+                }
+            }
+        }
+
         // [Model]で参照されているモデルを読み、インスタンスと境界とモデルキャッシュを組み立てる
         void LoadSceneModels(
             RHI::IRHIDevice& device, const ParsedScene& parsed, const std::wstring& sceneFilePath,
@@ -1678,349 +2040,22 @@ namespace Kurenai::Assets
             // 非一様スケールの警告は1シーンにつき1回だけ出す(767モデルのシーンで毎件出すと埋もれる)
             bool sceneEmissiveNonUniformLogged = false;
 
+            // 【ストリーミング時は実体を読まない】ヘッダのAABBだけで配置を決め、
+            // 実体はカメラが近づいたときにLoaderスレッドが読む
+            const bool streaming = scene.HasStreamingDistance;
+
             for (const ParsedModelEntry& parsedModel : parsed.Models)
             {
-                const std::wstring normalizedPath = NormalizePathSeparators(parsedModel.Path);
-                if (IsPathEscaping(normalizedPath))
-                {
-                    throw std::runtime_error(
-                        "[Model]Pathがルート外を指しています(絶対パスまたは'..'は使用できません): " +
-                        WideToUtf8(parsedModel.Path) + " (" + WideToUtf8(sceneFilePath) + ")");
-                }
-
-                const std::wstring fullModelPath = assetRootDirectory + normalizedPath;
-
                 ModelInstance instance;
-                // 同じ.kmodelを指すインスタンスは実体を共有する。読み込みは初回だけで、
-                // 2回目以降はキャッシュの共有参照を配るだけになる(VRAMの二重常駐を避ける)。
-                //
-                // 1x1のフォールバックはシーン全体で1組を共有する(モデルごとに作ると
-                // 671モデルのシーンで2000個超の個別リソースになる。ModelLoader.hのコメント参照)
-                // 【ストリーミング時は実体を読まない】ヘッダのAABBだけで配置を決め、
-                // 実体はカメラが近づいたときにLoaderスレッドが読む
-                const bool streaming = scene.HasStreamingDistance;
-
-                const auto acquireModel = [&device, &scene, streaming](const std::wstring& path)
-                    -> std::shared_ptr<const Model>
-                {
-                    if (streaming)
-                    {
-                        return nullptr;
-                    }
-                    auto cached = scene.ModelCache.find(path);
-                    if (cached == scene.ModelCache.end())
-                    {
-                        auto loaded = std::make_shared<Model>(LoadModel(device, path, &scene.SharedTextures));
-                        cached = scene.ModelCache.emplace(path, std::move(loaded)).first;
-                    }
-                    return cached->second;
-                };
-
-                instance.Model = acquireModel(fullModelPath);
-                instance.ModelPaths.push_back(fullModelPath);
-                instance.IsWater = parsedModel.Water;
-
-                // モデルLODの2段目以降。同じ粗いモデルを多数のタイルが共有する使い方
-                // (PLATEAUのLOD1タイルなど)を想定しているので、ここもキャッシュを通す
-                instance.LODModels.reserve(parsedModel.LODPaths.size());
-                instance.LODDistances = parsedModel.LODDistances;
-                for (const std::wstring& lodPath : parsedModel.LODPaths)
-                {
-                    const std::wstring normalizedLODPath = NormalizePathSeparators(lodPath);
-                    if (IsPathEscaping(normalizedLODPath))
-                    {
-                        throw std::runtime_error(
-                            "[Model]LODPathがルート外を指しています(絶対パスまたは'..'は使用できません): " +
-                            WideToUtf8(lodPath) + " (" + WideToUtf8(sceneFilePath) + ")");
-                    }
-                    const std::wstring fullLODPath = assetRootDirectory + normalizedLODPath;
-                    instance.LODModels.push_back(acquireModel(fullLODPath));
-                    instance.ModelPaths.push_back(fullLODPath);
-                }
-
-                using namespace DirectX;
-                const XMMATRIX scaleMatrix = XMMatrixScaling(parsedModel.Scale[0], parsedModel.Scale[1], parsedModel.Scale[2]);
-                const XMMATRIX rotationMatrix = XMMatrixRotationRollPitchYaw(
-                    XMConvertToRadians(parsedModel.RotationEulerDegrees[0]),
-                    XMConvertToRadians(parsedModel.RotationEulerDegrees[1]),
-                    XMConvertToRadians(parsedModel.RotationEulerDegrees[2]));
-                const XMMATRIX translationMatrix = XMMatrixTranslation(parsedModel.Translation[0], parsedModel.Translation[1], parsedModel.Translation[2]);
-                // 合成順はS(スケール)→R(回転)→T(平行移動)。行ベクトル規約(p' = p * World)のため
-                // この掛け算順でスケール→回転→平行移動の順に適用される
-                const XMMATRIX worldMathSpace = scaleMatrix * rotationMatrix * translationMatrix;
-
-                const float determinant = XMVectorGetX(XMMatrixDeterminant(worldMathSpace));
-                instance.TangentSignFlip = determinant < 0.0f ? -1.0f : 1.0f;
-                // ミラーリングは三角形のワインディングも反転させるため、描画時に表裏判定を
-                // 入れ替えたパイプラインを選ぶ必要がある(KurenaiEngine3D::Renderの各ジオメトリパス)
-                instance.IsMirrored = determinant < 0.0f;
-
-                // 法線用行列はWorldの3x3部分の逆転置(inverse-transpose)。回転+非一様スケールが
-                // 組み合わさった場合に法線が歪むのを防ぐ(ModelSource.cppの同種の処理と同じ理由)。
-                // 特異行列(スケール0など)で逆行列が求まらない場合は3x3部分をそのまま使う簡易
-                // フォールバックとする
-                XMMATRIX normalMathSpace = worldMathSpace;
-                if (determinant != 0.0f)
-                {
-                    normalMathSpace = XMMatrixTranspose(XMMatrixInverse(nullptr, worldMathSpace));
-                }
-
-                // FrameConstants(ViewProj等)と同じく、HLSL側のmul(vec, matrix)(行ベクトル)規約に
-                // 合わせて転置して格納する
-                XMStoreFloat4x4(&instance.World, XMMatrixTranspose(worldMathSpace));
-                XMStoreFloat4x4(&instance.NormalMatrix, XMMatrixTranspose(normalMathSpace));
-
-                // モデルのローカル空間AABB(8頂点)をWorldで変換し、シーン全体のAABBへ合成する。
-                // 軸並行のまま変換前のmin/maxだけを使うと回転時に不正確になるため、必ず8頂点全てを変換する。
-                //
-                // 【常に.kmodelのヘッダから取る】ストリーミング時は実体が無いのでヘッダしか無いが、
-                // 常駐時もヘッダを使う。両方の経路でシーンAABB(=farZ)と初期カメラが1ビットも
-                // 変わらないことを保証するため ―― 片方だけModel::BoundsMinから取ると、
-                // 「ストリーミングを付けたら遠景の描画距離が変わった」という分かりにくい差が生まれる
-                // (ModelLoaderがヘッダの値をそのままModelへ写しているので、値自体は同じ)
-                const ModelHeaderInfo headerInfo = ReadModelHeader(fullModelPath);
-                if (streaming && headerInfo.LightCount > 0)
-                {
-                    // ストリーミング時はモデル埋め込みライトをシーンのライト一覧へ合成できない
-                    // (実体を読むまでライトの位置が分からず、破棄で消えてしまうため)
-                    Core::Logger::Warning(
-                        "SceneLoader",
-                        "ストリーミング対象の.kmodelに埋め込みライトが" + std::to_string(headerInfo.LightCount) +
-                            "件ありますが、無視されます: " + WideToUtf8(fullModelPath));
-                }
-                // インスタンス自身のワールドAABBも同じループで求める(フラスタムカリング用)
-                bool instanceBoundsInitialized = false;
-                for (int cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
-                {
-                    const XMVECTOR corner = XMVectorSet(
-                        (cornerIndex & 1) ? headerInfo.BoundsMax[0] : headerInfo.BoundsMin[0],
-                        (cornerIndex & 2) ? headerInfo.BoundsMax[1] : headerInfo.BoundsMin[1],
-                        (cornerIndex & 4) ? headerInfo.BoundsMax[2] : headerInfo.BoundsMin[2],
-                        1.0f);
-                    const XMVECTOR transformed = XMVector3TransformCoord(corner, worldMathSpace);
-                    XMFLOAT3 transformedFloat3;
-                    XMStoreFloat3(&transformedFloat3, transformed);
-
-                    if (!boundsInitialized)
-                    {
-                        scene.BoundsMin[0] = scene.BoundsMax[0] = transformedFloat3.x;
-                        scene.BoundsMin[1] = scene.BoundsMax[1] = transformedFloat3.y;
-                        scene.BoundsMin[2] = scene.BoundsMax[2] = transformedFloat3.z;
-                        boundsInitialized = true;
-                    }
-                    else
-                    {
-                        scene.BoundsMin[0] = std::min(scene.BoundsMin[0], transformedFloat3.x);
-                        scene.BoundsMin[1] = std::min(scene.BoundsMin[1], transformedFloat3.y);
-                        scene.BoundsMin[2] = std::min(scene.BoundsMin[2], transformedFloat3.z);
-                        scene.BoundsMax[0] = std::max(scene.BoundsMax[0], transformedFloat3.x);
-                        scene.BoundsMax[1] = std::max(scene.BoundsMax[1], transformedFloat3.y);
-                        scene.BoundsMax[2] = std::max(scene.BoundsMax[2], transformedFloat3.z);
-                    }
-
-                    const float cornerXYZ[3] = { transformedFloat3.x, transformedFloat3.y, transformedFloat3.z };
-                    for (int axis = 0; axis < 3; ++axis)
-                    {
-                        if (!instanceBoundsInitialized)
-                        {
-                            instance.WorldBoundsMin[axis] = cornerXYZ[axis];
-                            instance.WorldBoundsMax[axis] = cornerXYZ[axis];
-                        }
-                        else
-                        {
-                            instance.WorldBoundsMin[axis] = std::min(instance.WorldBoundsMin[axis], cornerXYZ[axis]);
-                            instance.WorldBoundsMax[axis] = std::max(instance.WorldBoundsMax[axis], cornerXYZ[axis]);
-                        }
-                    }
-                    instanceBoundsInitialized = true;
-                }
-
-                // メッシュごとのワールドAABB(メッシュ単位フラスタムカリング用)。
-                // インスタンスのAABBとまったく同じ手順を、Mesh::BoundsMin/Max(.kmodel v10が持つ
-                // メッシュ単位のローカルAABB)に対して繰り返す。
-                //
-                // 【ここでも8頂点すべてを変換する】回転が入ると軸並行でなくなるため、
-                // min/maxだけを変換して包絡を取ってはいけない(上のインスタンスAABBと同じ理由)。
-                // 【毎フレームやらない】Worldは読み込み後に変化しない(書き込みはこの1箇所のみ)
-                //
-                // 【ストリーミング時は作れない】実体を読んでいないのでメッシュ単位のAABBが無い。
-                // 空のままにしておくと IsMeshVisibleWithStats(KurenaiEngine3D.cpp)が
-                // 間引かない側へ倒す。あとから読み込まれた実体のぶんも同じ扱いになる
-                if (instance.Model)
-                {
-                    const Model& boundsModel = *instance.Model;
-                    instance.MeshWorldBoundsList.resize(boundsModel.Meshes.size());
-                    for (size_t meshIndex = 0; meshIndex < boundsModel.Meshes.size(); ++meshIndex)
-                    {
-                        const Mesh& sourceMesh = boundsModel.Meshes[meshIndex];
-                        MeshWorldBounds& meshBounds = instance.MeshWorldBoundsList[meshIndex];
-
-                        for (int cornerIndex = 0; cornerIndex < 8; ++cornerIndex)
-                        {
-                            const XMVECTOR corner = XMVectorSet(
-                                (cornerIndex & 1) ? sourceMesh.BoundsMax[0] : sourceMesh.BoundsMin[0],
-                                (cornerIndex & 2) ? sourceMesh.BoundsMax[1] : sourceMesh.BoundsMin[1],
-                                (cornerIndex & 4) ? sourceMesh.BoundsMax[2] : sourceMesh.BoundsMin[2],
-                                1.0f);
-                            XMFLOAT3 transformedFloat3;
-                            XMStoreFloat3(&transformedFloat3, XMVector3TransformCoord(corner, worldMathSpace));
-
-                            const float cornerXYZ[3] = { transformedFloat3.x, transformedFloat3.y, transformedFloat3.z };
-                            for (int axis = 0; axis < 3; ++axis)
-                            {
-                                if (cornerIndex == 0)
-                                {
-                                    meshBounds.Min[axis] = cornerXYZ[axis];
-                                    meshBounds.Max[axis] = cornerXYZ[axis];
-                                }
-                                else
-                                {
-                                    meshBounds.Min[axis] = std::min(meshBounds.Min[axis], cornerXYZ[axis]);
-                                    meshBounds.Max[axis] = std::max(meshBounds.Max[axis], cornerXYZ[axis]);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // モデルファイル埋め込みのライト(glTFのKHR_lights_punctual・FBXのライトノード由来、
-                // ModelLoader.cppがModel::Lightsへ読み込み済み)をInstance::Worldでワールド空間へ変換して
-                // シーン全体のライト一覧へ追加する。Positionは平行移動を含む点として、Directionは
-                // 平行移動を含まない方向ベクトルとして変換する必要があるため、それぞれ
-                // XMVector3TransformCoord/TransformNormalを使い分ける(法線のような逆転置は不要。
-                // 接線ベクトルの変換(GBuffer.hlsl)と同じ理由)
-                // 【ストリーミング時は合成しない】実体が無いのでライトの位置が分からず、
-                // 仮に読めても破棄のたびに消えることになる。ヘッダのLightCountで警告済み
-                const std::vector<Light> emptyLights;
-                for (const Light& localLight : (streaming ? emptyLights : instance.Model->Lights))
-                {
-                    Light worldLight = localLight;
-
-                    const XMVECTOR localPosition = XMVectorSet(localLight.Position[0], localLight.Position[1], localLight.Position[2], 0.0f);
-                    const XMVECTOR worldPosition = XMVector3TransformCoord(localPosition, worldMathSpace);
-                    XMFLOAT3 worldPositionFloat3;
-                    XMStoreFloat3(&worldPositionFloat3, worldPosition);
-                    worldLight.Position[0] = worldPositionFloat3.x;
-                    worldLight.Position[1] = worldPositionFloat3.y;
-                    worldLight.Position[2] = worldPositionFloat3.z;
-
-                    const XMVECTOR localDirection = XMVectorSet(localLight.Direction[0], localLight.Direction[1], localLight.Direction[2], 0.0f);
-                    const XMVECTOR worldDirection = XMVector3Normalize(XMVector3TransformNormal(localDirection, worldMathSpace));
-                    XMFLOAT3 worldDirectionFloat3;
-                    XMStoreFloat3(&worldDirectionFloat3, worldDirection);
-                    worldLight.Direction[0] = worldDirectionFloat3.x;
-                    worldLight.Direction[1] = worldDirectionFloat3.y;
-                    worldLight.Direction[2] = worldDirectionFloat3.z;
-
-                    scene.Lights.push_back(worldLight);
-                }
-
-                // エミッシブなメッシュから起こした光源のかたまり(Mesh::EmissiveClusters、
-                // モデルのローカル空間)をワールド空間へ移す。
-                //
-                // 【Lights とは別の配列へ入れる】作者が置いたライトと自動生成の光源を同じ配列に
-                // すると、ImGui のライト一覧から消せてしまい元のメッシュと食い違う。
-                // ライト数の上限に当たったときの詰める順序も分ける必要がある。
-                //
-                // 【ストリーミング時は作らない】埋め込みライトと同じ理由(上のコメント参照)。
-                // 実体が無いので位置が分からず、破棄のたびに消えることになる。
-                //
-                // 【モデルLODの段0からしか取らない】粗い段で面積が変わると、段が切り替わった
-                // 瞬間に光量が跳ねる。instance.Model は常に段0(LODModels は見ない)
-                if (!streaming && instance.Model)
-                {
-                    // 非一様スケールの度合い。面積と半径の換算はここが1に近いことを前提にしている
-                    const XMVECTOR scaleRow0 = worldMathSpace.r[0];
-                    const XMVECTOR scaleRow1 = worldMathSpace.r[1];
-                    const XMVECTOR scaleRow2 = worldMathSpace.r[2];
-                    const float axisLength[3] = {
-                        XMVectorGetX(XMVector3Length(scaleRow0)),
-                        XMVectorGetX(XMVector3Length(scaleRow1)),
-                        XMVectorGetX(XMVector3Length(scaleRow2)),
-                    };
-                    const float maxAxis = std::max({ axisLength[0], axisLength[1], axisLength[2] });
-                    const float minAxis = std::min({ axisLength[0], axisLength[1], axisLength[2] });
-                    const bool nonUniform = (minAxis > 1e-6f) && ((maxAxis / minAxis) > 1.01f);
-
-                    // 等方スケール s なら |det|^(1/3) = s。長さの換算はこれでよい
-                    const float absDeterminant = std::fabs(determinant);
-                    const float lengthScale =
-                        (absDeterminant > 0.0f) ? std::cbrt(absDeterminant) : 1.0f;
-
-                    for (size_t meshIndex = 0; meshIndex < instance.Model->Meshes.size(); ++meshIndex)
-                    {
-                        const Mesh& sourceMesh = instance.Model->Meshes[meshIndex];
-                        for (size_t clusterIndex = 0; clusterIndex < sourceMesh.EmissiveClusters.size();
-                             ++clusterIndex)
-                        {
-                            const EmissiveCluster& cluster = sourceMesh.EmissiveClusters[clusterIndex];
-
-                            EmissiveProxy proxy;
-                            const XMVECTOR localCentroid =
-                                XMVectorSet(cluster.Centroid[0], cluster.Centroid[1], cluster.Centroid[2], 0.0f);
-                            XMFLOAT3 worldCentroid;
-                            XMStoreFloat3(&worldCentroid, XMVector3TransformCoord(localCentroid, worldMathSpace));
-                            proxy.Position[0] = worldCentroid.x;
-                            proxy.Position[1] = worldCentroid.y;
-                            proxy.Position[2] = worldCentroid.z;
-
-                            // 【法線は逆転置で移す】すぐ上の埋め込みライトの Direction は
-                            // 「光の進行方向」なので World でそのまま回してよいが、こちらは
-                            // **面の法線**である。同じ扱いにすると非一様スケールで黙ってずれる
-                            const XMVECTOR localNormal = XMVectorSet(
-                                cluster.AverageNormal[0], cluster.AverageNormal[1], cluster.AverageNormal[2], 0.0f);
-                            XMFLOAT3 worldNormal;
-                            XMStoreFloat3(
-                                &worldNormal, XMVector3Normalize(XMVector3TransformNormal(localNormal, normalMathSpace)));
-                            proxy.Direction[0] = worldNormal.x;
-                            proxy.Direction[1] = worldNormal.y;
-                            proxy.Direction[2] = worldNormal.z;
-
-                            // 面積の換算 A_world = A_local * |det(M)| * |M^-T n|。
-                            // 等方スケール s では s^2 へ縮退する(平面のかたまりでは厳密、
-                            // 閉じた形では平均法線1本で代表しているので近似)
-                            const float normalStretch =
-                                XMVectorGetX(XMVector3Length(XMVector3TransformNormal(localNormal, normalMathSpace)));
-                            proxy.Area = cluster.Area * absDeterminant * normalStretch;
-                            proxy.SourceRadius = cluster.SourceRadius * lengthScale;
-                            // κ は形の性質なので、等方スケールでは不変。非一様では近似
-                            proxy.Directionality = cluster.Directionality;
-
-                            // 【シーン全体の倍率も露出も掛けない】倍率は毎フレームのライトリスト
-                            // 構築で掛ける(掛けてしまうとImGuiのスライダーが効かなくなる)。
-                            // 露出はそもそも掛けてはいけない(G-Bufferのエミッシブが露出を通らない)
-                            for (int channel = 0; channel < 3; ++channel)
-                            {
-                                proxy.RadianceBase[channel] =
-                                    sourceMesh.EmissiveFactor[channel] * sourceMesh.EmissiveTextureAverage[channel];
-                            }
-
-                            proxy.InstanceIndex = static_cast<uint32_t>(scene.Instances.size());
-                            proxy.MeshIndex = static_cast<uint32_t>(meshIndex);
-                            proxy.ClusterIndex = static_cast<uint32_t>(clusterIndex);
-                            scene.EmissiveProxies.push_back(proxy);
-                        }
-                    }
-
-                    // 【ずれても「少し明るい/暗い」だけなので絵からは分からない】だから警告を出す
-                    if (nonUniform && !sceneEmissiveNonUniformLogged && !instance.Model->Meshes.empty())
-                    {
-                        bool hasCluster = false;
-                        for (const Mesh& m : instance.Model->Meshes)
-                        {
-                            if (!m.EmissiveClusters.empty()) { hasCluster = true; break; }
-                        }
-                        if (hasCluster)
-                        {
-                            Core::Logger::Warning(
-                                "SceneLoader",
-                                "非一様スケールのインスタンスにエミッシブ光源があります。面積と半径の換算が"
-                                "近似になります(軸長の比 " + std::to_string(maxAxis / std::max(minAxis, 1e-6f)) +
-                                    "): " + WideToUtf8(parsedModel.Path));
-                            sceneEmissiveNonUniformLogged = true;
-                        }
-                    }
-                }
+                DirectX::XMMATRIX worldMathSpace{};
+                DirectX::XMMATRIX normalMathSpace{};
+                float determinant = 0.0f;
+                BuildInstancePlacement(
+                    device, parsedModel, sceneFilePath, assetRootDirectory, streaming, scene, instance,
+                    boundsInitialized, worldMathSpace, normalMathSpace, determinant);
+                BuildInstanceLightsAndProxies(
+                    parsedModel, streaming, worldMathSpace, normalMathSpace, determinant, scene, instance,
+                    sceneEmissiveNonUniformLogged);
 
                 scene.Instances.push_back(std::move(instance));
 
