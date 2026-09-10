@@ -109,11 +109,8 @@ namespace Kurenai
         // ビュー行列と「ジッター済み」射影行列をここで一度だけ確定させ、以降のカメラ由来の行列は
         // すべてこれらから作る。
         //
-        // 【なぜ行列の掛け算でジッターを入れられるのか】Camera::GetProjectionMatrixは行ベクトル規約
-        // (clip = view * P)で、第3列が(0,0,1,0)すなわち clip.w = viewZ である。
-        // XMMatrixTranslationは行ベクトル規約では第3行が(jx, jy, 0, 1)になるので、P * T を展開すると
-        // 変化するのは要素[2][0]と[2][1]、つまり clip.xy += jitterNdc * clip.w だけになる。
-        // w除算後には ndc.xy += jitterNdc という定数オフセットになり、狙いどおり平行移動として効く。
+        // 【行列の掛け算でジッターを入れられる】展開すると ndc.xy への定数オフセットに
+        // なる。導出は docs/ImplementationDetail.md 23.3
         //
         // 【なぜ全パスで統一するのか】深度バッファはこのジッター済み行列でラスタライズされる。
         // 深度から位置を復元する側(SSAO/SSIL/SSR/スクリーンスペースシャドウ)がジッター前の行列を
@@ -316,8 +313,7 @@ namespace Kurenai
                 m_EmissiveLights.SelectionHash = selectionHash;
 
                 // 【切り捨ては発光を捨てている】併合で減らせないか先に疑うこと。
-                // EmeraldSquare の実測では、面積の大きい順に上位256個を残しても
-                // 総面積の46.7%にしかならない(上位1024個でも84.9%)
+                // 面積の大きい順に残しても総面積のごく一部にしかならない(実測は docs/ImplementationDetail.md 62.2)
                 if (!m_EmissiveLights.CapLogged)
                 {
                     Core::Logger::Warning(
@@ -552,22 +548,16 @@ namespace Kurenai
             const bool turbidityMoved = std::abs(m_Settings.Sky.Turbidity - m_LastBakedTurbidity) > 0.01f;
             // 空の彩度(アート指定)もPreethamの色度を動かすため、タービディティと同じ扱いで焼き直す
             const bool saturationMoved = std::abs(m_Settings.Sky.Saturation - m_LastBakedSkySaturation) > 0.005f;
-            // 雲のパラメータが動いたら焼き直す(P18)。
+            // 雲のパラメータが動いたら焼き直す。
             //
-            // 【なぜ要るか】ここまでの4つは晴天の空の形を決める値だけで、雲は「晴天の空を
-            // 変えない」ため入っていなかった。P18でSkyIntegrateが雲込みの空の照度を積むように
-            // なったので、被覆率を動かしても焼き直しが走らないと**古い被覆率で積んだ
-            // CloudSkyLightが残り続ける**。実際これで被覆率0でも比が1にならず、雲を持たない
-            // シーンの遠景が動いた(切り分け: SkyIntegrateへ1を直書きした絵と、消費側で1へ
-            // 潰した絵は画素まで一致した=経路は正しく、値だけが古かった)。
+            // 【なぜ要るか】SkyIntegrate は雲込みの空の照度を積むので、被覆率を動かしても
+            // 焼き直しが走らないと**古い被覆率で積んだ CloudSkyLight が残り続ける**。
+            // IBLへ掛ける平均透過率(m_ActiveCloudTransmittance)もこのブロックでしか
+            // 更新されないため、同じ形の取りこぼしになる。
             //
             // 【風のスクロールを入れない】スクロール量は毎フレーム動くので、入れると毎フレーム
             // 焼き直しになる。求めているのは半球平均なので、雲の場が平行移動しても値はほとんど
-            // 変わらない。同じ理由でカメラ位置も入れない。
-            //
-            // 【IBLの雲減光もこれで直る】m_ActiveCloudTransmittance(キューブへ焼く平均透過率)も
-            // このブロックの中でしか更新されないため、被覆率を動かしても環境光が追従しない
-            // という同じ形の取りこぼしがあった
+            // 変わらない。同じ理由でカメラ位置も入れない
             const CloudBakeSignature cloudSignature = MakeCloudBakeSignature();
             const bool cloudChanged = !m_HasBakedCloudSignature
                                       || cloudSignature != m_LastBakedCloudSignature;
@@ -667,12 +657,10 @@ namespace Kurenai
             }
         }
         // このフレームで平面反射パスを実行するか。
-        // 【反射の手法がSSRのときだけ実行する】このパスの出力(m_RenderTargets.PlanarReflectionColor)を読むのは
-        // SSR.hlslだけである。手法がRaytracedやOffのときに走らせても、不透明メッシュ全体を
-        // もう1回フォワードで描いた結果を誰も読まないまま捨てることになる
-        // (DXR対応環境ではDefaultReflectionModeがRaytracedを返すため、この条件が無いと
-        //  DX12では常に丸ごと無駄になる。実測でもDX12起動時に水面へ映っていたのはRT反射の結果で、
-        //  平面反射パスの出力ではなかった)
+        // 【反射の手法がSSRのときだけ実行する】このパスの出力を読むのは SSR.hlsl だけで、
+        // 手法がRaytracedやOffのときに走らせると、不透明メッシュ全体をもう1回フォワードで
+        // 描いた結果を誰も読まないまま捨てることになる(DXR対応環境では既定がRaytracedに
+        // なるため、この条件が無いとDX12では常に丸ごと無駄になる)
         frameContext.PlanarReflectionPassRuns =
             m_Settings.Reflection.PlanarEnabled && frameContext.HasWaterInstance && m_Settings.Reflection.Mode == ReflectionMode::ScreenSpace;
 
@@ -710,12 +698,11 @@ namespace Kurenai
         RHI::IRHICommandList* commandList, const SunLighting& sunLighting, float effectiveExposure,
         Rendering::RenderFrameContext& frameContext, ShaderInterop::FrameConstants& constants)
     {
-        // === 実効プリ露出が大きく動いたら、更新モードに関わらずプローブを焼き直す(19.14節) ===
+        // === 実効プリ露出が大きく動いたら、更新モードに関わらずプローブを焼き直す ===
         // 下のProbeParams2.wは「焼いた時点の露出→現在の露出」の換算倍率で、これだけでも
-        // プローブの値の解釈は常に正しくなる。ただし換算はあくまで**焼いた時点の環境**を
-        // 正しい明るさで見せるだけなので、昼に焼いたプローブを夜の場面へ持ち込めば
-        // 「夜の部屋に昼の環境が正しい明るさで映り込む」ことになり、換算前より派手に破綻する
-        // (実測: ProbeTestを夜にしたときの平均輝度が213.6→253.9、白飽和78%)。
+        // プローブの値の解釈は常に正しくなる。ただし換算は**焼いた時点の環境**を正しい
+        // 明るさで見せるだけなので、昼に焼いたプローブを夜の場面へ持ち込むと換算前より
+        // 派手に破綻する(実測は docs/ImplementationDetail.md 19.14)。
         //
         // 実効プリ露出が大きく動くのは時刻が大きく動いたときなので、そのときは環境そのものが
         // 古くなっている。Bakedモードが凍結すると宣言しているのはライトやマテリアルの編集に
