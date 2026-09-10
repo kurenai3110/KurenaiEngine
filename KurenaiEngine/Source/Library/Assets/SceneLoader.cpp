@@ -437,6 +437,770 @@ namespace Kurenai::Assets
 
         // .ksceneのテキストをパースする(モデルの実読み込みは行わない、純粋なテキスト解析)。
         // 失敗時はstd::runtime_error(ファイル名・行番号・該当行つき)を投げる
+        // .ksceneの「key = value」1行ぶんの情報。セクションごとの関数へまとめて渡す。
+        // 【参照で持つ】解析ループの1行ぶんしか生きない。ループの外へ持ち出さないこと
+        struct SceneLine
+        {
+            const std::wstring& FilePath;
+            size_t LineNumber;
+            const std::wstring& RawLine;
+            const std::wstring& Key;
+            const std::wstring& Value;
+        };
+
+        // 解析エラー。どのファイルの何行目かを添えてログへ出し、そのまま投げる
+        void ErrorAt(
+            const std::wstring& filePath, size_t lineNumber, const std::wstring& rawLine, const std::string& message)
+        {
+            const std::string fullMessage =
+                message + " (" + WideToUtf8(filePath) + ":" + std::to_string(lineNumber) + ": " + WideToUtf8(rawLine) + ")";
+            Core::Logger::Error("SceneLoader", fullMessage);
+            throw std::runtime_error(fullMessage);
+        }
+
+        void ErrorAt(const SceneLine& sceneLine, const std::string& message)
+        {
+            ErrorAt(sceneLine.FilePath, sceneLine.LineNumber, sceneLine.RawLine, message);
+        }
+
+        // 知らないキーは落とさず警告にとどめる(古い.ksceneを読めなくしないため)
+        void WarnUnknownKey(const SceneLine& sceneLine)
+        {
+            Core::Logger::Warning(
+                "SceneLoader",
+                "未知のキーを無視します: " + WideToUtf8(sceneLine.Key) + " (" + WideToUtf8(sceneLine.FilePath) + ":" +
+                    std::to_string(sceneLine.LineNumber) + ")");
+        }
+
+        // 各セクションで共通の数値解析・範囲検証・指定フラグ更新
+        void ReadFloat(
+            const SceneLine& sceneLine, float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
+        {
+            if (!ParseFloatToken(sceneLine.Value, out))
+            {
+                ErrorAt(sceneLine, WideToUtf8(name) + "の値が不正です");
+            }
+            if (out < minValue || out > maxValue)
+            {
+                ErrorAt(sceneLine, WideToUtf8(name) + "の値が範囲外です");
+            }
+            has = true;
+        }
+
+        // [Scene] セクションの1行を解析する
+        void ParseSceneKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        if (CaseInsensitiveEquals(sceneLine.Key, L"Name"))
+        {
+            result.Name = sceneLine.Value;
+            result.HasName = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Skybox"))
+        {
+            // スカイボックス(キューブマップDDS)のAssetsルートからの相対パス。
+            // [Model]Pathと同じ基準・同じルート外チェックを適用する
+            result.SkyboxPath = sceneLine.Value;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"IBLIntensity"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.IBLIntensity)) ErrorAt(sceneLine, "IBLIntensityの値が不正です");
+            if (result.IBLIntensity < 0.0f) ErrorAt(sceneLine, "IBLIntensityは0以上で指定してください");
+            result.HasIBLIntensity = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"ShadowDistance"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.ShadowDistance)) ErrorAt(sceneLine, "ShadowDistanceの値が不正です");
+            // 下限: 近クリップ面は最大でも0.1mなので、それを下回ると影が1枚も出ない。
+            // 上限: シャドウマップ1枚(2048x2048)で覆って意味のある範囲を大きく超えると、
+            // 打ち切る意味がなくなる(既定のfarZ側でどのみち制限される)。
+            // どちらも打ち間違い(0や桁の取り違え)を弾くためのもの
+            if (result.ShadowDistance < 1.0f || result.ShadowDistance > 100000.0f)
+            {
+                ErrorAt(sceneLine, "ShadowDistanceは1〜100000の範囲で指定してください");
+            }
+            result.HasShadowDistance = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"StreamingDistance"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.StreamingDistance)) ErrorAt(sceneLine, "StreamingDistanceの値が不正です");
+            // 1m未満だと全モデルが未読み込みのままになり、巨大すぎると常駐と変わらない。
+            // ShadowDistanceと同じ範囲にしてある
+            if (result.StreamingDistance < 1.0f || result.StreamingDistance > 100000.0f)
+            {
+                ErrorAt(sceneLine, "StreamingDistanceは1〜100000の範囲で指定してください");
+            }
+            result.HasStreamingDistance = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"CameraSpeed"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.CameraSpeed)) ErrorAt(sceneLine, "CameraSpeedの値が不正です");
+            // 下限: 0や負値は「動けない/逆走する」になるだけで指定として意味を成さない。
+            // 0.01 m/s は1mの移動に100秒かかる速度で、実用の下限より十分下にある。
+            // 上限: 東京23区(対角約45km)の自動値が653 m/s、Shiftで2612 m/sなので、
+            // 桁の取り違えを弾きつつそれを妨げない位置に置く。
+            // どちらも打ち間違いを弾くためのもので、実用範囲を狭める意図はない
+            if (result.CameraSpeed < 0.01f || result.CameraSpeed > 10000.0f)
+            {
+                ErrorAt(sceneLine, "CameraSpeedは0.01〜10000の範囲で指定してください");
+            }
+            result.HasCameraSpeed = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"TextureStreaming"))
+        {
+            const std::optional<bool> parsedValue = ParseBoolToken(sceneLine.Value);
+            if (!parsedValue) ErrorAt(sceneLine, "TextureStreamingの値はtrue/falseで指定してください");
+            result.TextureStreamingEnabled = *parsedValue;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"TextureStreamingBias"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.TextureStreamingBias)) ErrorAt(sceneLine, "TextureStreamingBiasの値が不正です");
+            // ミップ段数は多くても十数段なので、これを超える指定は桁の打ち間違い。
+            // 正側(粗くする)を+4までにしているのは、それ以上はどのみち最小ミップに張り付くため
+            if (result.TextureStreamingBias < -8.0f || result.TextureStreamingBias > 4.0f)
+            {
+                ErrorAt(sceneLine, "TextureStreamingBiasは-8〜4の範囲で指定してください");
+            }
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"AmbientOcclusion"))
+        {
+            const std::optional<bool> parsedValue = ParseBoolToken(sceneLine.Value);
+            if (!parsedValue) ErrorAt(sceneLine, "AmbientOcclusionの値はtrue/falseで指定してください");
+            result.AOEnabled = *parsedValue;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Tonemap"))
+        {
+            // トーンマップのカーブをシーン単位で選ぶ。屋外の風景はACESのほうが空の青が残る
+            // (既定のAgXはハイライトを色相保持のまま白へ脱色するため彩度が落ちる)
+            if (CaseInsensitiveEquals(sceneLine.Value, L"Reinhard"))
+            {
+                result.Tonemap = Scene::TonemapCurveSetting::Reinhard;
+            }
+            else if (CaseInsensitiveEquals(sceneLine.Value, L"ACES"))
+            {
+                result.Tonemap = Scene::TonemapCurveSetting::ACES;
+            }
+            else if (CaseInsensitiveEquals(sceneLine.Value, L"AgX"))
+            {
+                result.Tonemap = Scene::TonemapCurveSetting::AgX;
+            }
+            else
+            {
+                ErrorAt(sceneLine, "Tonemapの値はReinhard/ACES/AgXのいずれかで指定してください");
+            }
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"SkySaturation"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.SkySaturation)) ErrorAt(sceneLine, "SkySaturationの値が不正です");
+            if (result.SkySaturation < 0.0f) ErrorAt(sceneLine, "SkySaturationは0以上で指定してください");
+        }
+        // 大気の濁り具合。大きいほど地平線が白く霞み、天頂の青が薄くなる。
+        // 【SkySaturationと違って指定されたときだけ上書きする】タービディティを動かすと
+        // 大気LUTの焼き直しが走るため、書いていないシーンにまで無条件で触りたくない
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"SkyTurbidity"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.SkyTurbidity)) ErrorAt(sceneLine, "SkyTurbidityの値が不正です");
+            // Preethamの定義域はおおむね1.7〜10。外れた値は打ち間違いとみなす
+            if (result.SkyTurbidity < 1.0f || result.SkyTurbidity > 10.0f)
+            {
+                ErrorAt(sceneLine, "SkyTurbidityの値が範囲外です");
+            }
+            result.HasSkyTurbidity = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"TonemapBlackPoint"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.TonemapBlackPoint))
+            {
+                ErrorAt(sceneLine, "TonemapBlackPointの値が不正です");
+            }
+            // 0で恒等、1で全部黒。0.2を超えると暗部が丸ごと潰れるので
+            // 打ち間違いとみなす(実用域は0.00〜0.10)
+            if (result.TonemapBlackPoint < 0.0f || result.TonemapBlackPoint > 0.2f)
+            {
+                ErrorAt(sceneLine, "TonemapBlackPointは0〜0.2で指定してください");
+            }
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Exposure"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.ExposureEV100)) ErrorAt(sceneLine, "Exposureの値が不正です");
+            // EV100の実用域(暗い室内-6 〜 直射日光下17程度)を大きく外れた値は
+            // 打ち間違いとみなす。自動露出の範囲(EngineDefaults.hのAutoExposure
+            // Min/MaxEV100)と同じ-6〜18に合わせてある
+            if (result.ExposureEV100 < -6.0f || result.ExposureEV100 > 18.0f)
+            {
+                ErrorAt(sceneLine, "Exposureは-6〜18(EV100)の範囲で指定してください");
+            }
+            result.HasExposure = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"TAA"))
+        {
+            const std::optional<bool> parsedValue = ParseBoolToken(sceneLine.Value);
+            if (!parsedValue) ErrorAt(sceneLine, "TAAの値はtrue/falseで指定してください");
+            result.TAAEnabled = *parsedValue;
+            result.HasTAAEnabled = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"RenderResolution"))
+        {
+            uint32_t parsedXY[2] = {};
+            if (!ParseUint2(sceneLine.Value, parsedXY))
+            {
+                ErrorAt(sceneLine, "RenderResolutionの値が不正です(幅, 高さの2要素の正整数が必要)");
+            }
+            // 上限はレンダーターゲット1枚あたりの現実的な大きさで抑える。
+            // G-Buffer・TAA履歴・Bloomの段など多数のフルスクリーンテクスチャが
+            // この解像度で作られるため、書き間違いで数GBを確保しないための歯止め
+            if (parsedXY[0] > 7680u || parsedXY[1] > 4320u)
+            {
+                ErrorAt(sceneLine, "RenderResolutionは7680x4320以下で指定してください");
+            }
+            result.RenderWidth = parsedXY[0];
+            result.RenderHeight = parsedXY[1];
+            result.HasRenderResolution = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"ScreenSpaceReflection"))
+        {
+            const std::optional<bool> parsedValue = ParseBoolToken(sceneLine.Value);
+            if (!parsedValue) ErrorAt(sceneLine, "ScreenSpaceReflectionの値はtrue/falseで指定してください");
+            result.SSREnabled = *parsedValue;
+            // 「書いた」ことそのものに意味がある(Scene::HasSSREnabledOverride参照)
+            result.HasSSREnabled = true;
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
+        // [Model] セクションの1行を解析する
+        void ParseModelKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        ParsedModelEntry& entry = result.Models.back();
+        if (CaseInsensitiveEquals(sceneLine.Key, L"Path"))
+        {
+            entry.Path = sceneLine.Value;
+            entry.HasPath = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Translation"))
+        {
+            if (!ParseFloat3(sceneLine.Value, entry.Translation)) ErrorAt(sceneLine, "Translationの値が不正です(x, y, zの3要素が必要)");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"RotationEuler"))
+        {
+            if (!ParseFloat3(sceneLine.Value, entry.RotationEulerDegrees)) ErrorAt(sceneLine, "RotationEulerの値が不正です(x, y, zの3要素が必要)");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Scale"))
+        {
+            if (!ParseFloat3(sceneLine.Value, entry.Scale)) ErrorAt(sceneLine, "Scaleの値が不正です(x, y, zの3要素が必要)");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Water"))
+        {
+            // 水面マテリアル基盤。trueにするとこのインスタンスがWater.hlslで
+            // 描画され、G-BufferのMaterial.aへ水面のマテリアルIDが書かれるようになる
+            const std::optional<bool> parsed = ParseBoolToken(sceneLine.Value);
+            if (!parsed) ErrorAt(sceneLine, "Waterの値はtrue/falseで指定してください");
+            entry.Water = *parsed;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"LODPath"))
+        {
+            // 【対で書くことを強制する】LODPathの直前にLODDistanceが埋まっていたら、
+            // それは前のLODPathに対応する距離が無いまま次の段が来たということ
+            if (entry.LODPaths.size() != entry.LODDistances.size())
+            {
+                ErrorAt(sceneLine, "LODPathの前にLODDistanceが指定されていません(LODPathとLODDistanceは対で書いてください)");
+            }
+            if (sceneLine.Value.empty()) ErrorAt(sceneLine, "LODPathが空です");
+            entry.LODPaths.push_back(sceneLine.Value);
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"LODDistance"))
+        {
+            if (entry.LODDistances.size() + 1 != entry.LODPaths.size())
+            {
+                ErrorAt(sceneLine, "LODDistanceに対応するLODPathがありません(LODPathを先に書いてください)");
+            }
+            float distance = 0.0f;
+            if (!ParseFloatToken(sceneLine.Value, distance)) ErrorAt(sceneLine, "LODDistanceの値が不正です");
+            if (distance < 1.0f || distance > 1000000.0f)
+            {
+                ErrorAt(sceneLine, "LODDistanceは1〜1000000の範囲で指定してください");
+            }
+            // 【昇順を強制する】切り替え距離が単調でないと「遠いのに詳細な段」が選ばれる。
+            // 書き間違えても絵はそれらしく出てしまうので、ここで弾く
+            if (!entry.LODDistances.empty() && distance <= entry.LODDistances.back())
+            {
+                ErrorAt(sceneLine, "LODDistanceは粗くなる順(昇順)に指定してください");
+            }
+            entry.LODDistances.push_back(distance);
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
+        // [Camera] セクションの1行を解析する
+        void ParseCameraKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        if (CaseInsensitiveEquals(sceneLine.Key, L"Position"))
+        {
+            if (!ParseFloat3(sceneLine.Value, result.CameraPosition)) ErrorAt(sceneLine, "Positionの値が不正です(x, y, zの3要素が必要)");
+            result.CameraPositionSet = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Yaw"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.CameraYaw)) ErrorAt(sceneLine, "Yawの値が不正です");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Pitch"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.CameraPitch)) ErrorAt(sceneLine, "Pitchの値が不正です");
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
+        // [Sun] セクションの1行を解析する
+        void ParseSunKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        if (CaseInsensitiveEquals(sceneLine.Key, L"TimeOfDay"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.SunTimeOfDay)) ErrorAt(sceneLine, "TimeOfDayの値が不正です");
+            if (result.SunTimeOfDay < 0.0f || result.SunTimeOfDay > 24.0f) ErrorAt(sceneLine, "TimeOfDayは0〜24の範囲で指定してください");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"AzimuthDegrees"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.SunAzimuthDegrees)) ErrorAt(sceneLine, "AzimuthDegreesの値が不正です");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Shadow"))
+        {
+            const std::optional<bool> parsed = ParseBoolToken(sceneLine.Value);
+            if (!parsed) ErrorAt(sceneLine, "Shadowの値はtrue/falseで指定してください");
+            result.SunShadow = *parsed;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Enabled"))
+        {
+            // 太陽(平行光)そのものの有効/無効。TimeOfDayを夜にすると昼度も一緒に
+            // 落ちて環境光まで消えるため、「昼のまま太陽だけ消す」にはこちらを使う
+            const std::optional<bool> parsed = ParseBoolToken(sceneLine.Value);
+            if (!parsed) ErrorAt(sceneLine, "Enabledの値はtrue/falseで指定してください");
+            result.SunEnabled = *parsed;
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
+        // [Light] セクションの1行を解析する
+        void ParseLightKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        ParsedLightEntry& entry = result.Lights.back();
+        if (CaseInsensitiveEquals(sceneLine.Key, L"Type"))
+        {
+            if (CaseInsensitiveEquals(sceneLine.Value, L"Point")) entry.Type = LightType::Point;
+            else if (CaseInsensitiveEquals(sceneLine.Value, L"Spot")) entry.Type = LightType::Spot;
+            else ErrorAt(sceneLine, "Typeの値はPointかSpotで指定してください");
+            entry.HasType = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Position"))
+        {
+            if (!ParseFloat3(sceneLine.Value, entry.Position)) ErrorAt(sceneLine, "Positionの値が不正です(x, y, zの3要素が必要)");
+            entry.HasPosition = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Direction"))
+        {
+            if (!ParseFloat3(sceneLine.Value, entry.Direction)) ErrorAt(sceneLine, "Directionの値が不正です(x, y, zの3要素が必要)");
+            entry.HasDirection = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Color"))
+        {
+            if (!ParseFloat3(sceneLine.Value, entry.Color)) ErrorAt(sceneLine, "Colorの値が不正です(r, g, bの3要素が必要)");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Intensity"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, entry.Intensity)) ErrorAt(sceneLine, "Intensityの値が不正です");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Range"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, entry.Range)) ErrorAt(sceneLine, "Rangeの値が不正です");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"SourceRadius"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, entry.SourceRadius)) ErrorAt(sceneLine, "SourceRadiusの値が不正です");
+            if (entry.SourceRadius < 0.0f) ErrorAt(sceneLine, "SourceRadiusは0以上で指定してください");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"ConeAngleDegrees"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, entry.ConeAngleDegrees)) ErrorAt(sceneLine, "ConeAngleDegreesの値が不正です");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"CastShadow"))
+        {
+            const std::optional<bool> parsed = ParseBoolToken(sceneLine.Value);
+            if (!parsed) ErrorAt(sceneLine, "CastShadowの値はtrue/falseで指定してください");
+            entry.CastShadow = *parsed;
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
+        // [ReflectionProbe] セクションの1行を解析する
+        void ParseReflectionProbeKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        ParsedReflectionProbeEntry& entry = result.ReflectionProbes.back();
+        if (CaseInsensitiveEquals(sceneLine.Key, L"Position"))
+        {
+            if (!ParseFloat3(sceneLine.Value, entry.Position)) ErrorAt(sceneLine, "Positionの値が不正です(x, y, zの3要素が必要)");
+            entry.HasPosition = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Radius"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, entry.Radius)) ErrorAt(sceneLine, "Radiusの値が不正です");
+            if (entry.Radius <= 0.0f) ErrorAt(sceneLine, "Radiusは0より大きい値で指定してください");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Shape"))
+        {
+            if (CaseInsensitiveEquals(sceneLine.Value, L"Sphere")) entry.Shape = ReflectionProbeShape::Sphere;
+            else if (CaseInsensitiveEquals(sceneLine.Value, L"Box")) entry.Shape = ReflectionProbeShape::Box;
+            else ErrorAt(sceneLine, "Shapeの値が不正です(SphereまたはBox)");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"BoxExtents"))
+        {
+            if (!ParseFloat3(sceneLine.Value, entry.BoxExtents)) ErrorAt(sceneLine, "BoxExtentsの値が不正です(x, y, zの3要素が必要)");
+            if (entry.BoxExtents[0] <= 0.0f || entry.BoxExtents[1] <= 0.0f || entry.BoxExtents[2] <= 0.0f)
+            {
+                ErrorAt(sceneLine, "BoxExtentsは全ての軸を0より大きい値で指定してください");
+            }
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Yaw"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, entry.YawDegrees)) ErrorAt(sceneLine, "Yawの値が不正です");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"BlendDistance"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, entry.BlendDistance)) ErrorAt(sceneLine, "BlendDistanceの値が不正です");
+            if (entry.BlendDistance < 0.0f) ErrorAt(sceneLine, "BlendDistanceは0以上の値で指定してください");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Name"))
+        {
+            entry.Name = sceneLine.Value;
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
+        // [GIVolume] セクションの1行を解析する
+        void ParseGIVolumeKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        ParsedGIVolumeEntry& entry = result.GIVolumes.back();
+        if (CaseInsensitiveEquals(sceneLine.Key, L"Origin"))
+        {
+            if (!ParseFloat3(sceneLine.Value, entry.Origin)) ErrorAt(sceneLine, "Originの値が不正です(x, y, zの3要素が必要)");
+            entry.HasOrigin = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"ProbeSpacing"))
+        {
+            if (!ParseFloat3(sceneLine.Value, entry.ProbeSpacing)) ErrorAt(sceneLine, "ProbeSpacingの値が不正です(x, y, zの3要素が必要)");
+            if (entry.ProbeSpacing[0] <= 0.0f || entry.ProbeSpacing[1] <= 0.0f || entry.ProbeSpacing[2] <= 0.0f)
+            {
+                ErrorAt(sceneLine, "ProbeSpacingは全ての軸を0より大きい値で指定してください");
+            }
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"ProbeCounts"))
+        {
+            if (!ParseUint3(sceneLine.Value, entry.ProbeCounts))
+            {
+                ErrorAt(sceneLine, "ProbeCountsの値が不正です(x, y, zの3要素、それぞれ1以上の整数)");
+            }
+            // トライリニア補間は周囲8個のプローブを使うため、各軸2個以上ないと成立しない
+            if (entry.ProbeCounts[0] < 2u || entry.ProbeCounts[1] < 2u || entry.ProbeCounts[2] < 2u)
+            {
+                ErrorAt(sceneLine, "ProbeCountsは全ての軸を2以上で指定してください(トライリニア補間に周囲8個が必要なため)");
+            }
+            entry.HasProbeCounts = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"NormalBias"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, entry.NormalBias)) ErrorAt(sceneLine, "NormalBiasの値が不正です");
+            if (entry.NormalBias < 0.0f) ErrorAt(sceneLine, "NormalBiasは0以上の値で指定してください");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"ViewBias"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, entry.ViewBias)) ErrorAt(sceneLine, "ViewBiasの値が不正です");
+            if (entry.ViewBias < 0.0f) ErrorAt(sceneLine, "ViewBiasは0以上の値で指定してください");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Hysteresis"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, entry.Hysteresis)) ErrorAt(sceneLine, "Hysteresisの値が不正です");
+            if (entry.Hysteresis < 0.0f || entry.Hysteresis >= 1.0f)
+            {
+                ErrorAt(sceneLine, "Hysteresisは0以上1未満で指定してください(1では新しい値が一切入らない)");
+            }
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"MaxRayDistance"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, entry.MaxRayDistance)) ErrorAt(sceneLine, "MaxRayDistanceの値が不正です");
+            // 距離アトラスは平均距離と平均二乗距離を持ち、その差から分散を求める。
+            // 距離が大きいほどこの引き算の桁落ちが効くため上限を設ける
+            // (r=200なら r²=40000 で、fp32の有効桁に対し分散を0.01程度の分解能で
+            //  残せる。詳細はScene.hのGIVolume::MaxRayDistance参照)
+            if (entry.MaxRayDistance <= 0.0f || entry.MaxRayDistance > 200.0f)
+            {
+                ErrorAt(sceneLine, "MaxRayDistanceは0より大きく200以下で指定してください(分散の計算が桁落ちで潰れるため)");
+            }
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"LODCount"))
+        {
+            float parsed = 0.0f;
+            if (!ParseFloatToken(sceneLine.Value, parsed)) ErrorAt(sceneLine, "LODCountの値が不正です");
+            // 段数が増えるとプローブ総数が段数倍になる(=一巡にかかる時間もその分伸びる)。
+            // 上限はkDDGIMaxLODCountと合わせること
+            if (parsed < 1.0f || parsed > 4.0f || parsed != std::floor(parsed))
+            {
+                ErrorAt(sceneLine, "LODCountは1以上4以下の整数で指定してください");
+            }
+            entry.LODCount = static_cast<uint32_t>(parsed);
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"FollowCamera"))
+        {
+            const std::optional<bool> parsedValue = ParseBoolToken(sceneLine.Value);
+            if (!parsedValue) ErrorAt(sceneLine, "FollowCameraの値が不正です");
+            entry.FollowCamera = *parsedValue;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Name"))
+        {
+            entry.Name = sceneLine.Value;
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
+        // [Water] セクションの1行を解析する
+        void ParseWaterKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        // 水面マテリアル基盤。NormalMapのパス解決(ルート外チェック・絶対パス化)は
+        // ここでは行わず、[Scene]Skyboxと同じくLoadScene側でまとめて行う
+        // (ParseSceneFileは純粋なテキスト解析でファイルシステムに触れない方針のため)
+        if (CaseInsensitiveEquals(sceneLine.Key, L"NormalMap"))
+        {
+            result.WaterNormalMapPath = sceneLine.Value;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"WaveScale"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.WaterWaveScale)) ErrorAt(sceneLine, "WaveScaleの値が不正です");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"WaveSpeed"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.WaterWaveSpeed)) ErrorAt(sceneLine, "WaveSpeedの値が不正です");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"WaveStrength"))
+        {
+            if (!ParseFloatToken(sceneLine.Value, result.WaterWaveStrength)) ErrorAt(sceneLine, "WaveStrengthの値が不正です");
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
+        // [Cloud] セクションの1行を解析する
+        void ParseCloudKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        if (CaseInsensitiveEquals(sceneLine.Key, L"Coverage"))
+        {
+            ReadFloat(sceneLine, result.CloudCoverage, result.HasCloudCoverage, 0.0f, 1.0f, L"Coverage");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Altitude"))
+        {
+            ReadFloat(sceneLine, result.CloudAltitude, result.HasCloudAltitude, 100.0f, 20000.0f, L"Altitude");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Thickness"))
+        {
+            ReadFloat(sceneLine, result.CloudThickness, result.HasCloudThickness, 0.0f, 5000.0f, L"Thickness");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Density"))
+        {
+            ReadFloat(sceneLine, result.CloudDensity, result.HasCloudDensity, 0.0f, 100.0f, L"Density");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"TypeBias"))
+        {
+            // 0=層雲寄り / 0.5=中立 / 1=雄大積雲寄り(C4)
+            ReadFloat(sceneLine, result.CloudTypeBias, result.HasCloudTypeBias, 0.0f, 1.0f, L"TypeBias");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"CellSize"))
+        {
+            ReadFloat(sceneLine, result.CloudCellSize, result.HasCloudCellSize, 10.0f, 100000.0f, L"CellSize");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"CirrusCoverage"))
+        {
+            ReadFloat(sceneLine, result.CirrusCoverage, result.HasCirrusCoverage, 0.0f, 1.0f, L"CirrusCoverage");
+        }
+        // 巻雲(P11)。積雲と同じ作法で、範囲外は打ち間違いとみなしてエラーにする。
+        // 上限・下限はUIのスライダーより広く取る(スライダーは操作しやすい範囲、
+        // ここは打ち間違いの門番、という役割の違い。積雲のAltitude/CellSizeと同じ)
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"CirrusAltitude"))
+        {
+            ReadFloat(sceneLine, result.CirrusAltitude, result.HasCirrusAltitude, 100.0f, 20000.0f, L"CirrusAltitude");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"CirrusCellSize"))
+        {
+            ReadFloat(sceneLine, result.CirrusCellSize, result.HasCirrusCellSize, 10.0f, 100000.0f, L"CirrusCellSize");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"CirrusDensity"))
+        {
+            ReadFloat(sceneLine, result.CirrusDensity, result.HasCirrusDensity, 0.0f, 100.0f, L"CirrusDensity");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"CirrusAnisotropy"))
+        {
+            // 1で積雲と同じ等方な塊、大きいほどU方向へ伸びて筋状になる
+            ReadFloat(sceneLine, result.CirrusAnisotropy, result.HasCirrusAnisotropy, 1.0f, 16.0f, L"CirrusAnisotropy");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"CirrusWindSpeed"))
+        {
+            ReadFloat(sceneLine, result.CirrusWindSpeed, result.HasCirrusWindSpeed, 0.0f, 200.0f, L"CirrusWindSpeed");
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
+        // [Fog] セクションの1行を解析する
+        void ParseFogKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        if (CaseInsensitiveEquals(sceneLine.Key, L"Enabled"))
+        {
+            const std::optional<bool> parsedValue = ParseBoolToken(sceneLine.Value);
+            if (!parsedValue) ErrorAt(sceneLine, "Enabledの値はtrue/falseで指定してください");
+            result.FogEnabled = *parsedValue;
+            result.HasFogEnabled = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Density"))
+        {
+            // 上限0.002は視程約2km(もや)に相当する。これより濃いと600m先の地物すら
+            // 見えなくなり屋外の風景として成立しないため、UIのスライダーと同じ上限にしてある
+            ReadFloat(sceneLine, result.FogDensity, result.HasFogDensity, 0.0f, 0.002f, L"Density");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"ScaleHeight"))
+        {
+            ReadFloat(sceneLine, result.FogScaleHeight, result.HasFogScaleHeight, 10.0f, 5000.0f, L"ScaleHeight");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"RefHeight"))
+        {
+            ReadFloat(sceneLine, result.FogRefHeight, result.HasFogRefHeight, -500.0f, 500.0f, L"RefHeight");
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
+        // [Bloom] セクションの1行を解析する
+        void ParseBloomKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        if (CaseInsensitiveEquals(sceneLine.Key, L"Enabled"))
+        {
+            const std::optional<bool> parsedValue = ParseBoolToken(sceneLine.Value);
+            if (!parsedValue) ErrorAt(sceneLine, "Enabledの値はtrue/falseで指定してください");
+            result.BloomEnabled = *parsedValue;
+            result.HasBloomEnabled = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Strength"))
+        {
+            // Tonemapは元の色とブルームをこの比率でlerpするため1.0で完全に置き換わる
+            ReadFloat(sceneLine, result.BloomStrength, result.HasBloomStrength, 0.0f, 1.0f, L"Strength");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Threshold"))
+        {
+            ReadFloat(sceneLine, result.BloomThreshold, result.HasBloomThreshold, 0.0f, 100.0f, L"Threshold");
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
+        // [Stars] セクションの1行を解析する
+        void ParseStarsKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        if (CaseInsensitiveEquals(sceneLine.Key, L"Enabled"))
+        {
+            const std::optional<bool> parsedValue = ParseBoolToken(sceneLine.Value);
+            if (!parsedValue) ErrorAt(sceneLine, "Enabledの値はtrue/falseで指定してください");
+            result.StarsEnabled = *parsedValue;
+            result.HasStarsEnabled = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Density"))
+        {
+            // 上限256は「1セルに1個」の規則から全天で数十万個に相当し、
+            // これ以上は星というより砂嵐になる
+            ReadFloat(sceneLine, result.StarsDensity, result.HasStarsDensity, 1.0f, 256.0f, L"Density");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Brightness"))
+        {
+            ReadFloat(sceneLine, result.StarsBrightness, result.HasStarsBrightness, 0.0f, 20.0f, L"Brightness");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Twinkle"))
+        {
+            ReadFloat(sceneLine, result.StarsTwinkle, result.HasStarsTwinkle, 0.0f, 1.0f, L"Twinkle");
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
+        // [DroneShow] セクションの1行を解析する
+        void ParseDroneShowKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        if (CaseInsensitiveEquals(sceneLine.Key, L"Enabled"))
+        {
+            const std::optional<bool> parsedValue = ParseBoolToken(sceneLine.Value);
+            if (!parsedValue) ErrorAt(sceneLine, "Enabledの値はtrue/falseで指定してください");
+            result.DroneShowEnabled = *parsedValue;
+            result.HasDroneShowEnabled = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Path"))
+        {
+            // .kshowのパス。パス解決(ルート外チェック・絶対パス化)はここでは行わず、
+            // [Scene]Skybox・[Water]NormalMapと同じくLoadScene側でまとめて行う
+            result.DroneShowPath = sceneLine.Value;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Center"))
+        {
+            if (!ParseFloat3(sceneLine.Value, result.DroneShowCenter))
+            {
+                ErrorAt(sceneLine, "Centerの値が不正です(x, y, zの3要素が必要)");
+            }
+            result.HasDroneShowCenter = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Scale"))
+        {
+            ReadFloat(sceneLine, result.DroneShowScale, result.HasDroneShowScale, 1.0f, 5000.0f, L"Scale");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"CastLight"))
+        {
+            const std::optional<bool> parsedValue = ParseBoolToken(sceneLine.Value);
+            if (!parsedValue) ErrorAt(sceneLine, "CastLightの値はtrue/falseで指定してください");
+            result.DroneShowCastLight = *parsedValue;
+            result.HasDroneShowCastLight = true;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"CastLightScale"))
+        {
+            ReadFloat(sceneLine,
+                result.DroneShowCastLightScale, result.HasDroneShowCastLightScale,
+                0.0f, 1000.0f, L"CastLightScale");
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
         ParsedScene ParseSceneFile(const std::wstring& filePath)
         {
             std::ifstream in(filePath, std::ios::binary);
@@ -462,13 +1226,13 @@ namespace Kurenai::Assets
             ParsedScene result;
             Section currentSection = Section::None;
 
+            // 【ここだけラムダを残す】セクション見出しの解析はキーも値もまだ無く、
+            // SceneLineを組み立てられないため、ファイルパスだけを捕まえて包む
             auto errorAt = [&](size_t lineNumber, const std::wstring& rawLine, const std::string& message) -> void
             {
-                const std::string fullMessage =
-                    message + " (" + WideToUtf8(filePath) + ":" + std::to_string(lineNumber) + ": " + WideToUtf8(rawLine) + ")";
-                Core::Logger::Error("SceneLoader", fullMessage);
-                throw std::runtime_error(fullMessage);
+                ErrorAt(filePath, lineNumber, rawLine, message);
             };
+
 
             size_t lineNumber = 0;
             size_t pos = 0;
@@ -556,732 +1320,49 @@ namespace Kurenai::Assets
                     continue;
                 }
 
-                auto warnUnknownKey = [&]()
-                {
-                    Core::Logger::Warning("SceneLoader", "未知のキーを無視します: " + WideToUtf8(key) + " (" + WideToUtf8(filePath) + ":" + std::to_string(lineNumber) + ")");
-                };
-
-                // 各セクションで共通の数値解析・範囲検証・指定フラグ更新をここへ集約する。
-                const auto readFloat = [&](float& out, bool& has, float minValue, float maxValue, const wchar_t* name)
-                {
-                    if (!ParseFloatToken(value, out))
-                    {
-                        errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が不正です");
-                    }
-                    if (out < minValue || out > maxValue)
-                    {
-                        errorAt(lineNumber, rawLine, WideToUtf8(name) + "の値が範囲外です");
-                    }
-                    has = true;
-                };
+                const SceneLine sceneLine{ filePath, lineNumber, rawLine, key, value };
 
                 switch (currentSection)
                 {
                 case Section::Scene:
-                    if (CaseInsensitiveEquals(key, L"Name"))
-                    {
-                        result.Name = value;
-                        result.HasName = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Skybox"))
-                    {
-                        // スカイボックス(キューブマップDDS)のAssetsルートからの相対パス。
-                        // [Model]Pathと同じ基準・同じルート外チェックを適用する
-                        result.SkyboxPath = value;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"IBLIntensity"))
-                    {
-                        if (!ParseFloatToken(value, result.IBLIntensity)) errorAt(lineNumber, rawLine, "IBLIntensityの値が不正です");
-                        if (result.IBLIntensity < 0.0f) errorAt(lineNumber, rawLine, "IBLIntensityは0以上で指定してください");
-                        result.HasIBLIntensity = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"ShadowDistance"))
-                    {
-                        if (!ParseFloatToken(value, result.ShadowDistance)) errorAt(lineNumber, rawLine, "ShadowDistanceの値が不正です");
-                        // 下限: 近クリップ面は最大でも0.1mなので、それを下回ると影が1枚も出ない。
-                        // 上限: シャドウマップ1枚(2048x2048)で覆って意味のある範囲を大きく超えると、
-                        // 打ち切る意味がなくなる(既定のfarZ側でどのみち制限される)。
-                        // どちらも打ち間違い(0や桁の取り違え)を弾くためのもの
-                        if (result.ShadowDistance < 1.0f || result.ShadowDistance > 100000.0f)
-                        {
-                            errorAt(lineNumber, rawLine, "ShadowDistanceは1〜100000の範囲で指定してください");
-                        }
-                        result.HasShadowDistance = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"StreamingDistance"))
-                    {
-                        if (!ParseFloatToken(value, result.StreamingDistance)) errorAt(lineNumber, rawLine, "StreamingDistanceの値が不正です");
-                        // 1m未満だと全モデルが未読み込みのままになり、巨大すぎると常駐と変わらない。
-                        // ShadowDistanceと同じ範囲にしてある
-                        if (result.StreamingDistance < 1.0f || result.StreamingDistance > 100000.0f)
-                        {
-                            errorAt(lineNumber, rawLine, "StreamingDistanceは1〜100000の範囲で指定してください");
-                        }
-                        result.HasStreamingDistance = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"CameraSpeed"))
-                    {
-                        if (!ParseFloatToken(value, result.CameraSpeed)) errorAt(lineNumber, rawLine, "CameraSpeedの値が不正です");
-                        // 下限: 0や負値は「動けない/逆走する」になるだけで指定として意味を成さない。
-                        // 0.01 m/s は1mの移動に100秒かかる速度で、実用の下限より十分下にある。
-                        // 上限: 東京23区(対角約45km)の自動値が653 m/s、Shiftで2612 m/sなので、
-                        // 桁の取り違えを弾きつつそれを妨げない位置に置く。
-                        // どちらも打ち間違いを弾くためのもので、実用範囲を狭める意図はない
-                        if (result.CameraSpeed < 0.01f || result.CameraSpeed > 10000.0f)
-                        {
-                            errorAt(lineNumber, rawLine, "CameraSpeedは0.01〜10000の範囲で指定してください");
-                        }
-                        result.HasCameraSpeed = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"TextureStreaming"))
-                    {
-                        const std::optional<bool> parsedValue = ParseBoolToken(value);
-                        if (!parsedValue) errorAt(lineNumber, rawLine, "TextureStreamingの値はtrue/falseで指定してください");
-                        result.TextureStreamingEnabled = *parsedValue;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"TextureStreamingBias"))
-                    {
-                        if (!ParseFloatToken(value, result.TextureStreamingBias)) errorAt(lineNumber, rawLine, "TextureStreamingBiasの値が不正です");
-                        // ミップ段数は多くても十数段なので、これを超える指定は桁の打ち間違い。
-                        // 正側(粗くする)を+4までにしているのは、それ以上はどのみち最小ミップに張り付くため
-                        if (result.TextureStreamingBias < -8.0f || result.TextureStreamingBias > 4.0f)
-                        {
-                            errorAt(lineNumber, rawLine, "TextureStreamingBiasは-8〜4の範囲で指定してください");
-                        }
-                    }
-                    else if (CaseInsensitiveEquals(key, L"AmbientOcclusion"))
-                    {
-                        const std::optional<bool> parsedValue = ParseBoolToken(value);
-                        if (!parsedValue) errorAt(lineNumber, rawLine, "AmbientOcclusionの値はtrue/falseで指定してください");
-                        result.AOEnabled = *parsedValue;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Tonemap"))
-                    {
-                        // トーンマップのカーブをシーン単位で選ぶ。屋外の風景はACESのほうが空の青が残る
-                        // (既定のAgXはハイライトを色相保持のまま白へ脱色するため彩度が落ちる)
-                        if (CaseInsensitiveEquals(value, L"Reinhard"))
-                        {
-                            result.Tonemap = Scene::TonemapCurveSetting::Reinhard;
-                        }
-                        else if (CaseInsensitiveEquals(value, L"ACES"))
-                        {
-                            result.Tonemap = Scene::TonemapCurveSetting::ACES;
-                        }
-                        else if (CaseInsensitiveEquals(value, L"AgX"))
-                        {
-                            result.Tonemap = Scene::TonemapCurveSetting::AgX;
-                        }
-                        else
-                        {
-                            errorAt(lineNumber, rawLine, "Tonemapの値はReinhard/ACES/AgXのいずれかで指定してください");
-                        }
-                    }
-                    else if (CaseInsensitiveEquals(key, L"SkySaturation"))
-                    {
-                        if (!ParseFloatToken(value, result.SkySaturation)) errorAt(lineNumber, rawLine, "SkySaturationの値が不正です");
-                        if (result.SkySaturation < 0.0f) errorAt(lineNumber, rawLine, "SkySaturationは0以上で指定してください");
-                    }
-                    // 大気の濁り具合。大きいほど地平線が白く霞み、天頂の青が薄くなる。
-                    // 【SkySaturationと違って指定されたときだけ上書きする】タービディティを動かすと
-                    // 大気LUTの焼き直しが走るため、書いていないシーンにまで無条件で触りたくない
-                    else if (CaseInsensitiveEquals(key, L"SkyTurbidity"))
-                    {
-                        if (!ParseFloatToken(value, result.SkyTurbidity)) errorAt(lineNumber, rawLine, "SkyTurbidityの値が不正です");
-                        // Preethamの定義域はおおむね1.7〜10。外れた値は打ち間違いとみなす
-                        if (result.SkyTurbidity < 1.0f || result.SkyTurbidity > 10.0f)
-                        {
-                            errorAt(lineNumber, rawLine, "SkyTurbidityの値が範囲外です");
-                        }
-                        result.HasSkyTurbidity = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"TonemapBlackPoint"))
-                    {
-                        if (!ParseFloatToken(value, result.TonemapBlackPoint))
-                        {
-                            errorAt(lineNumber, rawLine, "TonemapBlackPointの値が不正です");
-                        }
-                        // 0で恒等、1で全部黒。0.2を超えると暗部が丸ごと潰れるので
-                        // 打ち間違いとみなす(実用域は0.00〜0.10)
-                        if (result.TonemapBlackPoint < 0.0f || result.TonemapBlackPoint > 0.2f)
-                        {
-                            errorAt(lineNumber, rawLine, "TonemapBlackPointは0〜0.2で指定してください");
-                        }
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Exposure"))
-                    {
-                        if (!ParseFloatToken(value, result.ExposureEV100)) errorAt(lineNumber, rawLine, "Exposureの値が不正です");
-                        // EV100の実用域(暗い室内-6 〜 直射日光下17程度)を大きく外れた値は
-                        // 打ち間違いとみなす。自動露出の範囲(EngineDefaults.hのAutoExposure
-                        // Min/MaxEV100)と同じ-6〜18に合わせてある
-                        if (result.ExposureEV100 < -6.0f || result.ExposureEV100 > 18.0f)
-                        {
-                            errorAt(lineNumber, rawLine, "Exposureは-6〜18(EV100)の範囲で指定してください");
-                        }
-                        result.HasExposure = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"TAA"))
-                    {
-                        const std::optional<bool> parsedValue = ParseBoolToken(value);
-                        if (!parsedValue) errorAt(lineNumber, rawLine, "TAAの値はtrue/falseで指定してください");
-                        result.TAAEnabled = *parsedValue;
-                        result.HasTAAEnabled = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"RenderResolution"))
-                    {
-                        uint32_t parsedXY[2] = {};
-                        if (!ParseUint2(value, parsedXY))
-                        {
-                            errorAt(lineNumber, rawLine, "RenderResolutionの値が不正です(幅, 高さの2要素の正整数が必要)");
-                        }
-                        // 上限はレンダーターゲット1枚あたりの現実的な大きさで抑える。
-                        // G-Buffer・TAA履歴・Bloomの段など多数のフルスクリーンテクスチャが
-                        // この解像度で作られるため、書き間違いで数GBを確保しないための歯止め
-                        if (parsedXY[0] > 7680u || parsedXY[1] > 4320u)
-                        {
-                            errorAt(lineNumber, rawLine, "RenderResolutionは7680x4320以下で指定してください");
-                        }
-                        result.RenderWidth = parsedXY[0];
-                        result.RenderHeight = parsedXY[1];
-                        result.HasRenderResolution = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"ScreenSpaceReflection"))
-                    {
-                        const std::optional<bool> parsedValue = ParseBoolToken(value);
-                        if (!parsedValue) errorAt(lineNumber, rawLine, "ScreenSpaceReflectionの値はtrue/falseで指定してください");
-                        result.SSREnabled = *parsedValue;
-                        // 「書いた」ことそのものに意味がある(Scene::HasSSREnabledOverride参照)
-                        result.HasSSREnabled = true;
-                    }
-                    else
-                    {
-                        warnUnknownKey();
-                    }
+                    ParseSceneKey(sceneLine, result);
                     break;
-
                 case Section::Model:
-                {
-                    ParsedModelEntry& entry = result.Models.back();
-                    if (CaseInsensitiveEquals(key, L"Path"))
-                    {
-                        entry.Path = value;
-                        entry.HasPath = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Translation"))
-                    {
-                        if (!ParseFloat3(value, entry.Translation)) errorAt(lineNumber, rawLine, "Translationの値が不正です(x, y, zの3要素が必要)");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"RotationEuler"))
-                    {
-                        if (!ParseFloat3(value, entry.RotationEulerDegrees)) errorAt(lineNumber, rawLine, "RotationEulerの値が不正です(x, y, zの3要素が必要)");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Scale"))
-                    {
-                        if (!ParseFloat3(value, entry.Scale)) errorAt(lineNumber, rawLine, "Scaleの値が不正です(x, y, zの3要素が必要)");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Water"))
-                    {
-                        // 水面マテリアル基盤。trueにするとこのインスタンスがWater.hlslで
-                        // 描画され、G-BufferのMaterial.aへ水面のマテリアルIDが書かれるようになる
-                        const std::optional<bool> parsed = ParseBoolToken(value);
-                        if (!parsed) errorAt(lineNumber, rawLine, "Waterの値はtrue/falseで指定してください");
-                        entry.Water = *parsed;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"LODPath"))
-                    {
-                        // 【対で書くことを強制する】LODPathの直前にLODDistanceが埋まっていたら、
-                        // それは前のLODPathに対応する距離が無いまま次の段が来たということ
-                        if (entry.LODPaths.size() != entry.LODDistances.size())
-                        {
-                            errorAt(lineNumber, rawLine, "LODPathの前にLODDistanceが指定されていません(LODPathとLODDistanceは対で書いてください)");
-                        }
-                        if (value.empty()) errorAt(lineNumber, rawLine, "LODPathが空です");
-                        entry.LODPaths.push_back(value);
-                    }
-                    else if (CaseInsensitiveEquals(key, L"LODDistance"))
-                    {
-                        if (entry.LODDistances.size() + 1 != entry.LODPaths.size())
-                        {
-                            errorAt(lineNumber, rawLine, "LODDistanceに対応するLODPathがありません(LODPathを先に書いてください)");
-                        }
-                        float distance = 0.0f;
-                        if (!ParseFloatToken(value, distance)) errorAt(lineNumber, rawLine, "LODDistanceの値が不正です");
-                        if (distance < 1.0f || distance > 1000000.0f)
-                        {
-                            errorAt(lineNumber, rawLine, "LODDistanceは1〜1000000の範囲で指定してください");
-                        }
-                        // 【昇順を強制する】切り替え距離が単調でないと「遠いのに詳細な段」が選ばれる。
-                        // 書き間違えても絵はそれらしく出てしまうので、ここで弾く
-                        if (!entry.LODDistances.empty() && distance <= entry.LODDistances.back())
-                        {
-                            errorAt(lineNumber, rawLine, "LODDistanceは粗くなる順(昇順)に指定してください");
-                        }
-                        entry.LODDistances.push_back(distance);
-                    }
-                    else
-                    {
-                        warnUnknownKey();
-                    }
+                    ParseModelKey(sceneLine, result);
                     break;
-                }
-
                 case Section::Camera:
-                    if (CaseInsensitiveEquals(key, L"Position"))
-                    {
-                        if (!ParseFloat3(value, result.CameraPosition)) errorAt(lineNumber, rawLine, "Positionの値が不正です(x, y, zの3要素が必要)");
-                        result.CameraPositionSet = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Yaw"))
-                    {
-                        if (!ParseFloatToken(value, result.CameraYaw)) errorAt(lineNumber, rawLine, "Yawの値が不正です");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Pitch"))
-                    {
-                        if (!ParseFloatToken(value, result.CameraPitch)) errorAt(lineNumber, rawLine, "Pitchの値が不正です");
-                    }
-                    else
-                    {
-                        warnUnknownKey();
-                    }
+                    ParseCameraKey(sceneLine, result);
                     break;
-
                 case Section::Sun:
-                    if (CaseInsensitiveEquals(key, L"TimeOfDay"))
-                    {
-                        if (!ParseFloatToken(value, result.SunTimeOfDay)) errorAt(lineNumber, rawLine, "TimeOfDayの値が不正です");
-                        if (result.SunTimeOfDay < 0.0f || result.SunTimeOfDay > 24.0f) errorAt(lineNumber, rawLine, "TimeOfDayは0〜24の範囲で指定してください");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"AzimuthDegrees"))
-                    {
-                        if (!ParseFloatToken(value, result.SunAzimuthDegrees)) errorAt(lineNumber, rawLine, "AzimuthDegreesの値が不正です");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Shadow"))
-                    {
-                        const std::optional<bool> parsed = ParseBoolToken(value);
-                        if (!parsed) errorAt(lineNumber, rawLine, "Shadowの値はtrue/falseで指定してください");
-                        result.SunShadow = *parsed;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Enabled"))
-                    {
-                        // 太陽(平行光)そのものの有効/無効。TimeOfDayを夜にすると昼度も一緒に
-                        // 落ちて環境光まで消えるため、「昼のまま太陽だけ消す」にはこちらを使う
-                        const std::optional<bool> parsed = ParseBoolToken(value);
-                        if (!parsed) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
-                        result.SunEnabled = *parsed;
-                    }
-                    else
-                    {
-                        warnUnknownKey();
-                    }
+                    ParseSunKey(sceneLine, result);
                     break;
-
                 case Section::Light:
-                {
-                    ParsedLightEntry& entry = result.Lights.back();
-                    if (CaseInsensitiveEquals(key, L"Type"))
-                    {
-                        if (CaseInsensitiveEquals(value, L"Point")) entry.Type = LightType::Point;
-                        else if (CaseInsensitiveEquals(value, L"Spot")) entry.Type = LightType::Spot;
-                        else errorAt(lineNumber, rawLine, "Typeの値はPointかSpotで指定してください");
-                        entry.HasType = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Position"))
-                    {
-                        if (!ParseFloat3(value, entry.Position)) errorAt(lineNumber, rawLine, "Positionの値が不正です(x, y, zの3要素が必要)");
-                        entry.HasPosition = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Direction"))
-                    {
-                        if (!ParseFloat3(value, entry.Direction)) errorAt(lineNumber, rawLine, "Directionの値が不正です(x, y, zの3要素が必要)");
-                        entry.HasDirection = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Color"))
-                    {
-                        if (!ParseFloat3(value, entry.Color)) errorAt(lineNumber, rawLine, "Colorの値が不正です(r, g, bの3要素が必要)");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Intensity"))
-                    {
-                        if (!ParseFloatToken(value, entry.Intensity)) errorAt(lineNumber, rawLine, "Intensityの値が不正です");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Range"))
-                    {
-                        if (!ParseFloatToken(value, entry.Range)) errorAt(lineNumber, rawLine, "Rangeの値が不正です");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"SourceRadius"))
-                    {
-                        if (!ParseFloatToken(value, entry.SourceRadius)) errorAt(lineNumber, rawLine, "SourceRadiusの値が不正です");
-                        if (entry.SourceRadius < 0.0f) errorAt(lineNumber, rawLine, "SourceRadiusは0以上で指定してください");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"ConeAngleDegrees"))
-                    {
-                        if (!ParseFloatToken(value, entry.ConeAngleDegrees)) errorAt(lineNumber, rawLine, "ConeAngleDegreesの値が不正です");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"CastShadow"))
-                    {
-                        const std::optional<bool> parsed = ParseBoolToken(value);
-                        if (!parsed) errorAt(lineNumber, rawLine, "CastShadowの値はtrue/falseで指定してください");
-                        entry.CastShadow = *parsed;
-                    }
-                    else
-                    {
-                        warnUnknownKey();
-                    }
+                    ParseLightKey(sceneLine, result);
                     break;
-                }
-
                 case Section::ReflectionProbe:
-                {
-                    ParsedReflectionProbeEntry& entry = result.ReflectionProbes.back();
-                    if (CaseInsensitiveEquals(key, L"Position"))
-                    {
-                        if (!ParseFloat3(value, entry.Position)) errorAt(lineNumber, rawLine, "Positionの値が不正です(x, y, zの3要素が必要)");
-                        entry.HasPosition = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Radius"))
-                    {
-                        if (!ParseFloatToken(value, entry.Radius)) errorAt(lineNumber, rawLine, "Radiusの値が不正です");
-                        if (entry.Radius <= 0.0f) errorAt(lineNumber, rawLine, "Radiusは0より大きい値で指定してください");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Shape"))
-                    {
-                        if (CaseInsensitiveEquals(value, L"Sphere")) entry.Shape = ReflectionProbeShape::Sphere;
-                        else if (CaseInsensitiveEquals(value, L"Box")) entry.Shape = ReflectionProbeShape::Box;
-                        else errorAt(lineNumber, rawLine, "Shapeの値が不正です(SphereまたはBox)");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"BoxExtents"))
-                    {
-                        if (!ParseFloat3(value, entry.BoxExtents)) errorAt(lineNumber, rawLine, "BoxExtentsの値が不正です(x, y, zの3要素が必要)");
-                        if (entry.BoxExtents[0] <= 0.0f || entry.BoxExtents[1] <= 0.0f || entry.BoxExtents[2] <= 0.0f)
-                        {
-                            errorAt(lineNumber, rawLine, "BoxExtentsは全ての軸を0より大きい値で指定してください");
-                        }
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Yaw"))
-                    {
-                        if (!ParseFloatToken(value, entry.YawDegrees)) errorAt(lineNumber, rawLine, "Yawの値が不正です");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"BlendDistance"))
-                    {
-                        if (!ParseFloatToken(value, entry.BlendDistance)) errorAt(lineNumber, rawLine, "BlendDistanceの値が不正です");
-                        if (entry.BlendDistance < 0.0f) errorAt(lineNumber, rawLine, "BlendDistanceは0以上の値で指定してください");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Name"))
-                    {
-                        entry.Name = value;
-                    }
-                    else
-                    {
-                        warnUnknownKey();
-                    }
+                    ParseReflectionProbeKey(sceneLine, result);
                     break;
-                }
-
                 case Section::GIVolume:
-                {
-                    ParsedGIVolumeEntry& entry = result.GIVolumes.back();
-                    if (CaseInsensitiveEquals(key, L"Origin"))
-                    {
-                        if (!ParseFloat3(value, entry.Origin)) errorAt(lineNumber, rawLine, "Originの値が不正です(x, y, zの3要素が必要)");
-                        entry.HasOrigin = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"ProbeSpacing"))
-                    {
-                        if (!ParseFloat3(value, entry.ProbeSpacing)) errorAt(lineNumber, rawLine, "ProbeSpacingの値が不正です(x, y, zの3要素が必要)");
-                        if (entry.ProbeSpacing[0] <= 0.0f || entry.ProbeSpacing[1] <= 0.0f || entry.ProbeSpacing[2] <= 0.0f)
-                        {
-                            errorAt(lineNumber, rawLine, "ProbeSpacingは全ての軸を0より大きい値で指定してください");
-                        }
-                    }
-                    else if (CaseInsensitiveEquals(key, L"ProbeCounts"))
-                    {
-                        if (!ParseUint3(value, entry.ProbeCounts))
-                        {
-                            errorAt(lineNumber, rawLine, "ProbeCountsの値が不正です(x, y, zの3要素、それぞれ1以上の整数)");
-                        }
-                        // トライリニア補間は周囲8個のプローブを使うため、各軸2個以上ないと成立しない
-                        if (entry.ProbeCounts[0] < 2u || entry.ProbeCounts[1] < 2u || entry.ProbeCounts[2] < 2u)
-                        {
-                            errorAt(lineNumber, rawLine, "ProbeCountsは全ての軸を2以上で指定してください(トライリニア補間に周囲8個が必要なため)");
-                        }
-                        entry.HasProbeCounts = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"NormalBias"))
-                    {
-                        if (!ParseFloatToken(value, entry.NormalBias)) errorAt(lineNumber, rawLine, "NormalBiasの値が不正です");
-                        if (entry.NormalBias < 0.0f) errorAt(lineNumber, rawLine, "NormalBiasは0以上の値で指定してください");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"ViewBias"))
-                    {
-                        if (!ParseFloatToken(value, entry.ViewBias)) errorAt(lineNumber, rawLine, "ViewBiasの値が不正です");
-                        if (entry.ViewBias < 0.0f) errorAt(lineNumber, rawLine, "ViewBiasは0以上の値で指定してください");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Hysteresis"))
-                    {
-                        if (!ParseFloatToken(value, entry.Hysteresis)) errorAt(lineNumber, rawLine, "Hysteresisの値が不正です");
-                        if (entry.Hysteresis < 0.0f || entry.Hysteresis >= 1.0f)
-                        {
-                            errorAt(lineNumber, rawLine, "Hysteresisは0以上1未満で指定してください(1では新しい値が一切入らない)");
-                        }
-                    }
-                    else if (CaseInsensitiveEquals(key, L"MaxRayDistance"))
-                    {
-                        if (!ParseFloatToken(value, entry.MaxRayDistance)) errorAt(lineNumber, rawLine, "MaxRayDistanceの値が不正です");
-                        // 距離アトラスは平均距離と平均二乗距離を持ち、その差から分散を求める。
-                        // 距離が大きいほどこの引き算の桁落ちが効くため上限を設ける
-                        // (r=200なら r²=40000 で、fp32の有効桁に対し分散を0.01程度の分解能で
-                        //  残せる。詳細はScene.hのGIVolume::MaxRayDistance参照)
-                        if (entry.MaxRayDistance <= 0.0f || entry.MaxRayDistance > 200.0f)
-                        {
-                            errorAt(lineNumber, rawLine, "MaxRayDistanceは0より大きく200以下で指定してください(分散の計算が桁落ちで潰れるため)");
-                        }
-                    }
-                    else if (CaseInsensitiveEquals(key, L"LODCount"))
-                    {
-                        float parsed = 0.0f;
-                        if (!ParseFloatToken(value, parsed)) errorAt(lineNumber, rawLine, "LODCountの値が不正です");
-                        // 段数が増えるとプローブ総数が段数倍になる(=一巡にかかる時間もその分伸びる)。
-                        // 上限はkDDGIMaxLODCountと合わせること
-                        if (parsed < 1.0f || parsed > 4.0f || parsed != std::floor(parsed))
-                        {
-                            errorAt(lineNumber, rawLine, "LODCountは1以上4以下の整数で指定してください");
-                        }
-                        entry.LODCount = static_cast<uint32_t>(parsed);
-                    }
-                    else if (CaseInsensitiveEquals(key, L"FollowCamera"))
-                    {
-                        const std::optional<bool> parsedValue = ParseBoolToken(value);
-                        if (!parsedValue) errorAt(lineNumber, rawLine, "FollowCameraの値が不正です");
-                        entry.FollowCamera = *parsedValue;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Name"))
-                    {
-                        entry.Name = value;
-                    }
-                    else
-                    {
-                        warnUnknownKey();
-                    }
+                    ParseGIVolumeKey(sceneLine, result);
                     break;
-                }
-
                 case Section::Water:
-                    // 水面マテリアル基盤。NormalMapのパス解決(ルート外チェック・絶対パス化)は
-                    // ここでは行わず、[Scene]Skyboxと同じくLoadScene側でまとめて行う
-                    // (ParseSceneFileは純粋なテキスト解析でファイルシステムに触れない方針のため)
-                    if (CaseInsensitiveEquals(key, L"NormalMap"))
-                    {
-                        result.WaterNormalMapPath = value;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"WaveScale"))
-                    {
-                        if (!ParseFloatToken(value, result.WaterWaveScale)) errorAt(lineNumber, rawLine, "WaveScaleの値が不正です");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"WaveSpeed"))
-                    {
-                        if (!ParseFloatToken(value, result.WaterWaveSpeed)) errorAt(lineNumber, rawLine, "WaveSpeedの値が不正です");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"WaveStrength"))
-                    {
-                        if (!ParseFloatToken(value, result.WaterWaveStrength)) errorAt(lineNumber, rawLine, "WaveStrengthの値が不正です");
-                    }
-                    else
-                    {
-                        warnUnknownKey();
-                    }
+                    ParseWaterKey(sceneLine, result);
                     break;
-
                 case Section::Cloud:
-                {
-                    if (CaseInsensitiveEquals(key, L"Coverage"))
-                    {
-                        readFloat(result.CloudCoverage, result.HasCloudCoverage, 0.0f, 1.0f, L"Coverage");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Altitude"))
-                    {
-                        readFloat(result.CloudAltitude, result.HasCloudAltitude, 100.0f, 20000.0f, L"Altitude");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Thickness"))
-                    {
-                        readFloat(result.CloudThickness, result.HasCloudThickness, 0.0f, 5000.0f, L"Thickness");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Density"))
-                    {
-                        readFloat(result.CloudDensity, result.HasCloudDensity, 0.0f, 100.0f, L"Density");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"TypeBias"))
-                    {
-                        // 0=層雲寄り / 0.5=中立 / 1=雄大積雲寄り(C4)
-                        readFloat(result.CloudTypeBias, result.HasCloudTypeBias, 0.0f, 1.0f, L"TypeBias");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"CellSize"))
-                    {
-                        readFloat(result.CloudCellSize, result.HasCloudCellSize, 10.0f, 100000.0f, L"CellSize");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"CirrusCoverage"))
-                    {
-                        readFloat(result.CirrusCoverage, result.HasCirrusCoverage, 0.0f, 1.0f, L"CirrusCoverage");
-                    }
-                    // 巻雲(P11)。積雲と同じ作法で、範囲外は打ち間違いとみなしてエラーにする。
-                    // 上限・下限はUIのスライダーより広く取る(スライダーは操作しやすい範囲、
-                    // ここは打ち間違いの門番、という役割の違い。積雲のAltitude/CellSizeと同じ)
-                    else if (CaseInsensitiveEquals(key, L"CirrusAltitude"))
-                    {
-                        readFloat(result.CirrusAltitude, result.HasCirrusAltitude, 100.0f, 20000.0f, L"CirrusAltitude");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"CirrusCellSize"))
-                    {
-                        readFloat(result.CirrusCellSize, result.HasCirrusCellSize, 10.0f, 100000.0f, L"CirrusCellSize");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"CirrusDensity"))
-                    {
-                        readFloat(result.CirrusDensity, result.HasCirrusDensity, 0.0f, 100.0f, L"CirrusDensity");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"CirrusAnisotropy"))
-                    {
-                        // 1で積雲と同じ等方な塊、大きいほどU方向へ伸びて筋状になる
-                        readFloat(result.CirrusAnisotropy, result.HasCirrusAnisotropy, 1.0f, 16.0f, L"CirrusAnisotropy");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"CirrusWindSpeed"))
-                    {
-                        readFloat(result.CirrusWindSpeed, result.HasCirrusWindSpeed, 0.0f, 200.0f, L"CirrusWindSpeed");
-                    }
-                    else
-                    {
-                        warnUnknownKey();
-                    }
+                    ParseCloudKey(sceneLine, result);
                     break;
-                }
-
                 case Section::Fog:
-                {
-                    if (CaseInsensitiveEquals(key, L"Enabled"))
-                    {
-                        const std::optional<bool> parsedValue = ParseBoolToken(value);
-                        if (!parsedValue) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
-                        result.FogEnabled = *parsedValue;
-                        result.HasFogEnabled = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Density"))
-                    {
-                        // 上限0.002は視程約2km(もや)に相当する。これより濃いと600m先の地物すら
-                        // 見えなくなり屋外の風景として成立しないため、UIのスライダーと同じ上限にしてある
-                        readFloat(result.FogDensity, result.HasFogDensity, 0.0f, 0.002f, L"Density");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"ScaleHeight"))
-                    {
-                        readFloat(result.FogScaleHeight, result.HasFogScaleHeight, 10.0f, 5000.0f, L"ScaleHeight");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"RefHeight"))
-                    {
-                        readFloat(result.FogRefHeight, result.HasFogRefHeight, -500.0f, 500.0f, L"RefHeight");
-                    }
-                    else
-                    {
-                        warnUnknownKey();
-                    }
+                    ParseFogKey(sceneLine, result);
                     break;
-                }
-
                 case Section::Bloom:
-                {
-                    if (CaseInsensitiveEquals(key, L"Enabled"))
-                    {
-                        const std::optional<bool> parsedValue = ParseBoolToken(value);
-                        if (!parsedValue) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
-                        result.BloomEnabled = *parsedValue;
-                        result.HasBloomEnabled = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Strength"))
-                    {
-                        // Tonemapは元の色とブルームをこの比率でlerpするため1.0で完全に置き換わる
-                        readFloat(result.BloomStrength, result.HasBloomStrength, 0.0f, 1.0f, L"Strength");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Threshold"))
-                    {
-                        readFloat(result.BloomThreshold, result.HasBloomThreshold, 0.0f, 100.0f, L"Threshold");
-                    }
-                    else
-                    {
-                        warnUnknownKey();
-                    }
+                    ParseBloomKey(sceneLine, result);
                     break;
-                }
-
                 case Section::Stars:
-                {
-                    if (CaseInsensitiveEquals(key, L"Enabled"))
-                    {
-                        const std::optional<bool> parsedValue = ParseBoolToken(value);
-                        if (!parsedValue) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
-                        result.StarsEnabled = *parsedValue;
-                        result.HasStarsEnabled = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Density"))
-                    {
-                        // 上限256は「1セルに1個」の規則から全天で数十万個に相当し、
-                        // これ以上は星というより砂嵐になる
-                        readFloat(result.StarsDensity, result.HasStarsDensity, 1.0f, 256.0f, L"Density");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Brightness"))
-                    {
-                        readFloat(result.StarsBrightness, result.HasStarsBrightness, 0.0f, 20.0f, L"Brightness");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Twinkle"))
-                    {
-                        readFloat(result.StarsTwinkle, result.HasStarsTwinkle, 0.0f, 1.0f, L"Twinkle");
-                    }
-                    else
-                    {
-                        warnUnknownKey();
-                    }
+                    ParseStarsKey(sceneLine, result);
                     break;
-                }
-
                 case Section::DroneShow:
-                {
-                    if (CaseInsensitiveEquals(key, L"Enabled"))
-                    {
-                        const std::optional<bool> parsedValue = ParseBoolToken(value);
-                        if (!parsedValue) errorAt(lineNumber, rawLine, "Enabledの値はtrue/falseで指定してください");
-                        result.DroneShowEnabled = *parsedValue;
-                        result.HasDroneShowEnabled = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Path"))
-                    {
-                        // .kshowのパス。パス解決(ルート外チェック・絶対パス化)はここでは行わず、
-                        // [Scene]Skybox・[Water]NormalMapと同じくLoadScene側でまとめて行う
-                        result.DroneShowPath = value;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Center"))
-                    {
-                        if (!ParseFloat3(value, result.DroneShowCenter))
-                        {
-                            errorAt(lineNumber, rawLine, "Centerの値が不正です(x, y, zの3要素が必要)");
-                        }
-                        result.HasDroneShowCenter = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"Scale"))
-                    {
-                        readFloat(result.DroneShowScale, result.HasDroneShowScale, 1.0f, 5000.0f, L"Scale");
-                    }
-                    else if (CaseInsensitiveEquals(key, L"CastLight"))
-                    {
-                        const std::optional<bool> parsedValue = ParseBoolToken(value);
-                        if (!parsedValue) errorAt(lineNumber, rawLine, "CastLightの値はtrue/falseで指定してください");
-                        result.DroneShowCastLight = *parsedValue;
-                        result.HasDroneShowCastLight = true;
-                    }
-                    else if (CaseInsensitiveEquals(key, L"CastLightScale"))
-                    {
-                        readFloat(
-                            result.DroneShowCastLightScale, result.HasDroneShowCastLightScale,
-                            0.0f, 1000.0f, L"CastLightScale");
-                    }
-                    else
-                    {
-                        warnUnknownKey();
-                    }
+                    ParseDroneShowKey(sceneLine, result);
                     break;
-                }
 
                 default:
                     break;
