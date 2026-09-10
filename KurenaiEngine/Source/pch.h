@@ -15,9 +15,11 @@
 // <PrecompiledHeader>NotUsing</PrecompiledHeader> と空の <ForcedIncludeFiles> を
 // 個別に指定してある。ここを外すと ThirdParty のビルドが壊れる。
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
+// 【WIN32_LEAN_AND_MEAN を定義しないこと】定義すると <Windows.h> が <mmsystem.h> を
+// 引かなくなり、`#define PlaySound PlaySoundW` が消える。すると
+// KurenaiEngineBase::PlaySound のエクスポート名が PlaySoundW から PlaySound へ変わり、
+// **PCHを使わない Sample2D 側だけがリンクで落ちる**(実際にこれを踏んだ)。
+// 展開量を減らしたければ、まず API 名とマクロの衝突をなくすのが先。
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
