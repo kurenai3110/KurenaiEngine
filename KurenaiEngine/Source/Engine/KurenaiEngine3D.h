@@ -1958,6 +1958,20 @@ namespace Kurenai
         // 【まず読み込みだけ】破棄はまだ行わない。絵が出ることを確かめてから、
         // kFrameCountフレーム遅延させる解放キューを通して足す
         void UpdateModelStreaming(const DirectX::XMFLOAT3& cameraPosition);
+        // UpdateModelStreamingの5段。**順序に意味がある**ので入れ替えないこと
+        // (破棄待ちを進める → 出来上がりを取り込む → 候補を集める → 破棄する → 発注する)。
+        // 破棄待ちを1フレーム進め、0になったものだけLoaderスレッドへ渡す
+        void AdvancePendingModelRelease();
+        // Loaderスレッドが仕上げたモデルをインスタンスへ差し込む
+        void IntegrateLoadedModels();
+        // カメラからの距離を見て、読み込みたいものと「まだ要る」パスを集める
+        void CollectStreamingCandidates(
+            const DirectX::XMFLOAT3& cameraPosition, std::vector<Scene::StreamingCandidate>& candidates,
+            std::unordered_set<std::wstring>& neededPaths);
+        // neededPathsに無いモデルを破棄キューへ積む
+        void EvictDistantModels(const std::unordered_set<std::wstring>& neededPaths);
+        // 近い順に、1フレームの上限まで発注する
+        void IssueStreamingRequests(std::vector<Scene::StreamingCandidate>& candidates);
         // 常駐が変わったことを記録する。実際の作り直しは静かになってから
         void RequestRaytracingRebuild();
         // 出来上がったRaytracingSceneの差し替えと、静かになった後の発注。

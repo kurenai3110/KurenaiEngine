@@ -460,11 +460,8 @@ namespace Kurenai
         m_SceneLoad.RequestCV.notify_one();
     }
 
-    void KurenaiEngine3D::UpdateModelStreaming(const DirectX::XMFLOAT3& cameraPosition)
+    void KurenaiEngine3D::AdvancePendingModelRelease()
     {
-        m_Streaming.ResidentCount = 0;
-        m_Streaming.TargetCount = 0;
-
         // 破棄待ちを1フレーム進める。0になったものだけLoaderスレッドへ渡す。
         // 【ストリーミングを使わないシーンでも回す】シーンを切り替えた直後に、
         // 前のシーンで積んだ分が残っていることがある
@@ -506,12 +503,10 @@ namespace Kurenai
                 m_SceneLoad.RequestCV.notify_one();
             }
         }
+    }
 
-        if (!m_Scene.HasStreamingDistance)
-        {
-            return;
-        }
-
+    void KurenaiEngine3D::IntegrateLoadedModels()
+    {
         // --- Loaderスレッドが仕上げたものを取り込む -----------------------------------------
         {
             std::vector<Scene::ModelStreamingState::StreamingLoaded> loaded;
@@ -574,20 +569,17 @@ namespace Kurenai
                 }
             }
         }
+    }
 
+    void KurenaiEngine3D::CollectStreamingCandidates(
+        const DirectX::XMFLOAT3& cameraPosition, std::vector<Scene::StreamingCandidate>& candidates,
+        std::unordered_set<std::wstring>& neededPaths)
+    {
         // --- 距離を見て、足りないものを近い順に発注する -------------------------------------
         //
         // 【段ごとに要否が違う】いま選ばれている段だけを読めばよい。遠くて粗い段しか使わない
         // タイルの詳細な段まで読むと、ストリーミングの意味が無くなる
-        struct Candidate
-        {
-            float DistanceSq = 0.0f;
-            const std::wstring* Path = nullptr;
-        };
-        std::vector<Candidate> candidates;
-
         // 破棄しない(=まだ要る)パスの集合。読み込みの判定より広い距離で集める
-        std::unordered_set<std::wstring> neededPaths;
 
         const float limit = m_Scene.StreamingDistance;
         const float limitSq = limit * limit;
@@ -653,7 +645,10 @@ namespace Kurenai
             }
             candidates.push_back({ squaredDistance, &path });
         }
+    }
 
+    void KurenaiEngine3D::EvictDistantModels(const std::unordered_set<std::wstring>& neededPaths)
+    {
         // --- 遠ざかったものを破棄する ---------------------------------------------------------
         //
         // 【モデルは共有されている】同じ.kmodelを複数のインスタンスが指しうるので、
@@ -709,7 +704,10 @@ namespace Kurenai
                 RequestRaytracingRebuild();
             }
         }
+    }
 
+    void KurenaiEngine3D::IssueStreamingRequests(std::vector<Scene::StreamingCandidate>& candidates)
+    {
         if (candidates.empty())
         {
             return;
@@ -717,7 +715,7 @@ namespace Kurenai
 
         // 近い順に発注する。手前のものから絵が埋まるので、遠くの読み込みで手前が待たされない
         std::sort(candidates.begin(), candidates.end(),
-                  [](const Candidate& a, const Candidate& b) { return a.DistanceSq < b.DistanceSq; });
+                  [](const Scene::StreamingCandidate& a, const Scene::StreamingCandidate& b) { return a.DistanceSq < b.DistanceSq; });
 
         // 【1フレームの発注数に上限を置く】Loaderスレッドは1本で、シーン切り替えもここを通る。
         // 際限なく積むと、切り替え要求が数百件の読み込みの後ろで待たされる
@@ -733,6 +731,27 @@ namespace Kurenai
             }
         }
         m_SceneLoad.RequestCV.notify_one();
+    }
+
+    void KurenaiEngine3D::UpdateModelStreaming(const DirectX::XMFLOAT3& cameraPosition)
+    {
+        m_Streaming.ResidentCount = 0;
+        m_Streaming.TargetCount = 0;
+
+        AdvancePendingModelRelease();
+
+        if (!m_Scene.HasStreamingDistance)
+        {
+            return;
+        }
+
+        IntegrateLoadedModels();
+
+        std::vector<Scene::StreamingCandidate> candidates;
+        std::unordered_set<std::wstring> neededPaths;
+        CollectStreamingCandidates(cameraPosition, candidates, neededPaths);
+        EvictDistantModels(neededPaths);
+        IssueStreamingRequests(candidates);
     }
 
     uint32_t KurenaiEngine3D::GetLODDraws(size_t instanceIndex, LODDraw (&outDraws)[2]) const

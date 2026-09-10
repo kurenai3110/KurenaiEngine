@@ -83,4 +83,14 @@ namespace Kurenai::Scene
         uint32_t ResidentCount = 0;
         uint32_t TargetCount = 0;
     };
+
+    // 距離を見て集めた読み込み候補。近い順に並べ替えてから発注する。
+    //
+    // 【Pathは借り物】m_Scene.Instances が持つ文字列を指しているだけなので、
+    // 1フレームの UpdateModelStreaming の中でしか使えない。持ち越さないこと
+    struct StreamingCandidate
+    {
+        float DistanceSq = 0.0f;
+        const std::wstring* Path = nullptr;
+    };
 }
