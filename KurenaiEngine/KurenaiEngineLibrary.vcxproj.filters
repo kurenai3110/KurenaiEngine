@@ -435,6 +435,9 @@
     <ClCompile Include="Source\Library\RHI\DX12\DX12DeviceCapabilities.cpp">
       <Filter>Source\Library\RHI\DX12</Filter>
     </ClCompile>
+    <ClCompile Include="Source\Library\RHI\DX12\DX12DeviceRaytracing.cpp">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClCompile>
     <ClCompile Include="Source\Library\RHI\DX12\DX12ImGuiBackend.cpp">
       <Filter>Source\Library\RHI\DX12</Filter>
     </ClCompile>
