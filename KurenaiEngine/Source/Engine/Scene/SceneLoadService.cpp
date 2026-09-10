@@ -555,7 +555,9 @@ namespace Kurenai
         return loaded;
     }
 
-    void KurenaiEngine3D::ApplyLoadedScene(LoadedScene& loaded)
+    // 前のシーンに紐づいていた状態を捨てる。世代を進めて、切り替え前に発注して
+    // まだ届いていない完成品が新しいシーンへ混ざらないようにする
+    void KurenaiEngine3D::ResetSceneBoundState(LoadedScene& loaded, bool& outIsSameSceneReload)
     {
         // カメラ保持は「同じシーンをもう一度読む」ときにだけ効かせる。
         // 別のシーンへ切り替えたときまで前のカメラを引き継ぐと、まったく違う縮尺・位置の
@@ -623,6 +625,15 @@ namespace Kurenai
         m_DrawList.BatchedCoarsestLOD.clear();
         m_DrawList.InstanceRecords.clear();
 
+        // 呼び出し側もカメラの保持判定に使う
+        outIsSameSceneReload = isSameSceneReload;
+    }
+
+    // .ksceneが持つ設定をエンジンの設定へ反映する。
+    // 【「キーを書いたシーンだけ上書きする」ものと、常に反映するものがある】
+    // 区別を崩すと、書いていないシーンでエンジンの既定が握り潰される
+    void KurenaiEngine3D::ApplySceneSettingsFromScene()
+    {
         // [Sun]/[Camera]セクションが無いシーンでは、Sceneの側でこのメンバの既定値
         // (従来のKurenaiEngine3Dの初期値と同じ)が使われるため、常にそのまま反映してよい
         m_Settings.Sky.TimeOfDay = m_Scene.SunTimeOfDay;
@@ -756,6 +767,14 @@ namespace Kurenai
         m_Settings.Water.WaveScale = m_Scene.WaterWaveScale;
         m_Settings.Water.WaveSpeed = m_Scene.WaterWaveSpeed;
         m_Settings.Water.WaveStrength = m_Scene.WaterWaveStrength;
+    }
+
+    void KurenaiEngine3D::ApplyLoadedScene(LoadedScene& loaded)
+    {
+        bool isSameSceneReload = false;
+        ResetSceneBoundState(loaded, isSameSceneReload);
+        ApplySceneSettingsFromScene();
+
 
         // スカイボックスが差し替わった場合のみ非nullptr。IBLの拡散イラディアンス・プリフィルタ済み
         // 鏡面はスカイボックスから焼かれるため、差し替えたら焼き上がりの旗を倒して焼き直させる

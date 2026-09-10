@@ -794,6 +794,11 @@ namespace Kurenai
         // Renderスレッドで実行する反映。出来上がったシーンを現在のシーンと差し替え、
         // シーン由来の設定(太陽・影・AO・SSR・ライト・反射プローブ・ベイクフラグ等)を適用する
         void ApplyLoadedScene(LoadedScene& loaded);
+        // 前のシーンに紐づいていた状態を捨てる。ApplyLoadedSceneの最初に呼ぶ
+        void ResetSceneBoundState(LoadedScene& loaded, bool& outIsSameSceneReload);
+        // .ksceneが持つ設定をエンジンの設定へ反映する。
+        // 【「キーを書いたシーンだけ上書きする」ものと、常に反映するものがある】
+        void ApplySceneSettingsFromScene();
         // 不要になったアセット由来のリソースをLoaderスレッドへ破棄依頼として積む。
         // 【重要】呼ぶ前にIRHIDevice::WaitForGPUIdle()でGPUの参照が終わっていることを保証すること
         void RetireAssets(RetiredAssets&& retired);
