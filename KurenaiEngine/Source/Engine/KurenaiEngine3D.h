@@ -900,6 +900,11 @@ namespace Kurenai
             Rendering::RenderFrameContext& frameContext, std::vector<GPULight>& gpuLights,
             ShaderInterop::FrameConstants& constants, Passes::LightingConstants& lightingConstants,
             size_t& bakedLightCount);
+        // FillFrameConstantsの後半。反射プローブ・DDGI・空と雲まわりを埋める。
+        // 行列と露出が確定した後に呼ぶこと(前半が決めた値を読む)
+        void FillEnvironmentFrameConstants(
+            RHI::IRHICommandList* commandList, const SunLighting& sunLighting, float effectiveExposure,
+            Rendering::RenderFrameContext& frameContext, ShaderInterop::FrameConstants& constants);
         void ResolveOcclusionCullingFrameState(
             RHI::IRHICommandList* commandList, const DirectX::XMFLOAT3& cameraPosition,
             Rendering::RenderFrameContext& frameContext, std::vector<GPULight>& gpuLights,

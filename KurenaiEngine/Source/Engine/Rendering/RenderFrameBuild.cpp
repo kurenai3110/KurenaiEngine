@@ -704,131 +704,12 @@ namespace Kurenai
             && m_GeometryPasses->HasMeshletCullStatsBuffer();
     }
 
-    // FrameConstants と LightingConstants を埋める。
-    //
-    // 【引数が多いのは分割の結果】13引数の BuildFrameContext を割った先なので当然で、
-    // 無理に減らすために一時 struct を増やさない
-    void KurenaiEngine3D::FillFrameConstants(
-        const KurenaiEngine3D::FrameState& frameState, RHI::IRHICommandList* commandList,
-        const SunLighting& sunLighting, float effectiveExposure, float manualExposureScale,
-        float keyReferenceEV100, const DirectX::XMFLOAT3& cameraPosition,
-        const float (&cascadeSplits)[kCascadeCount],
-        const DirectX::XMMATRIX (&cascadeViewProj)[kCascadeCount],
-        Rendering::RenderFrameContext& frameContext, std::vector<GPULight>& gpuLights,
-        ShaderInterop::FrameConstants& constants, Passes::LightingConstants& lightingConstants,
-        size_t& bakedLightCount)
+    // 反射プローブ・DDGI・空と雲まわりのFrameConstantsを埋める。
+    // FillFrameConstantsの後半を切り出したもので、行列と露出が確定した後に呼ぶ
+    void KurenaiEngine3D::FillEnvironmentFrameConstants(
+        RHI::IRHICommandList* commandList, const SunLighting& sunLighting, float effectiveExposure,
+        Rendering::RenderFrameContext& frameContext, ShaderInterop::FrameConstants& constants)
     {
-        // 【実体はRender()にある】frameContext.Constantsがこれを指す。元と同じく未初期化のまま
-        // 受け取り、以降の代入で全フィールドを埋める
-        frameContext.ViewProj = frameContext.ViewMatrix * frameContext.JitteredProj;
-        DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(frameContext.ViewProj));
-
-        // 平面反射用の鏡映カメラ。水面平面 y=frameContext.WaterPlaneY に対する反射行列を、通常のView×Projへ
-        // 左から掛ける(PlanarReflection.hlsl冒頭参照)。XMMatrixReflectが受け取る平面の規約は
-        // 「点PがAx+By+Cz+D=0を満たす」形(ドキュメント準拠)で、これは
-        // FrameConstants.PlanarReflectionPlaneのSV_ClipDistance計算(dot(worldPos, xyz) + w)と
-        // 完全に同じ規約なので、同じベクトル(0,1,0,-frameContext.WaterPlaneY)がどちらにもそのまま使える
-        // (水面より上のworldPosでdot結果が正になることも、この式から導ける)。
-        // 水面が無いシーンでもwaterPlaneY=0で計算はできるが、パスを登録しないため使われない
-        frameContext.ReflectMatrix =
-            DirectX::XMMatrixReflect(DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, -frameContext.WaterPlaneY));
-        // メインカメラと同じジッター済みProjを使う(PlanarReflection.hlsl冒頭参照。ジッターが
-        // 異なると反射がメインの画面UVとサブピクセル単位でずれてしまう)
-        frameContext.ReflectedViewProj = frameContext.ReflectMatrix * frameContext.ViewMatrix * frameContext.JitteredProj;
-        DirectX::XMVECTOR determinant;
-        frameContext.InvViewProj = DirectX::XMMatrixInverse(&determinant, frameContext.ViewProj);
-        DirectX::XMStoreFloat4x4(&constants.InvViewProj, DirectX::XMMatrixTranspose(frameContext.InvViewProj));
-        for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
-        {
-            DirectX::XMStoreFloat4x4(&constants.CascadeViewProj[cascade], DirectX::XMMatrixTranspose(cascadeViewProj[cascade]));
-        }
-        // 【DDGIのクリップマップの追従中心をここで固定する】このあと組み立てるFrameConstantsの
-        // 各LODの原点も、後段のプローブのキャプチャ位置も、すべてこの値を基準に決まる。
-        // 1フレームの途中で動かすと「シェーダーが見ている格子」と「実際に焼いた位置」が
-        // 食い違い、間接光が別の場所のものになる
-        m_DDGIGrid.SetFollowCenter(DirectX::XMFLOAT3{ cameraPosition.x, cameraPosition.y, cameraPosition.z });
-
-        constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
-        constants.LightDirection = { sunLighting.Direction.x, sunLighting.Direction.y, sunLighting.Direction.z, 0.0f };
-        // 太陽を無効にする場合は色をゼロにするだけでよい(シェーダー側は太陽の寄与に
-        // LightColor.rgbを乗算するため、これで完全に消える)。TimeOfDayを夜にする方法と違い
-        // 昼度(AmbientColor.a)は下がらないので、環境光だけで照らす状態を作れる
-        // sunLighting.Color は絶対的な測光量[lx]なので、ここで実効プリ露出を掛けて表示レンジへ移す
-        constants.LightColor = m_Settings.Sky.SunEnabled
-            ? DirectX::XMFLOAT4{
-                  sunLighting.Color.x * effectiveExposure,
-                  sunLighting.Color.y * effectiveExposure,
-                  sunLighting.Color.z * effectiveExposure,
-                  0.0f }
-            : DirectX::XMFLOAT4{ 0.0f, 0.0f, 0.0f, 0.0f };
-        DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(frameContext.ViewMatrix));
-        // ジッター済みの射影行列を渡す。SSAO/SSILはこの行列でView空間の点を画面へ投影して
-        // 深度バッファと突き合わせるため、深度を描いたときと同じ行列でなければサブピクセルぶんずれる
-        DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(frameContext.JitteredProj));
-        // rgb(環境光の色)にm_Settings.IBL.AmbientScaleを乗算する。Enable IBL無効時のフォールバックアンビエント
-        // (DeferredLighting.hlsl)の強度調整用で、alpha(dayFactor、IBLの夜間減光・背景スカイの
-        // 昼夜ブレンドに使う)には掛けない
-        constants.AmbientColor =
-        {
-            sunLighting.Ambient.x * m_Settings.IBL.AmbientScale * effectiveExposure,
-            sunLighting.Ambient.y * m_Settings.IBL.AmbientScale * effectiveExposure,
-            sunLighting.Ambient.z * m_Settings.IBL.AmbientScale * effectiveExposure,
-            sunLighting.Ambient.w,
-        };
-        constants.CascadeSplits = { cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3] };
-        const float iblIntensity = m_Settings.IBL.Enabled ? m_Settings.IBL.Intensity : 0.0f;
-        const float specularEnergyCompensation = static_cast<float>(m_Settings.Reflection.SpecularCompensation);
-        constants.ShadowParams = {
-            m_Settings.Shadow.LightSize,
-            static_cast<float>(Passes::kIBLPrefilterMipLevels - 1),
-            iblIntensity,
-            specularEnergyCompensation,
-        };
-        constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
-        constants.IBLParams = {
-            m_Settings.IBL.UseDedicatedIrradiance ? 1.0f : 0.0f,
-            m_Settings.IBL.AmbientDiffuseScale,
-            m_Settings.IBL.AmbientSpecularScale,
-            0.0f,
-        };
-        constants.OcclusionParams = {
-            m_Settings.AmbientOcclusion.BentNormalAOSource ? 1.0f : 0.0f,
-            static_cast<float>(m_Settings.AmbientOcclusion.SpecularOcclusion),
-            m_Settings.AmbientOcclusion.MultiBounceAOEnabled ? 1.0f : 0.0f,
-            0.0f };
-
-        // 空の解析評価用。DeferredLighting.hlslが背景画素でSky.hlsliのSkyColorを画面解像度で
-        // 評価するために使う。ティントと天頂輝度はm_SkyResources.ParametersBuffer(直近の手続き空ベイクで
-        // SkyIntegrate.hlslが書いた値。上のbakeSkyThisFrameブロック参照)にあり、DeferredLighting.hlsl/
-        // SSR.hlslがStructuredBufferとして直接読むため、ここでFrameConstantsへは詰めない。
-        // SunDirectionはここで毎フレーム最新のsunLightingから渡す
-        // (太陽は角度閾値以下でも連続的に動くため。天頂輝度・色味と違い積分を伴わず、
-        // 毎フレーム渡してもコストが無い)。
-        // 正規化はSkyGenerate.hlsl側の慣習(呼び出し側=シェーダのSkyParameters組み立て時に
-        // normalizeする)に合わせ、C++側では正規化しない(DeferredLighting.hlsl側で行う)
-        constants.SkySunDirection = {
-            sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
-        };
-        // 太陽照度と空照度の比。Sky.hlsliのEvaluateCloudLayerが雲の明るさの基準を
-        // 「空の天頂輝度」から「太陽の照度」へ切り替えるために使う(雲を照らしているのは
-        // 空ではなく太陽であるため。詳細はSky.hlsli側のkCumulusSingleScatterScale等のコメント参照)。
-        // SkyIlluminanceLuxが0近傍(理論上は起こらないが)のときのゼロ除算を避けてある
-        const float sunToSkyIlluminanceRatio =
-            (sunLighting.SkyIlluminanceLux > 1e-6f)
-                ? (sunLighting.KeyIlluminanceLux / sunLighting.SkyIlluminanceLux)
-                : 0.0f;
-        constants.SkyParams = {
-            // x=未使用(天頂輝度はSkyParametersBufferにある)
-            0.0f,
-            // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、この設定に関わらず
-            // 常にキューブマップを使う。DDSは任意の絵でPerezモデルとは無関係なため、
-            // 解析評価してはいけない
-            (m_Settings.Sky.AnalyticBackground && frameContext.UsingProceduralSky) ? 1.0f : 0.0f,
-            // z=太陽照度/空照度比(SunToSkyIlluminanceRatio、雲の明るさの基準に使う)
-            sunToSkyIlluminanceRatio,
-            0.0f,
-        };
-
         // === 実効プリ露出が大きく動いたら、更新モードに関わらずプローブを焼き直す(19.14節) ===
         // 下のProbeParams2.wは「焼いた時点の露出→現在の露出」の換算倍率で、これだけでも
         // プローブの値の解釈は常に正しくなる。ただし換算はあくまで**焼いた時点の環境**を
@@ -1054,6 +935,134 @@ namespace Kurenai
             static_cast<float>(std::clamp(m_Settings.Cloud.RaymarchSteps, 1u, kCloudRaymarchStepsMax)),
             0.0f, 0.0f, 0.0f
         };
+    }
+
+    // FrameConstants と LightingConstants を埋める。
+    //
+    // 【引数が多いのは分割の結果】13引数の BuildFrameContext を割った先なので当然で、
+    // 無理に減らすために一時 struct を増やさない
+    void KurenaiEngine3D::FillFrameConstants(
+        const KurenaiEngine3D::FrameState& frameState, RHI::IRHICommandList* commandList,
+        const SunLighting& sunLighting, float effectiveExposure, float manualExposureScale,
+        float keyReferenceEV100, const DirectX::XMFLOAT3& cameraPosition,
+        const float (&cascadeSplits)[kCascadeCount],
+        const DirectX::XMMATRIX (&cascadeViewProj)[kCascadeCount],
+        Rendering::RenderFrameContext& frameContext, std::vector<GPULight>& gpuLights,
+        ShaderInterop::FrameConstants& constants, Passes::LightingConstants& lightingConstants,
+        size_t& bakedLightCount)
+    {
+        // 【実体はRender()にある】frameContext.Constantsがこれを指す。元と同じく未初期化のまま
+        // 受け取り、以降の代入で全フィールドを埋める
+        frameContext.ViewProj = frameContext.ViewMatrix * frameContext.JitteredProj;
+        DirectX::XMStoreFloat4x4(&constants.ViewProj, DirectX::XMMatrixTranspose(frameContext.ViewProj));
+
+        // 平面反射用の鏡映カメラ。水面平面 y=frameContext.WaterPlaneY に対する反射行列を、通常のView×Projへ
+        // 左から掛ける(PlanarReflection.hlsl冒頭参照)。XMMatrixReflectが受け取る平面の規約は
+        // 「点PがAx+By+Cz+D=0を満たす」形(ドキュメント準拠)で、これは
+        // FrameConstants.PlanarReflectionPlaneのSV_ClipDistance計算(dot(worldPos, xyz) + w)と
+        // 完全に同じ規約なので、同じベクトル(0,1,0,-frameContext.WaterPlaneY)がどちらにもそのまま使える
+        // (水面より上のworldPosでdot結果が正になることも、この式から導ける)。
+        // 水面が無いシーンでもwaterPlaneY=0で計算はできるが、パスを登録しないため使われない
+        frameContext.ReflectMatrix =
+            DirectX::XMMatrixReflect(DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, -frameContext.WaterPlaneY));
+        // メインカメラと同じジッター済みProjを使う(PlanarReflection.hlsl冒頭参照。ジッターが
+        // 異なると反射がメインの画面UVとサブピクセル単位でずれてしまう)
+        frameContext.ReflectedViewProj = frameContext.ReflectMatrix * frameContext.ViewMatrix * frameContext.JitteredProj;
+        DirectX::XMVECTOR determinant;
+        frameContext.InvViewProj = DirectX::XMMatrixInverse(&determinant, frameContext.ViewProj);
+        DirectX::XMStoreFloat4x4(&constants.InvViewProj, DirectX::XMMatrixTranspose(frameContext.InvViewProj));
+        for (uint32_t cascade = 0; cascade < kCascadeCount; ++cascade)
+        {
+            DirectX::XMStoreFloat4x4(&constants.CascadeViewProj[cascade], DirectX::XMMatrixTranspose(cascadeViewProj[cascade]));
+        }
+        // 【DDGIのクリップマップの追従中心をここで固定する】このあと組み立てるFrameConstantsの
+        // 各LODの原点も、後段のプローブのキャプチャ位置も、すべてこの値を基準に決まる。
+        // 1フレームの途中で動かすと「シェーダーが見ている格子」と「実際に焼いた位置」が
+        // 食い違い、間接光が別の場所のものになる
+        m_DDGIGrid.SetFollowCenter(DirectX::XMFLOAT3{ cameraPosition.x, cameraPosition.y, cameraPosition.z });
+
+        constants.CameraPosition = { cameraPosition.x, cameraPosition.y, cameraPosition.z, 0.0f };
+        constants.LightDirection = { sunLighting.Direction.x, sunLighting.Direction.y, sunLighting.Direction.z, 0.0f };
+        // 太陽を無効にする場合は色をゼロにするだけでよい(シェーダー側は太陽の寄与に
+        // LightColor.rgbを乗算するため、これで完全に消える)。TimeOfDayを夜にする方法と違い
+        // 昼度(AmbientColor.a)は下がらないので、環境光だけで照らす状態を作れる
+        // sunLighting.Color は絶対的な測光量[lx]なので、ここで実効プリ露出を掛けて表示レンジへ移す
+        constants.LightColor = m_Settings.Sky.SunEnabled
+            ? DirectX::XMFLOAT4{
+                  sunLighting.Color.x * effectiveExposure,
+                  sunLighting.Color.y * effectiveExposure,
+                  sunLighting.Color.z * effectiveExposure,
+                  0.0f }
+            : DirectX::XMFLOAT4{ 0.0f, 0.0f, 0.0f, 0.0f };
+        DirectX::XMStoreFloat4x4(&constants.View, DirectX::XMMatrixTranspose(frameContext.ViewMatrix));
+        // ジッター済みの射影行列を渡す。SSAO/SSILはこの行列でView空間の点を画面へ投影して
+        // 深度バッファと突き合わせるため、深度を描いたときと同じ行列でなければサブピクセルぶんずれる
+        DirectX::XMStoreFloat4x4(&constants.Proj, DirectX::XMMatrixTranspose(frameContext.JitteredProj));
+        // rgb(環境光の色)にm_Settings.IBL.AmbientScaleを乗算する。Enable IBL無効時のフォールバックアンビエント
+        // (DeferredLighting.hlsl)の強度調整用で、alpha(dayFactor、IBLの夜間減光・背景スカイの
+        // 昼夜ブレンドに使う)には掛けない
+        constants.AmbientColor =
+        {
+            sunLighting.Ambient.x * m_Settings.IBL.AmbientScale * effectiveExposure,
+            sunLighting.Ambient.y * m_Settings.IBL.AmbientScale * effectiveExposure,
+            sunLighting.Ambient.z * m_Settings.IBL.AmbientScale * effectiveExposure,
+            sunLighting.Ambient.w,
+        };
+        constants.CascadeSplits = { cascadeSplits[0], cascadeSplits[1], cascadeSplits[2], cascadeSplits[3] };
+        const float iblIntensity = m_Settings.IBL.Enabled ? m_Settings.IBL.Intensity : 0.0f;
+        const float specularEnergyCompensation = static_cast<float>(m_Settings.Reflection.SpecularCompensation);
+        constants.ShadowParams = {
+            m_Settings.Shadow.LightSize,
+            static_cast<float>(Passes::kIBLPrefilterMipLevels - 1),
+            iblIntensity,
+            specularEnergyCompensation,
+        };
+        constants.ActiveLightCount = { static_cast<float>(gpuLights.size()), 0.0f, 0.0f, 0.0f };
+        constants.IBLParams = {
+            m_Settings.IBL.UseDedicatedIrradiance ? 1.0f : 0.0f,
+            m_Settings.IBL.AmbientDiffuseScale,
+            m_Settings.IBL.AmbientSpecularScale,
+            0.0f,
+        };
+        constants.OcclusionParams = {
+            m_Settings.AmbientOcclusion.BentNormalAOSource ? 1.0f : 0.0f,
+            static_cast<float>(m_Settings.AmbientOcclusion.SpecularOcclusion),
+            m_Settings.AmbientOcclusion.MultiBounceAOEnabled ? 1.0f : 0.0f,
+            0.0f };
+
+        // 空の解析評価用。DeferredLighting.hlslが背景画素でSky.hlsliのSkyColorを画面解像度で
+        // 評価するために使う。ティントと天頂輝度はm_SkyResources.ParametersBuffer(直近の手続き空ベイクで
+        // SkyIntegrate.hlslが書いた値。上のbakeSkyThisFrameブロック参照)にあり、DeferredLighting.hlsl/
+        // SSR.hlslがStructuredBufferとして直接読むため、ここでFrameConstantsへは詰めない。
+        // SunDirectionはここで毎フレーム最新のsunLightingから渡す
+        // (太陽は角度閾値以下でも連続的に動くため。天頂輝度・色味と違い積分を伴わず、
+        // 毎フレーム渡してもコストが無い)。
+        // 正規化はSkyGenerate.hlsl側の慣習(呼び出し側=シェーダのSkyParameters組み立て時に
+        // normalizeする)に合わせ、C++側では正規化しない(DeferredLighting.hlsl側で行う)
+        constants.SkySunDirection = {
+            sunLighting.SunPosition.x, sunLighting.SunPosition.y, sunLighting.SunPosition.z, 0.0f
+        };
+        // 太陽照度と空照度の比。Sky.hlsliのEvaluateCloudLayerが雲の明るさの基準を
+        // 「空の天頂輝度」から「太陽の照度」へ切り替えるために使う(雲を照らしているのは
+        // 空ではなく太陽であるため。詳細はSky.hlsli側のkCumulusSingleScatterScale等のコメント参照)。
+        // SkyIlluminanceLuxが0近傍(理論上は起こらないが)のときのゼロ除算を避けてある
+        const float sunToSkyIlluminanceRatio =
+            (sunLighting.SkyIlluminanceLux > 1e-6f)
+                ? (sunLighting.KeyIlluminanceLux / sunLighting.SkyIlluminanceLux)
+                : 0.0f;
+        constants.SkyParams = {
+            // x=未使用(天頂輝度はSkyParametersBufferにある)
+            0.0f,
+            // 手続き空が無効(.ksceneのDDSスカイボックス使用時)は、この設定に関わらず
+            // 常にキューブマップを使う。DDSは任意の絵でPerezモデルとは無関係なため、
+            // 解析評価してはいけない
+            (m_Settings.Sky.AnalyticBackground && frameContext.UsingProceduralSky) ? 1.0f : 0.0f,
+            // z=太陽照度/空照度比(SunToSkyIlluminanceRatio、雲の明るさの基準に使う)
+            sunToSkyIlluminanceRatio,
+            0.0f,
+        };
+
+        FillEnvironmentFrameConstants(commandList, sunLighting, effectiveExposure, frameContext, constants);
     }
     // Hi-Zオクルージョンカリングの判定パラメータを確定させる
     void KurenaiEngine3D::ResolveOcclusionCullingFrameState(
