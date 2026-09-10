@@ -287,6 +287,564 @@ namespace KurenaiPacker
         {
             return (value + alignment - 1) / alignment * alignment;
         }
+        void ProcessTextureRequests(
+            const PackOptions& options,
+            std::vector<TextureRequest>& requests,
+            std::error_code& ec,
+            PackResult& result,
+            WriteTimings& timings)
+        {
+            const auto skipStart = PhaseClock::now();
+            std::vector<size_t> pendingIndices;
+            for (size_t i = 0; i < requests.size(); ++i)
+            {
+                if (!options.Force && fs::exists(requests[i].OutputKtexPath))
+                {
+                    // 既存を再利用する場合も、中身がGPUで扱えない寸法でないかは確かめる。
+                    // --forceを付けたときにしか検査しない作りにすると、一度生成してしまった
+                    // 不正な.ktexを.kmodelが参照し続け、実行のたびに転送失敗が出る
+                    if (ExistingKtexIsUnsupported(requests[i].OutputKtexPath))
+                    {
+                        requests[i].Failed = true;
+                        ++result.TextureFailed;
+                        std::cerr << "[KurenaiPacker][Warning] 既存の.ktexがブロック圧縮で4x4未満のため参照しません(フォールバックします): "
+                            << WideToUtf8(requests[i].SourcePath) << "\n";
+                        continue;
+                    }
+                    ++result.TextureSkippedExisting;
+                    continue;
+                }
+                pendingIndices.push_back(i);
+            }
+
+            timings.SkipCheckSeconds += PhaseSecondsSince(skipStart);
+
+            const auto textureStart = PhaseClock::now();
+            if (!pendingIndices.empty())
+            {
+                constexpr unsigned int kMaxWorkers = 8;
+                const unsigned int hardwareThreads = options.JobCount != 0
+                    ? options.JobCount
+                    : std::min(kMaxWorkers, std::max(1u, std::thread::hardware_concurrency()));
+                const unsigned int workerCount = std::min(hardwareThreads, static_cast<unsigned int>(pendingIndices.size()));
+
+                // 【実時間ではなく全ワーカーの累計を取る】和が実時間×ワーカー数に近ければ
+                // 全員が働いており、実時間×1に近ければ1本を残して全員が待っている。
+                // BC7圧縮はTextureImage内部のミューテックスで直列化されるため、この比が
+                // 「スレッドを増やして意味があるのか」を直接決める
+                // このモデルのぶんだけを測るため、ワーカーを起こす直前に0へ戻す
+                Kurenai::RHI::ResetTextureLoadStats();
+
+                std::atomic<uint64_t> loadNanos{ 0 };
+                std::atomic<uint64_t> ddsNanos{ 0 };
+                std::atomic<uint64_t> writeNanos{ 0 };
+
+                std::atomic<size_t> nextPending{ 0 };
+                std::mutex logMutex;
+                std::atomic<size_t> generatedCount{ 0 };
+                std::atomic<size_t> failedCount{ 0 };
+                std::atomic<size_t> completedCount{ 0 };
+
+                // 【逐次進捗を出す理由】PLATEAUのLOD2は1タイルで1,714枚あり、BC7圧縮は
+                // TextureImage内部のミューテックスで直列化される。従来は完了サマリしか出さないため、
+                // 数分〜十数分のあいだ「動いているのか止まっているのか」が区別できなかった。
+                // 何枚ごとに出すかは総数に応じて決める(小さいアセットで無駄に行を増やさない)
+                const size_t progressStep = std::max<size_t>(1, pendingIndices.size() / 20);
+
+                auto workerFn = [&]()
+                {
+                    // WICデコードはCOMを使用するため、ワーカースレッドごとに初期化が必要
+                    // (未初期化のままだとWIC呼び出しがハングする。ModelLoader::Prefetchの
+                    // 教訓を踏まえ、パッカーでは最初から入れておく)
+                    const HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+                    const bool comInitialized = SUCCEEDED(coHr);
+
+                    for (;;)
+                    {
+                        const size_t pendingSlot = nextPending.fetch_add(1);
+                        if (pendingSlot >= pendingIndices.size())
+                        {
+                            break;
+                        }
+                        TextureRequest& request = requests[pendingIndices[pendingSlot]];
+
+                        try
+                        {
+                            const auto loadStart = PhaseClock::now();
+                            Kurenai::RHI::TextureImage image = Kurenai::RHI::TextureImage::LoadFromFile(request.SourcePath, request.SRGB);
+                            AddNanos(loadNanos, loadStart);
+
+                            // ブロック圧縮で4x4に満たないものは、.ktexにしてもGPUが受け付けない。
+                            // ここで例外にして、下のcatchで「フォールバックする」経路へ流す
+                            const DirectX::TexMetadata& metadata = image.GetImage().GetMetadata();
+                            if (IsUnsupportedBlockCompressed(metadata))
+                            {
+                                throw std::runtime_error(
+                                    "ブロック圧縮テクスチャの寸法が4x4未満のためGPUが扱えません("
+                                    + std::to_string(metadata.width) + "x" + std::to_string(metadata.height) + ")");
+                            }
+
+                            const auto ddsStart = PhaseClock::now();
+                            DirectX::Blob blob;
+                            const HRESULT hr = DirectX::SaveToDDSMemory(
+                                image.GetImage().GetImages(), image.GetImage().GetImageCount(),
+                                image.GetImage().GetMetadata(), DirectX::DDS_FLAGS_NONE, blob);
+                            if (FAILED(hr))
+                            {
+                                throw std::runtime_error("DDSエンコードに失敗しました");
+                            }
+                            AddNanos(ddsNanos, ddsStart);
+
+                            PackedTextureHeader header{};
+                            std::memcpy(header.Magic, kPackedTextureMagic, sizeof(kPackedTextureMagic));
+                            header.Version = kPackedTextureVersion;
+                            header.Flags = request.SRGB ? kPackedTextureFlagSRGB : 0u;
+                            header.PayloadSize = blob.GetBufferSize();
+
+                            fs::create_directories(request.OutputKtexPath.parent_path(), ec);
+
+                            std::vector<uint8_t> fileBytes(sizeof(header) + blob.GetBufferSize());
+                            std::memcpy(fileBytes.data(), &header, sizeof(header));
+                            std::memcpy(fileBytes.data() + sizeof(header), blob.GetBufferPointer(), blob.GetBufferSize());
+                            const auto ktexWriteStart = PhaseClock::now();
+                            WriteFileAtomic(request.OutputKtexPath, fileBytes.data(), fileBytes.size());
+                            AddNanos(writeNanos, ktexWriteStart);
+
+                            generatedCount.fetch_add(1);
+                        }
+                        catch (const std::exception& e)
+                        {
+                            request.Failed = true;
+                            failedCount.fetch_add(1);
+                            std::lock_guard<std::mutex> lock(logMutex);
+                            std::cerr << "[KurenaiPacker][Warning] テクスチャの処理に失敗しました(フォールバックします): "
+                                << WideToUtf8(request.SourcePath) << " : " << e.what() << "\n";
+                        }
+
+                        const size_t done = completedCount.fetch_add(1) + 1;
+                        if (done % progressStep == 0 || done == pendingIndices.size())
+                        {
+                            std::lock_guard<std::mutex> lock(logMutex);
+                            std::cout << "[KurenaiPacker]   テクスチャ " << done << "/" << pendingIndices.size()
+                                << " (生成 " << generatedCount.load() << " / 失敗 " << failedCount.load() << ")\n";
+                        }
+                    }
+
+                    if (comInitialized)
+                    {
+                        CoUninitialize();
+                    }
+                };
+
+                std::vector<std::thread> workers;
+                workers.reserve(workerCount);
+                for (unsigned int w = 0; w < workerCount; ++w)
+                {
+                    workers.emplace_back(workerFn);
+                }
+                for (auto& worker : workers)
+                {
+                    worker.join();
+                }
+
+                const Kurenai::RHI::TextureLoadStats texStats = Kurenai::RHI::GetTextureLoadStats();
+                timings.TexDecodeSeconds = texStats.DecodeSeconds;
+                timings.TexMipSeconds = texStats.MipSeconds;
+                timings.TexBC7WaitSeconds = texStats.BC7WaitSeconds;
+                timings.TexBC7CompressSeconds = texStats.BC7CompressSeconds;
+                timings.TexDeviceCreateSeconds = texStats.DeviceCreateSeconds;
+
+                timings.WorkerCount = workerCount;
+                timings.WorkerLoadSeconds = static_cast<double>(loadNanos.load()) / 1e9;
+                timings.WorkerDdsSeconds = static_cast<double>(ddsNanos.load()) / 1e9;
+                timings.WorkerWriteSeconds = static_cast<double>(writeNanos.load()) / 1e9;
+
+                result.TextureGenerated = generatedCount.load();
+                // 既存.ktexの検査(上のループ)で数えた分に足し込む。代入にすると消える
+                result.TextureFailed += failedCount.load();
+            }
+
+            timings.TextureSeconds += PhaseSecondsSince(textureStart);
+        }
+        void BuildTextureEntries(
+            std::vector<TextureRequest>& requests,
+            const fs::path& outputDirectory,
+            std::error_code& ec,
+            PackResult& result,
+            std::vector<TextureEntry>& textureEntries,
+            std::vector<std::string>& texturePathStrings,
+            std::vector<int32_t>& finalIndexByRequest)
+        {
+            for (size_t i = 0; i < requests.size(); ++i)
+            {
+                if (requests[i].Failed)
+                {
+                    continue;
+                }
+                const fs::path relativeToModel = fs::relative(requests[i].OutputKtexPath, outputDirectory, ec);
+                if (ec)
+                {
+                    requests[i].Failed = true;
+                    ++result.TextureFailed;
+                    continue;
+                }
+
+                TextureEntry entry{};
+                entry.Flags = requests[i].SRGB ? kTextureEntryFlagSRGB : 0u;
+                texturePathStrings.push_back(ToPackagePathString(relativeToModel));
+
+                finalIndexByRequest[i] = static_cast<int32_t>(textureEntries.size());
+                textureEntries.push_back(entry);
+            }
+        }
+        void BakeOcclusionTextures(
+            const SourceModel& sourceModel,
+            const std::wstring& outputKModelPath,
+            const fs::path& outputDirectory,
+            const PackOptions& options,
+            std::error_code& ec,
+            std::vector<TextureEntry>& textureEntries,
+            std::vector<std::string>& texturePathStrings,
+            std::vector<int32_t>& bakedOcclusionIndexByMesh,
+            PackResult& result)
+        {
+            if (options.BakedOcclusion != nullptr && options.BakedOcclusion->Resolution > 0)
+            {
+                const OcclusionBakeResult& baked = *options.BakedOcclusion;
+                const uint32_t resolution = baked.Resolution;
+                const fs::path occlusionDirectory = outputDirectory / L"_Occlusion";
+
+                for (size_t meshIndex = 0; meshIndex < sourceModel.Meshes.size(); ++meshIndex)
+                {
+                    if (meshIndex >= baked.MeshTextures.size() || baked.MeshTextures[meshIndex].empty())
+                    {
+                        continue;
+                    }
+                    const std::vector<uint8_t>& pixels = baked.MeshTextures[meshIndex];
+
+                    try
+                    {
+                        DirectX::ScratchImage source;
+                        HRESULT hr = source.Initialize2D(DXGI_FORMAT_R8_UNORM, resolution, resolution, 1, 1);
+                        if (FAILED(hr))
+                        {
+                            throw std::runtime_error("遮蔽マップの画像確保に失敗しました");
+                        }
+                        // 行ピッチは要求した幅と一致するとは限らないため、必ず行単位でコピーする
+                        const DirectX::Image* destImage = source.GetImage(0, 0, 0);
+                        for (uint32_t y = 0; y < resolution; ++y)
+                        {
+                            std::memcpy(destImage->pixels + y * destImage->rowPitch, pixels.data() + static_cast<size_t>(y) * resolution, resolution);
+                        }
+
+                        // TEX_FILTER_FORCE_NON_WIC を必ず付ける。既定のWIC経由の縮小は
+                        // R8_UNORMのような単一チャンネル形式を扱えず、E_FAILで落ちる。
+                        // 非WICのボックスフィルタなら同じ形式のまま縮小できる
+                        DirectX::ScratchImage mipChain;
+                        hr = DirectX::GenerateMipMaps(
+                            *destImage, DirectX::TEX_FILTER_DEFAULT | DirectX::TEX_FILTER_FORCE_NON_WIC, 0, mipChain);
+                        if (FAILED(hr))
+                        {
+                            throw std::runtime_error("遮蔽マップのミップ生成に失敗しました");
+                        }
+
+                        DirectX::ScratchImage compressed;
+                        hr = DirectX::Compress(
+                            mipChain.GetImages(), mipChain.GetImageCount(), mipChain.GetMetadata(),
+                            DXGI_FORMAT_BC4_UNORM, DirectX::TEX_COMPRESS_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, compressed);
+                        if (FAILED(hr))
+                        {
+                            throw std::runtime_error("遮蔽マップのBC4圧縮に失敗しました");
+                        }
+
+                        DirectX::Blob blob;
+                        hr = DirectX::SaveToDDSMemory(
+                            compressed.GetImages(), compressed.GetImageCount(), compressed.GetMetadata(),
+                            DirectX::DDS_FLAGS_NONE, blob);
+                        if (FAILED(hr))
+                        {
+                            throw std::runtime_error("遮蔽マップのDDSエンコードに失敗しました");
+                        }
+
+                        PackedTextureHeader texHeader{};
+                        std::memcpy(texHeader.Magic, kPackedTextureMagic, sizeof(kPackedTextureMagic));
+                        texHeader.Version = kPackedTextureVersion;
+                        texHeader.Flags = 0u; // 遮蔽率は色ではないのでリニア
+                        texHeader.PayloadSize = blob.GetBufferSize();
+
+                        // 出力する.kmodelの名前を接頭辞に入れる。同じディレクトリへ複数のモデルを
+                        // パックする(同一ジオメトリのマテリアル違いを並べる検証シーンなど)と、
+                        // メッシュ番号だけでは互いの遮蔽マップを上書きしてしまうため
+                        const fs::path ktexPath = occlusionDirectory /
+                            (fs::path(outputKModelPath).stem().wstring() + L"_Mesh" + std::to_wstring(meshIndex) + L".ktex");
+                        fs::create_directories(occlusionDirectory, ec);
+
+                        std::vector<uint8_t> fileBytes(sizeof(texHeader) + blob.GetBufferSize());
+                        std::memcpy(fileBytes.data(), &texHeader, sizeof(texHeader));
+                        std::memcpy(fileBytes.data() + sizeof(texHeader), blob.GetBufferPointer(), blob.GetBufferSize());
+                        WriteFileAtomic(ktexPath, fileBytes.data(), fileBytes.size());
+
+                        const fs::path relativeToModel = fs::relative(ktexPath, outputDirectory, ec);
+                        if (ec)
+                        {
+                            throw std::runtime_error("遮蔽マップの相対パス計算に失敗しました");
+                        }
+
+                        TextureEntry entry{};
+                        entry.Flags = 0u;
+                        texturePathStrings.push_back(ToPackagePathString(relativeToModel));
+                        bakedOcclusionIndexByMesh[meshIndex] = static_cast<int32_t>(textureEntries.size());
+                        textureEntries.push_back(entry);
+                        ++result.OcclusionBaked;
+                    }
+                    catch (const std::exception& e)
+                    {
+                        std::cerr << "[KurenaiPacker][Warning] 遮蔽マップの書き出しに失敗しました(遮蔽なしとして扱います) メッシュ["
+                            << meshIndex << "]: " << e.what() << "\n";
+                    }
+                }
+            }
+        }
+        void BakeBentNormalTextures(
+            const SourceModel& sourceModel,
+            const std::wstring& outputKModelPath,
+            const fs::path& outputDirectory,
+            const PackOptions& options,
+            std::error_code& ec,
+            std::vector<TextureEntry>& textureEntries,
+            std::vector<std::string>& texturePathStrings,
+            std::vector<int32_t>& bentNormalIndexByMesh,
+            PackResult& result)
+        {
+            if (options.BakedOcclusion != nullptr && options.BakedOcclusion->Resolution > 0)
+            {
+                const OcclusionBakeResult& baked = *options.BakedOcclusion;
+                const uint32_t resolution = baked.Resolution;
+                const fs::path bentDirectory = outputDirectory / L"_BentNormal";
+
+                for (size_t meshIndex = 0; meshIndex < sourceModel.Meshes.size(); ++meshIndex)
+                {
+                    if (meshIndex >= baked.MeshBentNormals.size() || baked.MeshBentNormals[meshIndex].empty())
+                    {
+                        continue;
+                    }
+                    const std::vector<float>& pixels = baked.MeshBentNormals[meshIndex];
+
+                    try
+                    {
+                        // ミップはfp32のまま生成してから一括でfp16へ落とす。
+                        // ボックスフィルタが「ベクトルの平均」になる順序であることが重要で、
+                        // 長さを取ってから平均するとJensenの不等式より必ず過大評価になる(34章)
+                        DirectX::ScratchImage source;
+                        HRESULT hr = source.Initialize2D(DXGI_FORMAT_R32G32B32A32_FLOAT, resolution, resolution, 1, 1);
+                        if (FAILED(hr))
+                        {
+                            throw std::runtime_error("bent normalの画像確保に失敗しました");
+                        }
+                        const DirectX::Image* destImage = source.GetImage(0, 0, 0);
+                        const size_t rowBytes = static_cast<size_t>(resolution) * 4 * sizeof(float);
+                        for (uint32_t y = 0; y < resolution; ++y)
+                        {
+                            std::memcpy(
+                                destImage->pixels + y * destImage->rowPitch,
+                                pixels.data() + static_cast<size_t>(y) * resolution * 4,
+                                rowBytes);
+                        }
+
+                        // 遮蔽マップと同じ理由でTEX_FILTER_FORCE_NON_WICを必ず付ける
+                        // (WIC経路は非8bit形式を扱えずE_FAILで落ちる)
+                        DirectX::ScratchImage mipChain;
+                        hr = DirectX::GenerateMipMaps(
+                            *destImage, DirectX::TEX_FILTER_DEFAULT | DirectX::TEX_FILTER_FORCE_NON_WIC, 0, mipChain);
+                        if (FAILED(hr))
+                        {
+                            throw std::runtime_error("bent normalのミップ生成に失敗しました");
+                        }
+
+                        DirectX::ScratchImage half;
+                        hr = DirectX::Convert(
+                            mipChain.GetImages(), mipChain.GetImageCount(), mipChain.GetMetadata(),
+                            DXGI_FORMAT_R16G16B16A16_FLOAT,
+                            DirectX::TEX_FILTER_DEFAULT | DirectX::TEX_FILTER_FORCE_NON_WIC,
+                            DirectX::TEX_THRESHOLD_DEFAULT, half);
+                        if (FAILED(hr))
+                        {
+                            throw std::runtime_error("bent normalのfp16変換に失敗しました");
+                        }
+
+                        DirectX::Blob blob;
+                        hr = DirectX::SaveToDDSMemory(
+                            half.GetImages(), half.GetImageCount(), half.GetMetadata(),
+                            DirectX::DDS_FLAGS_NONE, blob);
+                        if (FAILED(hr))
+                        {
+                            throw std::runtime_error("bent normalのDDSエンコードに失敗しました");
+                        }
+
+                        PackedTextureHeader texHeader{};
+                        std::memcpy(texHeader.Magic, kPackedTextureMagic, sizeof(kPackedTextureMagic));
+                        texHeader.Version = kPackedTextureVersion;
+                        texHeader.Flags = 0u; // 方向ベクトルは色ではないのでリニア
+                        texHeader.PayloadSize = blob.GetBufferSize();
+
+                        const fs::path ktexPath = bentDirectory /
+                            (fs::path(outputKModelPath).stem().wstring() + L"_Mesh" + std::to_wstring(meshIndex) + L".ktex");
+                        fs::create_directories(bentDirectory, ec);
+
+                        std::vector<uint8_t> fileBytes(sizeof(texHeader) + blob.GetBufferSize());
+                        std::memcpy(fileBytes.data(), &texHeader, sizeof(texHeader));
+                        std::memcpy(fileBytes.data() + sizeof(texHeader), blob.GetBufferPointer(), blob.GetBufferSize());
+                        WriteFileAtomic(ktexPath, fileBytes.data(), fileBytes.size());
+
+                        const fs::path relativeToModel = fs::relative(ktexPath, outputDirectory, ec);
+                        if (ec)
+                        {
+                            throw std::runtime_error("bent normalの相対パス計算に失敗しました");
+                        }
+
+                        TextureEntry entry{};
+                        entry.Flags = 0u;
+                        texturePathStrings.push_back(ToPackagePathString(relativeToModel));
+                        bentNormalIndexByMesh[meshIndex] = static_cast<int32_t>(textureEntries.size());
+                        textureEntries.push_back(entry);
+                        ++result.BentNormalBaked;
+                    }
+                    catch (const std::exception& e)
+                    {
+                        std::cerr << "[KurenaiPacker][Warning] bent normalの書き出しに失敗しました(bent normal無しとして扱います) メッシュ["
+                            << meshIndex << "]: " << e.what() << "\n";
+                    }
+                }
+            }
+        }
+        void WriteGeometryFile(
+            const fs::path& kgeomPath,
+            const std::vector<uint8_t>& geometryPayload,
+            WriteTimings& timings)
+        {
+            {
+                const ScopedPhase timeGeometryWrite(timings.GeometryWriteSeconds);
+                GeometryHeader header{};
+                std::memcpy(header.Magic, kGeometryMagic, sizeof(kGeometryMagic));
+                header.Version = kGeometryVersion;
+                header.VertexStride = sizeof(Vertex);
+                header.IndexStride = sizeof(uint32_t);
+                header.PayloadSize = geometryPayload.size();
+
+                std::vector<uint8_t> fileBytes(sizeof(header) + geometryPayload.size());
+                std::memcpy(fileBytes.data(), &header, sizeof(header));
+                if (!geometryPayload.empty())
+                {
+                    std::memcpy(fileBytes.data() + sizeof(header), geometryPayload.data(), geometryPayload.size());
+                }
+                WriteFileAtomic(kgeomPath, fileBytes.data(), fileBytes.size());
+            }
+        }
+        void WriteModelFile(
+            const SourceModel& sourceModel,
+            const fs::path& kgeomPath,
+            const fs::path& kmodelPath,
+            const std::vector<TextureEntry>& textureEntries,
+            const std::vector<std::string>& texturePathStrings,
+            const std::vector<MaterialEntry>& materialEntries,
+            const std::vector<MeshEntry>& meshEntries,
+            WriteTimings& timings)
+        {
+            const auto modelWriteStart = PhaseClock::now();
+            // === 5. .kmodelを書き出す(StringPoolを構築してからヘッダ/テーブルをまとめて書く) ===
+            std::string stringPool;
+            std::vector<TextureEntry> finalTextureEntries = textureEntries;
+            for (size_t i = 0; i < finalTextureEntries.size(); ++i)
+            {
+                finalTextureEntries[i].PathOffset = static_cast<uint32_t>(stringPool.size());
+                finalTextureEntries[i].PathLength = static_cast<uint32_t>(texturePathStrings[i].size());
+                stringPool += texturePathStrings[i];
+            }
+
+            // ライト名(StringPool)を先に確定させる。ライトのPosition/Direction等は
+            // ワールド空間ではなくモデルのローカル空間のまま(SceneLoaderがModelInstance::Worldで
+            // 変換する。Assets/SceneLoader.cpp参照)そのまま書き出せばよい
+            std::vector<LightEntry> lightEntries(sourceModel.Lights.size());
+            for (size_t i = 0; i < sourceModel.Lights.size(); ++i)
+            {
+                const SourceLight& light = sourceModel.Lights[i];
+                LightEntry& entry = lightEntries[i];
+                entry.Type = static_cast<uint32_t>(light.Type);
+                entry.Position[0] = light.Position[0];
+                entry.Position[1] = light.Position[1];
+                entry.Position[2] = light.Position[2];
+                entry.Direction[0] = light.Direction[0];
+                entry.Direction[1] = light.Direction[1];
+                entry.Direction[2] = light.Direction[2];
+                entry.Color[0] = light.Color[0];
+                entry.Color[1] = light.Color[1];
+                entry.Color[2] = light.Color[2];
+                entry.Intensity = light.Intensity;
+                entry.Range = light.Range;
+                entry.SpotInnerConeAngle = light.SpotInnerConeAngle;
+                entry.SpotOuterConeAngle = light.SpotOuterConeAngle;
+                entry.Enabled = light.Enabled ? 1u : 0u;
+                entry.NameOffset = static_cast<uint32_t>(stringPool.size());
+                entry.NameLength = static_cast<uint32_t>(light.Name.size());
+                stringPool += light.Name;
+            }
+
+            const std::string geometryPathString = ToPackagePathString(kgeomPath.filename());
+            const uint32_t geometryPathOffset = static_cast<uint32_t>(stringPool.size());
+            stringPool += geometryPathString;
+
+            PackageHeader header{};
+            std::memcpy(header.Magic, kPackageMagic, sizeof(kPackageMagic));
+            header.Version = kPackageVersion;
+            header.VertexStride = sizeof(Vertex);
+            header.IndexStride = sizeof(uint32_t);
+            header.BoundsMin[0] = sourceModel.BoundsMin[0];
+            header.BoundsMin[1] = sourceModel.BoundsMin[1];
+            header.BoundsMin[2] = sourceModel.BoundsMin[2];
+            header.BoundsMax[0] = sourceModel.BoundsMax[0];
+            header.BoundsMax[1] = sourceModel.BoundsMax[1];
+            header.BoundsMax[2] = sourceModel.BoundsMax[2];
+            header.MeshCount = static_cast<uint32_t>(meshEntries.size());
+            header.MaterialCount = static_cast<uint32_t>(materialEntries.size());
+            header.TextureCount = static_cast<uint32_t>(finalTextureEntries.size());
+            header.LightCount = static_cast<uint32_t>(lightEntries.size());
+            header.GeometryPathOffset = geometryPathOffset;
+            header.GeometryPathLength = static_cast<uint32_t>(geometryPathString.size());
+            header.StringPoolSize = static_cast<uint32_t>(stringPool.size());
+            header.Reserved = 0u;
+
+            std::vector<uint8_t> fileBytes;
+            fileBytes.resize(
+                sizeof(header) + finalTextureEntries.size() * sizeof(TextureEntry) +
+                materialEntries.size() * sizeof(MaterialEntry) + meshEntries.size() * sizeof(MeshEntry) +
+                lightEntries.size() * sizeof(LightEntry) + stringPool.size());
+            size_t writeOffset = 0;
+            std::memcpy(fileBytes.data() + writeOffset, &header, sizeof(header));
+            writeOffset += sizeof(header);
+            if (!finalTextureEntries.empty())
+            {
+                std::memcpy(fileBytes.data() + writeOffset, finalTextureEntries.data(), finalTextureEntries.size() * sizeof(TextureEntry));
+                writeOffset += finalTextureEntries.size() * sizeof(TextureEntry);
+            }
+            // マテリアルはテクスチャ番号を参照するのでテクスチャの後ろ、メッシュの前(ModelPackage.h参照)
+            std::memcpy(fileBytes.data() + writeOffset, materialEntries.data(), materialEntries.size() * sizeof(MaterialEntry));
+            writeOffset += materialEntries.size() * sizeof(MaterialEntry);
+            std::memcpy(fileBytes.data() + writeOffset, meshEntries.data(), meshEntries.size() * sizeof(MeshEntry));
+            writeOffset += meshEntries.size() * sizeof(MeshEntry);
+            if (!lightEntries.empty())
+            {
+                std::memcpy(fileBytes.data() + writeOffset, lightEntries.data(), lightEntries.size() * sizeof(LightEntry));
+                writeOffset += lightEntries.size() * sizeof(LightEntry);
+            }
+            if (!stringPool.empty())
+            {
+                std::memcpy(fileBytes.data() + writeOffset, stringPool.data(), stringPool.size());
+                writeOffset += stringPool.size();
+            }
+
+            WriteFileAtomic(kmodelPath, fileBytes.data(), fileBytes.size());
+            timings.ModelWriteSeconds += PhaseSecondsSince(modelWriteStart);
+        }
     }
 
     PackResult WriteModelPackage(
@@ -372,205 +930,14 @@ namespace KurenaiPacker
 
         timings.CollectSeconds += PhaseSecondsSince(collectStart);
 
-        const auto skipStart = PhaseClock::now();
-        std::vector<size_t> pendingIndices;
-        for (size_t i = 0; i < requests.size(); ++i)
-        {
-            if (!options.Force && fs::exists(requests[i].OutputKtexPath))
-            {
-                // 既存を再利用する場合も、中身がGPUで扱えない寸法でないかは確かめる。
-                // --forceを付けたときにしか検査しない作りにすると、一度生成してしまった
-                // 不正な.ktexを.kmodelが参照し続け、実行のたびに転送失敗が出る
-                if (ExistingKtexIsUnsupported(requests[i].OutputKtexPath))
-                {
-                    requests[i].Failed = true;
-                    ++result.TextureFailed;
-                    std::cerr << "[KurenaiPacker][Warning] 既存の.ktexがブロック圧縮で4x4未満のため参照しません(フォールバックします): "
-                        << WideToUtf8(requests[i].SourcePath) << "\n";
-                    continue;
-                }
-                ++result.TextureSkippedExisting;
-                continue;
-            }
-            pendingIndices.push_back(i);
-        }
-
-        timings.SkipCheckSeconds += PhaseSecondsSince(skipStart);
-
-        const auto textureStart = PhaseClock::now();
-        if (!pendingIndices.empty())
-        {
-            constexpr unsigned int kMaxWorkers = 8;
-            const unsigned int hardwareThreads = options.JobCount != 0
-                ? options.JobCount
-                : std::min(kMaxWorkers, std::max(1u, std::thread::hardware_concurrency()));
-            const unsigned int workerCount = std::min(hardwareThreads, static_cast<unsigned int>(pendingIndices.size()));
-
-            // 【実時間ではなく全ワーカーの累計を取る】和が実時間×ワーカー数に近ければ
-            // 全員が働いており、実時間×1に近ければ1本を残して全員が待っている。
-            // BC7圧縮はTextureImage内部のミューテックスで直列化されるため、この比が
-            // 「スレッドを増やして意味があるのか」を直接決める
-            // このモデルのぶんだけを測るため、ワーカーを起こす直前に0へ戻す
-            Kurenai::RHI::ResetTextureLoadStats();
-
-            std::atomic<uint64_t> loadNanos{ 0 };
-            std::atomic<uint64_t> ddsNanos{ 0 };
-            std::atomic<uint64_t> writeNanos{ 0 };
-
-            std::atomic<size_t> nextPending{ 0 };
-            std::mutex logMutex;
-            std::atomic<size_t> generatedCount{ 0 };
-            std::atomic<size_t> failedCount{ 0 };
-            std::atomic<size_t> completedCount{ 0 };
-
-            // 【逐次進捗を出す理由】PLATEAUのLOD2は1タイルで1,714枚あり、BC7圧縮は
-            // TextureImage内部のミューテックスで直列化される。従来は完了サマリしか出さないため、
-            // 数分〜十数分のあいだ「動いているのか止まっているのか」が区別できなかった。
-            // 何枚ごとに出すかは総数に応じて決める(小さいアセットで無駄に行を増やさない)
-            const size_t progressStep = std::max<size_t>(1, pendingIndices.size() / 20);
-
-            auto workerFn = [&]()
-            {
-                // WICデコードはCOMを使用するため、ワーカースレッドごとに初期化が必要
-                // (未初期化のままだとWIC呼び出しがハングする。ModelLoader::Prefetchの
-                // 教訓を踏まえ、パッカーでは最初から入れておく)
-                const HRESULT coHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-                const bool comInitialized = SUCCEEDED(coHr);
-
-                for (;;)
-                {
-                    const size_t pendingSlot = nextPending.fetch_add(1);
-                    if (pendingSlot >= pendingIndices.size())
-                    {
-                        break;
-                    }
-                    TextureRequest& request = requests[pendingIndices[pendingSlot]];
-
-                    try
-                    {
-                        const auto loadStart = PhaseClock::now();
-                        Kurenai::RHI::TextureImage image = Kurenai::RHI::TextureImage::LoadFromFile(request.SourcePath, request.SRGB);
-                        AddNanos(loadNanos, loadStart);
-
-                        // ブロック圧縮で4x4に満たないものは、.ktexにしてもGPUが受け付けない。
-                        // ここで例外にして、下のcatchで「フォールバックする」経路へ流す
-                        const DirectX::TexMetadata& metadata = image.GetImage().GetMetadata();
-                        if (IsUnsupportedBlockCompressed(metadata))
-                        {
-                            throw std::runtime_error(
-                                "ブロック圧縮テクスチャの寸法が4x4未満のためGPUが扱えません("
-                                + std::to_string(metadata.width) + "x" + std::to_string(metadata.height) + ")");
-                        }
-
-                        const auto ddsStart = PhaseClock::now();
-                        DirectX::Blob blob;
-                        const HRESULT hr = DirectX::SaveToDDSMemory(
-                            image.GetImage().GetImages(), image.GetImage().GetImageCount(),
-                            image.GetImage().GetMetadata(), DirectX::DDS_FLAGS_NONE, blob);
-                        if (FAILED(hr))
-                        {
-                            throw std::runtime_error("DDSエンコードに失敗しました");
-                        }
-                        AddNanos(ddsNanos, ddsStart);
-
-                        PackedTextureHeader header{};
-                        std::memcpy(header.Magic, kPackedTextureMagic, sizeof(kPackedTextureMagic));
-                        header.Version = kPackedTextureVersion;
-                        header.Flags = request.SRGB ? kPackedTextureFlagSRGB : 0u;
-                        header.PayloadSize = blob.GetBufferSize();
-
-                        fs::create_directories(request.OutputKtexPath.parent_path(), ec);
-
-                        std::vector<uint8_t> fileBytes(sizeof(header) + blob.GetBufferSize());
-                        std::memcpy(fileBytes.data(), &header, sizeof(header));
-                        std::memcpy(fileBytes.data() + sizeof(header), blob.GetBufferPointer(), blob.GetBufferSize());
-                        const auto ktexWriteStart = PhaseClock::now();
-                        WriteFileAtomic(request.OutputKtexPath, fileBytes.data(), fileBytes.size());
-                        AddNanos(writeNanos, ktexWriteStart);
-
-                        generatedCount.fetch_add(1);
-                    }
-                    catch (const std::exception& e)
-                    {
-                        request.Failed = true;
-                        failedCount.fetch_add(1);
-                        std::lock_guard<std::mutex> lock(logMutex);
-                        std::cerr << "[KurenaiPacker][Warning] テクスチャの処理に失敗しました(フォールバックします): "
-                            << WideToUtf8(request.SourcePath) << " : " << e.what() << "\n";
-                    }
-
-                    const size_t done = completedCount.fetch_add(1) + 1;
-                    if (done % progressStep == 0 || done == pendingIndices.size())
-                    {
-                        std::lock_guard<std::mutex> lock(logMutex);
-                        std::cout << "[KurenaiPacker]   テクスチャ " << done << "/" << pendingIndices.size()
-                            << " (生成 " << generatedCount.load() << " / 失敗 " << failedCount.load() << ")\n";
-                    }
-                }
-
-                if (comInitialized)
-                {
-                    CoUninitialize();
-                }
-            };
-
-            std::vector<std::thread> workers;
-            workers.reserve(workerCount);
-            for (unsigned int w = 0; w < workerCount; ++w)
-            {
-                workers.emplace_back(workerFn);
-            }
-            for (auto& worker : workers)
-            {
-                worker.join();
-            }
-
-            const Kurenai::RHI::TextureLoadStats texStats = Kurenai::RHI::GetTextureLoadStats();
-            timings.TexDecodeSeconds = texStats.DecodeSeconds;
-            timings.TexMipSeconds = texStats.MipSeconds;
-            timings.TexBC7WaitSeconds = texStats.BC7WaitSeconds;
-            timings.TexBC7CompressSeconds = texStats.BC7CompressSeconds;
-            timings.TexDeviceCreateSeconds = texStats.DeviceCreateSeconds;
-
-            timings.WorkerCount = workerCount;
-            timings.WorkerLoadSeconds = static_cast<double>(loadNanos.load()) / 1e9;
-            timings.WorkerDdsSeconds = static_cast<double>(ddsNanos.load()) / 1e9;
-            timings.WorkerWriteSeconds = static_cast<double>(writeNanos.load()) / 1e9;
-
-            result.TextureGenerated = generatedCount.load();
-            // 既存.ktexの検査(上のループ)で数えた分に足し込む。代入にすると消える
-            result.TextureFailed += failedCount.load();
-        }
-
-        timings.TextureSeconds += PhaseSecondsSince(textureStart);
-
+        ProcessTextureRequests(options, requests, ec, result, timings);
         const auto entryStart = PhaseClock::now();
         // === 3. TextureEntryを確定させる(失敗したものは除外し、-1として扱う) ===
         std::vector<TextureEntry> textureEntries;
         std::vector<std::string> texturePathStrings; // StringPoolへ書く前段(順序保持)
         std::vector<int32_t> finalIndexByRequest(requests.size(), kNoTextureIndex);
-        for (size_t i = 0; i < requests.size(); ++i)
-        {
-            if (requests[i].Failed)
-            {
-                continue;
-            }
-            const fs::path relativeToModel = fs::relative(requests[i].OutputKtexPath, outputDirectory, ec);
-            if (ec)
-            {
-                requests[i].Failed = true;
-                ++result.TextureFailed;
-                continue;
-            }
-
-            TextureEntry entry{};
-            entry.Flags = requests[i].SRGB ? kTextureEntryFlagSRGB : 0u;
-            texturePathStrings.push_back(ToPackagePathString(relativeToModel));
-
-            finalIndexByRequest[i] = static_cast<int32_t>(textureEntries.size());
-            textureEntries.push_back(entry);
-        }
-
+        BuildTextureEntries(
+            requests, outputDirectory, ec, result, textureEntries, texturePathStrings, finalIndexByRequest);
         auto resolveTextureIndex = [&](size_t requestIndex) -> int32_t
         {
             return requestIndex == kNoRequest ? kNoTextureIndex : finalIndexByRequest[requestIndex];
@@ -588,103 +955,9 @@ namespace KurenaiPacker
         // 向けで、遮蔽率のような単一チャンネルには容量も品質も無駄が大きい。BC4ならCPU圧縮でも
         // 十分速いため、BC7で必要だったGPU圧縮デバイスも要らない
         std::vector<int32_t> bakedOcclusionIndexByMesh(sourceModel.Meshes.size(), kNoTextureIndex);
-        if (options.BakedOcclusion != nullptr && options.BakedOcclusion->Resolution > 0)
-        {
-            const OcclusionBakeResult& baked = *options.BakedOcclusion;
-            const uint32_t resolution = baked.Resolution;
-            const fs::path occlusionDirectory = outputDirectory / L"_Occlusion";
-
-            for (size_t meshIndex = 0; meshIndex < sourceModel.Meshes.size(); ++meshIndex)
-            {
-                if (meshIndex >= baked.MeshTextures.size() || baked.MeshTextures[meshIndex].empty())
-                {
-                    continue;
-                }
-                const std::vector<uint8_t>& pixels = baked.MeshTextures[meshIndex];
-
-                try
-                {
-                    DirectX::ScratchImage source;
-                    HRESULT hr = source.Initialize2D(DXGI_FORMAT_R8_UNORM, resolution, resolution, 1, 1);
-                    if (FAILED(hr))
-                    {
-                        throw std::runtime_error("遮蔽マップの画像確保に失敗しました");
-                    }
-                    // 行ピッチは要求した幅と一致するとは限らないため、必ず行単位でコピーする
-                    const DirectX::Image* destImage = source.GetImage(0, 0, 0);
-                    for (uint32_t y = 0; y < resolution; ++y)
-                    {
-                        std::memcpy(destImage->pixels + y * destImage->rowPitch, pixels.data() + static_cast<size_t>(y) * resolution, resolution);
-                    }
-
-                    // TEX_FILTER_FORCE_NON_WIC を必ず付ける。既定のWIC経由の縮小は
-                    // R8_UNORMのような単一チャンネル形式を扱えず、E_FAILで落ちる。
-                    // 非WICのボックスフィルタなら同じ形式のまま縮小できる
-                    DirectX::ScratchImage mipChain;
-                    hr = DirectX::GenerateMipMaps(
-                        *destImage, DirectX::TEX_FILTER_DEFAULT | DirectX::TEX_FILTER_FORCE_NON_WIC, 0, mipChain);
-                    if (FAILED(hr))
-                    {
-                        throw std::runtime_error("遮蔽マップのミップ生成に失敗しました");
-                    }
-
-                    DirectX::ScratchImage compressed;
-                    hr = DirectX::Compress(
-                        mipChain.GetImages(), mipChain.GetImageCount(), mipChain.GetMetadata(),
-                        DXGI_FORMAT_BC4_UNORM, DirectX::TEX_COMPRESS_DEFAULT, DirectX::TEX_THRESHOLD_DEFAULT, compressed);
-                    if (FAILED(hr))
-                    {
-                        throw std::runtime_error("遮蔽マップのBC4圧縮に失敗しました");
-                    }
-
-                    DirectX::Blob blob;
-                    hr = DirectX::SaveToDDSMemory(
-                        compressed.GetImages(), compressed.GetImageCount(), compressed.GetMetadata(),
-                        DirectX::DDS_FLAGS_NONE, blob);
-                    if (FAILED(hr))
-                    {
-                        throw std::runtime_error("遮蔽マップのDDSエンコードに失敗しました");
-                    }
-
-                    PackedTextureHeader texHeader{};
-                    std::memcpy(texHeader.Magic, kPackedTextureMagic, sizeof(kPackedTextureMagic));
-                    texHeader.Version = kPackedTextureVersion;
-                    texHeader.Flags = 0u; // 遮蔽率は色ではないのでリニア
-                    texHeader.PayloadSize = blob.GetBufferSize();
-
-                    // 出力する.kmodelの名前を接頭辞に入れる。同じディレクトリへ複数のモデルを
-                    // パックする(同一ジオメトリのマテリアル違いを並べる検証シーンなど)と、
-                    // メッシュ番号だけでは互いの遮蔽マップを上書きしてしまうため
-                    const fs::path ktexPath = occlusionDirectory /
-                        (fs::path(outputKModelPath).stem().wstring() + L"_Mesh" + std::to_wstring(meshIndex) + L".ktex");
-                    fs::create_directories(occlusionDirectory, ec);
-
-                    std::vector<uint8_t> fileBytes(sizeof(texHeader) + blob.GetBufferSize());
-                    std::memcpy(fileBytes.data(), &texHeader, sizeof(texHeader));
-                    std::memcpy(fileBytes.data() + sizeof(texHeader), blob.GetBufferPointer(), blob.GetBufferSize());
-                    WriteFileAtomic(ktexPath, fileBytes.data(), fileBytes.size());
-
-                    const fs::path relativeToModel = fs::relative(ktexPath, outputDirectory, ec);
-                    if (ec)
-                    {
-                        throw std::runtime_error("遮蔽マップの相対パス計算に失敗しました");
-                    }
-
-                    TextureEntry entry{};
-                    entry.Flags = 0u;
-                    texturePathStrings.push_back(ToPackagePathString(relativeToModel));
-                    bakedOcclusionIndexByMesh[meshIndex] = static_cast<int32_t>(textureEntries.size());
-                    textureEntries.push_back(entry);
-                    ++result.OcclusionBaked;
-                }
-                catch (const std::exception& e)
-                {
-                    std::cerr << "[KurenaiPacker][Warning] 遮蔽マップの書き出しに失敗しました(遮蔽なしとして扱います) メッシュ["
-                        << meshIndex << "]: " << e.what() << "\n";
-                }
-            }
-        }
-
+        BakeOcclusionTextures(
+            sourceModel, outputKModelPath, outputDirectory, options, ec, textureEntries,
+            texturePathStrings, bakedOcclusionIndexByMesh, result);
         timings.OcclusionSeconds += PhaseSecondsSince(occlusionStart);
 
         const auto bentStart = PhaseClock::now();
@@ -696,107 +969,9 @@ namespace KurenaiPacker
         // fp32ではなくfp16なのは、仮数11bitあればモンテカルロノイズ(256本で数%)より
         // 桁違いに細かく、精度が要る検証はベイカー内のfloat32で済ませているため。容量は半分になる
         std::vector<int32_t> bentNormalIndexByMesh(sourceModel.Meshes.size(), kNoTextureIndex);
-        if (options.BakedOcclusion != nullptr && options.BakedOcclusion->Resolution > 0)
-        {
-            const OcclusionBakeResult& baked = *options.BakedOcclusion;
-            const uint32_t resolution = baked.Resolution;
-            const fs::path bentDirectory = outputDirectory / L"_BentNormal";
-
-            for (size_t meshIndex = 0; meshIndex < sourceModel.Meshes.size(); ++meshIndex)
-            {
-                if (meshIndex >= baked.MeshBentNormals.size() || baked.MeshBentNormals[meshIndex].empty())
-                {
-                    continue;
-                }
-                const std::vector<float>& pixels = baked.MeshBentNormals[meshIndex];
-
-                try
-                {
-                    // ミップはfp32のまま生成してから一括でfp16へ落とす。
-                    // ボックスフィルタが「ベクトルの平均」になる順序であることが重要で、
-                    // 長さを取ってから平均するとJensenの不等式より必ず過大評価になる(34章)
-                    DirectX::ScratchImage source;
-                    HRESULT hr = source.Initialize2D(DXGI_FORMAT_R32G32B32A32_FLOAT, resolution, resolution, 1, 1);
-                    if (FAILED(hr))
-                    {
-                        throw std::runtime_error("bent normalの画像確保に失敗しました");
-                    }
-                    const DirectX::Image* destImage = source.GetImage(0, 0, 0);
-                    const size_t rowBytes = static_cast<size_t>(resolution) * 4 * sizeof(float);
-                    for (uint32_t y = 0; y < resolution; ++y)
-                    {
-                        std::memcpy(
-                            destImage->pixels + y * destImage->rowPitch,
-                            pixels.data() + static_cast<size_t>(y) * resolution * 4,
-                            rowBytes);
-                    }
-
-                    // 遮蔽マップと同じ理由でTEX_FILTER_FORCE_NON_WICを必ず付ける
-                    // (WIC経路は非8bit形式を扱えずE_FAILで落ちる)
-                    DirectX::ScratchImage mipChain;
-                    hr = DirectX::GenerateMipMaps(
-                        *destImage, DirectX::TEX_FILTER_DEFAULT | DirectX::TEX_FILTER_FORCE_NON_WIC, 0, mipChain);
-                    if (FAILED(hr))
-                    {
-                        throw std::runtime_error("bent normalのミップ生成に失敗しました");
-                    }
-
-                    DirectX::ScratchImage half;
-                    hr = DirectX::Convert(
-                        mipChain.GetImages(), mipChain.GetImageCount(), mipChain.GetMetadata(),
-                        DXGI_FORMAT_R16G16B16A16_FLOAT,
-                        DirectX::TEX_FILTER_DEFAULT | DirectX::TEX_FILTER_FORCE_NON_WIC,
-                        DirectX::TEX_THRESHOLD_DEFAULT, half);
-                    if (FAILED(hr))
-                    {
-                        throw std::runtime_error("bent normalのfp16変換に失敗しました");
-                    }
-
-                    DirectX::Blob blob;
-                    hr = DirectX::SaveToDDSMemory(
-                        half.GetImages(), half.GetImageCount(), half.GetMetadata(),
-                        DirectX::DDS_FLAGS_NONE, blob);
-                    if (FAILED(hr))
-                    {
-                        throw std::runtime_error("bent normalのDDSエンコードに失敗しました");
-                    }
-
-                    PackedTextureHeader texHeader{};
-                    std::memcpy(texHeader.Magic, kPackedTextureMagic, sizeof(kPackedTextureMagic));
-                    texHeader.Version = kPackedTextureVersion;
-                    texHeader.Flags = 0u; // 方向ベクトルは色ではないのでリニア
-                    texHeader.PayloadSize = blob.GetBufferSize();
-
-                    const fs::path ktexPath = bentDirectory /
-                        (fs::path(outputKModelPath).stem().wstring() + L"_Mesh" + std::to_wstring(meshIndex) + L".ktex");
-                    fs::create_directories(bentDirectory, ec);
-
-                    std::vector<uint8_t> fileBytes(sizeof(texHeader) + blob.GetBufferSize());
-                    std::memcpy(fileBytes.data(), &texHeader, sizeof(texHeader));
-                    std::memcpy(fileBytes.data() + sizeof(texHeader), blob.GetBufferPointer(), blob.GetBufferSize());
-                    WriteFileAtomic(ktexPath, fileBytes.data(), fileBytes.size());
-
-                    const fs::path relativeToModel = fs::relative(ktexPath, outputDirectory, ec);
-                    if (ec)
-                    {
-                        throw std::runtime_error("bent normalの相対パス計算に失敗しました");
-                    }
-
-                    TextureEntry entry{};
-                    entry.Flags = 0u;
-                    texturePathStrings.push_back(ToPackagePathString(relativeToModel));
-                    bentNormalIndexByMesh[meshIndex] = static_cast<int32_t>(textureEntries.size());
-                    textureEntries.push_back(entry);
-                    ++result.BentNormalBaked;
-                }
-                catch (const std::exception& e)
-                {
-                    std::cerr << "[KurenaiPacker][Warning] bent normalの書き出しに失敗しました(bent normal無しとして扱います) メッシュ["
-                        << meshIndex << "]: " << e.what() << "\n";
-                }
-            }
-        }
-
+        BakeBentNormalTextures(
+            sourceModel, outputKModelPath, outputDirectory, options, ec, textureEntries,
+            texturePathStrings, bentNormalIndexByMesh, result);
         timings.BentNormalSeconds += PhaseSecondsSince(bentStart);
 
         // === 4. .kgeomを書き出す ===
@@ -954,119 +1129,10 @@ namespace KurenaiPacker
         }
 
         const fs::path kgeomPath = fs::path(kmodelPath).replace_extension(L".kgeom");
-        {
-            const ScopedPhase timeGeometryWrite(timings.GeometryWriteSeconds);
-            GeometryHeader header{};
-            std::memcpy(header.Magic, kGeometryMagic, sizeof(kGeometryMagic));
-            header.Version = kGeometryVersion;
-            header.VertexStride = sizeof(Vertex);
-            header.IndexStride = sizeof(uint32_t);
-            header.PayloadSize = geometryPayload.size();
-
-            std::vector<uint8_t> fileBytes(sizeof(header) + geometryPayload.size());
-            std::memcpy(fileBytes.data(), &header, sizeof(header));
-            if (!geometryPayload.empty())
-            {
-                std::memcpy(fileBytes.data() + sizeof(header), geometryPayload.data(), geometryPayload.size());
-            }
-            WriteFileAtomic(kgeomPath, fileBytes.data(), fileBytes.size());
-        }
-
-        const auto modelWriteStart = PhaseClock::now();
-        // === 5. .kmodelを書き出す(StringPoolを構築してからヘッダ/テーブルをまとめて書く) ===
-        std::string stringPool;
-        std::vector<TextureEntry> finalTextureEntries = textureEntries;
-        for (size_t i = 0; i < finalTextureEntries.size(); ++i)
-        {
-            finalTextureEntries[i].PathOffset = static_cast<uint32_t>(stringPool.size());
-            finalTextureEntries[i].PathLength = static_cast<uint32_t>(texturePathStrings[i].size());
-            stringPool += texturePathStrings[i];
-        }
-
-        // ライト名(StringPool)を先に確定させる。ライトのPosition/Direction等は
-        // ワールド空間ではなくモデルのローカル空間のまま(SceneLoaderがModelInstance::Worldで
-        // 変換する。Assets/SceneLoader.cpp参照)そのまま書き出せばよい
-        std::vector<LightEntry> lightEntries(sourceModel.Lights.size());
-        for (size_t i = 0; i < sourceModel.Lights.size(); ++i)
-        {
-            const SourceLight& light = sourceModel.Lights[i];
-            LightEntry& entry = lightEntries[i];
-            entry.Type = static_cast<uint32_t>(light.Type);
-            entry.Position[0] = light.Position[0];
-            entry.Position[1] = light.Position[1];
-            entry.Position[2] = light.Position[2];
-            entry.Direction[0] = light.Direction[0];
-            entry.Direction[1] = light.Direction[1];
-            entry.Direction[2] = light.Direction[2];
-            entry.Color[0] = light.Color[0];
-            entry.Color[1] = light.Color[1];
-            entry.Color[2] = light.Color[2];
-            entry.Intensity = light.Intensity;
-            entry.Range = light.Range;
-            entry.SpotInnerConeAngle = light.SpotInnerConeAngle;
-            entry.SpotOuterConeAngle = light.SpotOuterConeAngle;
-            entry.Enabled = light.Enabled ? 1u : 0u;
-            entry.NameOffset = static_cast<uint32_t>(stringPool.size());
-            entry.NameLength = static_cast<uint32_t>(light.Name.size());
-            stringPool += light.Name;
-        }
-
-        const std::string geometryPathString = ToPackagePathString(kgeomPath.filename());
-        const uint32_t geometryPathOffset = static_cast<uint32_t>(stringPool.size());
-        stringPool += geometryPathString;
-
-        PackageHeader header{};
-        std::memcpy(header.Magic, kPackageMagic, sizeof(kPackageMagic));
-        header.Version = kPackageVersion;
-        header.VertexStride = sizeof(Vertex);
-        header.IndexStride = sizeof(uint32_t);
-        header.BoundsMin[0] = sourceModel.BoundsMin[0];
-        header.BoundsMin[1] = sourceModel.BoundsMin[1];
-        header.BoundsMin[2] = sourceModel.BoundsMin[2];
-        header.BoundsMax[0] = sourceModel.BoundsMax[0];
-        header.BoundsMax[1] = sourceModel.BoundsMax[1];
-        header.BoundsMax[2] = sourceModel.BoundsMax[2];
-        header.MeshCount = static_cast<uint32_t>(meshEntries.size());
-        header.MaterialCount = static_cast<uint32_t>(materialEntries.size());
-        header.TextureCount = static_cast<uint32_t>(finalTextureEntries.size());
-        header.LightCount = static_cast<uint32_t>(lightEntries.size());
-        header.GeometryPathOffset = geometryPathOffset;
-        header.GeometryPathLength = static_cast<uint32_t>(geometryPathString.size());
-        header.StringPoolSize = static_cast<uint32_t>(stringPool.size());
-        header.Reserved = 0u;
-
-        std::vector<uint8_t> fileBytes;
-        fileBytes.resize(
-            sizeof(header) + finalTextureEntries.size() * sizeof(TextureEntry) +
-            materialEntries.size() * sizeof(MaterialEntry) + meshEntries.size() * sizeof(MeshEntry) +
-            lightEntries.size() * sizeof(LightEntry) + stringPool.size());
-        size_t writeOffset = 0;
-        std::memcpy(fileBytes.data() + writeOffset, &header, sizeof(header));
-        writeOffset += sizeof(header);
-        if (!finalTextureEntries.empty())
-        {
-            std::memcpy(fileBytes.data() + writeOffset, finalTextureEntries.data(), finalTextureEntries.size() * sizeof(TextureEntry));
-            writeOffset += finalTextureEntries.size() * sizeof(TextureEntry);
-        }
-        // マテリアルはテクスチャ番号を参照するのでテクスチャの後ろ、メッシュの前(ModelPackage.h参照)
-        std::memcpy(fileBytes.data() + writeOffset, materialEntries.data(), materialEntries.size() * sizeof(MaterialEntry));
-        writeOffset += materialEntries.size() * sizeof(MaterialEntry);
-        std::memcpy(fileBytes.data() + writeOffset, meshEntries.data(), meshEntries.size() * sizeof(MeshEntry));
-        writeOffset += meshEntries.size() * sizeof(MeshEntry);
-        if (!lightEntries.empty())
-        {
-            std::memcpy(fileBytes.data() + writeOffset, lightEntries.data(), lightEntries.size() * sizeof(LightEntry));
-            writeOffset += lightEntries.size() * sizeof(LightEntry);
-        }
-        if (!stringPool.empty())
-        {
-            std::memcpy(fileBytes.data() + writeOffset, stringPool.data(), stringPool.size());
-            writeOffset += stringPool.size();
-        }
-
-        WriteFileAtomic(kmodelPath, fileBytes.data(), fileBytes.size());
-        timings.ModelWriteSeconds += PhaseSecondsSince(modelWriteStart);
-
+        WriteGeometryFile(kgeomPath, geometryPayload, timings);
+        WriteModelFile(
+            sourceModel, kgeomPath, kmodelPath, textureEntries, texturePathStrings,
+            materialEntries, meshEntries, timings);
         result.Timings = timings;
         return result;
     }
