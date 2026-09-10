@@ -23,12 +23,14 @@ namespace Kurenai
         };
 
         // register(b0)のFrameConstantsとレイアウトを一致させる
+        // (HLSL側の並びは Shaders/2D/Constants2D.hlsli に1本だけ置いてある)
         struct alignas(16) FrameConstants
         {
             DirectX::XMFLOAT4X4 ViewProj;
         };
 
         // register(b1)のObjectConstantsとレイアウトを一致させる
+        // (HLSL側の並びは Shaders/2D/Constants2D.hlsli に1本だけ置いてある)
         struct alignas(16) ObjectConstants
         {
             DirectX::XMFLOAT4X4 World;
@@ -41,6 +43,22 @@ namespace Kurenai
             // DrawRoundedRect専用。枠線の色
             DirectX::XMFLOAT4 BorderColor = { 0.0f, 0.0f, 0.0f, 0.0f };
         };
+
+        // 【HLSLとC++のレイアウト照合】Shaders/2D/Constants2D.hlsli の並びと対にしてある。
+        // 片方だけフィールドを足すとここで止まる。3D側(Passes/*Constants.h)と同じ作法。
+        //
+        // 【守れるのはオフセットとサイズだけ】フィールドの意味までは見ていないので、
+        // 同じ大きさの別物へ入れ替えると素通りする
+        static_assert(sizeof(FrameConstants) == 64, "FrameConstantsはfloat4x4 1本(64バイト)であること");
+        static_assert(offsetof(FrameConstants, ViewProj) == 0, "ViewProjはb0の先頭であること");
+
+        static_assert(sizeof(ObjectConstants) == 128, "ObjectConstantsはHLSL側と同じ128バイトであること");
+        static_assert(offsetof(ObjectConstants, World) == 0, "Worldの位置がHLSL側と食い違っています");
+        static_assert(offsetof(ObjectConstants, Color) == 64, "Colorの位置がHLSL側と食い違っています");
+        static_assert(
+            offsetof(ObjectConstants, UVOffsetScale) == 80, "UVOffsetScaleの位置がHLSL側と食い違っています");
+        static_assert(offsetof(ObjectConstants, ShapeParams) == 96, "ShapeParamsの位置がHLSL側と食い違っています");
+        static_assert(offsetof(ObjectConstants, BorderColor) == 112, "BorderColorの位置がHLSL側と食い違っています");
 
         // --- DrawPolylineの上限 ---
         //

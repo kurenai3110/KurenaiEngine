@@ -1,25 +1,8 @@
 // KurenaiEngine2D(2D公開API)が内部で使うスプライト描画シェーダ。
 // 定数バッファはb0(フレーム共通)とb1(スプライト単位)、テクスチャ/サンプラーはt0/s0のみを使用する。
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-};
-
-cbuffer ObjectConstants : register(b1)
-{
-    float4x4 World;
-    float4 Color;
-    // xy=UVオフセット, zw=UVスケール。DrawText(フォントアトラスの1文字ぶんの矩形)専用で、
-    // それ以外(DrawSprite/DrawCircle/DrawRoundedRect)は(0, 0, 1, 1)の恒等変換で呼ぶ
-    float4 UVOffsetScale;
-    // DrawRoundedRect/DrawCircle専用。xy=半幅・半高さ(ピクセル), z=角丸半径(ピクセル),
-    // w=枠線太さ(ピクセル)。DrawCircleはxy・zすべてに半径を入れる(= 角丸半径が半幅・半高さと
-    // 等しい角丸矩形は円そのもの、という関係だが、円は専用の距離関数のほうが安いのでPSは分けてある)
-    float4 ShapeParams;
-    // DrawRoundedRect/DrawCircle専用。枠線の色(borderThicknessPixels<=0のときは未使用)
-    float4 BorderColor;
-};
+// 定数バッファの並びは Constants2D.hlsli に1本だけ置いてある
+#include "Constants2D.hlsli"
 
 Texture2D SpriteTexture : register(t0);
 // 役割はKurenaiEngine/Shaders/3D/Samplers.hlsliのMaterialSamplerと同じ(s0固定)。
