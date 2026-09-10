@@ -343,260 +343,47 @@ namespace Kurenai::Assets
             }
         }
 
-        // outTriangleCluster に nullptr 以外を渡すと、三角形ごとの「どのかたまりに属するか」を
-        // 返す(要素数 = indexCount/3、どこにも属さない三角形は kEmissiveTriangleUnassigned)。
-        //
-        // 【段階2のメッシュライトが要る】三角形を面積比で引くとき、まずかたまりを選んでから
-        // その中の三角形を引く2段構えにする。**かたまりの中身が分からないと第2段が書けない**
-        std::vector<EmissiveCluster> BuildEmissiveClusters(
-            const Vertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount,
-            const float boundsMin[3], const float boundsMax[3], float clusterScale,
-            std::vector<uint32_t>* outTriangleCluster = nullptr)
+        // 位置を格子へ量子化した鍵。頂点の溶接(段A)と、かたまりの近傍探索(段C)の
+        // 両方で使うため、関数の外に置いてある
+        struct QuantizedKey
         {
-            std::vector<EmissiveCluster> result;
-            if (outTriangleCluster != nullptr)
+            int64_t X, Y, Z;
+            bool operator==(const QuantizedKey& other) const
             {
-                outTriangleCluster->assign(indexCount / 3, kEmissiveTriangleUnassigned);
+                return X == other.X && Y == other.Y && Z == other.Z;
             }
-            if (vertices == nullptr || indices == nullptr || vertexCount == 0 || indexCount < 3)
+        };
+        struct QuantizedKeyHash
+        {
+            size_t operator()(const QuantizedKey& k) const
             {
-                return result;
+                size_t h = static_cast<size_t>(k.X) * 0x9E3779B97F4A7C15ull;
+                h ^= static_cast<size_t>(k.Y) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                h ^= static_cast<size_t>(k.Z) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                return h;
             }
-            const uint32_t triangleCount = indexCount / 3;
+        };
 
-            // --- 頂点を位置で溶接する ---
-            //
-            // 【素の頂点番号で連結成分を取ってはいけない】.kgeom の頂点は meshopt を通した後で、
-            // 法線やUVが違えば同じ位置でも別の頂点になっている。溶接を省くと**1個の電球が
-            // 数十片に割れる**。しかも「細かい光源がたくさん出た」だけに見えるので気付けない。
-            //
-            // 【しきい値はメッシュの大きさに比例させる】絶対値で固定すると、1.1km四方の
-            // PLATEAU タイルで float32 の分解能(1000m 付近で約 6e-5)を割り込む。
-            // 相対 1e-5 は float32 の仮数(約 1.2e-7 相対)に対して十分な余裕があり、
-            // DCC の頂点溶接許容(ふつう 1e-4 m 前後)よりは細かい
-            float diagonal = 0.0f;
-            for (int axis = 0; axis < 3; ++axis)
-            {
-                const float d = boundsMax[axis] - boundsMin[axis];
-                diagonal += d * d;
-            }
-            diagonal = std::sqrt(diagonal);
-            const float weldEpsilon = std::clamp(1e-5f * diagonal, 1e-5f, 1e-3f);
-            const float invWeld = 1.0f / weldEpsilon;
+        // 発光のかたまりを累積するための入れ物。BuildEmissiveClustersと、そこから
+        // 切り出した段が共有するため、関数の外に置いてある
+        struct Accum
+        {
+            double Area = 0.0;
+            double CentroidSum[3] = { 0.0, 0.0, 0.0 }; // Σ A_i c_i
+            double NormalSum[3] = { 0.0, 0.0, 0.0 };   // Σ A_i n_i (= Σ cross_i / 2)
+            double OwnMoment = 0.0;                    // Σ (A_i/36)(|ab|^2+|bc|^2+|ca|^2)
+            float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
+            float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+            uint32_t TriangleCount = 0;
+        };
 
-            struct QuantizedKey
-            {
-                int64_t X, Y, Z;
-                bool operator==(const QuantizedKey& other) const
-                {
-                    return X == other.X && Y == other.Y && Z == other.Z;
-                }
-            };
-            struct QuantizedKeyHash
-            {
-                size_t operator()(const QuantizedKey& k) const
-                {
-                    size_t h = static_cast<size_t>(k.X) * 0x9E3779B97F4A7C15ull;
-                    h ^= static_cast<size_t>(k.Y) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
-                    h ^= static_cast<size_t>(k.Z) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
-                    return h;
-                }
-            };
-
-            // union-find の親配列。溶接と三角形の連結の両方に使う
-            std::vector<uint32_t> parent(vertexCount);
-            for (uint32_t v = 0; v < vertexCount; ++v)
-            {
-                parent[v] = v;
-            }
-            // 経路圧縮。再帰にすると頂点数ぶんの深さになりうるのでループで書く
-            const auto findRoot = [&parent](uint32_t v) -> uint32_t
-            {
-                uint32_t root = v;
-                while (parent[root] != root) { root = parent[root]; }
-                while (parent[v] != root) { const uint32_t next = parent[v]; parent[v] = root; v = next; }
-                return root;
-            };
-            // 【小さい番号を親にする】結合の向きを入力順に依存させないための決定性の要件
-            const auto unite = [&parent, &findRoot](uint32_t a, uint32_t b)
-            {
-                const uint32_t ra = findRoot(a);
-                const uint32_t rb = findRoot(b);
-                if (ra == rb) { return; }
-                if (ra < rb) { parent[rb] = ra; } else { parent[ra] = rb; }
-            };
-
-            {
-                std::unordered_map<QuantizedKey, uint32_t, QuantizedKeyHash> weldMap;
-                weldMap.reserve(vertexCount);
-                for (uint32_t v = 0; v < vertexCount; ++v)
-                {
-                    QuantizedKey key;
-                    key.X = std::llround(static_cast<double>(vertices[v].Position[0]) * invWeld);
-                    key.Y = std::llround(static_cast<double>(vertices[v].Position[1]) * invWeld);
-                    key.Z = std::llround(static_cast<double>(vertices[v].Position[2]) * invWeld);
-                    const auto inserted = weldMap.emplace(key, v);
-                    if (!inserted.second)
-                    {
-                        unite(inserted.first->second, v);
-                    }
-                }
-            }
-
-            // --- 三角形の3頂点をつないで連結成分にする ---
-            for (uint32_t tri = 0; tri < triangleCount; ++tri)
-            {
-                const uint32_t i0 = indices[tri * 3 + 0];
-                const uint32_t i1 = indices[tri * 3 + 1];
-                const uint32_t i2 = indices[tri * 3 + 2];
-                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
-                {
-                    continue;
-                }
-                unite(i0, i1);
-                unite(i1, i2);
-            }
-
-            // --- 三角形を「かたまり」へ割り当てて累積する ---
-            struct GroupKey
-            {
-                uint32_t Root;
-                int64_t CellX, CellY, CellZ; // 段Bのグリッドセル(分割しないときは常に0)
-                bool operator==(const GroupKey& o) const
-                {
-                    return Root == o.Root && CellX == o.CellX && CellY == o.CellY && CellZ == o.CellZ;
-                }
-            };
-            struct GroupKeyHash
-            {
-                size_t operator()(const GroupKey& k) const
-                {
-                    size_t h = static_cast<size_t>(k.Root) * 0x9E3779B97F4A7C15ull;
-                    h ^= static_cast<size_t>(k.CellX) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
-                    h ^= static_cast<size_t>(k.CellY) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
-                    h ^= static_cast<size_t>(k.CellZ) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
-                    return h;
-                }
-            };
-
-            struct Accum
-            {
-                double Area = 0.0;
-                double CentroidSum[3] = { 0.0, 0.0, 0.0 }; // Σ A_i c_i
-                double NormalSum[3] = { 0.0, 0.0, 0.0 };   // Σ A_i n_i (= Σ cross_i / 2)
-                double OwnMoment = 0.0;                    // Σ (A_i/36)(|ab|^2+|bc|^2+|ca|^2)
-                float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
-                float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
-                uint32_t TriangleCount = 0;
-            };
-            std::vector<Accum> groups;
-            std::unordered_map<GroupKey, uint32_t, GroupKeyHash> groupIndexOf;
-            std::vector<uint32_t> triangleGroup(triangleCount, 0xFFFFFFFFu);
-
-            const bool splitEnabled = clusterScale > 0.0f;
-            const float invSplit = splitEnabled ? (1.0f / clusterScale) : 0.0f;
-
-            for (uint32_t tri = 0; tri < triangleCount; ++tri)
-            {
-                const uint32_t i0 = indices[tri * 3 + 0];
-                const uint32_t i1 = indices[tri * 3 + 1];
-                const uint32_t i2 = indices[tri * 3 + 2];
-                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
-                {
-                    continue;
-                }
-                const float* p0 = vertices[i0].Position;
-                const float* p1 = vertices[i1].Position;
-                const float* p2 = vertices[i2].Position;
-
-                const double e1[3] = { static_cast<double>(p1[0]) - p0[0], static_cast<double>(p1[1]) - p0[1], static_cast<double>(p1[2]) - p0[2] };
-                const double e2[3] = { static_cast<double>(p2[0]) - p0[0], static_cast<double>(p2[1]) - p0[1], static_cast<double>(p2[2]) - p0[2] };
-                const double cross[3] = {
-                    e1[1] * e2[2] - e1[2] * e2[1],
-                    e1[2] * e2[0] - e1[0] * e2[2],
-                    e1[0] * e2[1] - e1[1] * e2[0],
-                };
-                const double area =
-                    0.5 * std::sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
-                // 縮退した三角形は面積0で法線の向きも決まらない。重心にも寄与しないので飛ばす
-                if (area <= 1e-12)
-                {
-                    continue;
-                }
-
-                const double centroid[3] = {
-                    (static_cast<double>(p0[0]) + p1[0] + p2[0]) / 3.0,
-                    (static_cast<double>(p0[1]) + p1[1] + p2[1]) / 3.0,
-                    (static_cast<double>(p0[2]) + p1[2] + p2[2]) / 3.0,
-                };
-
-                GroupKey key{};
-                key.Root = findRoot(i0);
-                key.CellX = key.CellY = key.CellZ = 0;
-                if (splitEnabled)
-                {
-                    // 【重心でセルを決める】頂点で決めると1枚の三角形が複数セルに跨る。
-                    // セルの原点はメッシュのAABB最小コーナーで、インスタンス変換に依存しない
-                    key.CellX = static_cast<int64_t>(std::floor((centroid[0] - boundsMin[0]) * invSplit));
-                    key.CellY = static_cast<int64_t>(std::floor((centroid[1] - boundsMin[1]) * invSplit));
-                    key.CellZ = static_cast<int64_t>(std::floor((centroid[2] - boundsMin[2]) * invSplit));
-                }
-
-                uint32_t groupIndex;
-                const auto found = groupIndexOf.find(key);
-                if (found == groupIndexOf.end())
-                {
-                    groupIndex = static_cast<uint32_t>(groups.size());
-                    groupIndexOf.emplace(key, groupIndex);
-                    groups.emplace_back();
-                    for (int axis = 0; axis < 3; ++axis)
-                    {
-                        groups[groupIndex].BoundsMin[axis] = p0[axis];
-                        groups[groupIndex].BoundsMax[axis] = p0[axis];
-                    }
-                }
-                else
-                {
-                    groupIndex = found->second;
-                }
-                triangleGroup[tri] = groupIndex;
-
-                Accum& acc = groups[groupIndex];
-                acc.Area += area;
-                acc.TriangleCount += 1u;
-                for (int axis = 0; axis < 3; ++axis)
-                {
-                    acc.CentroidSum[axis] += area * centroid[axis];
-                    // Σ A_i n_i は Σ cross_i / 2 と厳密に等しい(crossの長さが 2*A_i)。
-                    // 正規化してから面積を掛け直すより丸めが1段少ない
-                    acc.NormalSum[axis] += 0.5 * cross[axis];
-                    acc.BoundsMin[axis] = std::min({ acc.BoundsMin[axis], p0[axis], p1[axis], p2[axis] });
-                    acc.BoundsMax[axis] = std::max({ acc.BoundsMax[axis], p0[axis], p1[axis], p2[axis] });
-                }
-
-                // 三角形自身の広がり(自分の重心まわりの二次モーメント)。
-                // ∫|x-g|^2 dA = (A/36)(|ab|^2 + |bc|^2 + |ca|^2)
-                //
-                // 【これを落とすと三角形1枚のかたまりで半径が厳密に0になる】重心の散らばりだけを
-                // 見ると1枚しかないときに0になる。半径0は点光源を意味し、半影が消え、
-                // 近傍のクランプ(d^2 + R^2)も効かなくなる
-                const double ab[3] = { static_cast<double>(p1[0]) - p0[0], static_cast<double>(p1[1]) - p0[1], static_cast<double>(p1[2]) - p0[2] };
-                const double bc[3] = { static_cast<double>(p2[0]) - p1[0], static_cast<double>(p2[1]) - p1[1], static_cast<double>(p2[2]) - p1[2] };
-                const double ca[3] = { static_cast<double>(p0[0]) - p2[0], static_cast<double>(p0[1]) - p2[1], static_cast<double>(p0[2]) - p2[2] };
-                const double edgeSq =
-                    ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2] +
-                    bc[0] * bc[0] + bc[1] * bc[1] + bc[2] * bc[2] +
-                    ca[0] * ca[0] + ca[1] * ca[1] + ca[2] * ca[2];
-                acc.OwnMoment += area * edgeSq / 36.0;
-            }
-
-            if (groups.empty())
-            {
-                return result;
-            }
-
-            // --- 段C: 近すぎるかたまりを併合する ---
-            //
+        // --- 段C: 近すぎるかたまりを併合する ---
+        //
+        // 面積の大きい順に上位を残す形にすると発光の半分以上を黙って捨てることになる。
+        // 併合ならエネルギーは厳密に保存される(理由は本体のコメント)
+        void MergeCloseEmissiveClusters(
+            float clusterScale, std::vector<Accum>& groups, std::vector<uint32_t>& triangleGroup)
+        {
             // 【上限で切り捨てて逃げてはいけない】街区の看板のように「小さな発光面がばらばらに
             // 大量にある」形は段Aで数千個に割れる。面積の大きい順に上位を残す形にすると、
             // EmeraldSquare では上位256個で総面積の46.7%にしかならず、発光の半分以上を
@@ -738,7 +525,15 @@ namespace Kurenai::Assets
                     g = mergedOf[g];
                 }
             }
+        }
 
+        // 二次モーメントの第2段(重心が確定してから重心の散らばりを足す)と、
+        // かたまりごとの値の確定。**かたまり番号と出力の添字は一致しない**
+        void FinalizeEmissiveClusters(
+            const Vertex* vertices, const uint32_t* indices, uint32_t triangleCount,
+            const std::vector<Accum>& groups, std::vector<uint32_t>& triangleGroup,
+            std::vector<EmissiveCluster>& result, std::vector<uint32_t>* outTriangleCluster)
+        {
             // --- 二次モーメントの第2段(重心が確定してから、重心の散らばりを足す) ---
             std::vector<double> centroidSpread(groups.size(), 0.0);
             for (uint32_t tri = 0; tri < triangleCount; ++tri)
@@ -836,8 +631,238 @@ namespace Kurenai::Assets
                 }
             }
 
+        }
+
+        // outTriangleCluster に nullptr 以外を渡すと、三角形ごとの「どのかたまりに属するか」を
+        // 返す(要素数 = indexCount/3、どこにも属さない三角形は kEmissiveTriangleUnassigned)。
+        //
+        // 【段階2のメッシュライトが要る】三角形を面積比で引くとき、まずかたまりを選んでから
+        // その中の三角形を引く2段構えにする。**かたまりの中身が分からないと第2段が書けない**
+        std::vector<EmissiveCluster> BuildEmissiveClusters(
+            const Vertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount,
+            const float boundsMin[3], const float boundsMax[3], float clusterScale,
+            std::vector<uint32_t>* outTriangleCluster = nullptr)
+        {
+            std::vector<EmissiveCluster> result;
+            if (outTriangleCluster != nullptr)
+            {
+                outTriangleCluster->assign(indexCount / 3, kEmissiveTriangleUnassigned);
+            }
+            if (vertices == nullptr || indices == nullptr || vertexCount == 0 || indexCount < 3)
+            {
+                return result;
+            }
+            const uint32_t triangleCount = indexCount / 3;
+
+            // --- 頂点を位置で溶接する ---
+            //
+            // 【素の頂点番号で連結成分を取ってはいけない】.kgeom の頂点は meshopt を通した後で、
+            // 法線やUVが違えば同じ位置でも別の頂点になっている。溶接を省くと**1個の電球が
+            // 数十片に割れる**。しかも「細かい光源がたくさん出た」だけに見えるので気付けない。
+            //
+            // 【しきい値はメッシュの大きさに比例させる】絶対値で固定すると、1.1km四方の
+            // PLATEAU タイルで float32 の分解能(1000m 付近で約 6e-5)を割り込む。
+            // 相対 1e-5 は float32 の仮数(約 1.2e-7 相対)に対して十分な余裕があり、
+            // DCC の頂点溶接許容(ふつう 1e-4 m 前後)よりは細かい
+            float diagonal = 0.0f;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const float d = boundsMax[axis] - boundsMin[axis];
+                diagonal += d * d;
+            }
+            diagonal = std::sqrt(diagonal);
+            const float weldEpsilon = std::clamp(1e-5f * diagonal, 1e-5f, 1e-3f);
+            const float invWeld = 1.0f / weldEpsilon;
+
+
+            // union-find の親配列。溶接と三角形の連結の両方に使う
+            std::vector<uint32_t> parent(vertexCount);
+            for (uint32_t v = 0; v < vertexCount; ++v)
+            {
+                parent[v] = v;
+            }
+            // 経路圧縮。再帰にすると頂点数ぶんの深さになりうるのでループで書く
+            const auto findRoot = [&parent](uint32_t v) -> uint32_t
+            {
+                uint32_t root = v;
+                while (parent[root] != root) { root = parent[root]; }
+                while (parent[v] != root) { const uint32_t next = parent[v]; parent[v] = root; v = next; }
+                return root;
+            };
+            // 【小さい番号を親にする】結合の向きを入力順に依存させないための決定性の要件
+            const auto unite = [&parent, &findRoot](uint32_t a, uint32_t b)
+            {
+                const uint32_t ra = findRoot(a);
+                const uint32_t rb = findRoot(b);
+                if (ra == rb) { return; }
+                if (ra < rb) { parent[rb] = ra; } else { parent[ra] = rb; }
+            };
+
+            {
+                std::unordered_map<QuantizedKey, uint32_t, QuantizedKeyHash> weldMap;
+                weldMap.reserve(vertexCount);
+                for (uint32_t v = 0; v < vertexCount; ++v)
+                {
+                    QuantizedKey key;
+                    key.X = std::llround(static_cast<double>(vertices[v].Position[0]) * invWeld);
+                    key.Y = std::llround(static_cast<double>(vertices[v].Position[1]) * invWeld);
+                    key.Z = std::llround(static_cast<double>(vertices[v].Position[2]) * invWeld);
+                    const auto inserted = weldMap.emplace(key, v);
+                    if (!inserted.second)
+                    {
+                        unite(inserted.first->second, v);
+                    }
+                }
+            }
+
+            // --- 三角形の3頂点をつないで連結成分にする ---
+            for (uint32_t tri = 0; tri < triangleCount; ++tri)
+            {
+                const uint32_t i0 = indices[tri * 3 + 0];
+                const uint32_t i1 = indices[tri * 3 + 1];
+                const uint32_t i2 = indices[tri * 3 + 2];
+                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
+                {
+                    continue;
+                }
+                unite(i0, i1);
+                unite(i1, i2);
+            }
+
+            // --- 三角形を「かたまり」へ割り当てて累積する ---
+            struct GroupKey
+            {
+                uint32_t Root;
+                int64_t CellX, CellY, CellZ; // 段Bのグリッドセル(分割しないときは常に0)
+                bool operator==(const GroupKey& o) const
+                {
+                    return Root == o.Root && CellX == o.CellX && CellY == o.CellY && CellZ == o.CellZ;
+                }
+            };
+            struct GroupKeyHash
+            {
+                size_t operator()(const GroupKey& k) const
+                {
+                    size_t h = static_cast<size_t>(k.Root) * 0x9E3779B97F4A7C15ull;
+                    h ^= static_cast<size_t>(k.CellX) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                    h ^= static_cast<size_t>(k.CellY) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                    h ^= static_cast<size_t>(k.CellZ) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                    return h;
+                }
+            };
+
+            std::vector<Accum> groups;
+            std::unordered_map<GroupKey, uint32_t, GroupKeyHash> groupIndexOf;
+            std::vector<uint32_t> triangleGroup(triangleCount, 0xFFFFFFFFu);
+
+            const bool splitEnabled = clusterScale > 0.0f;
+            const float invSplit = splitEnabled ? (1.0f / clusterScale) : 0.0f;
+
+            for (uint32_t tri = 0; tri < triangleCount; ++tri)
+            {
+                const uint32_t i0 = indices[tri * 3 + 0];
+                const uint32_t i1 = indices[tri * 3 + 1];
+                const uint32_t i2 = indices[tri * 3 + 2];
+                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
+                {
+                    continue;
+                }
+                const float* p0 = vertices[i0].Position;
+                const float* p1 = vertices[i1].Position;
+                const float* p2 = vertices[i2].Position;
+
+                const double e1[3] = { static_cast<double>(p1[0]) - p0[0], static_cast<double>(p1[1]) - p0[1], static_cast<double>(p1[2]) - p0[2] };
+                const double e2[3] = { static_cast<double>(p2[0]) - p0[0], static_cast<double>(p2[1]) - p0[1], static_cast<double>(p2[2]) - p0[2] };
+                const double cross[3] = {
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                };
+                const double area =
+                    0.5 * std::sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+                // 縮退した三角形は面積0で法線の向きも決まらない。重心にも寄与しないので飛ばす
+                if (area <= 1e-12)
+                {
+                    continue;
+                }
+
+                const double centroid[3] = {
+                    (static_cast<double>(p0[0]) + p1[0] + p2[0]) / 3.0,
+                    (static_cast<double>(p0[1]) + p1[1] + p2[1]) / 3.0,
+                    (static_cast<double>(p0[2]) + p1[2] + p2[2]) / 3.0,
+                };
+
+                GroupKey key{};
+                key.Root = findRoot(i0);
+                key.CellX = key.CellY = key.CellZ = 0;
+                if (splitEnabled)
+                {
+                    // 【重心でセルを決める】頂点で決めると1枚の三角形が複数セルに跨る。
+                    // セルの原点はメッシュのAABB最小コーナーで、インスタンス変換に依存しない
+                    key.CellX = static_cast<int64_t>(std::floor((centroid[0] - boundsMin[0]) * invSplit));
+                    key.CellY = static_cast<int64_t>(std::floor((centroid[1] - boundsMin[1]) * invSplit));
+                    key.CellZ = static_cast<int64_t>(std::floor((centroid[2] - boundsMin[2]) * invSplit));
+                }
+
+                uint32_t groupIndex;
+                const auto found = groupIndexOf.find(key);
+                if (found == groupIndexOf.end())
+                {
+                    groupIndex = static_cast<uint32_t>(groups.size());
+                    groupIndexOf.emplace(key, groupIndex);
+                    groups.emplace_back();
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        groups[groupIndex].BoundsMin[axis] = p0[axis];
+                        groups[groupIndex].BoundsMax[axis] = p0[axis];
+                    }
+                }
+                else
+                {
+                    groupIndex = found->second;
+                }
+                triangleGroup[tri] = groupIndex;
+
+                Accum& acc = groups[groupIndex];
+                acc.Area += area;
+                acc.TriangleCount += 1u;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    acc.CentroidSum[axis] += area * centroid[axis];
+                    // Σ A_i n_i は Σ cross_i / 2 と厳密に等しい(crossの長さが 2*A_i)。
+                    // 正規化してから面積を掛け直すより丸めが1段少ない
+                    acc.NormalSum[axis] += 0.5 * cross[axis];
+                    acc.BoundsMin[axis] = std::min({ acc.BoundsMin[axis], p0[axis], p1[axis], p2[axis] });
+                    acc.BoundsMax[axis] = std::max({ acc.BoundsMax[axis], p0[axis], p1[axis], p2[axis] });
+                }
+
+                // 三角形自身の広がり(自分の重心まわりの二次モーメント)。
+                // ∫|x-g|^2 dA = (A/36)(|ab|^2 + |bc|^2 + |ca|^2)
+                //
+                // 【これを落とすと三角形1枚のかたまりで半径が厳密に0になる】重心の散らばりだけを
+                // 見ると1枚しかないときに0になる。半径0は点光源を意味し、半影が消え、
+                // 近傍のクランプ(d^2 + R^2)も効かなくなる
+                const double ab[3] = { static_cast<double>(p1[0]) - p0[0], static_cast<double>(p1[1]) - p0[1], static_cast<double>(p1[2]) - p0[2] };
+                const double bc[3] = { static_cast<double>(p2[0]) - p1[0], static_cast<double>(p2[1]) - p1[1], static_cast<double>(p2[2]) - p1[2] };
+                const double ca[3] = { static_cast<double>(p0[0]) - p2[0], static_cast<double>(p0[1]) - p2[1], static_cast<double>(p0[2]) - p2[2] };
+                const double edgeSq =
+                    ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2] +
+                    bc[0] * bc[0] + bc[1] * bc[1] + bc[2] * bc[2] +
+                    ca[0] * ca[0] + ca[1] * ca[1] + ca[2] * ca[2];
+                acc.OwnMoment += area * edgeSq / 36.0;
+            }
+
+            if (groups.empty())
+            {
+                return result;
+            }
+
+            MergeCloseEmissiveClusters(clusterScale, groups, triangleGroup);
+            FinalizeEmissiveClusters(
+                vertices, indices, triangleCount, groups, triangleGroup, result, outTriangleCluster);
             return result;
         }
+
 
         // テクスチャの読み込みとキャッシュ・共有インスタンス(白/フラット法線/マゼンタ)の管理。
         // .kmodelのTextureEntryは既にKurenaiPacker側でユニーク化(同じ画像+同じsRGBは1件に集約)
