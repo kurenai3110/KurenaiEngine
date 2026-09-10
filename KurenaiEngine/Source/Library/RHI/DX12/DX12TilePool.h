@@ -48,6 +48,13 @@ namespace Kurenai::RHI
         // Allocateで得たタイルを返却する
         void Free(const std::vector<Tile>& tiles);
 
+        // tiles[from] から始まる「同じヒープの、番号が連続したタイル」の本数を返す。
+        // UpdateTileMappingsは1回の呼び出しで1つのヒープしか指せないため、
+        // ここで区切った単位で貼ることになる。
+        // 【タイルがヒープをまたいで散らばるのはこのクラスの性質】貼る側ではなく
+        // ここに置いて、貼る側(標準ミップとミップテール)が同じ数え方を共有する
+        static uint32_t GetContiguousRunLength(const std::vector<Tile>& tiles, uint32_t from);
+
         ID3D12Heap* GetHeap(uint32_t heapIndex) const;
 
         // 統計用。確保済みヒープの総バイト数と、いま貼られているタイル数

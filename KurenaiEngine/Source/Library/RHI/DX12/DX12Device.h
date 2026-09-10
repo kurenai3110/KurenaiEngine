@@ -26,6 +26,8 @@ namespace Kurenai::RHI
 {
     class DX12CommandList;
     struct DX12TiledTextureState;
+    class DX12Texture;
+    class DX12PendingTextureContents;
 
     class DX12Device : public IRHIDevice
     {
@@ -291,6 +293,21 @@ namespace Kurenai::RHI
         void MapStandardMip(
             ID3D12Resource* resource, const DX12TiledTextureState& state, uint32_t mip,
             const std::vector<DX12TilePool::Tile>& tiles);
+        // PrepareTiledTextureResidencyの3段。いずれもm_UploadMutexを保持したまま呼ばれる
+        // (std::mutexは再帰ロックできないので、この中で取り直してはいけない)。
+        // 予約リソースを作り、タイルの形とミップテールを実測して常駐状態を組み立てる
+        std::unique_ptr<DX12TiledTextureState> CreateReservedTiledResource(
+            const TiledTextureDesc& desc, Microsoft::WRL::ComPtr<ID3D12Resource>& resource);
+        // 常駐するミップの範囲をfirstMipへ寄せる。粗くする側は外す予約をpendingへ積むだけにする
+        bool UpdateTiledMipResidency(
+            const TiledTextureDesc& desc, DX12Texture* texture, const Microsoft::WRL::ComPtr<ID3D12Resource>& resource,
+            DX12TiledTextureState* state, uint32_t firstMip, uint32_t oldFirstMip, uint32_t standardMips,
+            DX12PendingTextureContents* pending);
+        // 新しく貼ったミップへ画像データを流し込む
+        bool UploadTiledMipContents(
+            const TiledTextureDesc& desc, const TextureImage& image, DX12Texture* texture,
+            const Microsoft::WRL::ComPtr<ID3D12Resource>& resource, const DX12TiledTextureState* state,
+            uint32_t firstMip, uint32_t oldFirstMip);
         // m_UploadCommandListへ記録した内容をクローズして実行投入し、完了を同期的に待ってから開き直す。
         // CreateBuffer/CreateTextureFromImageの初期データアップロード専用(詳細はm_UploadCommandListの
         // コメント参照)

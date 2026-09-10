@@ -62,11 +62,10 @@ namespace Kurenai::RHI
         while (consumed < tiles.size())
         {
             const uint32_t heapIndex = tiles[consumed].HeapIndex;
-            uint32_t run = 1;
-            while (consumed + run < tiles.size() && tiles[consumed + run].HeapIndex == heapIndex &&
-                   tiles[consumed + run].TileIndex == tiles[consumed + run - 1].TileIndex + 1)
+            const uint32_t run = DX12TilePool::GetContiguousRunLength(tiles, consumed);
+            if (run == 0)
             {
-                ++run;
+                break;
             }
 
             D3D12_TILED_RESOURCE_COORDINATE runStart = start;
@@ -90,6 +89,201 @@ namespace Kurenai::RHI
 
             consumed += run;
         }
+    }
+
+    // 【第1段】予約リソースを作り、タイルの形とミップテールを実測して常駐状態を組み立てる。
+    // 作れない構成・タイルにする意味が無い構成ではnullptrを返し、呼び出し元が従来経路へ委ねる
+    std::unique_ptr<DX12TiledTextureState> DX12Device::CreateReservedTiledResource(
+        const TiledTextureDesc& desc, Microsoft::WRL::ComPtr<ID3D12Resource>& resource)
+    {
+        // --- 初めてタイルリソース化する ---
+        D3D12_RESOURCE_DESC resourceDesc{};
+        resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        resourceDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        resourceDesc.Width = desc.Width;
+        resourceDesc.Height = desc.Height;
+        resourceDesc.DepthOrArraySize = 1;
+        resourceDesc.MipLevels = static_cast<UINT16>(desc.MipLevels);
+        resourceDesc.Format = static_cast<DXGI_FORMAT>(desc.DxgiFormat);
+        resourceDesc.SampleDesc.Count = 1;
+        // 予約リソースはこのレイアウトでしか作れない(D3D12_TEXTURE_LAYOUTの規定)
+        resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+        resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
+
+        if (FAILED(m_Device->CreateReservedResource(
+                &resourceDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource))))
+        {
+            Core::Logger::Warning(
+                "DX12", "予約リソースを作成できませんでした(このテクスチャは従来経路で扱います)");
+            return nullptr;
+        }
+
+        auto newState = std::make_unique<DX12TiledTextureState>();
+        newState->Format = resourceDesc.Format;
+        newState->Width = desc.Width;
+        newState->Height = desc.Height;
+        newState->MipLevels = desc.MipLevels;
+
+        // 【タイルの形もミップテールの構成も実測する】仕様上どちらもアダプタ依存で、
+        // 「64KBタイル = BC7で256x256」は見積もりに過ぎない
+        UINT numTiles = 0;
+        UINT numSubresourceTilings = desc.MipLevels;
+        newState->SubresourceTiling.resize(desc.MipLevels);
+        m_Device->GetResourceTiling(
+            resource.Get(), &numTiles, &newState->PackedMipInfo, &newState->TileShape,
+            &numSubresourceTilings, 0, newState->SubresourceTiling.data());
+
+        if (newState->PackedMipInfo.NumStandardMips == 0)
+        {
+            // 全部がミップテール = 一括でしか出し入れできない。タイルにする意味が無いので
+            // 従来経路(リソースごと作り直す)へ委ねる。512x512以下ではこちらが普通
+            return nullptr;
+        }
+
+        newState->MappedTiles.resize(newState->PackedMipInfo.NumStandardMips);
+        resource->SetName(L"TiledStreamingTexture");
+
+        // ミップテールは一括でしかマップ/アンマップできないため、常に貼りっぱなしにする
+        if (newState->PackedMipInfo.NumTilesForPackedMips > 0)
+        {
+            if (!m_TilePool->Allocate(newState->PackedMipInfo.NumTilesForPackedMips, newState->PackedMipTiles))
+            {
+                return nullptr;
+            }
+
+            D3D12_TILED_RESOURCE_COORDINATE tailStart{};
+            tailStart.Subresource = newState->PackedMipInfo.NumStandardMips;
+            D3D12_TILE_REGION_SIZE tailRegion{};
+            tailRegion.NumTiles = newState->PackedMipInfo.NumTilesForPackedMips;
+            tailRegion.UseBox = FALSE;
+
+            // ミップテールのタイルもヒープをまたぎうるので、連続範囲ごとに切って貼る
+            uint32_t consumed = 0;
+            while (consumed < newState->PackedMipTiles.size())
+            {
+                const uint32_t heapIndex = newState->PackedMipTiles[consumed].HeapIndex;
+                const uint32_t run = DX12TilePool::GetContiguousRunLength(newState->PackedMipTiles, consumed);
+                if (run == 0)
+                {
+                    break;
+                }
+
+                D3D12_TILED_RESOURCE_COORDINATE runStart = tailStart;
+                runStart.X = consumed;
+                D3D12_TILE_REGION_SIZE runRegion{};
+                runRegion.NumTiles = run;
+                runRegion.UseBox = FALSE;
+
+                const D3D12_TILE_RANGE_FLAGS rangeFlag = D3D12_TILE_RANGE_FLAG_NONE;
+                const UINT heapStartOffset = newState->PackedMipTiles[consumed].TileIndex;
+                const UINT rangeTileCount = run;
+                m_CommandQueue->UpdateTileMappings(
+                    resource.Get(), 1, &runStart, &runRegion, m_TilePool->GetHeap(heapIndex), 1, &rangeFlag,
+                    &heapStartOffset, &rangeTileCount, D3D12_TILE_MAPPING_FLAG_NONE);
+                consumed += run;
+            }
+        }
+
+        return newState;
+    }
+
+    // 【第2段】常駐するミップの範囲をfirstMipへ寄せる。細かくする側はその場でタイルを貼り、
+    // 粗くする側は外す予約をpendingへ積むだけにする(いま外すとGPUが読んでいる最中に消える)
+    bool DX12Device::UpdateTiledMipResidency(
+        const TiledTextureDesc& desc, DX12Texture* texture, const Microsoft::WRL::ComPtr<ID3D12Resource>& resource,
+        DX12TiledTextureState* state, uint32_t firstMip, uint32_t oldFirstMip, uint32_t standardMips,
+        DX12PendingTextureContents* pending)
+    {
+        // --- 細かくする方向: [firstMip, oldFirstMip) の標準ミップを貼る ---
+        for (uint32_t mip = firstMip; mip < std::min(oldFirstMip, standardMips); ++mip)
+        {
+            const D3D12_SUBRESOURCE_TILING& tiling = state->SubresourceTiling[mip];
+            const uint32_t tileCount = tiling.WidthInTiles * tiling.HeightInTiles * tiling.DepthInTiles;
+            if (tileCount == 0)
+            {
+                continue;
+            }
+            if (!m_TilePool->Allocate(tileCount, state->MappedTiles[mip]))
+            {
+                Core::Logger::Error(
+                    "DX12",
+                    "タイルプール不足のためテクスチャ(SRV " + std::to_string(texture->GetSrvIndex()) + ", " +
+                        std::to_string(desc.Width) + "x" + std::to_string(desc.Height) + ", ミップ" +
+                        std::to_string(mip) + ")の常駐化を中止します");
+                return false;
+            }
+            MapStandardMip(resource.Get(), *state, mip, state->MappedTiles[mip]);
+        }
+
+        // --- 粗くする方向: [oldFirstMip, firstMip) を外す。**ここではまだ外さない** ---
+        if (firstMip > oldFirstMip)
+        {
+            pending->UnmapFirstMip = oldFirstMip;
+            pending->UnmapMipCount = std::min(firstMip, standardMips) - std::min(oldFirstMip, standardMips);
+            for (uint32_t mip = oldFirstMip; mip < std::min(firstMip, standardMips); ++mip)
+            {
+                pending->TilesToRelease.insert(
+                    pending->TilesToRelease.end(), state->MappedTiles[mip].begin(), state->MappedTiles[mip].end());
+                state->MappedTiles[mip].clear();
+            }
+        }
+
+        return true;
+    }
+
+    // 【第3段】新しく貼ったミップへ画像データを流し込む
+    bool DX12Device::UploadTiledMipContents(
+        const TiledTextureDesc& desc, const TextureImage& image, DX12Texture* texture,
+        const Microsoft::WRL::ComPtr<ID3D12Resource>& resource, const DX12TiledTextureState* state,
+        uint32_t firstMip, uint32_t oldFirstMip)
+    {
+        const DirectX::TexMetadata& imageMeta = image.GetMetadata();
+        const uint32_t uploadFirst = firstMip;
+        const uint32_t uploadCount = std::min<uint32_t>(
+            static_cast<uint32_t>(imageMeta.mipLevels), std::min(oldFirstMip, state->MipLevels) - firstMip);
+        if (uploadCount > 0)
+        {
+            std::vector<D3D12_SUBRESOURCE_DATA> subresources(uploadCount);
+            for (uint32_t i = 0; i < uploadCount; ++i)
+            {
+                const DirectX::Image* src = image.GetImage().GetImage(i, 0, 0);
+                if (src == nullptr)
+                {
+                    Core::Logger::Error(
+                        "DX12",
+                        "テクスチャ(SRV " + std::to_string(texture->GetSrvIndex()) + ", " +
+                            std::to_string(desc.Width) + "x" + std::to_string(desc.Height) + ", ミップ" +
+                            std::to_string(uploadFirst + i) + ")の画像データを取得できず常駐化を中止します");
+                    return false;
+                }
+                subresources[i].pData = src->pixels;
+                subresources[i].RowPitch = static_cast<LONG_PTR>(src->rowPitch);
+                subresources[i].SlicePitch = static_cast<LONG_PTR>(src->slicePitch);
+            }
+
+            const D3D12_RESOURCE_DESC destDesc = resource->GetDesc();
+            UINT64 requiredSize = 0;
+            m_Device->GetCopyableFootprints(&destDesc, uploadFirst, uploadCount, 0, nullptr, nullptr, nullptr, &requiredSize);
+
+            const D3D12_RESOURCE_BARRIER toCopyDest = CD3DX12_RESOURCE_BARRIER::Transition(
+                resource.Get(),
+                texture->IsTiled() ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_COMMON,
+                D3D12_RESOURCE_STATE_COPY_DEST);
+            m_UploadCommandList->ResourceBarrier(1, &toCopyDest);
+
+            Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer = CreateUploadBuffer(requiredSize);
+            UpdateSubresources(
+                m_UploadCommandList.Get(), resource.Get(), uploadBuffer.Get(), 0, uploadFirst, uploadCount,
+                subresources.data());
+
+            const D3D12_RESOURCE_BARRIER toSrv = CD3DX12_RESOURCE_BARRIER::Transition(
+                resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            m_UploadCommandList->ResourceBarrier(1, &toSrv);
+
+            UploadSubmitAndWait();
+        }
+
+        return true;
     }
 
     std::unique_ptr<IRHIPendingTextureContents> DX12Device::PrepareTiledTextureResidency(
@@ -130,95 +324,10 @@ namespace Kurenai::RHI
 
         if (state == nullptr)
         {
-            // --- 初めてタイルリソース化する ---
-            D3D12_RESOURCE_DESC resourceDesc{};
-            resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-            resourceDesc.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-            resourceDesc.Width = desc.Width;
-            resourceDesc.Height = desc.Height;
-            resourceDesc.DepthOrArraySize = 1;
-            resourceDesc.MipLevels = static_cast<UINT16>(desc.MipLevels);
-            resourceDesc.Format = static_cast<DXGI_FORMAT>(desc.DxgiFormat);
-            resourceDesc.SampleDesc.Count = 1;
-            // 予約リソースはこのレイアウトでしか作れない(D3D12_TEXTURE_LAYOUTの規定)
-            resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
-            resourceDesc.Flags = D3D12_RESOURCE_FLAG_NONE;
-
-            if (FAILED(m_Device->CreateReservedResource(
-                    &resourceDesc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource))))
+            auto newState = CreateReservedTiledResource(desc, resource);
+            if (!newState)
             {
-                Core::Logger::Warning(
-                    "DX12", "予約リソースを作成できませんでした(このテクスチャは従来経路で扱います)");
                 return nullptr;
-            }
-
-            auto newState = std::make_unique<DX12TiledTextureState>();
-            newState->Format = resourceDesc.Format;
-            newState->Width = desc.Width;
-            newState->Height = desc.Height;
-            newState->MipLevels = desc.MipLevels;
-
-            // 【タイルの形もミップテールの構成も実測する】仕様上どちらもアダプタ依存で、
-            // 「64KBタイル = BC7で256x256」は見積もりに過ぎない
-            UINT numTiles = 0;
-            UINT numSubresourceTilings = desc.MipLevels;
-            newState->SubresourceTiling.resize(desc.MipLevels);
-            m_Device->GetResourceTiling(
-                resource.Get(), &numTiles, &newState->PackedMipInfo, &newState->TileShape,
-                &numSubresourceTilings, 0, newState->SubresourceTiling.data());
-
-            if (newState->PackedMipInfo.NumStandardMips == 0)
-            {
-                // 全部がミップテール = 一括でしか出し入れできない。タイルにする意味が無いので
-                // 従来経路(リソースごと作り直す)へ委ねる。512x512以下ではこちらが普通
-                return nullptr;
-            }
-
-            newState->MappedTiles.resize(newState->PackedMipInfo.NumStandardMips);
-            resource->SetName(L"TiledStreamingTexture");
-
-            // ミップテールは一括でしかマップ/アンマップできないため、常に貼りっぱなしにする
-            if (newState->PackedMipInfo.NumTilesForPackedMips > 0)
-            {
-                if (!m_TilePool->Allocate(newState->PackedMipInfo.NumTilesForPackedMips, newState->PackedMipTiles))
-                {
-                    return nullptr;
-                }
-
-                D3D12_TILED_RESOURCE_COORDINATE tailStart{};
-                tailStart.Subresource = newState->PackedMipInfo.NumStandardMips;
-                D3D12_TILE_REGION_SIZE tailRegion{};
-                tailRegion.NumTiles = newState->PackedMipInfo.NumTilesForPackedMips;
-                tailRegion.UseBox = FALSE;
-
-                // ミップテールのタイルもヒープをまたぎうるので、連続範囲ごとに切って貼る
-                uint32_t consumed = 0;
-                while (consumed < newState->PackedMipTiles.size())
-                {
-                    const uint32_t heapIndex = newState->PackedMipTiles[consumed].HeapIndex;
-                    uint32_t run = 1;
-                    while (consumed + run < newState->PackedMipTiles.size() &&
-                           newState->PackedMipTiles[consumed + run].HeapIndex == heapIndex &&
-                           newState->PackedMipTiles[consumed + run].TileIndex ==
-                               newState->PackedMipTiles[consumed + run - 1].TileIndex + 1)
-                    {
-                        ++run;
-                    }
-
-                    D3D12_TILED_RESOURCE_COORDINATE runStart = tailStart;
-                    runStart.X = consumed;
-                    D3D12_TILE_REGION_SIZE runRegion{};
-                    runRegion.NumTiles = run;
-                    runRegion.UseBox = FALSE;
-
-                    const D3D12_TILE_RANGE_FLAGS rangeFlag = D3D12_TILE_RANGE_FLAG_NONE;
-                    const UINT heapStartOffset = newState->PackedMipTiles[consumed].TileIndex;
-                    const UINT rangeTileCount = run;
-                    m_CommandQueue->UpdateTileMappings(
-                        resource.Get(), 1, &runStart, &runRegion, m_TilePool->GetHeap(heapIndex), 1, &rangeFlag,
-                        &heapStartOffset, &rangeTileCount, D3D12_TILE_MAPPING_FLAG_NONE);
-                    consumed += run;
-                }
             }
 
             state = newState.get();
@@ -235,85 +344,14 @@ namespace Kurenai::RHI
         const uint32_t standardMips = state->PackedMipInfo.NumStandardMips;
         const uint32_t oldFirstMip = state->ResidentFirstMip;
 
-        // --- 細かくする方向: [firstMip, oldFirstMip) の標準ミップを貼る ---
-        for (uint32_t mip = firstMip; mip < std::min(oldFirstMip, standardMips); ++mip)
+        if (!UpdateTiledMipResidency(desc, texture, resource, state, firstMip, oldFirstMip, standardMips, pending.get()))
         {
-            const D3D12_SUBRESOURCE_TILING& tiling = state->SubresourceTiling[mip];
-            const uint32_t tileCount = tiling.WidthInTiles * tiling.HeightInTiles * tiling.DepthInTiles;
-            if (tileCount == 0)
-            {
-                continue;
-            }
-            if (!m_TilePool->Allocate(tileCount, state->MappedTiles[mip]))
-            {
-                Core::Logger::Error(
-                    "DX12",
-                    "タイルプール不足のためテクスチャ(SRV " + std::to_string(texture->GetSrvIndex()) + ", " +
-                        std::to_string(desc.Width) + "x" + std::to_string(desc.Height) + ", ミップ" +
-                        std::to_string(mip) + ")の常駐化を中止します");
-                return nullptr;
-            }
-            MapStandardMip(resource.Get(), *state, mip, state->MappedTiles[mip]);
+            return nullptr;
         }
 
-        // --- 粗くする方向: [oldFirstMip, firstMip) を外す。**ここではまだ外さない** ---
-        if (firstMip > oldFirstMip)
+        if (!UploadTiledMipContents(desc, image, texture, resource, state, firstMip, oldFirstMip))
         {
-            pending->UnmapFirstMip = oldFirstMip;
-            pending->UnmapMipCount = std::min(firstMip, standardMips) - std::min(oldFirstMip, standardMips);
-            for (uint32_t mip = oldFirstMip; mip < std::min(firstMip, standardMips); ++mip)
-            {
-                pending->TilesToRelease.insert(
-                    pending->TilesToRelease.end(), state->MappedTiles[mip].begin(), state->MappedTiles[mip].end());
-                state->MappedTiles[mip].clear();
-            }
-        }
-
-        // --- 新しく貼ったミップへデータを流し込む ---
-        const DirectX::TexMetadata& imageMeta = image.GetMetadata();
-        const uint32_t uploadFirst = firstMip;
-        const uint32_t uploadCount = std::min<uint32_t>(
-            static_cast<uint32_t>(imageMeta.mipLevels), std::min(oldFirstMip, state->MipLevels) - firstMip);
-        if (uploadCount > 0)
-        {
-            std::vector<D3D12_SUBRESOURCE_DATA> subresources(uploadCount);
-            for (uint32_t i = 0; i < uploadCount; ++i)
-            {
-                const DirectX::Image* src = image.GetImage().GetImage(i, 0, 0);
-                if (src == nullptr)
-                {
-                    Core::Logger::Error(
-                        "DX12",
-                        "テクスチャ(SRV " + std::to_string(texture->GetSrvIndex()) + ", " +
-                            std::to_string(desc.Width) + "x" + std::to_string(desc.Height) + ", ミップ" +
-                            std::to_string(uploadFirst + i) + ")の画像データを取得できず常駐化を中止します");
-                    return nullptr;
-                }
-                subresources[i].pData = src->pixels;
-                subresources[i].RowPitch = static_cast<LONG_PTR>(src->rowPitch);
-                subresources[i].SlicePitch = static_cast<LONG_PTR>(src->slicePitch);
-            }
-
-            const D3D12_RESOURCE_DESC destDesc = resource->GetDesc();
-            UINT64 requiredSize = 0;
-            m_Device->GetCopyableFootprints(&destDesc, uploadFirst, uploadCount, 0, nullptr, nullptr, nullptr, &requiredSize);
-
-            const D3D12_RESOURCE_BARRIER toCopyDest = CD3DX12_RESOURCE_BARRIER::Transition(
-                resource.Get(),
-                texture->IsTiled() ? D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE : D3D12_RESOURCE_STATE_COMMON,
-                D3D12_RESOURCE_STATE_COPY_DEST);
-            m_UploadCommandList->ResourceBarrier(1, &toCopyDest);
-
-            Microsoft::WRL::ComPtr<ID3D12Resource> uploadBuffer = CreateUploadBuffer(requiredSize);
-            UpdateSubresources(
-                m_UploadCommandList.Get(), resource.Get(), uploadBuffer.Get(), 0, uploadFirst, uploadCount,
-                subresources.data());
-
-            const D3D12_RESOURCE_BARRIER toSrv = CD3DX12_RESOURCE_BARRIER::Transition(
-                resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            m_UploadCommandList->ResourceBarrier(1, &toSrv);
-
-            UploadSubmitAndWait();
+            return nullptr;
         }
 
         // SRVは「全ミップを持つが、firstMipより細かい段はサンプルさせない」形にする。
