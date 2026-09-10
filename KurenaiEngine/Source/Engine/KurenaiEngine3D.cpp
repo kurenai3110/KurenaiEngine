@@ -460,15 +460,12 @@ namespace Kurenai
         // 待った後に新しいコマンドが積まれることはない
         WaitForGPUIdle();
     }
-
-    void KurenaiEngine3D::CreateSceneResources()
+    // 【この3つを呼ぶ順序を入れ替えないこと】DX12はディスクリプタ枠を生成順に割り当てる。
+    // 順序が変わるとシェーダーが読む枠と実際のリソースがずれ、絵が出てから原因を探すことになる
+    // 1. パイプラインステートを作る
+    void KurenaiEngine3D::CreateScenePipelineStates(
+        const std::wstring& shaderDirectory, const std::vector<RHI::InputElementDesc>& modelInputLayout)
     {
-        // Shaders/AssetsはビルドでKurenaiEngine.dllと同じフォルダにコピーされる
-        const std::wstring dataRoot = GetModuleDirectory();
-        const std::wstring shaderDirectory = dataRoot + L"Shaders\\";
-
-        const std::vector<RHI::InputElementDesc> modelInputLayout = GetModelInputLayout();
-
         // 【元の行位置のまま呼ぶ】DX12はディスクリプタ枠を生成順に割り当てるため、
         // 所有権をGeometryPassesへ移しても生成の順序はここから動かさない
         m_GeometryPasses->CreateGeometryShaders(*m_Device, shaderDirectory, m_Device->SupportsMeshShader());
@@ -594,7 +591,11 @@ namespace Kurenai
                 "ソフトウェアラスタライザは利用できません(DX12・シェーダーモデル6.6・"
                 "64bit整数アトミック・bindlessのすべてが必要です)");
         }
+    }
 
+    // 2. 定数バッファ・構造化バッファと、メッシュレット/レイトレーシングの資源を作る
+    void KurenaiEngine3D::CreateSceneBuffers(const std::wstring& dataRoot, const std::wstring& shaderDirectory)
+    {
         // 【元の行位置のまま呼ぶ】DX12はディスクリプタ枠を生成順に割り当てるため、
         // 所有権をReflectionPassesへ移しても生成の順序はここから動かさない
         m_ReflectionPasses->CreateSSRPipelineState(*m_Device, shaderDirectory);
@@ -867,7 +868,12 @@ namespace Kurenai
         m_SkyResources.CreateParametersBuffer(*m_Device, sizeof(GPUSkyParameters));
 
         m_IBLResources.CreatePrefilterConstantBuffer(*m_Device, sizeof(Passes::IBLFaceConstants));
+    }
 
+    // 3. 反射プローブ・平面反射・DDGIの資源を作る
+    void KurenaiEngine3D::CreateSceneGIResources(
+        const std::wstring& shaderDirectory, const std::vector<RHI::InputElementDesc>& modelInputLayout)
+    {
         // --- 反射プローブ(19章) ---
         // キャプチャ先(1面ぶんを6面で使い回す)。キューブへ写す前のHDR値を保つためFloatにする
         m_GIResources.ProbeCaptureColor = m_Device->CreateRenderTexture(Passes::kProbeCaptureSize, Passes::kProbeCaptureSize, RHI::Format::R16G16B16A16_Float);
@@ -994,6 +1000,21 @@ namespace Kurenai
         // (呼び出し箇所はCreateRenderTargetsと同じ2か所。もう1か所はRender()の解像度変更ハンドリング)
         CreatePlanarReflectionTargets();
         CreatePrecisionDependentPipelineStates();
+    }
+
+    void KurenaiEngine3D::CreateSceneResources()
+    {
+        // Shaders/AssetsはビルドでKurenaiEngine.dllと同じフォルダにコピーされる
+        const std::wstring dataRoot = GetModuleDirectory();
+        const std::wstring shaderDirectory = dataRoot + L"Shaders\\";
+
+        const std::vector<RHI::InputElementDesc> modelInputLayout = GetModelInputLayout();
+
+        // 【この順序を入れ替えないこと】理由は各関数の直前のコメント参照
+        CreateScenePipelineStates(shaderDirectory, modelInputLayout);
+        CreateSceneBuffers(dataRoot, shaderDirectory);
+        CreateSceneGIResources(shaderDirectory, modelInputLayout);
+
 
         DiscoverScenes();
 

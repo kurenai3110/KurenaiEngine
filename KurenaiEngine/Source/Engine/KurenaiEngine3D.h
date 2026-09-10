@@ -656,6 +656,14 @@ namespace Kurenai
         };
 
         void CreateSceneResources();
+        // CreateSceneResourcesの3段。
+        // 【呼ぶ順序を入れ替えないこと】DX12はディスクリプタ枠を生成順に割り当てる。
+        // 順序が変わるとシェーダーが読む枠と実際のリソースがずれ、絵が出てから原因を探すことになる
+        void CreateScenePipelineStates(
+            const std::wstring& shaderDirectory, const std::vector<RHI::InputElementDesc>& modelInputLayout);
+        void CreateSceneBuffers(const std::wstring& dataRoot, const std::wstring& shaderDirectory);
+        void CreateSceneGIResources(
+            const std::wstring& shaderDirectory, const std::vector<RHI::InputElementDesc>& modelInputLayout);
         // 中間バッファの精度構成(m_Settings.System.Precision)によって変わるフォーマット。
         // レンダーターゲットの作成(CreateRenderTargets)と、そこへ描くPSOのRenderTargetFormats
         // 宣言の両方がこれを使う。両者がずれるとD3D12では仕様違反(デバッグレイヤーがID 613を出す)
