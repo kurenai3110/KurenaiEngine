@@ -1,6 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <Filter Include="Source\Engine\Settings">
+      <UniqueIdentifier>{a00a339d-0000-4000-8000-d0bba00a339d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine\Scene">
+      <UniqueIdentifier>{751ac03b-0000-4000-8000-ea4e751ac03b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine\Rendering">
+      <UniqueIdentifier>{38964407-0000-4000-8000-36af38964407}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine\Passes">
+      <UniqueIdentifier>{c1fd0510-0000-4000-8000-ad21c1fd0510}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine\GI">
+      <UniqueIdentifier>{2ea77ef9-0000-4000-8000-4f272ea77ef9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine\Diagnostics">
+      <UniqueIdentifier>{3a58b060-0000-4000-8000-51ca3a58b060}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Shaders">
       <UniqueIdentifier>{00000000-0000-0000-0000-000000000001}</UniqueIdentifier>
     </Filter>
@@ -354,6 +372,63 @@
     <None Include="Shaders\3D\Bloom.hlsl">
       <Filter>Shaders\3D</Filter>
     </None>
+    <ClInclude Include="Source\Engine\Diagnostics\CullStatsReadback.h">
+      <Filter>Source\Engine\Diagnostics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Diagnostics\FrameStatsLogger.h">
+      <Filter>Source\Engine\Diagnostics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Diagnostics\RenderDumpServiceState.h">
+      <Filter>Source\Engine\Diagnostics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Diagnostics\ScheduledRecreationQueue.h">
+      <Filter>Source\Engine\Diagnostics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\GI\DDGIGrid.h">
+      <Filter>Source\Engine\GI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Passes\PassHost.h">
+      <Filter>Source\Engine\Passes</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\DroneShowSystem.h">
+      <Filter>Source\Engine\Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\FrameHistoryState.h">
+      <Filter>Source\Engine\Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\GeometryDrawHost.h">
+      <Filter>Source\Engine\Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\SceneDrawList.h">
+      <Filter>Source\Engine\Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Scene\EmissiveLightSet.h">
+      <Filter>Source\Engine\Scene</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Scene\InstanceLODState.h">
+      <Filter>Source\Engine\Scene</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Scene\ModelStreamingState.h">
+      <Filter>Source\Engine\Scene</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Scene\RaytracingRebuildState.h">
+      <Filter>Source\Engine\Scene</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Scene\SceneLoadHandoff.h">
+      <Filter>Source\Engine\Scene</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\EngineSettings.h">
+      <Filter>Source\Engine\Settings</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\EngineUIHost.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClCompile Include="Source\pch.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClInclude Include="Source\pch.h">
+      <Filter>Source</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
 

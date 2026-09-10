@@ -166,6 +166,23 @@
     <ClInclude Include="Source\Engine\UI\ProfilerPanel.h" />
     <ClInclude Include="Source\Engine\UI\ReflectionProbePanel.h" />
     <ClInclude Include="..\ThirdParty\imgui\imgui.h" />
+    <ClInclude Include="Source\Engine\Diagnostics\CullStatsReadback.h" />
+    <ClInclude Include="Source\Engine\Diagnostics\FrameStatsLogger.h" />
+    <ClInclude Include="Source\Engine\Diagnostics\RenderDumpServiceState.h" />
+    <ClInclude Include="Source\Engine\Diagnostics\ScheduledRecreationQueue.h" />
+    <ClInclude Include="Source\Engine\GI\DDGIGrid.h" />
+    <ClInclude Include="Source\Engine\Passes\PassHost.h" />
+    <ClInclude Include="Source\Engine\Rendering\DroneShowSystem.h" />
+    <ClInclude Include="Source\Engine\Rendering\FrameHistoryState.h" />
+    <ClInclude Include="Source\Engine\Rendering\GeometryDrawHost.h" />
+    <ClInclude Include="Source\Engine\Rendering\SceneDrawList.h" />
+    <ClInclude Include="Source\Engine\Scene\EmissiveLightSet.h" />
+    <ClInclude Include="Source\Engine\Scene\InstanceLODState.h" />
+    <ClInclude Include="Source\Engine\Scene\ModelStreamingState.h" />
+    <ClInclude Include="Source\Engine\Scene\RaytracingRebuildState.h" />
+    <ClInclude Include="Source\Engine\Scene\SceneLoadHandoff.h" />
+    <ClInclude Include="Source\Engine\Settings\EngineSettings.h" />
+    <ClInclude Include="Source\Engine\UI\EngineUIHost.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Source\pch.cpp">

@@ -161,6 +161,7 @@
     <ClInclude Include="..\ThirdParty\imgui\backends\imgui_impl_win32.h" />
     <ClInclude Include="..\ThirdParty\imgui\backends\imgui_impl_dx11.h" />
     <ClInclude Include="..\ThirdParty\imgui\backends\imgui_impl_dx12.h" />
+    <ClInclude Include="Source\Library\RHI\DX12\DX12DeviceInternal.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Source\pch.cpp">

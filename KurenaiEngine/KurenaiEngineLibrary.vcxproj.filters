@@ -456,6 +456,15 @@
     <ClCompile Include="..\ThirdParty\DirectXTex\DirectXTex\DirectXTexD3D12.cpp">
       <Filter>ThirdParty</Filter>
     </ClCompile>
+    <ClInclude Include="Source\Library\RHI\DX12\DX12DeviceInternal.h">
+      <Filter>Source\Library\RHI\DX12</Filter>
+    </ClInclude>
+    <ClCompile Include="Source\pch.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClInclude Include="Source\pch.h">
+      <Filter>Source</Filter>
+    </ClInclude>
   </ItemGroup>
 </Project>
 
