@@ -46,6 +46,9 @@
   <PropertyGroup Label="UserMacros" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <ForcedIncludeFiles>pch.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <PreprocessorDefinitions>KURENAI_LIBRARY_EXPORTS;IMGUI_API=__declspec(dllexport);_DEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex;$(ProjectDir)..\ThirdParty\DirectXTex\Common;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -57,6 +60,9 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <ForcedIncludeFiles>pch.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <PreprocessorDefinitions>KURENAI_LIBRARY_EXPORTS;IMGUI_API=__declspec(dllexport);NDEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex;$(ProjectDir)..\ThirdParty\DirectXTex\Common;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -74,6 +80,7 @@
        d3dcompiler.lib のリンクは残る ―― ThirdParty の imgui バックエンドが
        内蔵シェーダーを D3DCompile で実行時にコンパイルしているため -->
   <ItemGroup>
+    <ClInclude Include="Source\pch.h" />
     <ClInclude Include="Source\Engine\KurenaiTypes.h" />
     <ClInclude Include="Source\Engine\KurenaiEngineBase.h" />
     <ClInclude Include="Source\Library\Core\Window.h" />
@@ -156,13 +163,47 @@
     <ClInclude Include="..\ThirdParty\imgui\backends\imgui_impl_dx12.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\ThirdParty\imgui\imgui.cpp" />
-    <ClCompile Include="..\ThirdParty\imgui\imgui_draw.cpp" />
-    <ClCompile Include="..\ThirdParty\imgui\imgui_tables.cpp" />
-    <ClCompile Include="..\ThirdParty\imgui\imgui_widgets.cpp" />
-    <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_win32.cpp" />
-    <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_dx11.cpp" />
-    <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_dx12.cpp" />
+    <ClCompile Include="Source\pch.cpp">
+      <!-- このファイルだけが .pch を作る(/Yc) -->
+      <PrecompiledHeader>Create</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\imgui\imgui.cpp">
+      <!-- ThirdParty は PCH と /FI の対象外。ここを外すとビルドが壊れる -->
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\imgui\imgui_draw.cpp">
+      <!-- ThirdParty は PCH と /FI の対象外。ここを外すとビルドが壊れる -->
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\imgui\imgui_tables.cpp">
+      <!-- ThirdParty は PCH と /FI の対象外。ここを外すとビルドが壊れる -->
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\imgui\imgui_widgets.cpp">
+      <!-- ThirdParty は PCH と /FI の対象外。ここを外すとビルドが壊れる -->
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_win32.cpp">
+      <!-- ThirdParty は PCH と /FI の対象外。ここを外すとビルドが壊れる -->
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_dx11.cpp">
+      <!-- ThirdParty は PCH と /FI の対象外。ここを外すとビルドが壊れる -->
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\ThirdParty\imgui\backends\imgui_impl_dx12.cpp">
+      <!-- ThirdParty は PCH と /FI の対象外。ここを外すとビルドが壊れる -->
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
     <ClCompile Include="Source\Engine\KurenaiEngineBase.cpp" />
     <ClCompile Include="Source\Library\Core\Window.cpp" />
     <ClCompile Include="Source\Library\Core\Camera.cpp" />
@@ -219,7 +260,11 @@
     <ClCompile Include="Source\Library\RHI\DX12\DX12SamplerSet.cpp" />
     <!-- 配布されているDirectXTex.libはDesktop_2022向けにD3D11用ソースのみでビルドされておりD3D12関数を含まないため、
          D3D12ヘルパー(CreateTextureEx/PrepareUpload等)のみこのプロジェクトで直接コンパイルする -->
-    <ClCompile Include="..\ThirdParty\DirectXTex\DirectXTex\DirectXTexD3D12.cpp" />
+    <ClCompile Include="..\ThirdParty\DirectXTex\DirectXTex\DirectXTexD3D12.cpp">
+      <!-- ThirdParty は PCH と /FI の対象外。ここを外すとビルドが壊れる -->
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

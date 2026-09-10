@@ -46,6 +46,9 @@
   <PropertyGroup Label="UserMacros" />
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <ForcedIncludeFiles>pch.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <PreprocessorDefinitions>KURENAI_ENGINE3D_EXPORTS;IMGUI_API=__declspec(dllimport);_DEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -55,6 +58,9 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <ForcedIncludeFiles>pch.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <PreprocessorDefinitions>KURENAI_ENGINE3D_EXPORTS;IMGUI_API=__declspec(dllimport);NDEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
@@ -76,6 +82,7 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="Source\pch.h" />
     <ClInclude Include="Source\Engine\KurenaiTypes.h" />
     <ClInclude Include="Source\Engine\KurenaiEngine3D.h" />
     <ClInclude Include="Source\Engine\EngineDefaults.h" />
@@ -161,6 +168,12 @@
     <ClInclude Include="..\ThirdParty\imgui\imgui.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Source\pch.cpp">
+      <!-- このファイルだけが .pch を作る(/Yc) -->
+      <PrecompiledHeader>Create</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
     <ClCompile Include="Source\Engine\KurenaiEngine3D.cpp" />
     <ClCompile Include="Source\Engine\Settings\QualitySettings.cpp" />
     <ClCompile Include="Source\Engine\Diagnostics\RenderDumpService.cpp" />
