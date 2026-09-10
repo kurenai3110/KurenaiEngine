@@ -169,20 +169,12 @@ namespace Kurenai
         size_t GetCurrentSceneIndex() const { return m_CurrentSceneIndex; }
 
         // デバッグ表示を番号で選ぶ(番号の並びはUIの「デバッグ表示」コンボと同じ)。
-        //
-        // 【何のためにあるのか】アトラスやバッファの生値を確かめる検証を、GUIのクリック操作
-        // なしで起動オプションから行えるようにするため。DDGIのイラディアンスアトラスが
-        // 一様な白の環境で基準値と一致するか、といった検証は「見て判断する」ものではなく
-        // 画素値を測るものなので、毎回コンボを人手で操作する形にすると再現性が落ちる。
-        //
-        // 範囲外の番号は無視してログを残す(呼び出し側で範囲を知らなくてよいようにする)
+        // 範囲外の番号は無視してログを残す(呼び出し側で範囲を知らなくてよいようにする)。
+        // GUIのつまみではなく起動オプションで持つ理由は docs/ImplementationDetail.md 64章
         void SetDebugViewIndex(int index);
 
         // DDGIのレイの取得をラスタライズへ強制する(既定はDXRが使えるならDXR)。
-        //
-        // 【何のためにあるのか】ラスタ経路とレイトレース経路のA/B比較を、GUIのコンボを
-        // 人手で操作せずに同じ起動手順で行えるようにするため。シーンを切り替えると
-        // 露出(EV100)が引き継がれてしまうので、比較は必ず起動直後から同じ手順で行う
+        // ラスタ経路とレイトレース経路のA/B用(docs/ImplementationDetail.md 64.4)
         void ForceDDGIRayModeRaster();
 
         // プローブ分類のしきい値を上書きする(0以下なら分類そのものを無効にする)。
@@ -200,11 +192,8 @@ namespace Kurenai
         // (一部だけの指定ができるようにするため)。sampleCount は確率的サンプリングが
         // 1ピクセルあたりに候補プールから引く数(RISのM)。
         //
-        // 【何のためにあるのか】SetDebugViewIndex / ForceDDGIRayModeRaster と同じ理由。
-        // MegaLightsの検証は「見て判断する」ものではなく画素値を測るもので、
-        // 影レイ0本(恒等テスト)と従来のライトループの一致を数値で確かめる、といった比較を
-        // 毎回コンボの人手操作でやると再現性が落ちる。**シーンを切り替えると露出(EV100)が
-        // 引き継がれるため、A/Bは必ず起動直後から同じ手順で行うこと。**
+        // 影レイ0本(恒等テスト)と従来のライトループの一致を数値で確かめるための口。
+        // **A/Bは必ず起動直後から同じ手順で行うこと**(docs/ImplementationDetail.md 64章)
         //
         // 範囲外の値は無視してログを残す(呼び出し側が範囲を知らなくてよいようにする)。
         // レイトレーシング非対応の環境では手法を変えてもパスが走らない(ShouldRunMegaLights)
@@ -236,9 +225,8 @@ namespace Kurenai
 
         // シーン全体の自発光の強度倍率(ImGuiの「自発光の強度」と同じ値)。0以下で既定のまま。
         //
-        // 【検証に要る】glTFのemissiveFactorは[0,1]に収まるため、面積の小さい器具は
-        // 物理的に暗すぎて1階調に届かない(実測: Bistroの電球は8bitの1階調の0.36倍)。
-        // 単位の正しさを絵で確かめるには、この倍率を振れる必要がある
+        // 単位の正しさを絵で確かめるために振れるようにしてある
+        // (実測と根拠は docs/ImplementationDetail.md 64.6)
         void SetEmissiveIntensity(float intensity);
 
 
@@ -246,37 +234,22 @@ namespace Kurenai
         // 指定した枚数に達したら足すのを止めるので、表示が静止し
         // 「ちょうどNサンプルの平均」を決定的に撮れる。
         //
-        // 【何のためにあるのか】確率的サンプリングの正しさは「平均が真値に一致するか」で決まるが、
-        // スクリーンショットはトーンマップ後の8bitで、トーンマップは凹関数のため
-        // **偏りがゼロでもノイズがあるだけで平均が低く出る**。N枚のスクリーンショットを
-        // 平均しても検証にならない。デバッグ表示「MegaLights - 蓄積平均」と対で使う
+        // 線形空間で足す場所をエンジン側に持つ理由は docs/ImplementationDetail.md 61.7b / 64.6
         void SetMegaLightsAccumFrames(int frames);
 
         // 蓄積し終えた平均を、指定パスへ生データ(float4 × 画素数)で書き出す。
         // 形式: 'K','M','L','A' / uint32 幅 / uint32 高さ / uint32 足したフレーム数 / uint32 予約 /
         //       そのあとに float4 が 幅×高さ 個(index = y * 幅 + x)。
         //
-        // 【何のためにあるのか】確率的サンプリングの検証は「平均が真値へ 1/√N で寄るか」を測る。
-        // 画面キャプチャは8bit・トーンマップ後で、丸めだけでRMSEに0.29階調の下限が生まれ、
-        // その下限に隠れて比が読めない。**物差しの分解能が足りないまま原因を断定しないため**、
-        // 線形のまま倍精度で取り出せる経路を用意する
+        // 線形のまま倍精度で取り出す理由は docs/ImplementationDetail.md 61.5 / 64.6
         void SetMegaLightsDumpPath(const wchar_t* path);
 
         // 空間再利用の有無と、借りる近傍の数・半径を起動時に上書きする。
         // いずれも負の値を渡すとその項目は既定のままにする。
-        //
-        // 【何のためにあるのか】空間再利用は「入れたら誤差が減るはず」の段で、
-        // 有無を切り替えて同じ手順で撮り比べられないと効果を測れない。
-        // UIのつまみで切り替えると再現性が落ちる(SetDebugViewIndexと同じ理由)
+        // 効果を同じ手順で撮り比べるための口(docs/ImplementationDetail.md 64章)
         void SetMegaLightsSpatial(int enabled, int neighborCount, int radius, int useMIS);
         // 初期サンプルの可視レイ(遮蔽されたサンプルをリザーバごと殺す)の有無。負の値は既定のまま
         void SetMegaLightsInitialVisibility(int enabled);
-        // 【計測専用】GPUの区間計測をウォームアップ後に指定枚数ぶん集計し、
-        // パス名ごとの平均[ms]をCSVへ書き出して終了する。
-        //
-        // 【Perfログでは段階7の測定ができない】あちらは0.05ms未満のパスを落とし、
-        // しかも1フレームの代表値しか出さない。ライト数が少ないとMegaLightsのパスが
-        // 消えてしまい、「ライト数に対して横ばいか」を測れない
         // 【計測専用】自動露出の有効/無効を起動時に決める。
         //
         // UI(PostProcessPanel)は m_Settings.PostProcess.AutoExposureEnabled を直接触るが、起動オプションから
@@ -285,28 +258,18 @@ namespace Kurenai
         void SetAutoExposureEnabled(bool enabled);
 
         // 【計測専用】Hi-Zオクルージョンカリングの有効/無効を起動時に決める。
-        //
-        // カリングは保守的でなければならない ―― 有効/無効で絵が1画素も変わらないことが
-        // 正しさの定義そのものになる。その突き合わせをUIのチェックボックスでやると、
-        // 撮影のたびに同じ操作を再現できず、押せていないのを「差分ゼロ＝合格」と
-        // 読み違える(SetDebugViewIndexと同じ理由)。**A/Bは起動直後から同じ手順で行うこと**
+        // 有効/無効で絵が1画素も変わらないことが、このカリングの正しさの定義そのもの
+        // (docs/ImplementationDetail.md 64.4)。**A/Bは起動直後から同じ手順で行うこと**
         void SetOcclusionCullingEnabled(bool enabled);
 
         // 【計測専用】メッシュレット描画の有効/無効を起動時に決める。
-        //
         // 無効にすると従来の頂点シェーダー + DrawIndexed の経路へ落ちる。この経路は
-        // メッシュレット単位のカリング(視錐台・法線コーン・Hi-Z)を一切行わないので、
-        // **「メッシュレット経路が何か落としていないか」を見るときの基準になる。**
-        // 出力するPSInputの中身は両経路で同じにしてあり、絵は一致するのが正しい
-        // (GBufferMeshlet.hlsl 冒頭のコメント)。一致しなければ増幅シェーダーの判定が
-        // 保守的でない。UIのチェックボックスからしか切り替えられないと、
+        // メッシュレット単位のカリングを行わないので、「メッシュレット経路が何か
+        // 落としていないか」を見るときの基準になる(docs/ImplementationDetail.md 64.4)
         // この基準を同じ起動手順で撮れない
         void SetMeshletRenderingEnabled(bool enabled);
 
-        // 【計測専用】TAAの有効/無効を起動時に決める。
-        //
-        // TAAは時間方向に蓄積するため、フレームレートの揺れがそのまま画素差になる。
-        // 画素単位の一致を測る比較では切っておかないと、再現性の下限が取れない
+        // 蓄積するものは測る前に切る(docs/ImplementationDetail.md 64.3)
         void SetTAAEnabled(bool enabled);
 
         void SetAOTechnique(int technique);
@@ -316,18 +279,15 @@ namespace Kurenai
         void SetUpscaleEnabled(bool enabled);
         void SetFixedTimeStep(float seconds);
 
+        // 【計測専用】GPUの区間計測をウォームアップ後に指定枚数ぶん集計し、
+        // パス名ごとの平均[ms]をCSVへ書き出して終了する。
+        // Perfログでは足りない理由は docs/ImplementationDetail.md 61.7e.1
         void SetPerfDump(const wchar_t* path, int frames);
         void SetPassManifest(const wchar_t* path, int frames);
 
         // 【検証専用】中間レンダーターゲットの中身を、線形の生値のままファイルへ書き出す。
         // nameは GetDumpableTextureNames() が返す名前(m_を外したメンバ名)。
-        //
-        // 【何のためにあるのか】「コンパイルは通るが絵が違う」を切り分ける唯一の数値経路。
-        // 画面から採れるのは8bit・トーンマップ後で、G-Bufferの法線も深度も間接光も、
-        // 表示のために加工された姿しか見られない。**加工前の値を数えられないと、
-        // 「壊れている」と「そう見えるだけ」を区別できない。**
-        // SetMegaLightsDumpPathが MegaLights の蓄積バッファ専用に用意した経路を、
-        // 任意のレンダーターゲットへ一般化したもの。
+        // 何のためにあるか・形式・使い方は docs/ImplementationDetail.md 63章。
         //
         // 複数回呼べば1回の起動で複数枚を同じフレームから落とす(GUIの起動は共有資源なので、
         // 1回の起動で必要な数値が全部取れる形にすること)。
@@ -352,11 +312,6 @@ namespace Kurenai
         {
             m_Recreations.Add(request);
         }
-
-        // TAAの有無を起動時に上書きするのは SetTAAEnabled(上で宣言済み)。
-        // ダンプの比較では、まずこれを切って再現性の下限をゼロにする ――
-        // TAAのジッタは投影行列を毎フレームずらすため、同じ条件で2回撮っても
-        // ダンプがビット一致しない
 
         // -dumptex が受け付けるテクスチャ名の一覧(表示・ログ用)。
         // ClaudeのようなUIを見られない利用者にとって、これが唯一の発見手段になる
@@ -389,13 +344,11 @@ namespace Kurenai
         // 範囲外はログを出して無視し、負の値では既定値の状態をログへ残す
         void SetMegaLightsTileJitter(int mode);
 
-        // 【検証専用】蓄積が始まった瞬間にシーンへ摂動を加える。時間再利用の「追従」を
-        // 測るためのもので、静止した絵をいくら撮っても測れない側を測る入口。
+        // 【検証専用】蓄積が始まった瞬間にシーンへ摂動を加える。時間再利用の「追従」を測る入口。
         //   0 = 何もしない(既定)
         //   1 = 全ライトを消す。ゴースト(灯を消しても明かりが残る)の追従フレーム数を測る
         //   2 = 実効プリ露出EV100を +2 段跳ばす。プリ露出の補正が効いているかを測る
-        // 蓄積ダンプは「総和」を書くので、Nを変えた2本の差を取れば1フレームぶんが取り出せる。
-        // これで追従の時間変化を、フレームごとの読み戻し無しで測れる
+        // 測り方は docs/ImplementationHistory.md 67章
         void SetMegaLightsPerturb(int mode);
 
         // カスケードシャドウマップの分割数。カメラ視錐台をこの数だけの深度範囲に分割し、
@@ -542,7 +495,7 @@ namespace Kurenai
         RHI::IRHIDevice* GetDevice() { return m_Device.get(); }
 
 
-        // --- 以下は段階7.5で散在していた公開の口を集めたもの ---
+        // --- パス群と Present がコールバックの中から呼ぶ公開の口 ---
 
         // このインスタンスを「1回のDispatchMeshでモデル全体」の経路で描けるか。
         // 描けない場合は従来どおりメッシュ単位のループで描く
@@ -606,7 +559,9 @@ namespace Kurenai
         GI::DDGIGrid& GetDDGIGrid() { return m_DDGIGrid; }
 
         // 【publicにしてある】上と同じ理由。1フレームに焼けるプローブ数を
-        // ObjectConstantsのリング段数から決める判定で、群が登録時に呼ぶ
+        // ObjectConstantsのリング段数から決める判定で、群が登録時に呼ぶ。
+        // 抑えないとDX12の1フレームあたりの上限を超えて起動直後に落ちる
+        // (経緯は docs/ImplementationHistory.md 45.1)
         uint32_t ClampDDGIProbesPerFrameToConstantRing(uint32_t requested);
 
         // UIのつまみの上限。**シェーダー側の段数そのものではない。**
@@ -1076,12 +1031,6 @@ namespace Kurenai
         // Render()の先頭(RenderGraphの構築より前)でm_Device->WaitForGPUIdle()を挟んで処理する
         bool m_BufferPrecisionDirty = false;
 
-        // G-Buffer・水面・深度プリパス・メッシュレット経路・Hi-Zのシェーダーと
-        // PSOは Passes/GeometryPasses へ移した
-
-        // プリパスを走らせるか・メッシュ単位のフラスタムカリングを行うかは
-        // m_Settings.Geometry.DepthPrepassEnabled / MeshCullingEnabledへ移した
-
         // --- インスタンシング(Stage 7) ------------------------------------------------------
         //
         // 同じ .kmodel を指すインスタンスを1回の DrawIndexed(..., instanceCount) へまとめる。
@@ -1111,14 +1060,6 @@ namespace Kurenai
             std::vector<std::pair<Rendering::InstanceGroupKey, std::vector<size_t>>>& groups,
             std::vector<Rendering::InstanceBatch>& outBatches, std::vector<uint8_t>& outBatched);
 
-        // --- ジオメトリ描画ループの共通化(Rendering/GeometryDrawLoop.h) --------------------
-        //
-        // どのパスも「インスタンスの列挙 → 錐台カリング → 段の選択 → メッシュのループ」までは
-        // 同じで、違うのはPSOの選び方・定数バッファ・張るテクスチャ・ドローの発行だけ。
-        // 前半をForEachGeometryDrawへ寄せ、後半をコールバックとして呼び出し側に残す
-
-        // 出所は Rendering/GeometryDrawTypes.h(移行中の別名)
-
 
         // 起動時に決まる能力値(メッシュシェーダー・レイトレーシング等)。詳細は
         // Diagnostics/RenderCapabilities.h
@@ -1128,10 +1069,6 @@ namespace Kurenai
         RenderStats m_RenderStats;
         // 毎フレーム主カメラから作り直し、全パスの定数バッファへ同じものを配る
         MeshletLODFrameConstants m_MeshletLODFrame;
-        // 増幅シェーダーが数え上げる先。uint×3 = [判定, 視錐台+コーンで間引き, オクルージョンで間引き]
-        // 出所は Passes/GeometryConstants.h(移行中の別名)
-        // カウンタバッファ本体は Passes::GeometryPasses が持つ(数えるのが増幅シェーダーのため)。
-
         // カウンタをCPUへ持ってくる受け皿(メッシュレット統計とモデルカリングの両方)。
         // リングの段数と添字の扱いは Diagnostics/CullStatsReadback.h にある
         Diagnostics::CullStatsReadback m_CullStats;
@@ -1149,56 +1086,23 @@ namespace Kurenai
             Passes::kModelCullArgsBaseOffset >= sizeof(uint32_t) * Passes::kModelCullRegionCount,
             "区画ごとの発行数が引数配列の領域へはみ出している");
 
-        // GpuModelCullInstance は Passes/GeometryConstants.h へ移した
-
-        // GPUカリングの資源一式は Passes::GeometryPasses が持つ。読み戻しと、
-        // そこから作るログ用の値は上の m_CullStats が持つ
-
         // G-Bufferは複数のパス群が共有するため、特定のパス群ではなく唯一の所有者へ集める。
         Rendering::RenderTargets m_RenderTargets;
         // 間接光(DDGI・反射プローブ)のリソースの持ち主は Rendering/GIResources.h
         Rendering::GIResources m_GIResources;
 
-        // 直接光パスのシェーダーとPSOはPasses/LightingPassesへ移した
-
         std::unique_ptr<RHI::IRHITexture> m_AODisabledTexture; // AO無効時に使う、遮蔽なし・間接光なしのテクスチャ
 
-        // AO/GI(共通ブラー・SSAO・SSIL)のシェーダー・PSO・定数バッファ・SSAOカーネルは
-        // Passes/LightingPassesへ移した
-
-
-
-        // RTAOのシェーダー・PSO・定数バッファはPasses/LightingPassesへ移した。
-        // 出力2枚はレンダー解像度に追従して作り直すためRenderTargets(RTAORawTexture / RTAOTexture)にある
-
-        // ライティングパスのシェーダー・PSO・定数バッファはPasses/LightingPassesへ移した
-
-        // 半透明フォワードパスのシェーダーとPSO2本はPasses/LightingPassesへ移した
 
         // ドローンショーの一式(資源・機体データ・設定)。
         // 生成位置を動かせない理由は Rendering/DroneShowSystem.h
         Rendering::DroneShowSystem m_Drones;
-
-        // Hi-Zのミップ段数と「1回でも構築されたか」は Passes::GeometryPasses が持つ
-        // (構築するのがHi-Zパス自身のため)。デバッグ表示で確認するミップレベルは
-        // m_Settings.DebugView.HiZDebugMipLevelへ移した
 
         // UIの「既定値に戻す」(右クリック)が戻る先。シーン読み込み時に決まった手法を控えておく。
         // 【静的なDefaultReflectionModeを使ってはいけない】.ksceneが指定を持つ場合、
         // 戻る先はエンジンの既定ではなく**そのシーンを読み込んだ直後の状態**である。
         // ここを取り違えると「既定へ戻したらシーンが要求した反射が消える」ことになる
         ReflectionMode m_SceneDefaultReflectionMode = ReflectionSettings::DefaultReflectionMode(false);
-
-        // SSRとRT反射のシェーダー・PSO・定数バッファはPasses/ReflectionPassesへ移した。
-        // RT反射の出力テクスチャだけは、レンダー解像度に追従して作り直すものなので
-        // 持ち主をRenderTargets(RTReflectionTexture)にしてある
-
-        // MegaLightsのシェーダー・PSO・定数バッファは Passes/MegaLightsPasses へ移した。
-        // 生出力と候補プール本体は直接光・Presentも読むため RenderTargets が持つ
-
-        // 出所は Passes/MegaLightsConstants.h(移行中の別名)
-        // 履歴・デノイザの作業バッファは RenderTargets、その添字と有効性は
-        // Passes/MegaLightsPasses が持つ
 
         // 前フレームの実効プリ露出EV100。
         // 【補正には使っていない】リザーバのWは露出に対して不変(比なので約分される)と
@@ -1216,17 +1120,6 @@ namespace Kurenai
         // 標本数が変わったのでリザーババッファを作り直す必要がある。
         // 解像度変更と同じくフレームの先頭(GPUアイドル後)でまとめて処理する
         bool m_MegaLightsReservoirDirty = false;
-
-        // --- 蓄積平均(計測専用) ---
-        // MegaLightsの出力を線形空間でフレーム方向へ足し込み、フレーム数で割った平均を表示する。
-        //
-        // 【なぜ要るのか】確率的サンプリングの正しさは「平均が真値に一致するか」で決まるが、
-        // 画面キャプチャで得られるのはトーンマップ後の8bitで、トーンマップは凹関数のため
-        // **偏りがゼロでもノイズがあるだけで平均が低く出る**。スクリーンショットをN枚平均しても
-        // 検証にならないので、線形空間で足す場所をエンジン側に持つ
-        // 蓄積バッファは RenderTargets::MegaLightsAccumBuffer、進行状態は Passes/MegaLightsPasses が持つ
-        // 何フレーム待ってから足し始めるか。小さなシーンの読み込みとリサイズが片付く目安
-        // 出所は Passes/MegaLightsConstants.h(移行中の別名)
 
         // --- GPU計測の書き出し(計測専用) ---
         std::wstring m_PerfDumpPath;
@@ -1274,89 +1167,13 @@ namespace Kurenai
         void WritePassManifestIfDue(Core::RenderGraph& graph);
 
 
-
-
-
-        // --- 雲(低解像度の専用パス) ---
-        // Lightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。積雲と巻雲だけを
-        // 内部レンダー解像度の1/2(面積で1/4)で評価し、「透過率 + 事前乗算済みの散乱光」を書く。
-        // Lightingパスの背景分岐がこれをバイリニアで引いて
-        // SkyColorWithoutClouds(rayDir) * a + rgb を合成する。
-        // 分離の根拠と、太陽・星がフル解像度のまま保たれる理由はShaders/3D/SkyCloud.hlsl冒頭を参照
-        // シェーダーとPSOはPasses/LightingPassesへ移した。書き先2枚と実寸は
-        // レンダー解像度に追従して作り直すためRenderTargets(SkyCloud*)にある
-
-        // DDGIの低解像度解決パスの資源と実寸は Passes/DDGIPasses と Rendering/GIResources.h へ移した
-
-        // --- 大気遠近(height fog / aerial perspective) ---
-        // 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
-        // Lightingパスの中へ入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl
-        // 冒頭のコメント参照。無効時(m_Settings.Fog.Enabled=falseまたはm_Settings.Fog.Density<=0)はパス自体を
-        // 登録せず、GetActiveReflectionOutput()の結果がそのままTAA(またはTonemap)へ渡る
-        // シェーダーとPSOはPasses/PostProcessPassesへ移した。書き先は
-        // レンダー解像度に追従するためRenderTargets(AerialPerspectiveTexture)にある
-
-        // TAA(Temporal Anti-Aliasing)パス: SSRの後、露出/ブルーム/トーンマップの前に置く。
-        // 毎フレーム投影行列を1ピクセル未満だけずらして(ジッター)サンプル位置を散らし、
-        // モーションベクターで前フレームの結果を今フレームの画素へ再投影して蓄積する。
-        // 静止していれば十数フレームで収束し、実質的なスーパーサンプリングになる。
-        // 詳細な原理と各工夫の理由はArchitecture.htmlのTAAの章を参照
-        // シェーダーとPSOと定数バッファはPasses/PostProcessPassesへ移した
         // フレームをまたいで持ち越す値(TAAの履歴と前フレームのカメラ由来の値)。
         // 中身と、有効性を別管理にしている理由は Rendering/FrameHistoryState.h
         Rendering::FrameHistoryState m_History;
 
-        // Tonemapパス: SceneColor(SSR有効時はRenderTargets::SSRTexture)のHDR値をReinhardトーンマッピング+
-        // ガンマ補正でLDRへ変換し、Presentパスへ渡す。SSR等のHDR演算より後、Present直前の
-        // 独立したステージとして置くことで、反射や将来のブルーム/露出制御(M7)がトーンマップの
-        // 影響を受けないHDR値の上に成立できるようにする
-        // シェーダーとPSOと定数バッファはPasses/PostProcessPassesへ移した
 
-        // 超解像パス(Upscale.hlsl): Tonemapが出したLDR画像を、EASUで出力解像度へ再構成し、
-        // RCASでシャープ化してからPresentへ渡す。出力2枚と実寸(RenderTargets::UpscaleTexture /
-        // UpscaleSharpTexture / UpscaleTargetWidth / Height)はPresentPassも読むため
-        // 持ち主をRenderTargetsへ移した。作り直しはCreateRenderTargets()とは別の契機で走る
-        // シェーダーとPSO2本と定数バッファはPasses/PostProcessPassesへ移した
-
-
-        // 自動露出(eye adaptation)パス: SceneColorの輝度ヒストグラムをGPUで作り、
-        // 低/高パーセンタイルを除外した加重平均から目標EV100を求めて時間方向に追従させる。
-        // 結果はRenderTargets::ExposureTextureへ書かれ、Tonemapパスが読んで露出倍率に変換する。
-        //
-        // 露出そのものはCPU側でライト強度へ事前乗算されている(プリ露出方式、
-        // m_Settings.PostProcess.SceneExposureEV100)。自動露出の結果をライト強度へ戻すとフィードバックループになり、
-        // かつGPU→CPUのリードバック(同期待ち)が要るため、プリ露出は固定のままにして
-        // 「プリ露出EVと自動露出EVの差」だけをTonemapで掛ける構成にしている
-        // (詳細はAutoExposure.hlsl冒頭)
-        // シェーダー3本・PSO3本・ヒストグラムバッファ・定数バッファ・順応リセットの要求は
-        // Passes/PostProcessPassesへ移した(ビン数の定数はPasses/PostProcessConstants.hへ)。
-        // 露出の保存先はRenderTargets(ExposureTexture)にある
-
-        // ブルームパス(Bloom.hlsl): 半解像度から始まるピラミッドを段階的にダウンサンプルし、
-        // 3x3テントで戻しながら加算することで広く滑らかな光の裾を作る。
-        //
-        // ピラミッドをミップチェーン1枚ではなくレベルごとの独立テクスチャで持っているのは、
-        // 同一リソースのSRV/UAV同時バインドを避けるため(理由の詳細はBloom.hlsl冒頭)。
-        // ピラミッド本体(RenderTargets::BloomDownTextures / BloomUpTextures / BloomLevelSizes)は
-        // PresentPassのデバッグ表示も読むため、持ち主をRenderTargetsへ移した
-        // シェーダーとPSO2本と定数バッファはPasses/PostProcessPassesへ移した
         // ピラミッドの段数。半解像度を第0段として、これ以上小さくしても見た目が変わらない範囲で選ぶ
         static constexpr uint32_t kBloomLevelCount = 6;
-
-
-        // 垂直同期・固定FPSモードはm_Settings.Systemへ移した
-
-        // Presentパスのシェーダー・PSO・定数バッファはPasses/PresentPassへ移した
-
-        // デバッグ表示用: Presentパスで最終的に表示するレンダーターゲットの種類(DebugView enum)と
-        // その表示パラメータはm_Settings.DebugViewへ移した(Settings/DebugViewSettings.h)。
-        // enumとkDebugViewCountも同じヘッダのKurenai名前空間直下にある
-        // シャドウパス(平行光のライト視点から深度のみを描画する)。カメラ視錐台をkCascadeCount個の
-        // 深度範囲に分割し(Practical Split Scheme)、それぞれ専用の正射影・シャドウマップを持たせる
-        // カスケードシャドウマップ(CSM)。近いカスケードほどテクセル密度が高く、遠いカスケードほど
-        // 広い範囲を粗くカバーする
-        // 出所は Rendering/ShadowConstants.h(移行中の別名)
-
 
 
         // 背景(深度が書き込まれなかったピクセル)に表示する空のキューブマップ。
@@ -1377,53 +1194,6 @@ namespace Kurenai
         // フォールバックを使用中であることを表す(m_CurrentSkyboxPathと同じ比較用途)
         std::wstring m_CurrentWaterNormalMapPath;
 
-        // IBL(Image Based Lighting): m_SkyboxTextureから拡散イラディアンス・プリフィルタ済み鏡面・
-        // BRDF積分LUTの3つをコンピュートシェーダーで畳み込む(split-sum近似、Karis 2013)。
-        // スカイボックスは実行時に変化しない静的アセットのため、起動後最初のRender()で一度だけ
-        // 焼いてEnvironmentPassesのm_IBLBakedを立て、以降は焼き直さない(詳細はdocs/Architecture.html参照)。
-        // 拡散イラディアンス・プリフィルタ済み鏡面はいずれも本物のTextureCube
-        // (CreateUAVTextureCube/CreateMippedUAVTextureCube、面ごとに個別のUAVを持つ)で、
-        // IBLConvolve.hlslが面ごとに1回ずつディスパッチして書き込む
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // ボリュメトリック雲の3Dノイズの1辺のテクセル数。
-        // Shapeは128^3のRGBA8で8MB、Detailは32^3のRGBA8で128KB。合わせて約8.1MB。
-        // Shapeを128にしているのは、雲1つが画面上で数百画素に広がるため塊の形にはこの程度の
-        // 解像度が要る一方、これ以上上げるとメモリが4倍(256^3で64MB)に跳ねるため。
-        // Detailは縁を削るだけで低周波成分を持たないので32で足りる
-        // 大気散乱のLUT(Hillaire 2020)。解像度は論文の推奨値。
-        // Transmittanceは高度×視線天頂角、MultiScatteringは高度×太陽天頂角で、
-        // どちらも大気パラメータだけで決まるためカメラにも時刻にも依存しない。
-        // SkyViewは空そのもの(太陽の子午線からの方位×天頂角)で、太陽が動くと変わる。
-        // **Passes::kSkyViewLUTWidth/Heightはシェーダ側(AtmosphereCommon.hlsliの
-        // kSkyViewLUTWidthF/kSkyViewLUTHeightF)と一致させること** — UVの半テクセル補正に
-        // 解像度が要るため、焼く側・引く側の両方が同じ値を知っている必要がある
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // ウェザーマップ(H3)。ノイズ空間の1周期(256セル=358km)を1枚で覆うので、
-        // 4096なら88m/テクセル。**CloudNoiseGenerate.hlsl の kWeatherNoiseSize と同じ値であること**
-        // (片方だけ変えるとテクセル中心がずれ、バイリニアが半テクセル分ぼける)。
-        // R8G8B8A8で4096^2 = 67MB。解像度の実測はSky.hlsliのウェザーマップの節
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // 手続き空(SkyGenerate.hlsl): Perez分布をGPUで評価してキューブマップを生成する。
-        // オフラインで焼いたDDS(Sky.dds)と違い、太陽が動くと空の輝度分布の「形」も追従する
-        // (circumsolarの明るい領域が太陽と一緒に動く)。詳細はSkyGenerate.hlsl冒頭。
-        //
-        // .ksceneで[Scene]Skyboxを明示しているシーン(White Furnace TestのUniformWhite.dds)は
-        // 従来どおりDDSを使う必要があるため、手続き空は別テクスチャに持ち、
-        // ActiveSkyTexture()がフレームごとにどちらを使うか決める
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // 手続き空のキューブマップは持ち主を SkyResources::ProceduralSkyTexture へ移した
-        // シェーダー・PSO・定数バッファは Passes/EnvironmentPasses へ移した
-        // SkyGenerate用の専用定数バッファ。m_IBLResources.PrefilterConstantBufferと共用しないこと
-        // (UpdateBuffer→SetComputeConstantBufferの順序制約があり、共用すると事故りやすい。
-        //  詳細はRHI/IRHICommandList.hのSetConstantBufferのコメント)
         // 手続き空を焼き直す必要があるか。太陽が動いたとき等に立てる
         bool m_SkyBakeDirty = true;
         // 最後に焼いたときの太陽の向き。これと現在の向きの角度差が閾値を超えたら焼き直す。
@@ -1477,48 +1247,11 @@ namespace Kurenai
         // 結果はm_SkyResources.ParametersBuffer(SkyGenerate.hlsl/DeferredLighting.hlsl/SSR.hlslが読む)へ書く
         // 空・大気・雲のリソースの持ち主は Rendering/SkyResources.h
         Rendering::SkyResources m_SkyResources;
-        // 空パラメータの初期化済み旗は持ち主を Passes/EnvironmentPasses へ移した
-
         // IBL・BRDF・雲ノイズ・大気の焼き上がりの状態は Passes/EnvironmentPasses へ移した
         // 畳み込み結果とBRDF積分LUTの持ち主は Rendering/IBLResources.h
         Rendering::IBLResources m_IBLResources;
-        // BRDF積分LUTのスクラッチとPSO2本は Passes/EnvironmentPasses へ移した
 
-
-        // 大気散乱の定数バッファとPSO3本は Passes/EnvironmentPasses へ移した
-        // 太陽がこの角度以上動いたらSkyView LUTを焼き直す。LUTは天頂方向180度を108テクセルで
-        // 持つので1テクセルあたり約1.67度あり、その1/30以下しかずらさない値にしてある。
-        //
-        // 【意図的に手続き空のm_Settings.Sky.BakeAngleThresholdDegrees(1.0度)より桁で細かくしている】
-        // このLUTは背景の空(Sky.hlsliのSkyColor)が画面解像度で毎フレーム引くもので、
-        // 間引きの粒度がそのまま背景の時間解像度になる。一方あちらが焼くIBLキューブは
-        // 6面+プリフィルタ36回のディスパッチを伴う重いベイクで、間接光にしか効かない。
-        // 変更前は「毎フレーム焼く」だったので、それに最も近い挙動を選んでいる。
-        //
-        // 【時刻を自動で進めるシーンでは削減にならない】Auto Advance既定(1h/s)では太陽は
-        // 15度/秒動くため、60fpsでも毎フレームこの閾値を超えて結局毎フレーム焼く。
-        // 削減が効くのは太陽が止まっているシーン(Defaults::TimeAutoAdvanceは既定false)で、
-        // その場合は起動直後の1回だけになる
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // イラディアンス畳み込みのシェーダーとPSOは Passes/EnvironmentPasses へ移した
         std::unique_ptr<RHI::IRHIShader> m_PrefilterComputeShader;
-        // 畳み込みのPSOは持ち主を IBLResources::PrefilterPipelineState へ移した
-        // 拡散イラディアンスの球面調和関数(SH L2)経路。CSIrradianceの高速な
-        // 代替で、m_Settings.IBL.UseSHIrradianceでA/B比較できるようトグルにしてある。詳細は
-        // IBLConvolve.hlsl冒頭のコメントとdocs/Architecture.htmlを参照
-        // SHの項数の定数は Passes/EnvironmentConstants.h へ移した
-        // CSProjectSHの射影に使う離散化解像度(1面の1辺のテクセル数)。
-        // 【SourceSkyboxの実解像度とは無関係】スカイボックスはDDS(シーンごとに任意の解像度)や
-        // 手続き空(256)など実行時に変わりうる一方、IRHITextureには解像度を問い合わせる手段が
-        // 無いため、射影側は独立した固定解像度を持つ(IBLConvolve.hlslのSHProjectionSizeコメント参照)。
-        // 64×64×6=24,576テクセルはCSIrradianceの約9,750万サンプルに対し十分密で、
-        // 9個の係数を求めるだけの積分には(理論上は32でも足りる範囲)余裕を持たせた値
-        // 出所は Passes/EnvironmentConstants.h(移行中の別名)
-        // SHのシェーダー3本・PSO3本・バッファ2本は Passes/EnvironmentPasses へ移した
-        // IBLの有効/強度・SH経路・専用イラディアンス・環境光の拡散/鏡面/フォールバック強度は
-        // m_Settings.IBLへ移した(Settings/IBLSettings.h)。bent normal/multi-bounce AOの
-        // ソース選択はm_Settings.AmbientOcclusionへ移した(Settings/AmbientOcclusionSettings.h)
-
 
         // --- エミッシブ光源(自発光メッシュを光源として扱う) ---
         // 中身と、それぞれが何のためにあるかは Scene/EmissiveLightSet.h
@@ -1534,19 +1267,8 @@ namespace Kurenai
         // 出所は Passes/ReflectionProbeConstants.h(移行中の別名)
         std::unique_ptr<RHI::IRHIShader> m_ProbeCaptureVertexShader;
         std::unique_ptr<RHI::IRHIShader> m_ProbeCapturePixelShader;
-        // キャプチャのPSOは持ち主を GIResources::ProbeCapturePipelineState へ移した。
-        // その書き先(ProbeCaptureColor / ProbeCaptureDistance / ProbeCaptureDepth)も同じ理由でGIResourcesにある
         std::unique_ptr<RHI::IRHIShader> m_ProbeCubeCopyComputeShader;
-        // キューブへ写すPSOは持ち主を GIResources::ProbeCubeCopyPipelineState へ移した。
-        // 写し先のスクラッチキューブマップ(ProbeRadianceCube)も同じくGIResourcesにある
-        // 面ごとの定数バッファは持ち主を GIResources::ProbeCaptureConstantBuffer へ移した
-        // プローブの一覧は持ち主を GIResources::ReflectionProbes へ移した
         int m_SelectedProbeIndex = -1;
-        // 焼き上がりの状態(要求・焼けたか・Realtimeの進行・署名・焼いた時点の露出)は
-        // 持ち主を Passes::ReflectionProbePasses へ移した。書き手がその群だけだったため
-        // プリフィルタの進行状態・OnDemandの署名は持ち主を Passes::ReflectionProbePasses へ移した。
-        // ステップ数の定数(kProbePrefilterStepCount / kProbeRealtimePrefilterStepsPerFrame)も
-        // 読み手がその群だけになったため、Passes/ReflectionProbeConstants.h を直接使わせている
         // 焼き上がりに影響する状態(時刻・太陽・シャドウ・IBL強度・全ライト)から署名を作る。
         // 影響範囲(形状・半径・ブレンド距離)はキャプチャ内容を変えないため含めない
         uint64_t ComputeProbeBakeSignature() const;
@@ -1554,19 +1276,6 @@ namespace Kurenai
         // 手続き空の0.05段よりずっと粗いのは、フルベイクがプローブ数×6面の描画になるため。
         // 1日を通した時刻変化(最大18段)なら十数回のフルベイクに収まる
         static constexpr float kProbeRebakeExposureEV = 1.0f;
-
-        // --- DDGI(Dynamic Diffuse Global Illumination、22章) ---
-        //
-        // 反射プローブ(上)が「少数を手で置き、主に鏡面を担う」のに対し、DDGIは
-        // 「格子状に多数を自動配置し、拡散の間接光だけを担う」。レイの取得には反射プローブと
-        // まったく同じキャプチャ経路(ProbeCapture.hlslの6面MRT)を使い、キャプチャ解像度だけ
-        // 落とす。得られた放射輝度と距離を、キューブではなくオクタヘドラル投影の2Dアトラスへ
-        // 畳み込む(DDGIProbeUpdate.hlsl)。
-        //
-        // 【20章の単一定義規則との関係】DDGIが差し替えるのはReflectionProbe.hlsliの
-        // SampleEnvironmentが返す拡散イラディアンスだけで、鏡面(prefiltered)と
-        // SpecularIBLWeightには一切触れない。したがって「SSRはDeferredLightingが足した
-        // 鏡面IBLと厳密に同じ量を引く」という不変条件はDDGIを入れても保たれる
 
         // オクタヘドラル1プローブぶんの1辺のテクセル数(境界を含まない)。
         // 拡散イラディアンスは低周波なのでこの程度で足りる。距離は遮蔽の輪郭を担うので広く取る
@@ -1589,66 +1298,15 @@ namespace Kurenai
         // クリップマップLODの最大段数。FrameConstantsへ段数ぶんの配列を持つので有界にしておく。
         // SceneLoaderのLODCountの検証範囲と一致させること
         static constexpr uint32_t kDDGIMaxLODCount = 4;
-        // キャプチャ解像度(1面あたり)。6面ぶんで 16×16×6 = 1536方向がレイの代わりになる。
-        // 反射プローブのkProbeCaptureSize(128)と違い小さくてよいのは、DDGIが必要とするのが
-        // 「低周波の拡散イラディアンス」であって鏡面の映り込みではないため
-        // 出所は Passes/DDGIConstants.h(移行中の別名)
-
         // 【m_GIResourcesより後に宣言すること】ボリュームの実体を参照で掴むので、
         // 宣言順が逆になると未初期化のメンバを束ねることになる
         GI::DDGIGrid m_DDGIGrid{ m_GIResources.GIVolume };
-
-        // レイ取得(DXR)の経路とキャプチャ資源一式は Passes/DDGIPasses へ移した
-
-        // これを超えて実効プリ露出が動いたら追従させる(段)。1段=明るさ2倍ぶん
-        // 出所は Passes/DDGIConstants.h(移行中の別名)
-        // ConvergeThenStopで停止するまでの巡回数。
-        //
-        // 【なぜヒステリシス由来の巡回数をやめたか】以前は残差0.01を切る巡回数
-        // N = ln(0.01)/ln(ヒステリシス) を停止条件にしていた(既定0.97なら152巡)。
-        // これは**1巡が何フレームかを見ていない**ため、プローブが多いボリュームでは
-        // 実質止まらなかった ―― Sponza(1152プローブ・4個/フレーム)で1巡288フレーム、
-        // 152巡 = 43,776フレーム ≒ 53分。実測でも180秒回して止まらず、
-        // 品質プリセット「中」がいちばん助けが要るシーンで効かない状態だった。
-        //
-        // 【上書きで巡回すれば足りる理由】署名が止まっている間、キャプチャは決定的な
-        // ラスタライズなので平滑すべき確率的ノイズが無い。ヒステリシスは目標値へ
-        // 指数的に近づくだけで、目標値そのものは上書き1巡で入る。複数巡が要るのは
-        // 多重バウンスだけで、ProbeCapture.hlslが前巡のアトラスを読む構造上
-        // 1巡につき1バウンス積み上がる。反射率aの面ならN巡後の相対残差はおよそa^Nで、
-        // a=0.5なら4巡で6%、a=0.7なら24%。4巡は「止まるまでの時間」との折り合いで選んだ値であり、
-        // バウンスを完全に積み切る数ではない(積み切りたいならAlwaysを使う)。
-        // ヒステリシスは「常時更新」で光の変化に滑らかに追従させる役目に戻した。
-        //
-        // 【4巡と1巡の差はまだ実測できていない】Sponzaの同一カメラで両者を撮り比べると
-        // 3Dビューポートはビット一致だった(Alwaysを200秒回したものとも一致)。
-        // ProbeCapture.hlslへデバッグ色を焼いて原因を追ったが、赤チャンネルが垂れ幕への
-        // 直接光と混ざり、Always側もヒステリシス0.97のため200秒ではまだ大半がウォームアップ時の
-        // 値で、多重バウンスの寄与を分離できる計測になっていない。上の残差の式は理屈であって
-        // 裏取り済みの数字ではない
-        // 出所は Passes/DDGIConstants.h(移行中の別名)
-
-        // クリップマップLODの格子(プローブ番号 ⇔ ワールド座標)は GI::DDGIGrid が持つ。
-        // 設計の意図と、更新CSのアトラス座標式を1文字も変えずに済む理由は GI/DDGIGrid.h にある
 
         // m_GIResources.GIVolumeのProbeCountsに合わせてアトラス2枚を確保し直す。ボリュームが無いシーンでは
         // 1プローブぶんのダミーを確保する(SRVは常にバインドできる必要があるため、
         // 「確保しない」という選択肢は取れない。無効化はDDGIParams0.wで行う)
         void RecreateDDGIAtlases();
 
-        // 1フレームに焼くプローブ数を、DX12の「1フレームあたりの予算」に収まる範囲へ抑える。
-        //
-        // 【なぜ要るのか】ラスタ経路のプローブキャプチャは1プローブにつきシーンを6回描き直すため、
-        // 1フレームの描画回数とObjectConstantsの書き込み回数がどちらも
-        // 「プローブ数 × 6面 × 不透明メッシュ数」に比例して増える。DX12はどちらにも上限があり、
-        //   - 描画回数(IRHIDevice::GetMaxDrawsPerFrame) … 超えるとSRVテーブルの払い出しが
-        //     例外を投げ、ログを残さずプロセスごと落ちる
-        //   - 定数の書き込み回数(IRHIBuffer::GetSafeUpdatesPerFrame) … 超えるとGPUが
-        //     読み取り中のスロットを上書きして描画が壊れる
-        // BistroInteriorLit(不透明59メッシュ)を既定の16プローブ/フレームで焼くと
-        // 59×6×16 = 5664 となり、実際に前者を踏んで起動直後に落ちていた。
-        //
-        // レイトレース経路にはメッシュごとの描画そのものが無いので、この制約は掛からない
         // ObjectConstantsのリングに要求する「1フレームあたりの書き込み回数」。
         // 根拠はこのバッファを作っている箇所(KurenaiEngine3D.cpp)のコメントを参照
         static constexpr uint32_t kObjectConstantUpdatesPerFrame = 16384;
@@ -1668,9 +1326,6 @@ namespace Kurenai
         // 水面に不透明ジオメトリの鏡像を映す専用フォワードパス。設計判断の詳細は
         // Shaders/3D/PlanarReflection.hlsl冒頭のコメントを参照。反射解像度はレンダー解像度に
         // m_Settings.Reflection.PlanarResolutionScaleを掛けた値で、実際の作成はCreatePlanarReflectionTargetsが行う。
-        // レンダーターゲット2枚と実寸は、PresentPassのデバッグ表示も読むため
-        // 持ち主をRenderTargets(m_RenderTargets.PlanarReflection*)へ移した。
-        // シェーダー・PSO・定数バッファはPasses/ReflectionPassesへ移した
         // 「システム」パネルのm_PendingRenderWidth/Height・m_RenderResolutionDirtyとまったく同じ方式
         // (要求を記録するだけにしてRender()の先頭でまとめて反映する。理由はCreateRenderTargets/
         // RequestRenderResolutionのコメント参照。GPUがまだ参照しているテクスチャを
@@ -1735,25 +1390,12 @@ namespace Kurenai
         // 以降は候補1つにつき2個(ライト番号と重み)。MegaLightsTilePool.hlsl 冒頭のレイアウトと一致させること
         static constexpr uint32_t kMegaLightsTilePoolStride = 6 + 2 * kMegaLightsTilePoolCapacity;
 
-        // ライトグリッド本体とタイル数は、3群(Lighting / MegaLights / Present)が読むため
-        // 持ち主をRenderTargets(m_RenderTargets.LightTileBuffer / LightTileCountX / Y)へ移した
         // タイル容量の超過"条件"(シーンのライト数が容量を超えている)を検出した最初のフレームだけ
         // 警告ログを出すためのフラグ(m_LightOverflowLoggedと同じ作法)。
         // 実際に超過したかはGPU側にしか無いため、確認はDebugView::LightTilesのマゼンタで行う
         bool m_LightTileOverflowLogged = false;
-        // DebugView::LightTilesのヒートマップの上限はm_Settings.DebugView.LightTileHeatmapMaxへ移した
-
-        // 自前ソフトウェアラスタライザ(46章)の資源とパス本体は Passes::GeometryPasses が持つ。
-        // 型と定数(SWRasterConstants / SWRasterMeshInfo / kSWRaster*)は
-        // Passes/GeometryConstants.h へ移した。
-        // 巨大三角形とみなすbbox画素面積のしきい値と、その既定値・可動範囲(kSWRasterDefault/Min/Max
-        // LargeTriangleArea)はm_Settings.Geometry.SoftwareRasterLargeTriangleAreaへ移した
 
         // --- 品質プリセット(41章) ---------------------------------------------------------
-        //
-        // QualityPreset(enum)とその既定値はSettings/QualitySettings.hへ移した
-        // (m_Settings.Quality.Preset)。ここに残るのはプリセットが実際に触る設定の一式
-        // (QualitySnapshot)と、それを読み書きする関数だけ。
         //
         // 【QualitySnapshotという名前にしている理由】Settings/QualitySettings.hの
         // struct QualitySettingsと役目がまったく違う(あちらは「今どのプリセットを
@@ -1821,14 +1463,6 @@ namespace Kurenai
         // 書き込み手を1スレッドに保っている
         Core::Camera m_Camera;
 
-        // WASD/E/Qの移動速度[m/s]はm_Settings.System.CameraSpeedへ移した。
-        // 【スレッド】書き手はRenderスレッド(ScenePanelのスライダとResetSceneDependentParams)、
-        // 読み手はUpdateスレッド(UpdateMovement)。単一のfloatを跨いで読み書きするだけなので
-        // 同期は置かない ―― 途中の値が1フレーム見えても「その1フレームだけ移動量が古い速度で
-        // 計算される」以上のことは起きない。m_Camera本体はUpdateスレッド専有のまま
-        // (この値はそこへ入力されるだけ)。値はシーン対角から決まるためResetSceneDependentParams()
-        // が上書きする。Settings側の初期化子は最初のシーンを読むまでの値でしかない
-
         // --- シーン読み込みのハンドオフ -------------------------------------------------------
 
         // シーン読み込みのハンドオフ一式。
@@ -1895,16 +1529,9 @@ namespace Kurenai
         // 実際にライト強度へ事前乗算される「実効プリ露出」。m_Settings.PostProcess.SceneExposureEV100(ユーザー設定)に
         // 時刻由来のバイアスを足したもので、Renderスレッドのみが読み書きする。
         //
-        // 【なぜ可変にする必要があるか】
-        // プリ露出をEV100=15固定のままだと夜がfp16でつぶれる。満月の照度は0.25lxで、
-        // 反射率0.2の面の輝度は 0.25*0.2/π = 0.016 cd/m^2。これに ComputeExposure(15)=2.54e-5 を
-        // 掛けると 4.0e-7 となり、SceneColor(R16G16B16A16_Float、最小正規化数6.1e-5)の
-        // 非正規化域へ落ちて情報が失われる。AutoExposure.hlsl も輝度1e-6未満の画素は
-        // ヒストグラムに数えないため、露出計にも乗らず復元できない。
-        //
-        // M7で導入したプリ露出方式は Tonemap・Bloom・AutoExposure がすべて同じ値を受け取って
-        // 割り戻す構造になっているため、**フレーム単位で変えても最終的な絵は変わらない**。
-        // その性質をそのまま利用して、バッファの数値レンジだけを健全に保つ
+        // 【固定にしないこと】EV100=15固定だと夜がfp16の非正規化域へ落ちて情報が失われる。
+        // 導出は docs/ImplementationDetail.md 21.5。プリ露出は Tonemap・Bloom・AutoExposure が
+        // すべて同じ値で割り戻すため、フレーム単位で変えても最終的な絵は変わらない
         float m_EffectiveExposureEV100 = 15.0f;
         // 実効プリ露出が初期化済みか(初回フレームは平滑化せず即座に合わせる)。
         // **シーン読み込み時にLoadSceneがfalseへ戻す**。シーンをまたぐと時刻が入れ替わって
@@ -1934,16 +1561,12 @@ namespace Kurenai
         float m_RenderDeltaTime = 0.0f;
         float m_FixedTimeStep = 0.0f;
 
-        // 性能ログ(LogFrameStatsIfDue)の有効/無効はm_Settings.System.FrameStatsLoggingEnabledへ移した。
         // 集計状態はすべてRenderスレッドのみが読み書きするため追加の排他制御は不要
         Diagnostics::FrameStatsLogger m_FrameStats;
 
         // モデル単位フラスタムカリングの統計(1フレーム分)。フレーム先頭でリセットし、
         // LogFrameStatsIfDueが集計期間の合計として出す。
-        //
-        // 【何のために出すか】カリングは「効いていない」と「間引きすぎて物が消えた」の
-        // どちらも絵からは判別しにくい。判定式が常にtrueを返していても既存シーンの絵は
-        // 一致してしまうため、間引いた数が0でないことを数値で確かめられるようにしておく
+        // 絵から判定できないものを数値で出している(理由は docs/ImplementationDetail.md 64.5)
         uint32_t m_FrustumCullTested = 0;
         uint32_t m_FrustumCullCulled = 0;
 
@@ -2018,22 +1641,6 @@ namespace Kurenai
         // --- レイトレーシングを常駐の増減へ追随させる ---
         // **この位置から動かさないこと**(破棄順の理由は Scene/RaytracingRebuildState.h)
         Scene::RaytracingRebuildState m_RaytracingRebuild;
-
-
-        // パス別のドローコール数の集計(1フレーム分)。フラスタムカリングの統計と同じく
-        // フレーム先頭でリセットし、LogFrameStatsIfDueが集計期間の平均として出す。
-        // 数える本体は Passes::GeometryPasses(G-Buffer・深度プリパス)と
-        // Passes::ShadowPasses が持ち、ここはその和を積むだけ。
-        //
-        // 【なぜパスごとに分けるのか】フラスタムカリングの統計が全パス合計になっていて、
-        // どのパスが何回描いているのかが分からない。ドローコールの削減はこのエンジンで
-        // これから何度も測る対象(メッシュレットによる1モデル1ドロー化、GPU駆動描画)で、
-        // 「G-Bufferは減ったがシャドウは減っていない」のような片手落ちは
-        // パス別に見ないと気づけない。
-        //
-        // 直前に描き終えたフレームの値はm_RenderStats.DrawCalls*LastFrameへ出す。
-        // **UIパネルはこちらを読むこと** ―― パス群のカウンタはフレーム先頭で0に戻るため、
-        // Renderの外で描かれるUIからは常に0に見える
 
         // メッシュ単位フラスタムカリングの統計(1フレーム分)。上のモデル単位とまったく同じ扱い。
         //

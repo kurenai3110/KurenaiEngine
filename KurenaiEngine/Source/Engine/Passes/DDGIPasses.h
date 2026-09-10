@@ -25,6 +25,17 @@ namespace Kurenai::Rendering
 
 // DDGI のパス群(段階6)。
 //
+// 反射プローブが「少数を手で置き、主に鏡面を担う」のに対し、DDGIは「格子状に多数を
+// 自動配置し、拡散の間接光だけを担う」。レイの取得には反射プローブとまったく同じ
+// キャプチャ経路(ProbeCapture.hlsl の6面MRT)を使い、キャプチャ解像度だけ落とす。
+// 得られた放射輝度と距離は、キューブではなくオクタヘドラル投影の2Dアトラスへ
+// 畳み込む(DDGIProbeUpdate.hlsl)。
+//
+// 【単一定義規則との関係】DDGIが差し替えるのは ReflectionProbe.hlsli の
+// SampleEnvironment が返す拡散イラディアンスだけで、鏡面(prefiltered)と
+// SpecularIBLWeight には一切触れない。したがって「SSRは DeferredLighting が足した
+// 鏡面IBLと厳密に同じ量を引く」という不変条件は、DDGIを入れても保たれる。
+//
 // 【登録位置が2箇所に離れている】プローブの捕捉と更新(DDGIInvalidate / DDGIUpdate)は
 // グラフの前寄り、格子から画面へ解決する DDGIResolve は AO の後ろに登録される。
 // 登録順は実行順の一部なので寄せられない。したがって登録の入口を分ける。

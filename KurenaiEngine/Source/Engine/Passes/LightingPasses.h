@@ -132,7 +132,12 @@ namespace Kurenai
             std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineState;
             std::unique_ptr<RHI::IRHIPipelineState> m_TransparentPipelineStateMirrored;
 
-            // 雲パス(積雲と巻雲だけを1/2解像度で評価し、透過率と事前乗算済みの散乱光を書く)。
+            // 雲パス。Lightingパスの直前に置くフルスクリーン三角形+ピクセルシェーダーで、
+            // 積雲と巻雲だけを内部レンダー解像度の1/2(面積で1/4)で評価し、
+            // 「透過率 + 事前乗算済みの散乱光」を書く。Lightingパスの背景分岐がこれを
+            // バイリニアで引いて SkyColorWithoutClouds(rayDir) * a + rgb を合成する。
+            // 分離の根拠と、太陽・星がフル解像度のまま保たれる理由は
+            // Shaders/3D/SkyCloud.hlsl 冒頭を参照。
             // 書き先2枚と実寸は、レンダー解像度に追従して作り直すものであり、
             // RenderDumpService(-dumptex)も読むため RenderTargets 側が持つ
             std::unique_ptr<RHI::IRHIShader> m_SkyCloudVertexShader;

@@ -56,6 +56,8 @@ namespace Kurenai::Passes
         inline constexpr uint32_t kProceduralSkySize = 256;
         // 太陽がこの角度以上動いたらSkyView LUTを焼き直す。LUTは天頂方向180度を108テクセルで
         // 持つので1テクセルあたり約1.67度あり、その1/30以下しかずらさない値にしてある。
+        // 手続き空の BakeAngleThresholdDegrees より桁で細かくしている理由と、
+        // 時刻を自動で進めるシーンでは削減にならないことは docs/ImplementationDetail.md 21.14。
         inline constexpr float kSkyViewRebakeAngleDegrees = 0.05f;
         // CSProjectSHの射影に使う離散化解像度(1面の1辺のテクセル数)。
         // 【SourceSkyboxの実解像度とは無関係】スカイボックスはDDS(シーンごとに任意の解像度)や

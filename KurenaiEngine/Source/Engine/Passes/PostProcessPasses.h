@@ -72,7 +72,10 @@ namespace Kurenai
             // 反射パス(SSR/RT反射)の後、TAAパスの直前に置くフルスクリーン三角形+ピクセルシェーダー。
             // Lightingパスの中へ入れない理由・TAAより前へ置く理由はShaders/3D/AerialPerspective.hlsl
             // 冒頭のコメント参照。書き先(RenderTargets::AerialPerspectiveTexture)は
-            // レンダー解像度に追従して作り直すため RenderTargets 側が持つ
+            // レンダー解像度に追従して作り直すため RenderTargets 側が持つ。
+            // 無効時(m_Settings.Fog.Enabled=false または m_Settings.Fog.Density<=0)は
+            // パス自体を登録せず、GetActiveReflectionOutput() の結果がそのまま
+            // TAA(または Tonemap)へ渡る
             std::unique_ptr<RHI::IRHIShader> m_AerialPerspectiveVertexShader;
             std::unique_ptr<RHI::IRHIShader> m_AerialPerspectivePixelShader;
             std::unique_ptr<RHI::IRHIPipelineState> m_AerialPerspectivePipelineState;
