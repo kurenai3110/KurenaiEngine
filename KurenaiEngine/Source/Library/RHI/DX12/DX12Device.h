@@ -248,6 +248,20 @@ namespace Kurenai::RHI
         // そのままではデバッガの出力ウィンドウにしか出ず、デバッガを繋がない実行で気付けないため
         void DrainDebugMessages();
         Microsoft::WRL::ComPtr<ID3D12Resource> CreateUploadBuffer(uint64_t sizeInBytes);
+        // CreateBufferのUsageごとの実装。ヒープ種別・作成時のリソース状態・ステージングリングの
+        // 段数がUsageごとに違い、取り違えても多くのUsageは動いてしまうため、手順をUsage単位で
+        // 独立させてある。
+        // 【いずれもm_UploadMutexを保持したまま呼ばれる】CreateBufferが先頭で確保している。
+        // std::mutexは再帰ロックできないので、これらの中で取り直してはいけない
+        std::unique_ptr<IRHIBuffer> CreateStructuredBuffer(const BufferDesc& desc);
+        std::unique_ptr<IRHIBuffer> CreateStructuredRWBuffer(const BufferDesc& desc);
+        std::unique_ptr<IRHIBuffer> CreateStructuredImmutableBuffer(const BufferDesc& desc);
+        std::unique_ptr<IRHIBuffer> CreateStructuredReadOnlyBuffer(const BufferDesc& desc);
+        std::unique_ptr<IRHIBuffer> CreateReadbackBuffer(const BufferDesc& desc);
+        std::unique_ptr<IRHIBuffer> CreateIndirectArgsBuffer(const BufferDesc& desc);
+        std::unique_ptr<IRHIBuffer> CreateConstantRingBuffer(const BufferDesc& desc);
+        // Vertex/Indexと、上のいずれにも当たらないUsageの受け皿(分割前の末尾のフォールスルー)
+        std::unique_ptr<IRHIBuffer> CreateVertexIndexBuffer(const BufferDesc& desc);
         // 公開APIのCreateTextureFromImage(const TextureImage&)から、内部のTexMetadata/ScratchImageを
         // 取り出して実際のGPUリソース作成を行う共通処理(CreateTextureFromFile/CreateSolidColorTexture/
         // CreateTextureFromMemoryからも使う)
