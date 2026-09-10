@@ -1,11 +1,20 @@
 #include "ShaderCompiler.h"
 #include "ShaderInterop/GroupSizes.h"
 #include "RHI/RHIBindingLimits.h"
+#include "Passes/EnvironmentConstants.h"
+#include "Passes/GeometryConstants.h"
+#include "Passes/LightingConstants.h"
+#include "Passes/MegaLightsConstants.h"
+#include "Passes/PostProcessConstants.h"
+#include "Passes/ReflectionConstants.h"
+#include "Passes/ReflectionProbeConstants.h"
+#include "Passes/DDGIConstants.h"
 
 #include <d3dcompiler.h>
 #include <dxcapi.h>
 
 #include <atomic>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 
@@ -42,6 +51,108 @@ namespace
         { L"KURENAI_EXPECT_SWRASTER_GROUP_SIZE",       Kurenai::ShaderInterop::kSWRasterGroupSize },
         { L"KURENAI_EXPECT_SAMPLER_SLOT_COUNT",        Kurenai::RHI::RHIBindingLimits::kSamplerSlotCount },
     };
+
+    // cbuffer の大きさを、**コンパイラが実際に作ったレイアウトから**確かめるための表。
+    //
+    // 【なぜ #define の突き合わせではないのか】HLSLには自分のcbufferの大きさを前処理時に
+    // 知る手立てが無い。HLSL側へ数字を手で書いて #if で比べる形にすると、
+    // 「HLSLへフィールドを足して数字を直し忘れた」場合に素通りする ―― いちばん起きやすい
+    // 壊れ方を捕まえられない。SM 5.0 の経路は D3DReflect が使えるので、焼いた結果を読む。
+    //
+    // 【ここに無いcbufferは照合されない】足すときはこの表へ1行足すだけでよい。
+    // C++側の型が唯一の出所で、HLSL側に書く数字は無い。
+    //
+    // 【限界】見ているのは合計サイズだけで、**フィールドの並び順は見ていない**。
+    // 並びの取り違えはC++側の offsetof の static_assert がC++側でだけ止める。
+    struct ConstantBufferExpectation
+    {
+        const char* Name;   // HLSLの cbuffer 名
+        uint32_t Size;      // C++側の sizeof
+    };
+
+    const ConstantBufferExpectation kConstantBufferExpectations[] = {
+        { "LightingConstants",           sizeof(Kurenai::Passes::LightingConstants) },
+        { "SSAOConstants",               sizeof(Kurenai::Passes::SSAOConstants) },
+        { "SSILConstants",               sizeof(Kurenai::Passes::SSILConstants) },
+        { "LightCullingConstants",       sizeof(Kurenai::Passes::LightCullingConstants) },
+        { "MegaLightsConstants",         sizeof(Kurenai::Passes::MegaLightsConstants) },
+        { "MegaLightsTilePoolConstants", sizeof(Kurenai::Passes::MegaLightsTilePoolConstants) },
+        { "MegaLightsAccumConstants",    sizeof(Kurenai::Passes::MegaLightsAccumConstants) },
+        { "MegaLightsDenoiseConstants",  sizeof(Kurenai::Passes::MegaLightsDenoiseConstants) },
+        { "TonemapConstants",            sizeof(Kurenai::Passes::TonemapConstants) },
+        { "UpscaleConstants",            sizeof(Kurenai::Passes::UpscaleConstants) },
+        { "BloomConstants",              sizeof(Kurenai::Passes::BloomConstants) },
+        { "AutoExposureConstants",       sizeof(Kurenai::Passes::AutoExposureConstants) },
+        { "TAAConstants",                sizeof(Kurenai::Passes::TAAConstants) },
+        // PresentConstants は Passes/PresentPass.h の中にあり、そこを引くと
+        // エンジン一式を巻き込むためこの表には無い(照合されない)
+        { "SSRConstants",                sizeof(Kurenai::Passes::SSRConstants) },
+        { "RTReflectionConstants",       sizeof(Kurenai::Passes::RTReflectionConstants) },
+        { "RTShadowConstants",           sizeof(Kurenai::Passes::RTShadowConstants) },
+        { "RTAOConstants",               sizeof(Kurenai::Passes::RTAOConstants) },
+        { "HiZConstants",                sizeof(Kurenai::Passes::HiZConstants) },
+        { "ModelCullConstants",          sizeof(Kurenai::Passes::ModelCullConstants) },
+        { "SWRasterConstants",           sizeof(Kurenai::Passes::SWRasterConstants) },
+        { "SkyBakeConstants",            sizeof(Kurenai::Passes::SkyBakeConstants) },
+        { "SkyIntegrateConstants",       sizeof(Kurenai::Passes::SkyIntegrateConstants) },
+        { "AtmosphereConstants",         sizeof(Kurenai::Passes::AtmosphereConstants) },
+        { "IBLFaceConstants",            sizeof(Kurenai::Passes::IBLFaceConstants) },
+        { "DDGIUpdateConstants",         sizeof(Kurenai::Passes::DDGIUpdateConstants) },
+        { "DDGITraceConstants",          sizeof(Kurenai::Passes::DDGITraceConstants) },
+    };
+
+    // 焼き上がったバイトコードのcbufferの大きさを、上の表と突き合わせる。
+    // 表に無いcbufferは素通りさせる(照合したいものだけを表に載せる方針)
+    bool VerifyConstantBufferSizes(ID3DBlob* bytecode, std::string& outMismatch)
+    {
+        Microsoft::WRL::ComPtr<ID3D11ShaderReflection> reflection;
+        const HRESULT hr = D3DReflect(
+            bytecode->GetBufferPointer(), bytecode->GetBufferSize(),
+            __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(reflection.GetAddressOf()));
+        if (FAILED(hr) || !reflection)
+        {
+            // 【照合できないことを失敗にしない】リフレクションが使えない状況でも
+            // 焼くこと自体は成立する。照合が空回りしていないかは、わざと壊す試験で見る
+            return true;
+        }
+
+        D3D11_SHADER_DESC shaderDesc{};
+        if (FAILED(reflection->GetDesc(&shaderDesc)))
+        {
+            return true;
+        }
+
+        for (UINT i = 0; i < shaderDesc.ConstantBuffers; ++i)
+        {
+            ID3D11ShaderReflectionConstantBuffer* const buffer = reflection->GetConstantBufferByIndex(i);
+            if (!buffer)
+            {
+                continue;
+            }
+            D3D11_SHADER_BUFFER_DESC bufferDesc{};
+            if (FAILED(buffer->GetDesc(&bufferDesc)) || !bufferDesc.Name)
+            {
+                continue;
+            }
+            for (const ConstantBufferExpectation& expectation : kConstantBufferExpectations)
+            {
+                if (std::strcmp(bufferDesc.Name, expectation.Name) != 0)
+                {
+                    continue;
+                }
+                if (bufferDesc.Size != expectation.Size)
+                {
+                    outMismatch = std::string("cbuffer ") + expectation.Name +
+                        " の大きさがC++側と食い違っています(HLSL " + std::to_string(bufferDesc.Size) +
+                        " バイト / C++ " + std::to_string(expectation.Size) +
+                        " バイト)。どちらかにフィールドを足して片方だけ直していないか確かめること";
+                    return false;
+                }
+                break;
+            }
+        }
+        return true;
+    }
 }
 namespace Kurenai::ShaderPacker
 {
@@ -479,6 +590,19 @@ namespace Kurenai::ShaderPacker
                 result.Diagnostics = "D3DCompileFromFileが失敗しました(HRESULT=0x" + std::to_string(hr) + ")";
             }
             return result;
+        }
+
+        // 【焼いた結果からcbufferの大きさを確かめる】表に載っているcbufferを使っている
+        // シェーダーなら、コンパイラが作ったレイアウトとC++側の sizeof を突き合わせる。
+        // 食い違ったらここで落とす —— 通してしまうと、定数バッファの後ろ半分が
+        // 別のフィールドとして読まれ、**絵は出るが値だけが狂う**という形で出る
+        {
+            std::string mismatch;
+            if (!VerifyConstantBufferSizes(bytecode.Get(), mismatch))
+            {
+                result.Diagnostics = mismatch;
+                return result;
+            }
         }
 
         const auto* data = static_cast<const uint8_t*>(bytecode->GetBufferPointer());
