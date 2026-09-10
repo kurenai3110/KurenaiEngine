@@ -151,14 +151,8 @@ namespace Kurenai
         // 環境の照度[lx]から「そのシーンの基準EV100」を求める。
         //
         // 自動露出のヒストグラムと違い、これは**画面に何が写っているかに一切依存しない**。
-        // 測光値が構図で振れる(空が画面に占める割合で2〜3.5段動く)のを抑えるための
-        // 足がかりとして使う(AutoExposure.hlsl の KeyReferenceEV100 参照)。
-        //
-        // 導出: 反射率ρのLambertian面が照度Eを受けたときの輝度は L = E·ρ/π。
-        // EV100と輝度の関係は L = 2^EV100 · K/S(反射光式露出計の標準、K=12.5・S=100)
-        // すなわち EV100 = log2(8L)。ρには中庸なグレーの18%を使う。
-        // 検算: E=100,000lx(直射日光) → EV100=15.5、E=0.3lx(満月の夜) → EV100=-2.9。
-        // どちらも実写の露出値と一致する
+        // 測光値が構図で振れるのを抑えるための足がかりとして使う
+        // (AutoExposure.hlsl の KeyReferenceEV100 参照)。導出と検算は docs/ImplementationDetail.md 21.9.6
         float ComputeReferenceEV100(float illuminanceLux)
         {
             constexpr float kMiddleGreyReflectance = 0.18f;
@@ -194,19 +188,12 @@ namespace Kurenai
             // === 昼夜の遷移係数を「時刻」ではなく「太陽の仰角」で決める ===
             // sinHour がそのまま太陽仰角のサインになる(軌道が単位円のため)。
             //
-            // 【なぜ時刻ベースではいけないか】Smoothstep(6,7) * (1 - Smoothstep(17,18)) という
-            // 時刻の窓は仰角0度〜15度にちょうど一致するため成立するが、遷移を長くしようと
-            // 窓を5-7時/17-19時へ広げると
-            // 5.5時(仰角-7.5度)で dayFactor≈0.156 となり、**地平線下の太陽が15,600 lx で照らす**
-            // ことになる。LightDirection.y > 0 となってカスケードシャドウが地面の下から
-            // 影を焼き、物体の裏側が照らされる。
-            //
-            // そこで遷移を2本に分ける:
-            //   SunFactor      … 直接光と影。仰角[0°,15°]。地平線下では厳密に0
-            //   TwilightFactor … 空の輝度と環境光。仰角[-15°,+15°] = 時刻でちょうど5-7時/17-19時
+            // 遷移は2本に分ける:
+            //   SunFactor      … 直接光と影。仰角[0°,15°]。**地平線下では厳密に0**
+            //   TwilightFactor … 空の輝度と環境光。仰角[-15°,+15°]
             // 「2時間かけて遷移する」という見た目の要求は TwilightFactor が満たし、
             // 直接光は物理的に成立する範囲(地平線より上)に留まる。
-            // 実際の市民薄明(太陽が地平線下0〜-6度)もこの構造になっている。
+            // 時刻の窓で決めると地平線下の太陽が照らす ―― 実測は docs/ImplementationDetail.md 21.3
             const float sunElevationSin = sinHour;
             const float kSin15Deg = std::sin(XMConvertToRadians(15.0f));
             const float sunFactor = Smoothstep(0.0f, kSin15Deg, sunElevationSin);
@@ -229,13 +216,9 @@ namespace Kurenai
             // 月が地平線より上にあるかどうか(太陽と同じく仰角[0°,15°]で立ち上げる)
             const float moonElevationFactor = Smoothstep(0.0f, kSin15Deg, moonDirection.y);
             // 【なぜ太陽の高度でも月を絞るのか】平行光源の枠は1つしかないので、
-            // 太陽と月は「支配的な方」を選んで切り替える。月を反太陽方向に固定するなら、
-            // 切替点(太陽の仰角0度)で月の係数もちょうど0になり、向きが反転しても
-            // 何も見えないためポップは原理的に起きない。
-            // 月の位置が独立だとこの保証が無く、太陽が沈む瞬間に月が高く昇っていると
-            // 0.25lxの直接光が向きだけ突然入れ替わる(夜の影が見える明るさなので実際に目に付く)。
-            // そこで月の立ち上がりを太陽の仰角0°→-5°に遅らせ、
-            // **切替点では太陽も月も厳密に0**という性質を保つ
+            // 太陽と月は「支配的な方」を選んで切り替える。月を反太陽方向に固定し、
+            // 立ち上がりを太陽の仰角0°→-5°に遅らせることで、**切替点では太陽も月も厳密に0**
+            // という性質を保つ。この保証が無いと何が起きるかは docs/ImplementationDetail.md 21.4
             const float kSin5Deg = std::sin(XMConvertToRadians(5.0f));
             const float moonNightGate = Smoothstep(0.0f, kSin5Deg, -sunElevationSin);
             const float moonFactor = moonElevationFactor * moonNightGate;
@@ -971,11 +954,10 @@ namespace Kurenai
         objectConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
         objectConstantBufferDesc.SizeInBytes = sizeof(ObjectConstants);
         // このバッファだけは「メッシュごと・パスごと」に書かれるため、既定の段数では足りない。
-        // 1フレームの最悪ケースは、本編のパス(深度プリパス・G-Buffer・シャドウ4枚・半透明ほか)に
-        // 加えて、プローブのキャプチャが「プローブ数 × 6面 × 不透明メッシュ数」を積む。
-        // BistroInteriorLit(不透明59メッシュ)で既定の16プローブ/フレームだと
-        // 59 × 6 × 16 = 5664 回に達し、既定の4096回では一周して描画が壊れていた。
-        // 16384にしておけば同シーンで3倍近い余裕がある(1スロット256Bなので約8MB)
+        // 1フレームの最悪ケースは、本編のパスに加えてプローブのキャプチャが
+        // 「プローブ数 × 6面 × 不透明メッシュ数」を積む。既定の4096回では一周して
+        // 描画が壊れていた(経緯は docs/ImplementationHistory.md 45.1)。
+        // 16384は1スロット256Bなので約8MB
         objectConstantBufferDesc.MaxConstantUpdatesPerFrame = kObjectConstantUpdatesPerFrame;
         m_ObjectConstantBuffer = m_Device->CreateBuffer(objectConstantBufferDesc);
 
@@ -2040,13 +2022,8 @@ namespace Kurenai
         const bool legacyPrecision = (m_Settings.System.Precision == BufferPrecision::Legacy8bit);
 
         // Albedoは両構成ともリニアのR8G8B8A8_UNormのままにする。
-        // sRGB格納(R8G8B8A8_UNorm_SRGB)にすれば符号点が暗部へ寄り、暗いマテリアルの量子化は
-        // 細かくなる(リニア反射率L=0.02で約4.3倍)。しかし実測すると最終画像への寄与は
-        // 平均0.03/255と測定限界以下である。アルベドの量子化は面ごとの一定オフセットとして出るため、
-        // 狙っていた暗部のバンディング(=照明の滑らかな変化が最終8bitで潰れる現象)には
-        // そもそも効かない。加えてL>0.244では逆に粗くなり、金属はアルベドバッファの値を
-        // F0として使う(DeferredLighting.hlsl)ぶん確実にその領域へ入るため、
-        // 利点が確認できないまま欠点だけを抱えることになる。詳細はArchitecture.html 17.4節
+        // sRGB格納にしても最終画像への寄与は測定限界以下で、金属がF0として読む領域では
+        // 逆に粗くなる。実測は docs/Architecture.html 17.4節
         // フォーマットの決定はGetEmissiveFormat/GetAOFormatに一本化している。ここへ直接書くと
         // 同じ値を宣言するPSO側(CreatePrecisionDependentPipelineStates)とずれ、
         // D3D12では仕様違反になる
@@ -2103,15 +2080,11 @@ namespace Kurenai
                 // MegaLightsが書くポイント/スポットライトの直接光(HDR)。DirectLighting.hlslが
                 // t7で読んで加算する。
                 //
-                // 【fp16ではなくfp32にしてある】RT反射やSceneColorと同じR16G16B16A16_Floatで
-                // 十分に見えるが、このテクスチャは参照実装の出力 ―― 以降の段階すべての
-                // 「真値」になる物差しでもある。fp16に落とすと、恒等テスト
-                // (影レイ0本で従来のライトループと一致するか)で**片側だけに寄った差**が出た。
-                // 実測: 3840x2088のManyLightsTestで、fp16は11661画素が1/255だけ暗い側へずれ、
-                // 逆向きは0画素。fp32では差のある画素が13まで減り、符号も両側(9/4)に散った。
-                // 物差し自体が系統的に暗い側へ寄っていると、確率的サンプリングの
-                // バイアス検査(N枚平均が真値へ寄るか)がそのぶん汚染される。
-                // 帯域が問題になったら、参照実装とは別の出力先を用意して測ってから決めること
+                // 【fp16ではなくfp32にしてある】このテクスチャは参照実装の出力 ―― 以降の段階すべての
+                // 「真値」になる物差しでもあり、fp16では恒等テストで**片側だけに寄った差**が出る。
+                // 物差しが系統的に寄っていると、確率的サンプリングのバイアス検査が汚染される。
+                // 実測は docs/ImplementationDetail.md 61.8。帯域が問題になったら、参照実装とは
+                // 別の出力先を用意して測ってから決めること
                 m_RenderTargets.CreateMegaLightsOutput(*m_Device, width, height);
             }
             m_RenderTargets.CreateTonemap(*m_Device, width, height);
@@ -2500,19 +2473,10 @@ namespace Kurenai
 
     // 歩き回る視点のカメラの近平面を求める。シーン対角に比例させつつ、上限で頭打ちにする。
     //
-    // 【比例させるだけでは足元が丸ごと消える】diagonal * 0.0005 は「near:far比を一定に保って
-    // 深度精度を確保する」という経験則で、深度をNDCへほぼ1/zで写す従来のZバッファを前提にしている。
-    // このエンジンはReverse-Z + D32_FLOATで、1/zが近平面側へ寄せる分布と浮動小数点の指数が
-    // 0付近で細かくなる性質がちょうど噛み合うため、近平面を小さくしても遠方の精度がほとんど落ちない
-    // (Reverse-Zを採る目的がまさにこれ)。一方で近平面が大きいままだと、その距離より手前の
-    // ジオメトリはラスタライズ前に丸ごと捨てられる。
-    //
-    // 実測: 6000m四方の干潟のシーン(対角約8487m)ではこの式が near = 4.24m を返し、水面の
-    // 1.45m上に置いたカメラを俯角19.9度より下へ向けると水面が画面から丸ごと消えた
-    // (G-Bufferのアルベドも水面マスクも0、つまり「暗く描かれている」のではなく「何も描かれて
-    // いない」状態になり、背景として空モデルの下半球の色が見えていた)。
-    // 上限は視点の高さ(人の目線で1.6m前後)に対して十分小さい値として0.1mを採る。
-    // 対角200m以下のシーンでは元の式が0.1mを下回るため、この上限は効かない(挙動が変わらない)。
+    // 【比例させるだけでは足元が丸ごと消える】近平面が大きいままだと、その距離より手前の
+    // ジオメトリはラスタライズ前に丸ごと捨てられる。Reverse-Z + D32_FLOAT では近平面を
+    // 小さくしても遠方の精度がほとんど落ちないので、上限で頭打ちにしてよい。
+    // 干潟のシーンで水面が丸ごと消えた実測と、上限0.1mの決め方は docs/ImplementationHistory.md 3.1
     float ComputeWalkableNearZ(float diagonal)
     {
         return std::clamp(diagonal * 0.0005f, 0.01f, 0.1f);
@@ -2601,11 +2565,8 @@ namespace Kurenai
     {
         const float nearZ = camera.GetNearZ();
         // [Scene]ShadowDistanceが指定されていれば、そこでカスケードの分割範囲を打ち切る。
-        //
-        // 【なぜ必要か】遠クリップ面はシーンAABBの対角から自動で決まる(farZ = max(100, 対角×4))。
-        // 数十km規模のシーンではfarZが100km級になり、分割範囲がそのまま伸びるため
-        // 第1カスケードが数kmを2048x2048の1枚で覆うことになって近景の影が消える。
-        // 【未指定なら従来どおり】書かなかったシーンの見え方は1ピクセルも変えない
+        // 【未指定なら従来どおり】書かなかったシーンの見え方は1ピクセルも変えない。
+        // 数十km規模のシーンで近景の影が消える理由は docs/ImplementationDetail.md 44.6
         const float farZ = m_Scene.HasShadowDistance
             ? (std::min)(camera.GetFarZ(), m_Scene.ShadowDistance)
             : camera.GetFarZ();
@@ -2942,10 +2903,8 @@ namespace Kurenai
             // Renderスレッド専有のまま進める。
             //
             // 【1巡ぶんで必ず折り返すこと】DroneShow::Evaluate自身も1巡の周期でstd::fmodするので
-            // 絵の上は折り返さなくても正しく出る。折り返しが要るのは**floatの精度**のためである。
-            // 仮数は24bitなので、1日(86,400秒)積むとULPが約0.010秒になり、60fpsのdt(0.0167秒)が
-            // まともに積めなくなってショーが止まる。以前はUIの「ショー時刻」スライダーで
-            // 手動で戻せることを逃げ道にしていたが、そのUIごと無くなったのでここで閉じる
+            // 絵の上は折り返さなくても正しく出る。折り返しが要るのは**floatの精度**のためで、
+            // 1日(86,400秒)積むとULPが60fpsのdtを超えてショーが止まる
             m_Drones.Time += renderDeltaTime * m_Drones.Show.Data().Speed;
             const float showLoopDuration = m_Drones.Show.LoopDuration();
             if (showLoopDuration > 0.0f)
@@ -3296,12 +3255,6 @@ namespace Kurenai
         AdvanceFrameHistory();
     }
 
-    // 【依存していた型と定数は Rendering/ へ出した】以前ここには「無名名前空間の
-    // kMaxLights / kMaxDrones / kTAAJitterSampleCount / RadicalInverse / MakeGPULight /
-    // ComputeCloudAverageTransmittance / GPUReflectionProbe に依存しているので
-    // この翻訳単位から移せない」と書いてあった。段階7.5でそれらを
-    // SampleSequence.h / GPULightBuild.h / GPUReflectionProbe.h / CloudTransmittance.h /
-    // DroneShowResources.h へ移したので、この関数を割って外へ出せるようになっている
     void KurenaiEngine3D::BuildFrameContext(
         const KurenaiEngine3D::FrameState& frameState, RHI::IRHICommandList* commandList,
         const SunLighting& sunLighting, float effectiveExposure, float manualExposureScale,
