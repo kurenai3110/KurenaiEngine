@@ -366,6 +366,12 @@ namespace Kurenai
         uint32_t m_PolylineDrawsThisFrame = 0;
         bool m_PolylineOverflowLogged = false;
 
+        // 【コンストラクタが呼ぶ3段。順序を入れ替えないこと】DX12はディスクリプタ枠を
+        // 生成順に割り当てるため、順序が変わるとシェーダーが読む枠と実際のリソースがずれる
+        void CreatePipelineStates();
+        void CreateQuadBuffers();
+        void CreateSamplersAndConstantBuffers();
+
         // pointsからマイター/ベベル接合済みの三角形リストを組み、m_PolylineVerticesへ書き込む。
         // 戻り値は生成した頂点数(生成できなかった場合は0)
         uint32_t BuildPolylineGeometry(const std::vector<float>& points, float halfThickness);

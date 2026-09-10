@@ -249,8 +249,11 @@ namespace Kurenai
         }
     }
 
-    KurenaiEngine2D::KurenaiEngine2D(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api)
-        : KurenaiEngineBase(title, width, height, api)
+    // 【この3つを呼ぶ順序を入れ替えないこと】DX12はディスクリプタ枠を生成順に割り当てる。
+    // 順序が変わるとシェーダーが読む枠と実際のリソースがずれる(3D側のCreateSceneResourcesと同じ)
+
+    // シェーダーとパイプラインステート、折れ線用のバッファを作る
+    void KurenaiEngine2D::CreatePipelineStates()
     {
         // ShadersはビルドでKurenaiEngine.dllと同じフォルダにコピーされる
         const std::wstring shaderPath = GetModuleDirectory() + L"Shaders\\Sprite2D.kshader";
@@ -311,7 +314,11 @@ namespace Kurenai
         // 全シェーダーの生成が終わったので、読み込んだ.kshaderのキャッシュは捨てる
         m_Device->ReleaseShaderPackages();
         m_PolylineVertices.reserve(kMaxPolylineVertices);
+    }
 
+    // スプライトが使う単位クアッドの頂点/インデックスバッファを作る
+    void KurenaiEngine2D::CreateQuadBuffers()
+    {
         // 原点中心の単位クアッド(-0.5〜0.5)。スプライトごとの位置/大きさ/回転はWorld行列側で表現する
         const Vertex2D quadVertices[] = {
             { { -0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f } },
@@ -334,7 +341,11 @@ namespace Kurenai
         indexBufferDesc.StrideInBytes = sizeof(uint32_t);
         indexBufferDesc.InitialData = quadIndices;
         m_QuadIndexBuffer = m_Device->CreateBuffer(indexBufferDesc);
+    }
 
+    // サンプラーセット(フィルタ×アドレスモードの全組み合わせ)・定数バッファ・白テクスチャを作る
+    void KurenaiEngine2D::CreateSamplersAndConstantBuffers()
+    {
         // スプライト用のサンプラーセットを、フィルタ×アドレスモードの全組み合わせぶん作り置きする。
         // CreateSamplerSetは描画開始前にしか呼べないため、SetSpriteFilter/SetSpriteAddressModeは
         // ここで作ったセットの選択しか行わない(KurenaiEngine2D.hのm_SpriteSamplerSets参照)。
@@ -373,6 +384,16 @@ namespace Kurenai
         m_ObjectConstantBuffer = m_Device->CreateBuffer(objectConstantBufferDesc);
 
         m_WhiteTexture = CreateSolidColorTexture(255, 255, 255, 255); // DrawLineが使う
+    }
+
+    KurenaiEngine2D::KurenaiEngine2D(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api)
+        : KurenaiEngineBase(title, width, height, api)
+    {
+        // 【この順序を入れ替えないこと】理由は各関数の直前のコメント参照
+        CreatePipelineStates();
+        CreateQuadBuffers();
+        CreateSamplersAndConstantBuffers();
+
 
         // BuildFontAtlasはコンストラクタで(BeginFrame/Drawの前に)呼ぶ必要がある。DX12の
         // CreateTextureFromMemoryは内部でSubmitAndWaitIdle(コマンドリストのフラッシュ+リセット)を
