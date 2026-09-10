@@ -8236,6 +8236,7 @@ GPU 30〜130ms のシーンがあるので、その環境では内部解像度�
 | `ReconstructWorldPos` | 19 | `ShaderInterop/Common.hlsli` |
 | フルスクリーン三角形の `PSInput` + `VSMain` | 11 | `ShaderInterop/FullscreenTriangle.hlsli` |
 | `MakeSkyParameters` | 5 | `ShaderInterop/SkyFrameParameters.hlsli` |
+| `static const float PI` | 18 | `MathConstants.hlsli` |
 
 `ReconstructWorldPos` は 19 本すべてが同じ計算だったが、`const` の有無と中間変数の
 使い方だけが違う2系統に分かれていた。式が短いぶん、食い違っても目で気付きにくい。
