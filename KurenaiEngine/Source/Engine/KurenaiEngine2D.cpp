@@ -121,6 +121,132 @@ namespace Kurenai
         // 2Dの外積(符号付き面積の2倍)。正なら反時計回り(ワールドはY-up)
         float Cross(const Float2& a, const Float2& b) { return a.X * b.Y - a.Y * b.X; }
         float Length(const Float2& v) { return std::sqrt(v.X * v.X + v.Y * v.Y); }
+
+        // 折れ線の各点の左右レール。接合がベベルになる点だけ、外側が「入る側」「出る側」の
+        // 2点に割れる
+        struct PolylineJoint
+        {
+            Float2 LeftIn, LeftOut;   // 手前のセグメントが使う点 / 次のセグメントが使う点
+            Float2 RightIn, RightOut;
+            bool Bevel = false;
+            bool LeftIsOuter = false; // ベベル時、どちら側が2点に割れているか
+        };
+
+        // 折れ線から各点の左右レールを組み立てる。戻り値は重複を除いた有効な点の数で、
+        // 2未満なら描くものが無い(その場でログを出す)
+        size_t BuildPolylineJoints(
+            const std::vector<float>& points, float halfThickness, std::vector<PolylineJoint>& joints)
+        {
+        // 連続する重複点は方向ベクトルが定義できないので除去する
+        std::vector<Float2> path;
+        path.reserve(points.size() / 2);
+        for (size_t i = 0; i + 1 < points.size(); i += 2)
+        {
+            const Float2 p{ points[i], points[i + 1] };
+            if (!path.empty() && Length(p - path.back()) < 1e-6f)
+            {
+                continue;
+            }
+            path.push_back(p);
+            if (path.size() >= kMaxPolylinePoints)
+            {
+                break;
+            }
+        }
+
+        if (path.size() < 2)
+        {
+            Core::Logger::Error("2D", "DrawPolyline: 重複点を除いた有効な点が2点未満です。描画しません");
+            return 0;
+        }
+        const size_t pointCount = path.size();
+        const size_t segmentCount = pointCount - 1;
+
+        // セグメントごとの単位方向と左法線(ワールドはY-upなので、進行方向の左は(-dy, dx))
+        std::vector<Float2> directions(segmentCount);
+        std::vector<Float2> normals(segmentCount);
+        std::vector<float> lengths(segmentCount);
+        for (size_t i = 0; i < segmentCount; ++i)
+        {
+            const Float2 delta = path[i + 1] - path[i];
+            lengths[i] = Length(delta);
+            directions[i] = delta * (1.0f / lengths[i]);
+            normals[i] = { -directions[i].Y, directions[i].X };
+        }
+
+            joints.assign(pointCount, PolylineJoint{});
+
+        // 端点(バットキャップ)。DrawLineが回転矩形=切りっぱなしなのに揃える
+        joints[0].LeftIn = joints[0].LeftOut = path[0] + normals[0] * halfThickness;
+        joints[0].RightIn = joints[0].RightOut = path[0] - normals[0] * halfThickness;
+        const size_t last = pointCount - 1;
+        joints[last].LeftIn = joints[last].LeftOut = path[last] + normals[segmentCount - 1] * halfThickness;
+        joints[last].RightIn = joints[last].RightOut = path[last] - normals[segmentCount - 1] * halfThickness;
+
+        for (size_t i = 1; i < last; ++i)
+        {
+            const Float2& prevNormal = normals[i - 1];
+            const Float2& nextNormal = normals[i];
+            const Float2 sum = prevNormal + nextNormal;
+            const float sumLength = Length(sum);
+
+            PolylineJoint& joint = joints[i];
+            if (sumLength < 1e-6f)
+            {
+                // 180度の折り返し。normalize()が0除算でNaNになり、そのまま描くと画面全体が消えるため、
+                // ここで潰す。オフセット0(接合点=元の点)のベベル扱いにする
+                joint.Bevel = true;
+                joint.LeftIsOuter = true;
+                joint.LeftIn = path[i] + prevNormal * halfThickness;
+                joint.LeftOut = path[i] + nextNormal * halfThickness;
+                joint.RightIn = joint.RightOut = path[i];
+                continue;
+            }
+
+            const Float2 miterDirection = sum * (1.0f / sumLength);
+            const float denominator = Dot(miterDirection, prevNormal);
+            const float miterLength = halfThickness / denominator;
+
+            // 旋回方向。左へ曲がるなら左側が内側になる
+            const float turn = Cross(directions[i - 1], directions[i]);
+            const bool leftIsOuter = turn < 0.0f;
+
+            // 内側は隣接する2セグメントの短いほうの長さでクランプする。これを忘れると
+            // 鋭角+太線で内側レールが隣のセグメントを突き抜け、帯が自己交差して
+            // その部分だけ色が濃くなる
+            const float shorterSegment = (std::min)(lengths[i - 1], lengths[i]);
+            const float innerLength = (std::min)(miterLength, shorterSegment);
+
+            if (miterLength > halfThickness * kPolylineMiterLimit)
+            {
+                // 鋭角すぎるのでベベルへフォールバックする(外側だけ2点に割る)
+                joint.Bevel = true;
+                joint.LeftIsOuter = leftIsOuter;
+                if (leftIsOuter)
+                {
+                    joint.LeftIn = path[i] + prevNormal * halfThickness;
+                    joint.LeftOut = path[i] + nextNormal * halfThickness;
+                    joint.RightIn = joint.RightOut = path[i] - miterDirection * innerLength;
+                }
+                else
+                {
+                    joint.RightIn = path[i] - prevNormal * halfThickness;
+                    joint.RightOut = path[i] - nextNormal * halfThickness;
+                    joint.LeftIn = joint.LeftOut = path[i] + miterDirection * innerLength;
+                }
+            }
+            else
+            {
+                // マイター。外側は交点まで伸ばし、内側はクランプ後の長さを使う
+                const float leftLength = leftIsOuter ? miterLength : innerLength;
+                const float rightLength = leftIsOuter ? innerLength : miterLength;
+                joint.LeftIn = joint.LeftOut = path[i] + miterDirection * leftLength;
+                joint.RightIn = joint.RightOut = path[i] - miterDirection * rightLength;
+            }
+        }
+
+            return pointCount;
+        }
     }
 
     KurenaiEngine2D::KurenaiEngine2D(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api)
@@ -673,122 +799,14 @@ namespace Kurenai
 
     uint32_t KurenaiEngine2D::BuildPolylineGeometry(const std::vector<float>& points, float halfThickness)
     {
-        // 連続する重複点は方向ベクトルが定義できないので除去する
-        std::vector<Float2> path;
-        path.reserve(points.size() / 2);
-        for (size_t i = 0; i + 1 < points.size(); i += 2)
+        std::vector<PolylineJoint> joints;
+        const size_t pointCount = BuildPolylineJoints(points, halfThickness, joints);
+        if (pointCount < 2)
         {
-            const Float2 p{ points[i], points[i + 1] };
-            if (!path.empty() && Length(p - path.back()) < 1e-6f)
-            {
-                continue;
-            }
-            path.push_back(p);
-            if (path.size() >= kMaxPolylinePoints)
-            {
-                break;
-            }
-        }
-
-        if (path.size() < 2)
-        {
-            Core::Logger::Error("2D", "DrawPolyline: 重複点を除いた有効な点が2点未満です。描画しません");
             return 0;
         }
-
-        const size_t pointCount = path.size();
         const size_t segmentCount = pointCount - 1;
-
-        // セグメントごとの単位方向と左法線(ワールドはY-upなので、進行方向の左は(-dy, dx))
-        std::vector<Float2> directions(segmentCount);
-        std::vector<Float2> normals(segmentCount);
-        std::vector<float> lengths(segmentCount);
-        for (size_t i = 0; i < segmentCount; ++i)
-        {
-            const Float2 delta = path[i + 1] - path[i];
-            lengths[i] = Length(delta);
-            directions[i] = delta * (1.0f / lengths[i]);
-            normals[i] = { -directions[i].Y, directions[i].X };
-        }
-
-        // 各点の左右レール。接合がベベルになる点だけ、外側が「入る側」「出る側」の2点に割れる
-        struct Joint
-        {
-            Float2 LeftIn, LeftOut;   // 手前のセグメントが使う点 / 次のセグメントが使う点
-            Float2 RightIn, RightOut;
-            bool Bevel = false;
-            bool LeftIsOuter = false; // ベベル時、どちら側が2点に割れているか
-        };
-        std::vector<Joint> joints(pointCount);
-
-        // 端点(バットキャップ)。DrawLineが回転矩形=切りっぱなしなのに揃える
-        joints[0].LeftIn = joints[0].LeftOut = path[0] + normals[0] * halfThickness;
-        joints[0].RightIn = joints[0].RightOut = path[0] - normals[0] * halfThickness;
         const size_t last = pointCount - 1;
-        joints[last].LeftIn = joints[last].LeftOut = path[last] + normals[segmentCount - 1] * halfThickness;
-        joints[last].RightIn = joints[last].RightOut = path[last] - normals[segmentCount - 1] * halfThickness;
-
-        for (size_t i = 1; i < last; ++i)
-        {
-            const Float2& prevNormal = normals[i - 1];
-            const Float2& nextNormal = normals[i];
-            const Float2 sum = prevNormal + nextNormal;
-            const float sumLength = Length(sum);
-
-            Joint& joint = joints[i];
-            if (sumLength < 1e-6f)
-            {
-                // 180度の折り返し。normalize()が0除算でNaNになり、そのまま描くと画面全体が消えるため、
-                // ここで潰す。オフセット0(接合点=元の点)のベベル扱いにする
-                joint.Bevel = true;
-                joint.LeftIsOuter = true;
-                joint.LeftIn = path[i] + prevNormal * halfThickness;
-                joint.LeftOut = path[i] + nextNormal * halfThickness;
-                joint.RightIn = joint.RightOut = path[i];
-                continue;
-            }
-
-            const Float2 miterDirection = sum * (1.0f / sumLength);
-            const float denominator = Dot(miterDirection, prevNormal);
-            const float miterLength = halfThickness / denominator;
-
-            // 旋回方向。左へ曲がるなら左側が内側になる
-            const float turn = Cross(directions[i - 1], directions[i]);
-            const bool leftIsOuter = turn < 0.0f;
-
-            // 内側は隣接する2セグメントの短いほうの長さでクランプする。これを忘れると
-            // 鋭角+太線で内側レールが隣のセグメントを突き抜け、帯が自己交差して
-            // その部分だけ色が濃くなる
-            const float shorterSegment = (std::min)(lengths[i - 1], lengths[i]);
-            const float innerLength = (std::min)(miterLength, shorterSegment);
-
-            if (miterLength > halfThickness * kPolylineMiterLimit)
-            {
-                // 鋭角すぎるのでベベルへフォールバックする(外側だけ2点に割る)
-                joint.Bevel = true;
-                joint.LeftIsOuter = leftIsOuter;
-                if (leftIsOuter)
-                {
-                    joint.LeftIn = path[i] + prevNormal * halfThickness;
-                    joint.LeftOut = path[i] + nextNormal * halfThickness;
-                    joint.RightIn = joint.RightOut = path[i] - miterDirection * innerLength;
-                }
-                else
-                {
-                    joint.RightIn = path[i] - prevNormal * halfThickness;
-                    joint.RightOut = path[i] - nextNormal * halfThickness;
-                    joint.LeftIn = joint.LeftOut = path[i] + miterDirection * innerLength;
-                }
-            }
-            else
-            {
-                // マイター。外側は交点まで伸ばし、内側はクランプ後の長さを使う
-                const float leftLength = leftIsOuter ? miterLength : innerLength;
-                const float rightLength = leftIsOuter ? innerLength : miterLength;
-                joint.LeftIn = joint.LeftOut = path[i] + miterDirection * leftLength;
-                joint.RightIn = joint.RightOut = path[i] - miterDirection * rightLength;
-            }
-        }
 
         // 三角形を積む。2DのPSOは既定のラスタライザ(裏面カリング有効、時計回りが表)で作られており、
         // ワールドはY-upなので「符号付き面積が負(=Y-upで時計回り)」が表になる
@@ -818,7 +836,7 @@ namespace Kurenai
 
         for (size_t i = 1; i < last; ++i)
         {
-            const Joint& joint = joints[i];
+            const PolylineJoint& joint = joints[i];
             if (!joint.Bevel)
             {
                 continue;
