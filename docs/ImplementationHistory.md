@@ -9034,6 +9034,23 @@ DX11 / DX12 の4枚すべてが一致した。**「物差しが無い」は「�
 ことで、これは `pch.h` の中身を全部潰してビルドが通るかの試験でしか担保できない。
 実際に試験を行い、**エラー0件**だった ―― どのTUも自分が使うものを自分で引いている。
 
+### PCH で1つ壊した —— `WIN32_LEAN_AND_MEAN` がエクスポート名を変えた
+
+`pch.h` に `WIN32_LEAN_AND_MEAN` を書いたところ、**Sample2D だけがリンクで落ちた。**
+`KurenaiEngineBase::PlaySound` が未解決になる。
+
+`<Windows.h>` は `WIN32_LEAN_AND_MEAN` が無ければ `<mmsystem.h>` を引き、
+そこに `#define PlaySound PlaySoundW` がある。つまりエンジンのDLLは
+**`PlaySoundW` という名前で**この関数をエクスポートしていた。`pch.h` で
+`WIN32_LEAN_AND_MEAN` を定義するとマクロが消え、エクスポート名が `PlaySound` に変わる。
+PCH を使う Library は新しい名前で出し、**PCH を使わない Sample2D は古い名前を探す。**
+
+3D側は `PlaySound` を呼ばないので Sample3D は通り、10構成の採取も一致していた。
+**「3Dが通ったから壊していない」では捕まえられない種類の壊れ方**で、
+2Dのビルドを回して初めて出た。`WIN32_LEAN_AND_MEAN` の定義をやめ、
+理由を `pch.h` の該当箇所に残した。展開量を減らしたいなら、
+先に API 名とマクロの衝突をなくすのが順序として正しい。
+
 clean build(`msbuild /t:Rebuild`、Sample3D.sln、Release、3回の中央値)は
 **31.5秒 → 28.0秒**。3回とも ±0.3秒に収まっている。パッカーの PostBuild が
 毎回 `.kshader` 49本を焼き直す時間もこの中に含む。
