@@ -783,74 +783,14 @@ namespace KurenaiPacker
         return fullPath;
     }
 
-    SourceModel LoadSourceModel(
-        const std::wstring& filePath,
-        float scale,
-        const MaterialOverride& materialOverride,
-        const std::optional<std::array<float, 3>>& originOffset,
-        ParseTimings* outTimings)
+    // aiMeshをマテリアルインデックスごとに結合する。OBJ形式のように同一マテリアルの三角形群が
+    // 大量の小さなaiMeshへ割れているアセットで、ドローコール数を実質マテリアル数まで減らす
+    void MergeMeshNodesByMaterial(
+        const std::vector<std::pair<const aiMesh*, aiMatrix4x4>>& meshNodes, float scale,
+        const std::optional<std::array<float, 3>>& originOffset, SourceModel& model,
+        bool& boundsInitialized, std::unordered_map<unsigned int, MergedMeshAccumulator>& meshesByMaterial,
+        ParseTimings& timings)
     {
-        // outTimingsがnullptrでも分岐を増やさずに済むよう、常にローカルへ積んで最後に転記する
-        ParseTimings timings;
-
-        Assimp::Importer importer;
-        // 【GenSmoothNormalsは法線を持たないアセットのためにある】assimpのこの処理は
-        // 法線を既に持つメッシュには何もしないため、法線付きのアセット(Sponza/Bistro等)の
-        // 出力は変わらない。一方 PLATEAU の FBX は CityGML 由来で法線を1つも持っておらず、
-        // これが無いと後段のフォールバック(上向き固定法線)が全頂点に入る。その結果、
-        // 垂直な壁も真上を向いていることになり、面の向きによる明暗(陰)が一切出なくなる。
-        // 落ち影は法線と無関係に出るので絵は「それらしく」見え、気づきにくい
-        //
-        // 【スムージング角度を絞る】既定の175度ではほぼ全ての稜線が平均化され、建物の
-        // 壁と屋根の直角まで丸まる。この角度より開いた稜線は頂点を分けて面法線にする
-        importer.SetPropertyFloat(AI_CONFIG_PP_GSN_MAX_SMOOTHING_ANGLE, kMaxSmoothingAngleDegrees);
-        // 接線はassimpのaiProcess_CalcTangentSpaceに任せず自前で計算する(下記の頂点ループ内、
-        // TangentAccumKey関連のコード参照)。CalcTangentSpaceはUV面積がほぼ0(縮退)の三角形で
-        // 接線が数値的に不安定になり、位置・法線・UVが完全に同一の頂点間でさえ接線がほぼ正反対に
-        // なることがある。JoinIdenticalVerticesは重複頂点を減らせるため付けておく
-        // (自前の接線平均化は位置+法線をキーにしており重複頂点の有無に依存しないため、
-        // 平均化の正しさ自体には影響しない)
-        const auto readStart = PhaseClock::now();
-        const aiScene* scene = importer.ReadFile(
-            WideToUtf8(filePath),
-            aiProcess_Triangulate | aiProcess_ConvertToLeftHanded | aiProcess_JoinIdenticalVertices |
-                aiProcess_GenSmoothNormals);
-        timings.ReadSeconds += PhaseSecondsSince(readStart);
-
-        if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !scene->mRootNode)
-        {
-            throw std::runtime_error(std::string("モデルの読み込みに失敗しました: ") + importer.GetErrorString());
-        }
-
-        const std::wstring directory = GetDirectory(filePath);
-
-        SourceModel model;
-
-        // 埋め込みテクスチャを持つモデルでだけ取り出し先を用意する。
-        // 一時ディレクトリの実体は最初の1枚を取り出す時点で作られる(EnsureDirectory)
-        if (scene->mNumTextures > 0)
-        {
-            model.EmbeddedTextures = std::make_shared<EmbeddedTextureStore>();
-            Kurenai::Core::Logger::Info("KurenaiPacker",
-                "埋め込みテクスチャを" + std::to_string(scene->mNumTextures) + "枚検出しました");
-        }
-
-        std::vector<std::pair<const aiMesh*, aiMatrix4x4>> meshNodes;
-        const auto collectStart = PhaseClock::now();
-        CollectMeshNodes(scene, scene->mRootNode, aiMatrix4x4(), meshNodes);
-        timings.CollectSeconds += PhaseSecondsSince(collectStart);
-
-        bool boundsInitialized = false;
-
-        // マテリアルインデックスごとに頂点・インデックスを結合してから1つのメッシュにまとめる。
-        // OBJ形式のように同一マテリアルの三角形群が(usemtlの切り替えのたびに)大量の
-        // 小さなaiMeshへ分割されているアセットでは、aiMeshごとに個別のバッファ/ドローコールを
-        // 発行すると数万件規模になり、GPU側のドライバウォッチドッグ(TDR)によるハングを
-        // 引き起こしうる(実測した大規模なOBJ配布では、実質132マテリアルに対して
-        // usemtl切り替えが22,396回あった)ため、マテリアル単位でまとめてドローコール数を実質マテリアル数まで
-        // 削減する
-        std::unordered_map<unsigned int, MergedMeshAccumulator> meshesByMaterial;
-
         for (const auto& [mesh, transform] : meshNodes)
         {
             if (!mesh->HasPositions() || !mesh->HasFaces())
@@ -1060,10 +1000,313 @@ namespace KurenaiPacker
             }
             timings.MergeSeconds += PhaseSecondsSince(mergeStart);
         }
+    }
 
+    // マテリアル1件ぶんの SourceMesh を組み立てる。テクスチャのパス・各係数・
+    // アルファの扱いを assimp から引き、上書き指定(--metallic ほか)を反映する
+    void BuildSourceMeshFromMaterial(
+        const aiScene* scene, const std::wstring& directory, const MaterialOverride& materialOverride,
+        unsigned int materialIndex, MergedMeshAccumulator& accum, SourceModel& model)
+    {
+        const aiMaterial* material = scene->mMaterials[materialIndex];
+        aiString texPath;
+
+        SourceMesh outMesh;
+        outMesh.Vertices = std::move(accum.Vertices);
+        outMesh.Indices = std::move(accum.Indices);
+
+        if (material->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == AI_SUCCESS ||
+            material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS)
+        {
+            outMesh.BaseColorPath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
+        }
+
+        // OBJ形式は法線マップをaiTextureType_NORMALSではなくmap_bump(aiTextureType_HEIGHT)として
+        // 格納する慣習があるため、NORMALSが無い場合はHEIGHTにもフォールバックする
+        if (material->GetTexture(aiTextureType_NORMALS, 0, &texPath) == AI_SUCCESS ||
+            material->GetTexture(aiTextureType_HEIGHT, 0, &texPath) == AI_SUCCESS)
+        {
+            outMesh.NormalPath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
+        }
+
+        // glTFのmetallicRoughnessテクスチャはG=ラフネス、B=メタリックを1枚に格納しており、
+        // assimpはこれをROUGHNESS/METALNESSの両方のテクスチャタイプとして同じ画像を指す
+        //
+        // --specular-as-orm指定時は、どちらも無い場合にaiTextureType_SPECULARも見る。
+        // FBXのSpecularColorスロットへORM(R=遮蔽/G=ラフネス/B=メタリック)を入れる規約の
+        // アセット用(MaterialOverride::SpecularAsOrmのコメント参照)。チャンネルの割り当ては
+        // glTFのmetallicRoughness(G=ラフネス/B=メタリック)と一致するため、
+        // GBuffer.hlslのサンプリングはそのままでよい
+        if (material->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texPath) == AI_SUCCESS ||
+            material->GetTexture(aiTextureType_METALNESS, 0, &texPath) == AI_SUCCESS ||
+            (materialOverride.SpecularAsOrm &&
+             material->GetTexture(aiTextureType_SPECULAR, 0, &texPath) == AI_SUCCESS))
+        {
+            outMesh.MetallicRoughnessPath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
+        }
+
+        if (material->GetTexture(aiTextureType_EMISSIVE, 0, &texPath) == AI_SUCCESS)
+        {
+            outMesh.EmissivePath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
+        }
+
+        // ベイク済みアンビエントオクルージョン(遮蔽マップ)。
+        // assimpはglTFのocclusionTextureをaiTextureType_LIGHTMAPへマップする
+        // (ThirdParty/assimp/code/AssetLib/glTF2/glTF2Importer.cpp参照)。明示的な
+        // AMBIENT_OCCLUSIONスロットを持つ形式もあるため、そちらもフォールバックとして見る。
+        //
+        // 【aiTextureType_AMBIENT(OBJのmap_Ka)は意図的に見ない】法線マップのNORMALS→HEIGHT
+        // フォールバックと同じ発想で最初は含めていたが、WavefrontMTLのmap_Kaは「アンビエント色の
+        // マップ」であって遮蔽率ではなく、実際にはmap_Kdと同じ拡散テクスチャを指す慣習になっている。
+        // 同梱のBistro(exterior.mtl/interior.mtl)も全マテリアルのmap_Kaが*_diff.pngを指していた。
+        // これを遮蔽率として採用すると、アルベドがそのまま環境光の減衰係数として掛かり、
+        // 色付きで極端に暗くなってしまう
+        if (material->GetTexture(aiTextureType_LIGHTMAP, 0, &texPath) == AI_SUCCESS ||
+            material->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texPath) == AI_SUCCESS)
+        {
+            outMesh.OcclusionPath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
+        }
+        else if (materialOverride.SpecularAsOrm && !outMesh.MetallicRoughnessPath.empty())
+        {
+            // ORMのRチャンネルは遮蔽なので、同じ画像を遮蔽スロットとしても使う。
+            //
+            // 【ktexは増えない】PackageWriterのテクスチャ要求は「解決済みパス|sRGBの要否」を
+            // キーに重複排除するため、metallicRoughnessと同じパス・同じlinear指定のこの要求は
+            // 同一エントリに畳まれる。
+            //
+            // 【UV1で引かれても正しい】遮蔽マップはシェーダー側で常にUV1(TEXCOORD1)から引くが、
+            // --bake-occlusionを行わない場合UV1にはUV0が複製される(Assets/Vertex.hのコメント)。
+            // ORMはUV0の空間で作られているため、これで意図どおりの位置が引ける
+            outMesh.OcclusionPath = outMesh.MetallicRoughnessPath;
+        }
+
+        // glTFのocclusionTexture.strength。ラフネス係数と異なり既定値がglTF仕様で1.0と
+        // 明記されているため、取得できない場合は無効値ではなくその既定値を採用する
+        // (assimpはLIGHTMAPスロットのプロパティとして格納する)
+        outMesh.OcclusionStrength = Kurenai::Assets::kDefaultOcclusionStrength;
+
+        float occlusionStrength = 0.0f;
+        if (material->Get(AI_MATKEY_GLTF_TEXTURE_STRENGTH(aiTextureType_LIGHTMAP, 0), occlusionStrength) == AI_SUCCESS)
+        {
+            // 遮蔽の強度は[0,1]が仕様上の値域。範囲外は壊れたデータとみなし既定値へ戻す
+            if (occlusionStrength >= 0.0f && occlusionStrength <= 1.0f)
+            {
+                outMesh.OcclusionStrength = occlusionStrength;
+            }
+            else
+            {
+                Kurenai::Core::Logger::Warning(
+                    "ModelSource",
+                    "遮蔽の強度が[0,1]の範囲外のため既定値1.0として扱います: " + std::to_string(occlusionStrength));
+            }
+        }
+
+        // FBXなどPBRメタリック係数を持たない形式では既定値(非金属)のままになる
+        material->Get(AI_MATKEY_METALLIC_FACTOR, outMesh.MetallicFactor);
+
+        // ラフネスは「ソースデータが持っていなければ無効値を書き出す」方針を取る。
+        // もっともらしい既定値(例: 0.7)をパッカーが勝手に埋めると、データに無い値が
+        // 事実として下流へ流れてしまい、消費側は「指定された0.7」と「データに無かった」を
+        // 区別できなくなる。何を既定値とするかはフォーマットやアセットによって異なり、
+        // 変換ツールが決めてよい値ではない。無効値の解釈は消費側の責任とする
+        // (シェーダーは係数1.0=テクスチャの値をそのまま使う、として扱う)
+        outMesh.RoughnessFactor = Kurenai::Assets::kInvalidMaterialFactor;
+
+        float roughnessFactor = 0.0f;
+        if (material->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughnessFactor) == AI_SUCCESS)
+        {
+            // 古いPhong系マテリアル(Shininessのみ持つ)をassimpがPBRラフネスへ変換する際、
+            // 変換式が破綻して[0,1]範囲外の値を返すことがある(実測で負値を確認済み)。
+            // そのまま流すとシェーダー側のclampで最小ラフネス(ほぼ鏡面)に張り付いてしまうため、
+            // 範囲外は「取得できなかった」と同じ扱いにする
+            if (roughnessFactor >= 0.0f && roughnessFactor <= 1.0f)
+            {
+                outMesh.RoughnessFactor = roughnessFactor;
+            }
+            else
+            {
+                Kurenai::Core::Logger::Warning(
+                    "ModelSource",
+                    "ラフネス係数が[0,1]の範囲外のため無効値として扱います: " + std::to_string(roughnessFactor));
+            }
+        }
+        else
+        {
+            // WavefrontMTL(OBJ)はPBRのラフネスを持たない代わりに、Blinn-Phongの鏡面反射指数Ns
+            // (assimpがAI_MATKEY_SHININESSへ格納する)を持っていることがある。変換式は
+            // Blinn-Phong指数 → GGXラフネス の一般的な近似 roughness = sqrt(2 / (Ns + 2))
+            // (Ns→∞で0、Ns=0で1に漸近する)。
+            //
+            // ただしNs = 100.000 ちょうどの値は採用しない。これはOBJエクスポータが書き出す
+            // 定型の既定値で、マテリアルごとに調整された値ではないため。実測したMTLでは
+            // 全マテリアルの8割前後がこの値ちょうどで、石畳や漆喰のような明らかに粗い材質まで
+            // 含まれていた。これを採用するとそれらがラフネス0.14(ほぼ鏡面)になり、
+            // 環境光の鏡面反射がシーン全体へ強くかかって白く霞んだ絵になることを実機で確認している。
+            // 情報量の無い値として無視し、無効値のままにする
+            constexpr float kMtlDefaultShininess = 100.0f;
+            float shininess = 0.0f;
+            if (material->Get(AI_MATKEY_SHININESS, shininess) == AI_SUCCESS && shininess > 0.0f &&
+                std::abs(shininess - kMtlDefaultShininess) > 0.001f)
+            {
+                outMesh.RoughnessFactor = std::clamp(std::sqrt(2.0f / (shininess + 2.0f)), 0.0f, 1.0f);
+            }
+        }
+
+        aiColor3D emissiveColor(0.0f, 0.0f, 0.0f);
+        material->Get(AI_MATKEY_COLOR_EMISSIVE, emissiveColor);
+        outMesh.EmissiveFactor[0] = emissiveColor.r;
+        outMesh.EmissiveFactor[1] = emissiveColor.g;
+        outMesh.EmissiveFactor[2] = emissiveColor.b;
+
+        // --emissive <マテリアル名>=<R,G,B>。Keを持たないアセット(Bistro屋外は
+        // 132マテリアル全部のKeが0)では、照明器具のジオメトリがあっても
+        // EmissiveFactorが0のままで、自発光テクスチャを持つマテリアルすら光らない。
+        // 名前が一致したマテリアルにだけ係数を与える
+        if (!materialOverride.Emissive.empty())
+        {
+            aiString materialName;
+            if (material->Get(AI_MATKEY_NAME, materialName) == AI_SUCCESS)
+            {
+                const auto found = materialOverride.Emissive.find(materialName.C_Str());
+                if (found != materialOverride.Emissive.end())
+                {
+                    outMesh.EmissiveFactor[0] = found->second[0];
+                    outMesh.EmissiveFactor[1] = found->second[1];
+                    outMesh.EmissiveFactor[2] = found->second[2];
+                }
+            }
+        }
+
+        // glTFのpbrMetallicRoughness.baseColorFactor(既定[1,1,1,1])。テクスチャを持たず
+        // baseColorFactorのみで色/不透明度を表現するマテリアル(ガラス等)を正しく再現するために
+        // 読み取る。取得できない場合(FBX/OBJ等、AI_MATKEY_BASE_COLORはglTF専用のため常に失敗する)は
+        // 代わりにOBJ/FBXの古典的なPhongモデルのKd(拡散色)であるAI_MATKEY_COLOR_DIFFUSEを使う
+        // (ガラス系マテリアルによくあるKdが黒[0,0,0]のケースを、白1x1プレースホルダーへ
+        // 誤ってフォールバックさせないため)
+        aiColor4D baseColorFactor(1.0f, 1.0f, 1.0f, 1.0f);
+        if (material->Get(AI_MATKEY_BASE_COLOR, baseColorFactor) != AI_SUCCESS)
+        {
+            aiColor3D diffuseColor(1.0f, 1.0f, 1.0f);
+            material->Get(AI_MATKEY_COLOR_DIFFUSE, diffuseColor);
+            baseColorFactor = aiColor4D(diffuseColor.r, diffuseColor.g, diffuseColor.b, 1.0f);
+        }
+
+        // アルファモード(BLEND/MASK/OPAQUE)はglTFの拡張情報でのみ判定できる(FBX/OBJ等には
+        // この3値の概念自体が無い)。MASKはAlphaCutoffを設定してGBuffer.hlsl側のclip()で
+        // カットアウトさせ、BLENDはIsTransparent=trueにしてKurenaiEngine3DのTransparentパス
+        // (フォワードシェーディング+アルファブレンド)へ回す
+        aiString alphaMode;
+        float alphaCutoff = 0.5f;
+        material->Get(AI_MATKEY_GLTF_ALPHACUTOFF, alphaCutoff);
+        const bool hasAlphaMode = material->Get(AI_MATKEY_GLTF_ALPHAMODE, alphaMode) == AI_SUCCESS;
+        outMesh.AlphaCutoff = (hasAlphaMode && std::strcmp(alphaMode.C_Str(), "MASK") == 0) ? alphaCutoff : 0.0f;
+        outMesh.IsTransparent = hasAlphaMode && std::strcmp(alphaMode.C_Str(), "BLEND") == 0;
+
+        // --alpha-cutout <マテリアル名>=<しきい値>。上のalphaMode判定はglTF専用で、
+        // FBX/OBJには対応する情報が無い。SpeedTreeの葉のように「BaseColorのアルファで抜く」
+        // 前提で作られたマテリアルは、指定しないと不透明な板として描かれる
+        // (Bistro(OBJ)の葉で実際に起きている既知の破綻と同じもの)
+        if (!materialOverride.AlphaCutoff.empty())
+        {
+            aiString materialName;
+            if (material->Get(AI_MATKEY_NAME, materialName) == AI_SUCCESS)
+            {
+                const auto found = materialOverride.AlphaCutoff.find(materialName.C_Str());
+                if (found != materialOverride.AlphaCutoff.end())
+                {
+                    outMesh.AlphaCutoff = found->second;
+                    // カットアウトと半透明は排他(glTFのalphaModeがOPAQUE/MASK/BLENDの
+                    // いずれか1つであるのと同じ)。明示的にカットアウトを指定した以上、
+                    // 後段のOPACITY/Tf由来の半透明判定に横取りされないようにする
+                    outMesh.IsTransparent = false;
+                }
+            }
+        }
+
+        // 透過率(葉・花弁のような薄いものが裏からの光を透かす量)。
+        // glTFにこれを表す標準のプロパティが無いため、--translucent <マテリアル名>=<値> で
+        // 外から与える。名前が一致したマテリアルにだけ設定する
+        if (!materialOverride.Translucency.empty())
+        {
+            aiString materialName;
+            if (material->Get(AI_MATKEY_NAME, materialName) == AI_SUCCESS)
+            {
+                const auto found = materialOverride.Translucency.find(materialName.C_Str());
+                if (found != materialOverride.Translucency.end())
+                {
+                    outMesh.Translucency = found->second;
+                }
+            }
+        }
+
+        // OBJ等、alphaModeの概念を持たない形式ではAI_MATKEY_OPACITY(WavefrontMTLの
+        // d/Trから変換された不透明度。assimpのObjFileImporter.cppが
+        // AI_MATKEY_OPACITYへ格納する)を見る。d/Trがどちらも無ければassimpは既定の1.0
+        // (不透明)を返すため、架空の値を補うことにはならない
+        float opacity = 1.0f;
+        if (!hasAlphaMode && material->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS && opacity < 0.999f)
+        {
+            outMesh.IsTransparent = true;
+            baseColorFactor.a = opacity;
+        }
+
+        // WavefrontMTLには、d/Trとは別に「透過を伴う照明モデル(illum 4/6/7/9)+ Tf(透過フィルタ)」で
+        // 透明度を表現する書き方がある。assimpのOBJインポータはTfをAI_MATKEY_COLOR_TRANSPARENTへ、
+        // illumをAI_MATKEY_OBJ_ILLUMへ格納するだけで、不透明度(AI_MATKEY_OPACITY)には一切反映しない
+        // (ObjFileImporter.cppのCreateMaterial。AI_MATKEY_OPACITYへ入るのはd/Tr由来の値のみ)。
+        // そのためd/Trだけを見ていると、この書き方のマテリアルがすべて不透明として扱われる。
+        // 実測した大規模なOBJ配布では、瓶・窓・街灯といったガラス系マテリアルの大半がこの書き方で、
+        // d/Trのみの判定ではシーン全体で半透明メッシュが計36三角形しか出ていなかった。
+        //
+        // Tfの解釈: MTLの原仕様では「透過光にかけるフィルタ色」(Tf=1,1,1が無着色=全透過)だが、
+        // Tf = 1 - Tr(= d)、つまり不透明度そのものとして書き出すエクスポータが実在する。
+        // d/TrとTfを両方持つマテリアルの実測値(Tr 0.800/Tf 0.2、Tr 0.900/Tf 0.1、
+        // Tr 0.000/Tf 1.0)がいずれもTf == 1 - Trで一貫していたため、Tfを不透明度として読む。
+        // assimpのTf既定値も(1,1,1)(ObjFileData.hのMaterial::transparent)なので、Tfを書いていない
+        // 通常のOBJがこの経路で誤って半透明化されることはない。
+        // なお原仕様どおり「Tf=透過率」と解釈するとTf未記載の全マテリアルが全透過になってしまい、
+        // 実用にならない点でも、この解釈以外に選択肢がない
+        if (!hasAlphaMode && !outMesh.IsTransparent)
+        {
+            int illuminationModel = 1;
+            aiColor3D transmissionFilter(1.0f, 1.0f, 1.0f);
+            if (material->Get(AI_MATKEY_OBJ_ILLUM, illuminationModel) == AI_SUCCESS &&
+                (illuminationModel == 4 || illuminationModel == 6 || illuminationModel == 7 || illuminationModel == 9) &&
+                material->Get(AI_MATKEY_COLOR_TRANSPARENT, transmissionFilter) == AI_SUCCESS)
+            {
+                const float filterOpacity =
+                    (transmissionFilter.r + transmissionFilter.g + transmissionFilter.b) / 3.0f;
+                if (filterOpacity < 0.999f)
+                {
+                    outMesh.IsTransparent = true;
+                    baseColorFactor.a = std::clamp(filterOpacity, 0.0f, 1.0f);
+
+                    aiString materialName;
+                    material->Get(AI_MATKEY_NAME, materialName);
+                    Kurenai::Core::Logger::Info(
+                        "ModelSource",
+                        std::string("マテリアル\"") + materialName.C_Str() + "\"をillum " +
+                            std::to_string(illuminationModel) + " + Tfから半透明と判定しました(不透明度 " +
+                            std::to_string(baseColorFactor.a) + ")");
+                }
+            }
+        }
+
+        outMesh.BaseColorFactor[0] = baseColorFactor.r;
+        outMesh.BaseColorFactor[1] = baseColorFactor.g;
+        outMesh.BaseColorFactor[2] = baseColorFactor.b;
+        outMesh.BaseColorFactor[3] = baseColorFactor.a;
+
+        model.Meshes.push_back(std::move(outMesh));
+    }
+
+    // 結合済みの塊から、マテリアルの昇順に SourceMesh を組み立てる
+    void BuildSourceMeshes(
+        const aiScene* scene, const std::wstring& directory, const MaterialOverride& materialOverride,
+        std::unordered_map<unsigned int, MergedMeshAccumulator>& meshesByMaterial, SourceModel& model)
+    {
         // マテリアルインデックスの昇順(assimpのマテリアル配列順)に処理することで、
         // 生成される.kmodelのメッシュ順が実行のたびに変わらないようにする
-        const auto materialStart = PhaseClock::now();
         for (unsigned int materialIndex = 0; materialIndex < scene->mNumMaterials; ++materialIndex)
         {
             const auto accumIt = meshesByMaterial.find(materialIndex);
@@ -1072,297 +1315,85 @@ namespace KurenaiPacker
                 continue;
             }
 
-            const aiMaterial* material = scene->mMaterials[materialIndex];
-            aiString texPath;
-
-            SourceMesh outMesh;
-            outMesh.Vertices = std::move(accumIt->second.Vertices);
-            outMesh.Indices = std::move(accumIt->second.Indices);
-
-            if (material->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == AI_SUCCESS ||
-                material->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS)
-            {
-                outMesh.BaseColorPath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
-            }
-
-            // OBJ形式は法線マップをaiTextureType_NORMALSではなくmap_bump(aiTextureType_HEIGHT)として
-            // 格納する慣習があるため、NORMALSが無い場合はHEIGHTにもフォールバックする
-            if (material->GetTexture(aiTextureType_NORMALS, 0, &texPath) == AI_SUCCESS ||
-                material->GetTexture(aiTextureType_HEIGHT, 0, &texPath) == AI_SUCCESS)
-            {
-                outMesh.NormalPath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
-            }
-
-            // glTFのmetallicRoughnessテクスチャはG=ラフネス、B=メタリックを1枚に格納しており、
-            // assimpはこれをROUGHNESS/METALNESSの両方のテクスチャタイプとして同じ画像を指す
-            //
-            // --specular-as-orm指定時は、どちらも無い場合にaiTextureType_SPECULARも見る。
-            // FBXのSpecularColorスロットへORM(R=遮蔽/G=ラフネス/B=メタリック)を入れる規約の
-            // アセット用(MaterialOverride::SpecularAsOrmのコメント参照)。チャンネルの割り当ては
-            // glTFのmetallicRoughness(G=ラフネス/B=メタリック)と一致するため、
-            // GBuffer.hlslのサンプリングはそのままでよい
-            if (material->GetTexture(aiTextureType_DIFFUSE_ROUGHNESS, 0, &texPath) == AI_SUCCESS ||
-                material->GetTexture(aiTextureType_METALNESS, 0, &texPath) == AI_SUCCESS ||
-                (materialOverride.SpecularAsOrm &&
-                 material->GetTexture(aiTextureType_SPECULAR, 0, &texPath) == AI_SUCCESS))
-            {
-                outMesh.MetallicRoughnessPath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
-            }
-
-            if (material->GetTexture(aiTextureType_EMISSIVE, 0, &texPath) == AI_SUCCESS)
-            {
-                outMesh.EmissivePath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
-            }
-
-            // ベイク済みアンビエントオクルージョン(遮蔽マップ)。
-            // assimpはglTFのocclusionTextureをaiTextureType_LIGHTMAPへマップする
-            // (ThirdParty/assimp/code/AssetLib/glTF2/glTF2Importer.cpp参照)。明示的な
-            // AMBIENT_OCCLUSIONスロットを持つ形式もあるため、そちらもフォールバックとして見る。
-            //
-            // 【aiTextureType_AMBIENT(OBJのmap_Ka)は意図的に見ない】法線マップのNORMALS→HEIGHT
-            // フォールバックと同じ発想で最初は含めていたが、WavefrontMTLのmap_Kaは「アンビエント色の
-            // マップ」であって遮蔽率ではなく、実際にはmap_Kdと同じ拡散テクスチャを指す慣習になっている。
-            // 同梱のBistro(exterior.mtl/interior.mtl)も全マテリアルのmap_Kaが*_diff.pngを指していた。
-            // これを遮蔽率として採用すると、アルベドがそのまま環境光の減衰係数として掛かり、
-            // 色付きで極端に暗くなってしまう
-            if (material->GetTexture(aiTextureType_LIGHTMAP, 0, &texPath) == AI_SUCCESS ||
-                material->GetTexture(aiTextureType_AMBIENT_OCCLUSION, 0, &texPath) == AI_SUCCESS)
-            {
-                outMesh.OcclusionPath = ResolveTextureReference(scene, model.EmbeddedTextures, directory, texPath);
-            }
-            else if (materialOverride.SpecularAsOrm && !outMesh.MetallicRoughnessPath.empty())
-            {
-                // ORMのRチャンネルは遮蔽なので、同じ画像を遮蔽スロットとしても使う。
-                //
-                // 【ktexは増えない】PackageWriterのテクスチャ要求は「解決済みパス|sRGBの要否」を
-                // キーに重複排除するため、metallicRoughnessと同じパス・同じlinear指定のこの要求は
-                // 同一エントリに畳まれる。
-                //
-                // 【UV1で引かれても正しい】遮蔽マップはシェーダー側で常にUV1(TEXCOORD1)から引くが、
-                // --bake-occlusionを行わない場合UV1にはUV0が複製される(Assets/Vertex.hのコメント)。
-                // ORMはUV0の空間で作られているため、これで意図どおりの位置が引ける
-                outMesh.OcclusionPath = outMesh.MetallicRoughnessPath;
-            }
-
-            // glTFのocclusionTexture.strength。ラフネス係数と異なり既定値がglTF仕様で1.0と
-            // 明記されているため、取得できない場合は無効値ではなくその既定値を採用する
-            // (assimpはLIGHTMAPスロットのプロパティとして格納する)
-            outMesh.OcclusionStrength = Kurenai::Assets::kDefaultOcclusionStrength;
-
-            float occlusionStrength = 0.0f;
-            if (material->Get(AI_MATKEY_GLTF_TEXTURE_STRENGTH(aiTextureType_LIGHTMAP, 0), occlusionStrength) == AI_SUCCESS)
-            {
-                // 遮蔽の強度は[0,1]が仕様上の値域。範囲外は壊れたデータとみなし既定値へ戻す
-                if (occlusionStrength >= 0.0f && occlusionStrength <= 1.0f)
-                {
-                    outMesh.OcclusionStrength = occlusionStrength;
-                }
-                else
-                {
-                    Kurenai::Core::Logger::Warning(
-                        "ModelSource",
-                        "遮蔽の強度が[0,1]の範囲外のため既定値1.0として扱います: " + std::to_string(occlusionStrength));
-                }
-            }
-
-            // FBXなどPBRメタリック係数を持たない形式では既定値(非金属)のままになる
-            material->Get(AI_MATKEY_METALLIC_FACTOR, outMesh.MetallicFactor);
-
-            // ラフネスは「ソースデータが持っていなければ無効値を書き出す」方針を取る。
-            // もっともらしい既定値(例: 0.7)をパッカーが勝手に埋めると、データに無い値が
-            // 事実として下流へ流れてしまい、消費側は「指定された0.7」と「データに無かった」を
-            // 区別できなくなる。何を既定値とするかはフォーマットやアセットによって異なり、
-            // 変換ツールが決めてよい値ではない。無効値の解釈は消費側の責任とする
-            // (シェーダーは係数1.0=テクスチャの値をそのまま使う、として扱う)
-            outMesh.RoughnessFactor = Kurenai::Assets::kInvalidMaterialFactor;
-
-            float roughnessFactor = 0.0f;
-            if (material->Get(AI_MATKEY_ROUGHNESS_FACTOR, roughnessFactor) == AI_SUCCESS)
-            {
-                // 古いPhong系マテリアル(Shininessのみ持つ)をassimpがPBRラフネスへ変換する際、
-                // 変換式が破綻して[0,1]範囲外の値を返すことがある(実測で負値を確認済み)。
-                // そのまま流すとシェーダー側のclampで最小ラフネス(ほぼ鏡面)に張り付いてしまうため、
-                // 範囲外は「取得できなかった」と同じ扱いにする
-                if (roughnessFactor >= 0.0f && roughnessFactor <= 1.0f)
-                {
-                    outMesh.RoughnessFactor = roughnessFactor;
-                }
-                else
-                {
-                    Kurenai::Core::Logger::Warning(
-                        "ModelSource",
-                        "ラフネス係数が[0,1]の範囲外のため無効値として扱います: " + std::to_string(roughnessFactor));
-                }
-            }
-            else
-            {
-                // WavefrontMTL(OBJ)はPBRのラフネスを持たない代わりに、Blinn-Phongの鏡面反射指数Ns
-                // (assimpがAI_MATKEY_SHININESSへ格納する)を持っていることがある。変換式は
-                // Blinn-Phong指数 → GGXラフネス の一般的な近似 roughness = sqrt(2 / (Ns + 2))
-                // (Ns→∞で0、Ns=0で1に漸近する)。
-                //
-                // ただしNs = 100.000 ちょうどの値は採用しない。これはOBJエクスポータが書き出す
-                // 定型の既定値で、マテリアルごとに調整された値ではないため。実測したMTLでは
-                // 全マテリアルの8割前後がこの値ちょうどで、石畳や漆喰のような明らかに粗い材質まで
-                // 含まれていた。これを採用するとそれらがラフネス0.14(ほぼ鏡面)になり、
-                // 環境光の鏡面反射がシーン全体へ強くかかって白く霞んだ絵になることを実機で確認している。
-                // 情報量の無い値として無視し、無効値のままにする
-                constexpr float kMtlDefaultShininess = 100.0f;
-                float shininess = 0.0f;
-                if (material->Get(AI_MATKEY_SHININESS, shininess) == AI_SUCCESS && shininess > 0.0f &&
-                    std::abs(shininess - kMtlDefaultShininess) > 0.001f)
-                {
-                    outMesh.RoughnessFactor = std::clamp(std::sqrt(2.0f / (shininess + 2.0f)), 0.0f, 1.0f);
-                }
-            }
-
-            aiColor3D emissiveColor(0.0f, 0.0f, 0.0f);
-            material->Get(AI_MATKEY_COLOR_EMISSIVE, emissiveColor);
-            outMesh.EmissiveFactor[0] = emissiveColor.r;
-            outMesh.EmissiveFactor[1] = emissiveColor.g;
-            outMesh.EmissiveFactor[2] = emissiveColor.b;
-
-            // --emissive <マテリアル名>=<R,G,B>。Keを持たないアセット(Bistro屋外は
-            // 132マテリアル全部のKeが0)では、照明器具のジオメトリがあっても
-            // EmissiveFactorが0のままで、自発光テクスチャを持つマテリアルすら光らない。
-            // 名前が一致したマテリアルにだけ係数を与える
-            if (!materialOverride.Emissive.empty())
-            {
-                aiString materialName;
-                if (material->Get(AI_MATKEY_NAME, materialName) == AI_SUCCESS)
-                {
-                    const auto found = materialOverride.Emissive.find(materialName.C_Str());
-                    if (found != materialOverride.Emissive.end())
-                    {
-                        outMesh.EmissiveFactor[0] = found->second[0];
-                        outMesh.EmissiveFactor[1] = found->second[1];
-                        outMesh.EmissiveFactor[2] = found->second[2];
-                    }
-                }
-            }
-
-            // glTFのpbrMetallicRoughness.baseColorFactor(既定[1,1,1,1])。テクスチャを持たず
-            // baseColorFactorのみで色/不透明度を表現するマテリアル(ガラス等)を正しく再現するために
-            // 読み取る。取得できない場合(FBX/OBJ等、AI_MATKEY_BASE_COLORはglTF専用のため常に失敗する)は
-            // 代わりにOBJ/FBXの古典的なPhongモデルのKd(拡散色)であるAI_MATKEY_COLOR_DIFFUSEを使う
-            // (ガラス系マテリアルによくあるKdが黒[0,0,0]のケースを、白1x1プレースホルダーへ
-            // 誤ってフォールバックさせないため)
-            aiColor4D baseColorFactor(1.0f, 1.0f, 1.0f, 1.0f);
-            if (material->Get(AI_MATKEY_BASE_COLOR, baseColorFactor) != AI_SUCCESS)
-            {
-                aiColor3D diffuseColor(1.0f, 1.0f, 1.0f);
-                material->Get(AI_MATKEY_COLOR_DIFFUSE, diffuseColor);
-                baseColorFactor = aiColor4D(diffuseColor.r, diffuseColor.g, diffuseColor.b, 1.0f);
-            }
-
-            // アルファモード(BLEND/MASK/OPAQUE)はglTFの拡張情報でのみ判定できる(FBX/OBJ等には
-            // この3値の概念自体が無い)。MASKはAlphaCutoffを設定してGBuffer.hlsl側のclip()で
-            // カットアウトさせ、BLENDはIsTransparent=trueにしてKurenaiEngine3DのTransparentパス
-            // (フォワードシェーディング+アルファブレンド)へ回す
-            aiString alphaMode;
-            float alphaCutoff = 0.5f;
-            material->Get(AI_MATKEY_GLTF_ALPHACUTOFF, alphaCutoff);
-            const bool hasAlphaMode = material->Get(AI_MATKEY_GLTF_ALPHAMODE, alphaMode) == AI_SUCCESS;
-            outMesh.AlphaCutoff = (hasAlphaMode && std::strcmp(alphaMode.C_Str(), "MASK") == 0) ? alphaCutoff : 0.0f;
-            outMesh.IsTransparent = hasAlphaMode && std::strcmp(alphaMode.C_Str(), "BLEND") == 0;
-
-            // --alpha-cutout <マテリアル名>=<しきい値>。上のalphaMode判定はglTF専用で、
-            // FBX/OBJには対応する情報が無い。SpeedTreeの葉のように「BaseColorのアルファで抜く」
-            // 前提で作られたマテリアルは、指定しないと不透明な板として描かれる
-            // (Bistro(OBJ)の葉で実際に起きている既知の破綻と同じもの)
-            if (!materialOverride.AlphaCutoff.empty())
-            {
-                aiString materialName;
-                if (material->Get(AI_MATKEY_NAME, materialName) == AI_SUCCESS)
-                {
-                    const auto found = materialOverride.AlphaCutoff.find(materialName.C_Str());
-                    if (found != materialOverride.AlphaCutoff.end())
-                    {
-                        outMesh.AlphaCutoff = found->second;
-                        // カットアウトと半透明は排他(glTFのalphaModeがOPAQUE/MASK/BLENDの
-                        // いずれか1つであるのと同じ)。明示的にカットアウトを指定した以上、
-                        // 後段のOPACITY/Tf由来の半透明判定に横取りされないようにする
-                        outMesh.IsTransparent = false;
-                    }
-                }
-            }
-
-            // 透過率(葉・花弁のような薄いものが裏からの光を透かす量)。
-            // glTFにこれを表す標準のプロパティが無いため、--translucent <マテリアル名>=<値> で
-            // 外から与える。名前が一致したマテリアルにだけ設定する
-            if (!materialOverride.Translucency.empty())
-            {
-                aiString materialName;
-                if (material->Get(AI_MATKEY_NAME, materialName) == AI_SUCCESS)
-                {
-                    const auto found = materialOverride.Translucency.find(materialName.C_Str());
-                    if (found != materialOverride.Translucency.end())
-                    {
-                        outMesh.Translucency = found->second;
-                    }
-                }
-            }
-
-            // OBJ等、alphaModeの概念を持たない形式ではAI_MATKEY_OPACITY(WavefrontMTLの
-            // d/Trから変換された不透明度。assimpのObjFileImporter.cppが
-            // AI_MATKEY_OPACITYへ格納する)を見る。d/Trがどちらも無ければassimpは既定の1.0
-            // (不透明)を返すため、架空の値を補うことにはならない
-            float opacity = 1.0f;
-            if (!hasAlphaMode && material->Get(AI_MATKEY_OPACITY, opacity) == AI_SUCCESS && opacity < 0.999f)
-            {
-                outMesh.IsTransparent = true;
-                baseColorFactor.a = opacity;
-            }
-
-            // WavefrontMTLには、d/Trとは別に「透過を伴う照明モデル(illum 4/6/7/9)+ Tf(透過フィルタ)」で
-            // 透明度を表現する書き方がある。assimpのOBJインポータはTfをAI_MATKEY_COLOR_TRANSPARENTへ、
-            // illumをAI_MATKEY_OBJ_ILLUMへ格納するだけで、不透明度(AI_MATKEY_OPACITY)には一切反映しない
-            // (ObjFileImporter.cppのCreateMaterial。AI_MATKEY_OPACITYへ入るのはd/Tr由来の値のみ)。
-            // そのためd/Trだけを見ていると、この書き方のマテリアルがすべて不透明として扱われる。
-            // 実測した大規模なOBJ配布では、瓶・窓・街灯といったガラス系マテリアルの大半がこの書き方で、
-            // d/Trのみの判定ではシーン全体で半透明メッシュが計36三角形しか出ていなかった。
-            //
-            // Tfの解釈: MTLの原仕様では「透過光にかけるフィルタ色」(Tf=1,1,1が無着色=全透過)だが、
-            // Tf = 1 - Tr(= d)、つまり不透明度そのものとして書き出すエクスポータが実在する。
-            // d/TrとTfを両方持つマテリアルの実測値(Tr 0.800/Tf 0.2、Tr 0.900/Tf 0.1、
-            // Tr 0.000/Tf 1.0)がいずれもTf == 1 - Trで一貫していたため、Tfを不透明度として読む。
-            // assimpのTf既定値も(1,1,1)(ObjFileData.hのMaterial::transparent)なので、Tfを書いていない
-            // 通常のOBJがこの経路で誤って半透明化されることはない。
-            // なお原仕様どおり「Tf=透過率」と解釈するとTf未記載の全マテリアルが全透過になってしまい、
-            // 実用にならない点でも、この解釈以外に選択肢がない
-            if (!hasAlphaMode && !outMesh.IsTransparent)
-            {
-                int illuminationModel = 1;
-                aiColor3D transmissionFilter(1.0f, 1.0f, 1.0f);
-                if (material->Get(AI_MATKEY_OBJ_ILLUM, illuminationModel) == AI_SUCCESS &&
-                    (illuminationModel == 4 || illuminationModel == 6 || illuminationModel == 7 || illuminationModel == 9) &&
-                    material->Get(AI_MATKEY_COLOR_TRANSPARENT, transmissionFilter) == AI_SUCCESS)
-                {
-                    const float filterOpacity =
-                        (transmissionFilter.r + transmissionFilter.g + transmissionFilter.b) / 3.0f;
-                    if (filterOpacity < 0.999f)
-                    {
-                        outMesh.IsTransparent = true;
-                        baseColorFactor.a = std::clamp(filterOpacity, 0.0f, 1.0f);
-
-                        aiString materialName;
-                        material->Get(AI_MATKEY_NAME, materialName);
-                        Kurenai::Core::Logger::Info(
-                            "ModelSource",
-                            std::string("マテリアル\"") + materialName.C_Str() + "\"をillum " +
-                                std::to_string(illuminationModel) + " + Tfから半透明と判定しました(不透明度 " +
-                                std::to_string(baseColorFactor.a) + ")");
-                    }
-                }
-            }
-
-            outMesh.BaseColorFactor[0] = baseColorFactor.r;
-            outMesh.BaseColorFactor[1] = baseColorFactor.g;
-            outMesh.BaseColorFactor[2] = baseColorFactor.b;
-            outMesh.BaseColorFactor[3] = baseColorFactor.a;
-
-            model.Meshes.push_back(std::move(outMesh));
+            BuildSourceMeshFromMaterial(
+                scene, directory, materialOverride, materialIndex, accumIt->second, model);
         }
+    }
+
+    SourceModel LoadSourceModel(
+        const std::wstring& filePath,
+        float scale,
+        const MaterialOverride& materialOverride,
+        const std::optional<std::array<float, 3>>& originOffset,
+        ParseTimings* outTimings)
+    {
+        // outTimingsがnullptrでも分岐を増やさずに済むよう、常にローカルへ積んで最後に転記する
+        ParseTimings timings;
+
+        Assimp::Importer importer;
+        // 【GenSmoothNormalsは法線を持たないアセットのためにある】assimpのこの処理は
+        // 法線を既に持つメッシュには何もしないため、法線付きのアセット(Sponza/Bistro等)の
+        // 出力は変わらない。一方 PLATEAU の FBX は CityGML 由来で法線を1つも持っておらず、
+        // これが無いと後段のフォールバック(上向き固定法線)が全頂点に入る。その結果、
+        // 垂直な壁も真上を向いていることになり、面の向きによる明暗(陰)が一切出なくなる。
+        // 落ち影は法線と無関係に出るので絵は「それらしく」見え、気づきにくい
+        //
+        // 【スムージング角度を絞る】既定の175度ではほぼ全ての稜線が平均化され、建物の
+        // 壁と屋根の直角まで丸まる。この角度より開いた稜線は頂点を分けて面法線にする
+        importer.SetPropertyFloat(AI_CONFIG_PP_GSN_MAX_SMOOTHING_ANGLE, kMaxSmoothingAngleDegrees);
+        // 接線はassimpのaiProcess_CalcTangentSpaceに任せず自前で計算する(下記の頂点ループ内、
+        // TangentAccumKey関連のコード参照)。CalcTangentSpaceはUV面積がほぼ0(縮退)の三角形で
+        // 接線が数値的に不安定になり、位置・法線・UVが完全に同一の頂点間でさえ接線がほぼ正反対に
+        // なることがある。JoinIdenticalVerticesは重複頂点を減らせるため付けておく
+        // (自前の接線平均化は位置+法線をキーにしており重複頂点の有無に依存しないため、
+        // 平均化の正しさ自体には影響しない)
+        const auto readStart = PhaseClock::now();
+        const aiScene* scene = importer.ReadFile(
+            WideToUtf8(filePath),
+            aiProcess_Triangulate | aiProcess_ConvertToLeftHanded | aiProcess_JoinIdenticalVertices |
+                aiProcess_GenSmoothNormals);
+        timings.ReadSeconds += PhaseSecondsSince(readStart);
+
+        if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !scene->mRootNode)
+        {
+            throw std::runtime_error(std::string("モデルの読み込みに失敗しました: ") + importer.GetErrorString());
+        }
+
+        const std::wstring directory = GetDirectory(filePath);
+
+        SourceModel model;
+
+        // 埋め込みテクスチャを持つモデルでだけ取り出し先を用意する。
+        // 一時ディレクトリの実体は最初の1枚を取り出す時点で作られる(EnsureDirectory)
+        if (scene->mNumTextures > 0)
+        {
+            model.EmbeddedTextures = std::make_shared<EmbeddedTextureStore>();
+            Kurenai::Core::Logger::Info("KurenaiPacker",
+                "埋め込みテクスチャを" + std::to_string(scene->mNumTextures) + "枚検出しました");
+        }
+
+        std::vector<std::pair<const aiMesh*, aiMatrix4x4>> meshNodes;
+        const auto collectStart = PhaseClock::now();
+        CollectMeshNodes(scene, scene->mRootNode, aiMatrix4x4(), meshNodes);
+        timings.CollectSeconds += PhaseSecondsSince(collectStart);
+
+        bool boundsInitialized = false;
+
+        // マテリアルインデックスごとに頂点・インデックスを結合してから1つのメッシュにまとめる。
+        // OBJ形式のように同一マテリアルの三角形群が(usemtlの切り替えのたびに)大量の
+        // 小さなaiMeshへ分割されているアセットでは、aiMeshごとに個別のバッファ/ドローコールを
+        // 発行すると数万件規模になり、GPU側のドライバウォッチドッグ(TDR)によるハングを
+        // 引き起こしうる(実測した大規模なOBJ配布では、実質132マテリアルに対して
+        // usemtl切り替えが22,396回あった)ため、マテリアル単位でまとめてドローコール数を実質マテリアル数まで
+        // 削減する
+        std::unordered_map<unsigned int, MergedMeshAccumulator> meshesByMaterial;
+
+        MergeMeshNodesByMaterial(
+            meshNodes, scale, originOffset, model, boundsInitialized, meshesByMaterial, timings);
+
+        const auto materialStart = PhaseClock::now();
+        BuildSourceMeshes(scene, directory, materialOverride, meshesByMaterial, model);
+
 
         if (scene->mNumLights > 0)
         {
