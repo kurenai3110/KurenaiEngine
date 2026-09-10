@@ -264,11 +264,8 @@ struct SkyParameters
 // ApplySkyParametersFromBufferと同じ理由=fxcのX3508回避)。
 // fogParams0はFrameConstants::FogParams0(x=消散係数, y=スケールハイト, z=基準高度, w=有効フラグ)。
 //
-// 【P17でviewerPositionはfloat3になり、意味が「おおよその高さ」から「レイの起点」へ変わった】
-// P17より前、この値は消散係数を高度で評価するためだけに使われており、数メートルのずれは
-// 結果を0.1%も動かさなかった。P17で雲をワールド座標に固定してからは、これが雲との交差を
-// 解くレイの起点そのものになる——**ずれるとその分だけ雲の模様がずれる**。
-// したがって呼び出し側は「そのレイが実際に出る場所」を渡すこと:
+// 【viewerPosition は雲との交差を解くレイの起点そのもの】**ずれるとその分だけ雲の
+// 模様がずれる**。したがって呼び出し側は「そのレイが実際に出る場所」を渡すこと:
 //   - DeferredLighting.hlsl … カメラ位置(背景画素の視線はカメラから出る)
 //   - SSR.hlsl             … カメラ位置。ただし水面の反射だけは起点が水面なので、
 //                             SkyColorWithRayへ水面のワールド座標を明示的に渡して上書きする
@@ -564,12 +561,9 @@ float3 SkyColorUpperUnit(float3 dir, SkyParameters params)
 
     // --- 日中の空: Hillaire (2020) のSkyView LUT ---
     //
-    // 【なぜPreethamではないのか】参考写真と突き合わせると、空の青さはPreetham
-    // というモデルの限界に当たる。写真の最も青い空はB/R=4.84だが、
-    // Preethamは論文の係数から実装とは独立に計算しても1.34〜1.74しか出さない(実装の実測も
-    // この範囲内でモデルに忠実だった)。Rayleigh散乱はλ^-4に比例するので、物理から始めれば
-    // B/Rは散乱係数の時点で5.70になる。地平線がマゼンタに寄る癖(Preethamは仰角0.5度で
-    // 緑の落ち込みが-7.6)も、Rayleigh/Mie/オゾンを分けて持てば構造的に起きない。
+    // 【なぜPreethamではないのか】空の青さも地平線がマゼンタに寄る癖も、Preetham という
+    // モデルの限界に当たる。Rayleigh/Mie/オゾンを分けて持てば構造的に起きない
+    // (参考写真との突き合わせは docs/ImplementationDetail.md 21.12)。
     //
     // LUTは天頂のRec.709輝度が1になるよう正規化して焼いてあるので、
     // 「天頂輝度を1としたときの空の色」というこの関数の規約はPreetham時代と同じまま
@@ -1049,8 +1043,8 @@ CloudLayerParams MakeCirrusLayerParams(SkyParameters params)
 
 // 雲(1層ぶん)の透過率と散乱光を求める。
 // 層に当たらないレイは交差が空になり、透過率1・散乱光0という中立元がそのまま返る。
-// 層ごとの設定は CloudLayerParams でまとめて渡す(積雲・巻雲で式を複製しないため)。
-// 経緯は docs/ImplementationHistory.md 91.1
+// 層ごとの設定は CloudLayerParams でまとめて渡す(積雲・巻雲で式を複製しないため。
+// 経緯は docs/ImplementationHistory.md 91.1)。
 // sunToSkyIlluminanceRatio/skyIlluminanceOverZenithは雲の明るさを太陽照度基準にするための
 // 係数(SkyParameters::SunToSkyIlluminanceRatio/SkyIlluminanceOverZenith参照)。SkyParameters
 // 全体ではなくこの2つだけを個別の引数にしているのは、既存のsunDirection/zenithLuminanceと
@@ -1328,15 +1322,9 @@ float CloudWorleyFbmFromChannels(float3 channels)
 // **輪郭が高さでほとんど変わらない**(同じ形が積み上がって見える)。しきい値にすれば
 // 高さで輪郭そのものが変わる。
 //
-// 【この形は一度失敗しており、原因も分かっている】当初 saturate(CloudRemap(base, 1 - weather, 1))
-// を試して密度が常に0へ落ちた。理由は2つあり、どちらもD2までに解消している:
-//   ・base がほぼ定数だった(当時 平均0.781・標準偏差0.055)。C1のコントラスト伸張後は
-//     平均0.455・標準偏差0.329
-//   ・weather が値域の下へ潰れていた(remapの上端がweatherNの届かない1.0だった)。
-//     D2で実測分布に合わせて直した(kCloudWeatherLow のコメント参照)
-//
-// なお kCloudVolumeDensityNormalize は「スラブ内の平均を1へ揃える」係数だが、
-// **D2で合成の式が変わったので測り直しが必要**である。
+// **base と weather はどちらも[0,1]を使い切っていなければならない。** どちらかが値域の
+// 下へ潰れていると base が 1-weather を上回れず、密度が常に0へ落ちる
+// (一度そうなった。docs/ImplementationDetail.md 35.33)。
 // その場所のウェザーマップ(被覆率で整形済み)と雲の種類(C7)。
 // 種類を先に求め、それで局所的な被覆率を上下させることで大きさをまばらにする
 // (kCloudCoverageAtStratus のコメント参照)。cloudTypeは呼び出し側が
@@ -2174,10 +2162,8 @@ float3 CloudAirlightCorrection(float3 clearColor, float fogInFront, SkyParameter
 //   SkyColorWithoutClouds(dir) * T + S + CloudAirlightCorrection(clearColor, fogInFront)
 // で、これはSkyColorWithRayが行う形と同一である。
 //
-// 【なぜ起点が要るのか】P17より前のSkyColor(dir, params)は方向しか受け取らず、雲層を
-// 「カメラの真上にある無限平面」として扱っていた。そのため水面の反射レイも起点がカメラ扱いに
-// なり、**水面に雲が映らない直接の原因**になっていた(EvaluateCloudLayerの(a)節に4つの症状を
-// まとめてある)。
+// 【なぜ起点が要るのか】方向だけを受け取る形だと雲層がカメラ相対の無限平面になり、
+// 水面の反射レイも起点がカメラ扱いになる(docs/ImplementationHistory.md 91.2)。
 //
 // 雲が無い場合(被覆率0、またはレイが層と交差しない)は中立元(透過率1.0 / 散乱光0 /
 // 霞1.0)を返す。合成式は x*1.0 + 0.0 + x*(CSL-1)*0.0 となりIEEE754で厳密にxと一致するため、

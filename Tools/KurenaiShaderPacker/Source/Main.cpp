@@ -7,8 +7,7 @@
 //                           [--config Debug|Release] [--force] [--jobs N]
 //   KurenaiShaderPacker.exe --dump <file.kshader>
 //
-// 従来は .hlsl を出力フォルダへコピーするだけで、アプリの起動時にその場でコンパイルしていた。
-// 実測(RTX 4070 Ti / Release / Sample3D)でDX11は約17.6秒、DX12は約2.1秒をそこで使っていた。
+// 起動時のコンパイルをやめてビルド時へ移した理由は docs/ImplementationDetail.md 54.1。
 //
 // 終了コード: 成功0 / 引数エラー1 / 入力読み込み失敗2 / コンパイルまたは書き出し失敗3
 //

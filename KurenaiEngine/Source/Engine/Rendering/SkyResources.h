@@ -62,10 +62,9 @@ namespace Kurenai::Rendering
         //
         // SkyViewは空そのもので太陽の位置に依存するため、太陽か濁りが動いたときに焼き直す
         // (同 m_SkyViewBakedSunPosition)。
-        // 【毎フレーム焼いていた頃の実測】192x108=20,736テクセルと小さいので「負荷は実質的に無い」と
-        // 書いていたが、Intel UHD Graphics 620 / DX11 / Release の実測では1.15〜1.53msあった。
-        // 1テクセルあたり視線32段+天頂32段の計64段のレイマーチで、各段が
-        // Transmittance LUTとMultiScattering LUTのサンプルを伴うため、テクセル数の割に高い。
+        // 【テクセル数が小さいことを「負荷が無い」の根拠にしないこと】1テクセルあたり
+        // 視線32段+天頂32段の計64段のレイマーチで、各段が2つのLUTのサンプルを伴う。
+        // 毎フレーム焼いていた頃の実測は docs/ImplementationHistory.md 41.17。
         // **このLUTを読むパス(SkyIntegrate/SkyGenerate/Lighting/SSR/AerialPerspective/
         // PlanarReflection)より前に実行される必要がある**が、順序はレンダーグラフが
         // Reads/Writesの依存から自動で決めるので、パスの登録順に依存しない
