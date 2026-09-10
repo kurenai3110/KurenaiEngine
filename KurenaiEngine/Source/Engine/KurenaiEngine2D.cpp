@@ -247,6 +247,24 @@ namespace Kurenai
 
             return pointCount;
         }
+
+        // GDIが描いたDIB(BGRA、白文字/黒背景)を、RGB=白・アルファ=被覆率のテクスチャへ直す。
+        // 色は DrawText の Color で乗算ティントするため、ここでは常に白にしておく
+        void ConvertGdiBitmapToAlphaTexels(
+            const void* bits, uint32_t atlasWidth, uint32_t atlasHeight, std::vector<uint8_t>& outPixels)
+        {
+            outPixels.assign(static_cast<size_t>(atlasWidth) * atlasHeight * 4, 0);
+            const uint8_t* src = static_cast<const uint8_t*>(bits);
+            const size_t pixelCount = static_cast<size_t>(atlasWidth) * atlasHeight;
+            for (size_t p = 0; p < pixelCount; ++p)
+            {
+                const uint8_t coverage = src[p * 4 + 0]; // DIBはBGRA順。B成分=R=G(グレースケールAA)をアルファに使う
+                outPixels[p * 4 + 0] = 255;
+                outPixels[p * 4 + 1] = 255;
+                outPixels[p * 4 + 2] = 255;
+                outPixels[p * 4 + 3] = coverage;
+            }
+        }
     }
 
     // 【この3つを呼ぶ順序を入れ替えないこと】DX12はディスクリプタ枠を生成順に割り当てる。
@@ -1100,17 +1118,8 @@ namespace Kurenai
 
         GdiFlush();
 
-        std::vector<uint8_t> pixels(static_cast<size_t>(atlasWidth) * atlasHeight * 4);
-        const uint8_t* src = static_cast<const uint8_t*>(bits);
-        const size_t pixelCount = static_cast<size_t>(atlasWidth) * atlasHeight;
-        for (size_t p = 0; p < pixelCount; ++p)
-        {
-            const uint8_t coverage = src[p * 4 + 0]; // DIBはBGRA順。B成分=R=G(グレースケールAA)をアルファに使う
-            pixels[p * 4 + 0] = 255;
-            pixels[p * 4 + 1] = 255;
-            pixels[p * 4 + 2] = 255;
-            pixels[p * 4 + 3] = coverage;
-        }
+        std::vector<uint8_t> pixels;
+        ConvertGdiBitmapToAlphaTexels(bits, atlasWidth, atlasHeight, pixels);
 
         SelectObject(memDC, oldBitmap);
         DeleteObject(bitmap);
