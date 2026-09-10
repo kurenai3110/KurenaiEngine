@@ -635,6 +635,166 @@ namespace
         std::cout << "[KurenaiPacker] シーン検証・配置完了: " << WideToUtf8(args.OutputPath) << "\n";
         return 0;
     }
+
+    // パックの結果を印字する。何も書き換えず、標準出力へ出すだけ
+    void PrintPackSummary(
+        const CommandLineArgs& args, const KurenaiPacker::SourceModel& sourceModel,
+        const KurenaiPacker::PackResult& result, const KurenaiPacker::OcclusionBakeResult& bakeResult,
+        const KurenaiPacker::ParseTimings& parseTimings,
+        const std::chrono::steady_clock::time_point& startTime,
+        const std::chrono::steady_clock::time_point& parseTime,
+        const std::chrono::steady_clock::time_point& bakeTime,
+        const std::chrono::steady_clock::time_point& endTime)
+    {
+        if (args.OriginOffset)
+        {
+            // .ksceneの先頭コメントへ記録できるよう、引いた値をそのまま出す
+            std::cout
+                << "[KurenaiPacker] --origin により ("
+                << (*args.OriginOffset)[0] << ", " << (*args.OriginOffset)[1] << ", " << (*args.OriginOffset)[2]
+                << ") を減算しました\n";
+        }
+
+        std::cout
+            << "[KurenaiPacker] パック完了: " << WideToUtf8(args.OutputPath) << "\n"
+            << "  メッシュ数: " << result.MeshCount
+            << " / 頂点数: " << result.VertexCount
+            << " / インデックス数: " << result.IndexCount << "\n"
+            << "  テクスチャ要求: " << result.TextureRequested
+            << " (新規生成 " << result.TextureGenerated
+            << " / 既存スキップ " << result.TextureSkippedExisting
+            << " / 失敗(フォールバック) " << result.TextureFailed << ")\n";
+
+        if (sourceModel.EmbeddedTextures && sourceModel.EmbeddedTextures->ExtractedCount() > 0)
+        {
+            // 埋め込みテクスチャは「取り出せた枚数」と「テクスチャ要求の数」の両方を見ないと
+            // 落ちているものに気づけない(取り出しに失敗したスロットは-1へフォールバックし、
+            // 要求そのものが立たないため)
+            std::cout << "  埋め込みテクスチャ: " << sourceModel.EmbeddedTextures->ExtractedCount()
+                << "枚を一時ファイルへ取り出しました\n";
+        }
+
+        if (args.EnableMeshlets && args.MeshletLODCount > 0)
+        {
+            std::cout << "  メッシュレット: " << result.MeshletCount << " (LOD0 " << result.MeshletLOD0Count << ")";
+            if (result.MeshletLOD0Count > 0)
+            {
+                // 1メッシュレットあたりの平均三角形数。上限(kMeshletMaxTriangles)に近いほど
+                // 分割が詰まっており、極端に少ない場合はモデルの三角形が散らばっている。
+                // LOD0だけで割る(簡略化した段は三角形が減っているので混ぜると意味が薄れる)
+                std::cout << " (LOD0の1つあたり平均 "
+                          << (result.IndexCount / 3 + result.MeshletLOD0Count / 2) / result.MeshletLOD0Count << "三角形)";
+            }
+            std::cout << "\n";
+
+            if (args.MeshletLODCount > 1 && result.MeshletTrianglesByLOD[0] > 0)
+            {
+                // 【段ごとに出す】段が進んでも三角形が減っていなければ、簡略化が効いていない。
+                // 総数だけを見ていると「段は作れた」で通ってしまう
+                std::cout << "  メッシュレットLOD:";
+                for (unsigned int lod = 0; lod < Kurenai::Assets::kMaxMeshletLODCount; ++lod)
+                {
+                    if (lod > 0 && result.MeshletTrianglesByLOD[lod] == 0)
+                    {
+                        break;
+                    }
+                    std::cout << " [" << lod << "] " << result.MeshletTrianglesByLOD[lod] << "三角形";
+                }
+                std::cout << "\n";
+            }
+        }
+
+        if (args.BakeOcclusion)
+        {
+            std::cout
+                << "  遮蔽マップ: ベイク " << bakeResult.BakedMeshCount
+                << " / スキップ " << bakeResult.SkippedMeshCount
+                << " / 書き出し " << result.OcclusionBaked
+                << " (解像度 " << args.OcclusionResolution
+                << " / レイ " << args.OcclusionRays << "本)\n"
+                << "  bent normal: 書き出し " << result.BentNormalBaked
+                << " (レイ " << args.BentNormalRays << "本)\n";
+        }
+
+        std::cout
+            << "  所要時間: 解析 " << FormatMs(startTime, parseTime) << "ms";
+        if (args.BakeOcclusion)
+        {
+            std::cout << " / 遮蔽ベイク " << FormatMs(parseTime, bakeTime) << "ms";
+        }
+        std::cout
+            << " / 書き出し " << FormatMs(bakeTime, endTime) << "ms"
+            << " / 合計 " << FormatMs(startTime, endTime) << "ms\n";
+
+        if (args.Timing)
+        {
+            // 【0の項目は出さない】テクスチャ0枚のPLATEAU LOD1タイルのように、ほとんどの項目が
+            // 0になる入力がある。全部並べると671タイルぶんのログが読めなくなる
+            const auto emit = [](const char* label, double seconds)
+            {
+                if (seconds < 0.0005) { return; }
+                std::cout << " / " << label << " " << FormatSeconds(seconds) << "ms";
+            };
+
+            std::cout << "  解析の内訳:";
+            emit("assimp読み込み", parseTimings.ReadSeconds);
+            emit("ノード収集", parseTimings.CollectSeconds);
+            emit("接線蓄積", parseTimings.TangentSeconds);
+            emit("頂点ループ", parseTimings.VertexSeconds);
+            emit("結合", parseTimings.MergeSeconds);
+            emit("マテリアル", parseTimings.MaterialSeconds);
+            std::cout << "\n";
+
+            const KurenaiPacker::WriteTimings& wt = result.Timings;
+            std::cout << "  書き出しの内訳:";
+            emit("収集", wt.CollectSeconds);
+            emit("スキップ判定", wt.SkipCheckSeconds);
+            emit("テクスチャ", wt.TextureSeconds);
+            emit("エントリ確定", wt.EntrySeconds);
+            emit("遮蔽マップ", wt.OcclusionSeconds);
+            emit("bentNormal", wt.BentNormalSeconds);
+            emit("メッシュレット構築", wt.MeshletSeconds);
+            emit("連結", wt.AppendSeconds);
+            emit(".kgeom書き込み", wt.GeometryWriteSeconds);
+            emit(".kmodel書き込み", wt.ModelWriteSeconds);
+            std::cout << "\n";
+
+            if (wt.WorkerCount > 0)
+            {
+                // 【和は実時間を超えうる】全ワーカーの累計なので上限は実時間×ワーカー数。
+                // 実効並列度がワーカー数に近ければ全員が働いており、1に近ければ1本を残して
+                // 全員がBC7のミューテックスで待っている。ここがスレッドを増やす価値を直接決める
+                const double workerSum = wt.WorkerLoadSeconds + wt.WorkerDdsSeconds + wt.WorkerWriteSeconds;
+                const double effective = wt.TextureSeconds > 0.0 ? workerSum / wt.TextureSeconds : 0.0;
+                std::cout
+                    << "  テクスチャ内訳(全ワーカーの累計): 読み込み+ミップ+BC7 " << FormatSeconds(wt.WorkerLoadSeconds) << "ms"
+                    << " / DDS化 " << FormatSeconds(wt.WorkerDdsSeconds) << "ms"
+                    << " / 書き込み " << FormatSeconds(wt.WorkerWriteSeconds) << "ms\n"
+                    << "    ワーカー " << wt.WorkerCount << "本 / フェーズ実時間 " << FormatSeconds(wt.TextureSeconds) << "ms"
+                    << " / 実効並列度 " << Format2(effective) << "\n";
+
+                // 【ここが本丸】BC7待ちとBC7圧縮の比が「ワーカーを増やして意味があるか」を決める。
+                // 待ちが支配的なら本数を増やしても待ち行列が伸びるだけで、直列点そのものを
+                // 見直すか、プロセスを分けてデバイスを分けるしかない
+                std::cout
+                    << "    LoadFromFileの内訳: デコード " << FormatSeconds(wt.TexDecodeSeconds) << "ms"
+                    << " / ミップ " << FormatSeconds(wt.TexMipSeconds) << "ms"
+                    << " / BC7待ち " << FormatSeconds(wt.TexBC7WaitSeconds) << "ms"
+                    << " / BC7圧縮 " << FormatSeconds(wt.TexBC7CompressSeconds) << "ms"
+                    << " / デバイス生成 " << FormatSeconds(wt.TexDeviceCreateSeconds) << "ms\n";
+            }
+
+            // 【プロセスCPU÷実時間を必ず出す】これがワーカー数を超えていたら、内側のライブラリが
+            // 既に自前で並列化しているという意味で、外側にプールを足してはいけない
+            // (DirectXTexのOpenMPと外側8ワーカーが掛かって224スレッドになり、機械が固まった前例がある)
+            const double cpuSeconds = KurenaiPacker::GetProcessCpuSeconds();
+            const double wallSeconds = std::chrono::duration<double>(endTime - startTime).count();
+            std::cout
+                << "  プロセス全体: CPU " << FormatSeconds(cpuSeconds) << "ms"
+                << " (" << Format2(wallSeconds > 0.0 ? cpuSeconds / wallSeconds : 0.0) << "コア相当)"
+                << " / ピークWS " << KurenaiPacker::GetPeakWorkingSetMB() << "MB\n";
+        }
+    }
 }
 
 int wmain(int argc, wchar_t** argv)
@@ -791,154 +951,8 @@ int wmain(int argc, wchar_t** argv)
 
     const auto endTime = std::chrono::steady_clock::now();
 
-    if (args.OriginOffset)
-    {
-        // .ksceneの先頭コメントへ記録できるよう、引いた値をそのまま出す
-        std::cout
-            << "[KurenaiPacker] --origin により ("
-            << (*args.OriginOffset)[0] << ", " << (*args.OriginOffset)[1] << ", " << (*args.OriginOffset)[2]
-            << ") を減算しました\n";
-    }
+    PrintPackSummary(args, sourceModel, result, bakeResult, parseTimings, startTime, parseTime, bakeTime, endTime);
 
-    std::cout
-        << "[KurenaiPacker] パック完了: " << WideToUtf8(args.OutputPath) << "\n"
-        << "  メッシュ数: " << result.MeshCount
-        << " / 頂点数: " << result.VertexCount
-        << " / インデックス数: " << result.IndexCount << "\n"
-        << "  テクスチャ要求: " << result.TextureRequested
-        << " (新規生成 " << result.TextureGenerated
-        << " / 既存スキップ " << result.TextureSkippedExisting
-        << " / 失敗(フォールバック) " << result.TextureFailed << ")\n";
-
-    if (sourceModel.EmbeddedTextures && sourceModel.EmbeddedTextures->ExtractedCount() > 0)
-    {
-        // 埋め込みテクスチャは「取り出せた枚数」と「テクスチャ要求の数」の両方を見ないと
-        // 落ちているものに気づけない(取り出しに失敗したスロットは-1へフォールバックし、
-        // 要求そのものが立たないため)
-        std::cout << "  埋め込みテクスチャ: " << sourceModel.EmbeddedTextures->ExtractedCount()
-            << "枚を一時ファイルへ取り出しました\n";
-    }
-
-    if (args.EnableMeshlets && args.MeshletLODCount > 0)
-    {
-        std::cout << "  メッシュレット: " << result.MeshletCount << " (LOD0 " << result.MeshletLOD0Count << ")";
-        if (result.MeshletLOD0Count > 0)
-        {
-            // 1メッシュレットあたりの平均三角形数。上限(kMeshletMaxTriangles)に近いほど
-            // 分割が詰まっており、極端に少ない場合はモデルの三角形が散らばっている。
-            // LOD0だけで割る(簡略化した段は三角形が減っているので混ぜると意味が薄れる)
-            std::cout << " (LOD0の1つあたり平均 "
-                      << (result.IndexCount / 3 + result.MeshletLOD0Count / 2) / result.MeshletLOD0Count << "三角形)";
-        }
-        std::cout << "\n";
-
-        if (args.MeshletLODCount > 1 && result.MeshletTrianglesByLOD[0] > 0)
-        {
-            // 【段ごとに出す】段が進んでも三角形が減っていなければ、簡略化が効いていない。
-            // 総数だけを見ていると「段は作れた」で通ってしまう
-            std::cout << "  メッシュレットLOD:";
-            for (unsigned int lod = 0; lod < Kurenai::Assets::kMaxMeshletLODCount; ++lod)
-            {
-                if (lod > 0 && result.MeshletTrianglesByLOD[lod] == 0)
-                {
-                    break;
-                }
-                std::cout << " [" << lod << "] " << result.MeshletTrianglesByLOD[lod] << "三角形";
-            }
-            std::cout << "\n";
-        }
-    }
-
-    if (args.BakeOcclusion)
-    {
-        std::cout
-            << "  遮蔽マップ: ベイク " << bakeResult.BakedMeshCount
-            << " / スキップ " << bakeResult.SkippedMeshCount
-            << " / 書き出し " << result.OcclusionBaked
-            << " (解像度 " << args.OcclusionResolution
-            << " / レイ " << args.OcclusionRays << "本)\n"
-            << "  bent normal: 書き出し " << result.BentNormalBaked
-            << " (レイ " << args.BentNormalRays << "本)\n";
-    }
-
-    std::cout
-        << "  所要時間: 解析 " << FormatMs(startTime, parseTime) << "ms";
-    if (args.BakeOcclusion)
-    {
-        std::cout << " / 遮蔽ベイク " << FormatMs(parseTime, bakeTime) << "ms";
-    }
-    std::cout
-        << " / 書き出し " << FormatMs(bakeTime, endTime) << "ms"
-        << " / 合計 " << FormatMs(startTime, endTime) << "ms\n";
-
-    if (args.Timing)
-    {
-        // 【0の項目は出さない】テクスチャ0枚のPLATEAU LOD1タイルのように、ほとんどの項目が
-        // 0になる入力がある。全部並べると671タイルぶんのログが読めなくなる
-        const auto emit = [](const char* label, double seconds)
-        {
-            if (seconds < 0.0005) { return; }
-            std::cout << " / " << label << " " << FormatSeconds(seconds) << "ms";
-        };
-
-        std::cout << "  解析の内訳:";
-        emit("assimp読み込み", parseTimings.ReadSeconds);
-        emit("ノード収集", parseTimings.CollectSeconds);
-        emit("接線蓄積", parseTimings.TangentSeconds);
-        emit("頂点ループ", parseTimings.VertexSeconds);
-        emit("結合", parseTimings.MergeSeconds);
-        emit("マテリアル", parseTimings.MaterialSeconds);
-        std::cout << "\n";
-
-        const KurenaiPacker::WriteTimings& wt = result.Timings;
-        std::cout << "  書き出しの内訳:";
-        emit("収集", wt.CollectSeconds);
-        emit("スキップ判定", wt.SkipCheckSeconds);
-        emit("テクスチャ", wt.TextureSeconds);
-        emit("エントリ確定", wt.EntrySeconds);
-        emit("遮蔽マップ", wt.OcclusionSeconds);
-        emit("bentNormal", wt.BentNormalSeconds);
-        emit("メッシュレット構築", wt.MeshletSeconds);
-        emit("連結", wt.AppendSeconds);
-        emit(".kgeom書き込み", wt.GeometryWriteSeconds);
-        emit(".kmodel書き込み", wt.ModelWriteSeconds);
-        std::cout << "\n";
-
-        if (wt.WorkerCount > 0)
-        {
-            // 【和は実時間を超えうる】全ワーカーの累計なので上限は実時間×ワーカー数。
-            // 実効並列度がワーカー数に近ければ全員が働いており、1に近ければ1本を残して
-            // 全員がBC7のミューテックスで待っている。ここがスレッドを増やす価値を直接決める
-            const double workerSum = wt.WorkerLoadSeconds + wt.WorkerDdsSeconds + wt.WorkerWriteSeconds;
-            const double effective = wt.TextureSeconds > 0.0 ? workerSum / wt.TextureSeconds : 0.0;
-            std::cout
-                << "  テクスチャ内訳(全ワーカーの累計): 読み込み+ミップ+BC7 " << FormatSeconds(wt.WorkerLoadSeconds) << "ms"
-                << " / DDS化 " << FormatSeconds(wt.WorkerDdsSeconds) << "ms"
-                << " / 書き込み " << FormatSeconds(wt.WorkerWriteSeconds) << "ms\n"
-                << "    ワーカー " << wt.WorkerCount << "本 / フェーズ実時間 " << FormatSeconds(wt.TextureSeconds) << "ms"
-                << " / 実効並列度 " << Format2(effective) << "\n";
-
-            // 【ここが本丸】BC7待ちとBC7圧縮の比が「ワーカーを増やして意味があるか」を決める。
-            // 待ちが支配的なら本数を増やしても待ち行列が伸びるだけで、直列点そのものを
-            // 見直すか、プロセスを分けてデバイスを分けるしかない
-            std::cout
-                << "    LoadFromFileの内訳: デコード " << FormatSeconds(wt.TexDecodeSeconds) << "ms"
-                << " / ミップ " << FormatSeconds(wt.TexMipSeconds) << "ms"
-                << " / BC7待ち " << FormatSeconds(wt.TexBC7WaitSeconds) << "ms"
-                << " / BC7圧縮 " << FormatSeconds(wt.TexBC7CompressSeconds) << "ms"
-                << " / デバイス生成 " << FormatSeconds(wt.TexDeviceCreateSeconds) << "ms\n";
-        }
-
-        // 【プロセスCPU÷実時間を必ず出す】これがワーカー数を超えていたら、内側のライブラリが
-        // 既に自前で並列化しているという意味で、外側にプールを足してはいけない
-        // (DirectXTexのOpenMPと外側8ワーカーが掛かって224スレッドになり、機械が固まった前例がある)
-        const double cpuSeconds = KurenaiPacker::GetProcessCpuSeconds();
-        const double wallSeconds = std::chrono::duration<double>(endTime - startTime).count();
-        std::cout
-            << "  プロセス全体: CPU " << FormatSeconds(cpuSeconds) << "ms"
-            << " (" << Format2(wallSeconds > 0.0 ? cpuSeconds / wallSeconds : 0.0) << "コア相当)"
-            << " / ピークWS " << KurenaiPacker::GetPeakWorkingSetMB() << "MB\n";
-    }
 
     return 0;
 }
