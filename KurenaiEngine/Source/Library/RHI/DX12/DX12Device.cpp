@@ -121,7 +121,9 @@ namespace Kurenai::RHI
         }
     }
 
-    void DX12Device::Initialize()
+    // デバッグレイヤー・DXGIファクトリ・D3D12デバイス・InfoQueueまで。
+    // ここから先のすべてがm_Deviceに依存するため、Initializeの最初に呼ぶ
+    void DX12Device::CreateDeviceAndDebugFacilities()
     {
 #if defined(_DEBUG)
         Microsoft::WRL::ComPtr<ID3D12Debug> debugController;
@@ -185,7 +187,12 @@ namespace Kurenai::RHI
             Core::Logger::Warning("DX12", "ID3D12InfoQueueを取得できませんでした。デバッグレイヤーの指摘はログに出ません");
         }
 #endif
+    }
 
+    // コマンドキュー・フレームスロットごとのアロケータ・コマンドリスト・フェンスと、
+    // リソースアップロード専用の一式
+    void DX12Device::CreateQueuesAndCommandLists()
+    {
         D3D12_COMMAND_QUEUE_DESC queueDesc{};
         queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         ThrowIfFailed(m_Device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_CommandQueue)), "コマンドキューの作成に失敗しました");
@@ -223,7 +230,11 @@ namespace Kurenai::RHI
         {
             throw std::runtime_error("アップロード用フェンスイベントの作成に失敗しました");
         }
+    }
 
+    // 機能判定の呼び出し。**この順序に意味がある**(各コメントのとおり依存関係がある)
+    void DX12Device::DetectDeviceCapabilities()
+    {
         // シェーダーモデルの判定とdxcの初期化はレイトレーシング判定より先に行う。
         // RayQueryを含むシェーダーはSM 6.5でしかコンパイルできないため、
         // DetectRaytracingSupportがこの結果を参照する
@@ -237,7 +248,12 @@ namespace Kurenai::RHI
         // 自前ラスタライザは頂点/インデックスをbindlessで引くため、bindlessの判定より後で行う
         DetectSoftwareRasterSupport();
         DetectTiledResourcesSupport();
+    }
 
+    // ディスクリプタヒープ一式と、そこへ最初に置く既定サンプラー・nullディスクリプタ。
+    // 機能判定のあとに呼ぶ(bindless区画の有無がヒープの使い方に効く)
+    void DX12Device::CreateDescriptorHeaps()
+    {
         // RTVの内訳: スワップチェーンのバックバッファ2 + オフスクリーンのレンダーテクスチャ12 = 常時14。
         // DSVと同じくCreateRenderTargetsのリサイズ処理は「新しいテクスチャを作ってから古いunique_ptrを
         // 解放する」順になるため、リサイズ中はほぼ倍のRTVが同時に生存する。余裕を持たせて32本確保する
@@ -318,6 +334,17 @@ namespace Kurenai::RHI
             nullUavDesc.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
             m_Device->CreateUnorderedAccessView(nullptr, nullptr, &nullUavDesc, m_RenderSrvCpuHeap->GetCpuHandle(m_NullUavIndex));
         }
+    }
+
+    void DX12Device::Initialize()
+    {
+        // 【順序を入れ替えないこと】デバイス生成 → キューとコマンドリスト → 機能判定 →
+        // ヒープ確保 の順に依存している。とくに機能判定はルートシグネチャの作成より前で
+        // なければならない(bindlessの可否でフラグが変わる)
+        CreateDeviceAndDebugFacilities();
+        CreateQueuesAndCommandLists();
+        DetectDeviceCapabilities();
+        CreateDescriptorHeaps();
 
         // bindless区画。シェーダ可視SRVヒープの、リング2区画より後ろの残り全部
         // (kBindlessDescriptorCapacityのコメント参照)

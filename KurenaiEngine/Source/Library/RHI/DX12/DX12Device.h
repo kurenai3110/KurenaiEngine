@@ -243,6 +243,16 @@ namespace Kurenai::RHI
         // 両者はSRVの次元とキューブ枚数以外まったく同じ手順のため1箇所にまとめている
         std::unique_ptr<IRHITexture> CreateCubeTextureInternal(
             uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount, bool asArray);
+        // Initializeの4段。**この順序に意味がある**ので入れ替えないこと
+        // (機能判定はルートシグネチャの作成より前でなければならない)。
+        // デバッグレイヤー・DXGIファクトリ・D3D12デバイス・InfoQueue
+        void CreateDeviceAndDebugFacilities();
+        // コマンドキュー・アロケータ・コマンドリスト・フェンスと、アップロード専用の一式
+        void CreateQueuesAndCommandLists();
+        // 機能判定(シェーダーモデル/レイトレ/bindless/メッシュシェーダー/自前ラスタ/タイル)
+        void DetectDeviceCapabilities();
+        // ディスクリプタヒープ一式と、既定サンプラー・nullディスクリプタの初期化
+        void CreateDescriptorHeaps();
         // 現在のフレームスロット(m_FrameIndex)のコマンドアロケータ/リストを開き直す
         void ResetCommandList();
         // デバッグレイヤーが溜めたメッセージを引き取ってエンジンのログ(KurenaiEngine_DX12.log)へ
