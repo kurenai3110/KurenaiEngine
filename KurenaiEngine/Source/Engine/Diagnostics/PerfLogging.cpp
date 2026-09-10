@@ -20,39 +20,9 @@ namespace Kurenai
     // 「この変更でフレーム時間がどう変わったか」を比較できない。集計期間ぶんを1行に
     // まとめて出すことで、フレーム時間への影響(Logger::Infoはflushを伴う)を
     // 1秒に1回に抑えつつ、実行ごとの記録が残るようにしている
-    void KurenaiEngine3D::LogFrameStatsIfDue(float renderDeltaTime)
+    // フレーム時間の内訳(平均FPS・GPU/CPUのパス別)。集計期間ぶんをまとめて出す
+    void KurenaiEngine3D::LogFrameTimingStats(float elapsedSeconds)
     {
-        if (!m_Settings.System.FrameStatsLoggingEnabled)
-        {
-            return;
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-
-        Diagnostics::FrameStatsLogger::FrameSample sample;
-        sample.CPUFrameTimeMs = m_RenderStats.CPUFrameTimeMs;
-        sample.GPUTimeMs = m_GPUProfiler ? m_GPUProfiler->GetTotalFrameTimeMs() : 0.0f;
-        sample.GPUWaitMs = m_Device->GetLastFrameGPUWaitTimeMs();
-        sample.FrameTimeMs = renderDeltaTime * 1000.0f;
-        sample.FrustumCullTested = m_FrustumCullTested;
-        sample.FrustumCullCulled = m_FrustumCullCulled;
-        sample.LODSwitchCount = m_LODSwitchCount;
-        sample.LODFadingCount = m_RenderStats.LODFadingCount;
-        sample.MeshCullTested = m_MeshCullTested;
-        sample.MeshCullCulled = m_MeshCullCulled;
-        sample.DrawCallsGBuffer = m_GeometryPasses->GetDrawCallsGBuffer();
-        sample.DrawCallsShadow = m_ShadowPasses->GetDrawCalls();
-        sample.DrawCallsDepthPrepass = m_GeometryPasses->GetDrawCallsDepthPrepass();
-        sample.InstancedBatchCount = m_DrawList.InstancedBatchCount;
-        sample.InstancedInstanceCount = m_DrawList.InstancedInstanceCount;
-        m_FrameStats.AddFrame(now, sample);
-
-        const float elapsedSeconds = m_FrameStats.GetElapsedSeconds(now);
-        if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
-        {
-            return;
-        }
-
         // 集計期間の実測フレーム数から求める。m_RenderStats.FPS(指数移動平均)と違い、この値は
         // 期間中に落ちたフレームがそのまま反映される
         const float averageFPS = static_cast<float>(m_FrameStats.GetFrameCount()) / std::max(elapsedSeconds, 1e-6f);
@@ -138,7 +108,12 @@ namespace Kurenai
                 Core::Logger::Info("Perf", "  CPU内訳[ms]: " + breakdown);
             }
         }
+    }
 
+    // CPU側で判定しているものの効き(カリング・LOD・ストリーミング・ドローコール・
+    // インスタンシング・bindless区画)
+    void KurenaiEngine3D::LogCpuSideStats()
+    {
         // フラスタムカリングの効き。「間引いた数が0」は、判定式が常に通しているのか
         // 本当に全部が視界内なのかを区別できないため、テストした数と併せて出す。
         //
@@ -243,7 +218,12 @@ namespace Kurenai
                 Core::Logger::Info("Perf", bindlessText);
             }
         }
+    }
 
+    // GPU側で判定しているものの効き(メッシュレット単位・モデル単位)。
+    // モデル単位はCPUの判定と突き合わせ、食い違いを警告として残す
+    void KurenaiEngine3D::LogGpuSideCullStats()
+    {
         // メッシュレット単位のカリング(増幅シェーダー)の効き。上のCPU側とは粒度も判定の種類も
         // 違うので別の行に出す。
         //
@@ -326,9 +306,11 @@ namespace Kurenai
                         std::to_string(m_CullStats.GetModelComparedCpuFrustumCulled()) + ")");
             }
         }
+    }
 
-        m_FrameStats.Reset();
-
+    // 常駐しているテクスチャとVRAMの使用量
+    void KurenaiEngine3D::LogResidencyStats()
+    {
         // テクスチャの常駐ミップの内訳。**サイズ帯ごとに分けて出す** ――
         // 64KBタイルはBC7で256x256テクセルを覆うため、ミップ/タイル単位の制御が効くのは
         // 大きいテクスチャに偏る。「入れたから減った」ではなくどの帯に効いたかで語るため
@@ -350,6 +332,48 @@ namespace Kurenai
                 static_cast<double>(usedBytes) / kBytesPerMiB, static_cast<double>(budgetBytes) / kBytesPerMiB);
             Core::Logger::Info("Perf", vramLine);
         }
+    }
+
+    void KurenaiEngine3D::LogFrameStatsIfDue(float renderDeltaTime)
+    {
+        if (!m_Settings.System.FrameStatsLoggingEnabled)
+        {
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+
+        Diagnostics::FrameStatsLogger::FrameSample sample;
+        sample.CPUFrameTimeMs = m_RenderStats.CPUFrameTimeMs;
+        sample.GPUTimeMs = m_GPUProfiler ? m_GPUProfiler->GetTotalFrameTimeMs() : 0.0f;
+        sample.GPUWaitMs = m_Device->GetLastFrameGPUWaitTimeMs();
+        sample.FrameTimeMs = renderDeltaTime * 1000.0f;
+        sample.FrustumCullTested = m_FrustumCullTested;
+        sample.FrustumCullCulled = m_FrustumCullCulled;
+        sample.LODSwitchCount = m_LODSwitchCount;
+        sample.LODFadingCount = m_RenderStats.LODFadingCount;
+        sample.MeshCullTested = m_MeshCullTested;
+        sample.MeshCullCulled = m_MeshCullCulled;
+        sample.DrawCallsGBuffer = m_GeometryPasses->GetDrawCallsGBuffer();
+        sample.DrawCallsShadow = m_ShadowPasses->GetDrawCalls();
+        sample.DrawCallsDepthPrepass = m_GeometryPasses->GetDrawCallsDepthPrepass();
+        sample.InstancedBatchCount = m_DrawList.InstancedBatchCount;
+        sample.InstancedInstanceCount = m_DrawList.InstancedInstanceCount;
+        m_FrameStats.AddFrame(now, sample);
+
+        const float elapsedSeconds = m_FrameStats.GetElapsedSeconds(now);
+        if (elapsedSeconds < Defaults::FrameStatsLogIntervalSeconds)
+        {
+            return;
+        }
+
+        LogFrameTimingStats(elapsedSeconds);
+        LogCpuSideStats();
+        LogGpuSideCullStats();
+
+        m_FrameStats.Reset();
+
+        LogResidencyStats();
     }
 
     void KurenaiEngine3D::AccumulatePerfDump()

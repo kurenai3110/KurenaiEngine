@@ -940,6 +940,13 @@ namespace Kurenai
         // このフレームの計測値を集計し、集計期間(FrameStatsLogIntervalSeconds)ぶん溜まっていれば
         // 1行にまとめてログへ出す。Renderスレッドからフレームごとに呼ぶ
         void LogFrameStatsIfDue(float renderDeltaTime);
+        // LogFrameStatsIfDueが出す内訳。いずれも集計期間ぶんをまとめて1回だけ出す。
+        // 【m_FrameStats.Reset()より前に呼ぶこと】積算値を読むのはこれらの中
+        void LogFrameTimingStats(float elapsedSeconds);
+        void LogCpuSideStats();
+        void LogGpuSideCullStats();
+        // 常駐しているテクスチャとVRAMの使用量。積算値を使わないのでResetの後でよい
+        void LogResidencyStats();
         // カメラ視錐台をkCascadeCount個の深度範囲に分割する(near/far境界、View空間での距離)。
         // 対数分割と均等分割を混合した実用的な分割(Practical Split Scheme)を使う
         void ComputeCascadeSplits(const Core::Camera& camera, float (&outSplits)[kCascadeCount]) const;
