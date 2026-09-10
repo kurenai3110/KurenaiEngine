@@ -209,6 +209,7 @@
     <ClCompile Include="Source\Library\RHI\DX12\DX12DeviceBuffers.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12DevicePipelines.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12DeviceTextures.cpp" />
+    <ClCompile Include="Source\Library\RHI\DX12\DX12DeviceTiles.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12ImGuiBackend.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12GPUProfiler.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Texture.cpp" />
