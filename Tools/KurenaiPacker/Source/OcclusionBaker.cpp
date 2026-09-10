@@ -1392,6 +1392,256 @@ void CSMain(uint3 id : SV_DispatchThreadID)
             return srv;
         }
     }
+    // メッシュ1枚ぶんのライトマップをラスタライズし、GPUでレイキャストして遮蔽率と
+    // bent normal を焼く。焼けたものだけ result へ積む
+    void BakeMeshOcclusion(
+        SourceModel& sourceModel, const OcclusionBakeOptions& options, size_t meshIndex,
+        const std::vector<uint8_t>& unwrapped, float rayLength, BakeDevice& device,
+        const ComPtr<ID3D11ShaderResourceView>& triangleSrv, const ComPtr<ID3D11ShaderResourceView>& nodeSrv,
+        uint32_t texelCount,
+        BakeTimings& timings, BentStats& stats, OcclusionBakeResult& result)
+    {
+        if (!unwrapped[meshIndex])
+        {
+            return;
+        }
+
+        const Clock::time_point rasterizeStart = Clock::now();
+        std::vector<BakeTexel> texels;
+        std::vector<uint8_t> valid;
+        RasterizeLightmapSpace(sourceModel.Meshes[meshIndex], options.Resolution, texels, valid);
+        timings.RasterizeSeconds += SecondsSince(rasterizeStart);
+
+        const size_t validCount = std::count(valid.begin(), valid.end(), static_cast<uint8_t>(1));
+        if (validCount == 0)
+        {
+            Warn("メッシュ[" + std::to_string(meshIndex) + "]はライトマップUV空間に有効なテクセルが無かったため、遮蔽マップのベイクをスキップします");
+            ++result.SkippedMeshCount;
+            return;
+        }
+
+        // 有効テクセルだけがレイを飛ばす(無効テクセルはシェーダー冒頭で即returnする)。
+        // スループットの分母はこちらでなければならない
+        timings.TotalRays +=
+            static_cast<uint64_t>(validCount) * (options.RayCount + options.BentNormalRayCount);
+
+        // UV展開の品質指標(22.6.4)。
+        //   被覆率      = 有効テクセル / 全テクセル。アトラスをどれだけ使えているか
+        //   テクセル/三角形 = 三角形あたり何テクセル割り当てられたか。1を切ると斑点が出る
+        // チャートが小さく数が多いほど、パディングとバイリニアの余白が食ってこの2つが下がる
+        const size_t meshTriangleCount = sourceModel.Meshes[meshIndex].Indices.size() / 3;
+        const double coverage = static_cast<double>(validCount) / static_cast<double>(texelCount);
+        const double texelsPerTriangle = meshTriangleCount > 0
+            ? static_cast<double>(validCount) / static_cast<double>(meshTriangleCount)
+            : 0.0;
+        Info("  メッシュ[" + std::to_string(meshIndex) + "] 被覆率 " + Format2(coverage * 100.0)
+            + "% / テクセル毎三角形 " + Format2(texelsPerTriangle));
+
+        const Clock::time_point dispatchStart = Clock::now();
+
+        // HLSL側のStructuredBuffer<uint>に合わせて4バイトへ展開する
+        std::vector<uint32_t> validU32(valid.begin(), valid.end());
+
+        ComPtr<ID3D11Buffer> texelBuffer;
+        ComPtr<ID3D11Buffer> validBuffer;
+        const ComPtr<ID3D11ShaderResourceView> texelSrv = CreateStructuredSrv(
+            device.Device(), texels.data(), sizeof(BakeTexel), texelCount, texelBuffer);
+        const ComPtr<ID3D11ShaderResourceView> validSrv = CreateStructuredSrv(
+            device.Device(), validU32.data(), sizeof(uint32_t), texelCount, validBuffer);
+
+        D3D11_BUFFER_DESC resultDesc{};
+        resultDesc.ByteWidth = texelCount * sizeof(float);
+        resultDesc.Usage = D3D11_USAGE_DEFAULT;
+        resultDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
+        resultDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+        resultDesc.StructureByteStride = sizeof(float);
+        ComPtr<ID3D11Buffer> resultBuffer;
+        ThrowIfFailed(device.Device()->CreateBuffer(&resultDesc, nullptr, &resultBuffer), "結果バッファの作成に失敗しました");
+
+        D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
+        uavDesc.Format = DXGI_FORMAT_UNKNOWN;
+        uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
+        uavDesc.Buffer.NumElements = texelCount;
+        ComPtr<ID3D11UnorderedAccessView> resultUav;
+        ThrowIfFailed(device.Device()->CreateUnorderedAccessView(resultBuffer.Get(), &uavDesc, &resultUav), "UAVの作成に失敗しました");
+
+        // bent normal用の結果バッファ(float4)。シェーダーは常にu1へ書くため、
+        // ベイクしない設定でもバッファ自体は作ってバインドする
+        D3D11_BUFFER_DESC bentDesc = resultDesc;
+        bentDesc.ByteWidth = texelCount * sizeof(float) * 4;
+        bentDesc.StructureByteStride = sizeof(float) * 4;
+        ComPtr<ID3D11Buffer> bentBuffer;
+        ThrowIfFailed(device.Device()->CreateBuffer(&bentDesc, nullptr, &bentBuffer), "bent normalの結果バッファの作成に失敗しました");
+        ComPtr<ID3D11UnorderedAccessView> bentUav;
+        ThrowIfFailed(device.Device()->CreateUnorderedAccessView(bentBuffer.Get(), &uavDesc, &bentUav), "bent normalのUAVの作成に失敗しました");
+
+        BakeConstants constants{};
+        constants.TexelCount = texelCount;
+        constants.RayCount = options.RayCount;
+        constants.BentRayCount = options.BentNormalRayCount;
+        constants.RayLength = rayLength;
+        // 自己交差を避ける浮かせ量。レイ長に比例させ、スケールの異なるモデルでも同じ挙動にする
+        constants.NormalOffset = rayLength * 1e-3f;
+
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        ThrowIfFailed(device.Context()->Map(device.Constants(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "定数バッファのMapに失敗しました");
+        std::memcpy(mapped.pData, &constants, sizeof(constants));
+        device.Context()->Unmap(device.Constants(), 0);
+
+        ID3D11ShaderResourceView* srvs[] = { triangleSrv.Get(), nodeSrv.Get(), texelSrv.Get(), validSrv.Get() };
+        ID3D11UnorderedAccessView* uavs[] = { resultUav.Get(), bentUav.Get() };
+        ID3D11Buffer* cbs[] = { device.Constants() };
+
+        device.Context()->CSSetShader(device.Shader(), nullptr, 0);
+        device.Context()->CSSetShaderResources(0, 4, srvs);
+        device.Context()->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
+        device.Context()->CSSetConstantBuffers(0, 1, cbs);
+        device.Context()->Dispatch((texelCount + 63) / 64, 1, 1);
+
+        // バインドを外してからリードバックする(次のメッシュで同じスロットを使い回すため)
+        ID3D11ShaderResourceView* nullSrvs[4] = {};
+        ID3D11UnorderedAccessView* nullUavs[2] = {};
+        device.Context()->CSSetShaderResources(0, 4, nullSrvs);
+        device.Context()->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
+
+        D3D11_BUFFER_DESC stagingDesc = resultDesc;
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.BindFlags = 0;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        ComPtr<ID3D11Buffer> staging;
+        ThrowIfFailed(device.Device()->CreateBuffer(&stagingDesc, nullptr, &staging), "リードバック用バッファの作成に失敗しました");
+        device.Context()->CopyResource(staging.Get(), resultBuffer.Get());
+
+        D3D11_MAPPED_SUBRESOURCE readback{};
+        ThrowIfFailed(device.Context()->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &readback), "リードバックのMapに失敗しました");
+        const float* ao = static_cast<const float*>(readback.pData);
+
+        std::vector<uint8_t> texture(texelCount);
+        for (uint32_t i = 0; i < texelCount; ++i)
+        {
+            const float clamped = std::clamp(ao[i], 0.0f, 1.0f);
+            texture[i] = static_cast<uint8_t>(clamped * 255.0f + 0.5f);
+        }
+
+        // bent normalのリードバック。AO(float)とは別バッファなのでステージングも別に要る
+        std::vector<float> bentTexture;
+        if (options.BentNormalRayCount > 0)
+        {
+            D3D11_BUFFER_DESC bentStagingDesc = bentDesc;
+            bentStagingDesc.Usage = D3D11_USAGE_STAGING;
+            bentStagingDesc.BindFlags = 0;
+            bentStagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            ComPtr<ID3D11Buffer> bentStaging;
+            ThrowIfFailed(device.Device()->CreateBuffer(&bentStagingDesc, nullptr, &bentStaging),
+                "bent normalのリードバック用バッファの作成に失敗しました");
+            device.Context()->CopyResource(bentStaging.Get(), bentBuffer.Get());
+
+            D3D11_MAPPED_SUBRESOURCE bentReadback{};
+            ThrowIfFailed(device.Context()->Map(bentStaging.Get(), 0, D3D11_MAP_READ, 0, &bentReadback),
+                "bent normalのリードバックのMapに失敗しました");
+            const float* bent = static_cast<const float*>(bentReadback.pData);
+
+            bentTexture.assign(bent, bent + static_cast<size_t>(texelCount) * 4);
+
+            // 仕様書§7のチェックリストを量子化前のfloat32で集計する。
+            // ここで既存AOとの一致を見ておかないと、後段で見つけた誤差が
+            // ベイクのバグなのかfp16量子化なのか切り分けられない
+            AccumulateBentStats(bent, ao, valid, texelCount, meshIndex, stats);
+
+            device.Context()->Unmap(bentStaging.Get(), 0);
+        }
+
+        device.Context()->Unmap(staging.Get(), 0);
+        timings.DispatchSeconds += SecondsSince(dispatchStart);
+
+        const Clock::time_point dilateStart = Clock::now();
+        Dilate(texture, valid, options.Resolution, options.DilationPixels);
+        if (!bentTexture.empty())
+        {
+            DilateBentNormal(bentTexture, valid, options.Resolution, options.DilationPixels);
+            // ダイレーション後(=実際にミップ生成へ渡す状態)で測る
+            AccumulateMipStability(bentTexture, options.Resolution, stats);
+            result.MeshBentNormals[meshIndex] = std::move(bentTexture);
+        }
+        timings.DilateSeconds += SecondsSince(dilateStart);
+
+        result.MeshTextures[meshIndex] = std::move(texture);
+        ++result.BakedMeshCount;
+    }
+
+    // === 4. 計測結果 ===
+    //
+    // フェーズ別に出すのは「どこを速くすべきか」を推測せずに決めるため。
+    // レイ/秒はGPUトラバーサルの改善を評価する唯一の指標なので、必ず残すこと
+    void LogBakeTimings(const BakeTimings& timings, const Clock::time_point& bakeStart)
+    {
+        const double totalSeconds = SecondsSince(bakeStart);
+        Info("ベイク完了 (合計 " + FormatSeconds(totalSeconds) + ")");
+        Info("  UV展開       " + FormatSeconds(timings.UnwrapSeconds));
+        Info("  BVH構築      " + FormatSeconds(timings.BvhSeconds));
+        Info("  ラスタライズ " + FormatSeconds(timings.RasterizeSeconds));
+        Info("  レイキャスト " + FormatSeconds(timings.DispatchSeconds) + " (GPU待ちを含む)");
+        Info("  ダイレーション " + FormatSeconds(timings.DilateSeconds));
+        if (timings.DispatchSeconds > 0.0 && timings.TotalRays > 0)
+        {
+            const double raysPerSecondM =
+                static_cast<double>(timings.TotalRays) / timings.DispatchSeconds / 1.0e6;
+            Info("  レイ " + std::to_string(timings.TotalRays) + "本 / "
+                + Format2(raysPerSecondM) + " 百万レイ毎秒");
+        }
+    }
+
+    // === 5. bent normalの検証(仕様書§7) ===
+    //
+    // 上から2項目が通れば地平線の二重計上が無いこと、
+    // 「既存AOとの一致」が通ればサンプリングと正規化係数が正しいことが確認できる
+    void VerifyBentNormals(const BentStats& stats)
+    {
+        if (stats.SampleCount > 0)
+        {
+            const double rms = std::sqrt(stats.SumSqError / static_cast<double>(stats.SampleCount));
+            const double occludedRatio =
+                static_cast<double>(stats.FullyOccludedCount) / static_cast<double>(stats.SampleCount) * 100.0;
+
+            Info("bent normalの検証 (量子化前のfloat32、有効テクセル " + std::to_string(stats.SampleCount) + "個):");
+            Info("  max|bRaw|         " + Format4(stats.MaxLength) + " (1.0以下であること)");
+            Info("  max(aoN - aoB)    " + Format4(stats.MaxAoNMinusAoB) + " (0.0以下であること)");
+            Info("  既存AOとの誤差    RMS " + Format4(rms) + " / 最大 " + Format4(stats.MaxError));
+            Info("  完全遮蔽の割合    " + Format2(occludedRatio) + "%");
+            Info("  ミップ耐性        " + Format4(stats.WorstMipRatio)
+                + " (mip " + std::to_string(stats.WorstMipLevel) + "、0.85以上であること)");
+
+            // 一致していないということは、同じ積分の別推定量になっていないということ。
+            // 0.05はモンテカルロ誤差(256本で数%)に安全側の余裕を見た値
+            if (rms > 0.05)
+            {
+                Warn("bent normalのaoN(= dot(N,bRaw))が既存AOと一致していません (RMS " + Format4(rms)
+                    + ")。一様半球サンプリングの正規化係数(2/本数)かレイの基底を確認してください");
+            }
+            if (stats.MaxLength > 1.05)
+            {
+                Warn("bent normalの長さが1を大きく超えています (max " + Format4(stats.MaxLength) + ")");
+            }
+            if (stats.MaxAoNMinusAoB > 0.05)
+            {
+                Warn("aoNがaoBを上回っています (max " + Format4(stats.MaxAoNMinusAoB)
+                    + ")。コーシー・シュワルツの不等式に反するため、どちらかの計算が誤っています");
+            }
+            if (stats.NanCount > 0)
+            {
+                Warn("bent normalにNaN/Infが合計 " + std::to_string(stats.NanCount) + "テクセルありました");
+            }
+            // 浅い段で0.85を下回るということは、格納しているベクトルが法線の向きに
+            // 引きずられていてミップで打ち消し合っているということ。消費側は縮小するほど暗くなる
+            if (stats.WorstMipRatio < 0.85)
+            {
+                Warn("bent normalのミップ耐性が不足しています (mip " + std::to_string(stats.WorstMipLevel)
+                    + " で " + Format4(stats.WorstMipRatio)
+                    + ")。接空間への変換(基底がGBuffer.hlslのComputeTangentFrameと一致しているか)を確認してください");
+            }
+        }
+    }
+
 
     OcclusionBakeResult BakeOcclusion(SourceModel& sourceModel, const OcclusionBakeOptions& options)
     {
@@ -1470,240 +1720,14 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         // === 3. メッシュごとにラスタライズ → GPUでレイキャスト ===
         for (size_t meshIndex = 0; meshIndex < sourceModel.Meshes.size(); ++meshIndex)
         {
-            if (!unwrapped[meshIndex])
-            {
-                continue;
-            }
-
-            const Clock::time_point rasterizeStart = Clock::now();
-            std::vector<BakeTexel> texels;
-            std::vector<uint8_t> valid;
-            RasterizeLightmapSpace(sourceModel.Meshes[meshIndex], options.Resolution, texels, valid);
-            timings.RasterizeSeconds += SecondsSince(rasterizeStart);
-
-            const size_t validCount = std::count(valid.begin(), valid.end(), static_cast<uint8_t>(1));
-            if (validCount == 0)
-            {
-                Warn("メッシュ[" + std::to_string(meshIndex) + "]はライトマップUV空間に有効なテクセルが無かったため、遮蔽マップのベイクをスキップします");
-                ++result.SkippedMeshCount;
-                continue;
-            }
-
-            // 有効テクセルだけがレイを飛ばす(無効テクセルはシェーダー冒頭で即returnする)。
-            // スループットの分母はこちらでなければならない
-            timings.TotalRays +=
-                static_cast<uint64_t>(validCount) * (options.RayCount + options.BentNormalRayCount);
-
-            // UV展開の品質指標(22.6.4)。
-            //   被覆率      = 有効テクセル / 全テクセル。アトラスをどれだけ使えているか
-            //   テクセル/三角形 = 三角形あたり何テクセル割り当てられたか。1を切ると斑点が出る
-            // チャートが小さく数が多いほど、パディングとバイリニアの余白が食ってこの2つが下がる
-            const size_t meshTriangleCount = sourceModel.Meshes[meshIndex].Indices.size() / 3;
-            const double coverage = static_cast<double>(validCount) / static_cast<double>(texelCount);
-            const double texelsPerTriangle = meshTriangleCount > 0
-                ? static_cast<double>(validCount) / static_cast<double>(meshTriangleCount)
-                : 0.0;
-            Info("  メッシュ[" + std::to_string(meshIndex) + "] 被覆率 " + Format2(coverage * 100.0)
-                + "% / テクセル毎三角形 " + Format2(texelsPerTriangle));
-
-            const Clock::time_point dispatchStart = Clock::now();
-
-            // HLSL側のStructuredBuffer<uint>に合わせて4バイトへ展開する
-            std::vector<uint32_t> validU32(valid.begin(), valid.end());
-
-            ComPtr<ID3D11Buffer> texelBuffer;
-            ComPtr<ID3D11Buffer> validBuffer;
-            const ComPtr<ID3D11ShaderResourceView> texelSrv = CreateStructuredSrv(
-                device.Device(), texels.data(), sizeof(BakeTexel), texelCount, texelBuffer);
-            const ComPtr<ID3D11ShaderResourceView> validSrv = CreateStructuredSrv(
-                device.Device(), validU32.data(), sizeof(uint32_t), texelCount, validBuffer);
-
-            D3D11_BUFFER_DESC resultDesc{};
-            resultDesc.ByteWidth = texelCount * sizeof(float);
-            resultDesc.Usage = D3D11_USAGE_DEFAULT;
-            resultDesc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;
-            resultDesc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-            resultDesc.StructureByteStride = sizeof(float);
-            ComPtr<ID3D11Buffer> resultBuffer;
-            ThrowIfFailed(device.Device()->CreateBuffer(&resultDesc, nullptr, &resultBuffer), "結果バッファの作成に失敗しました");
-
-            D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc{};
-            uavDesc.Format = DXGI_FORMAT_UNKNOWN;
-            uavDesc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-            uavDesc.Buffer.NumElements = texelCount;
-            ComPtr<ID3D11UnorderedAccessView> resultUav;
-            ThrowIfFailed(device.Device()->CreateUnorderedAccessView(resultBuffer.Get(), &uavDesc, &resultUav), "UAVの作成に失敗しました");
-
-            // bent normal用の結果バッファ(float4)。シェーダーは常にu1へ書くため、
-            // ベイクしない設定でもバッファ自体は作ってバインドする
-            D3D11_BUFFER_DESC bentDesc = resultDesc;
-            bentDesc.ByteWidth = texelCount * sizeof(float) * 4;
-            bentDesc.StructureByteStride = sizeof(float) * 4;
-            ComPtr<ID3D11Buffer> bentBuffer;
-            ThrowIfFailed(device.Device()->CreateBuffer(&bentDesc, nullptr, &bentBuffer), "bent normalの結果バッファの作成に失敗しました");
-            ComPtr<ID3D11UnorderedAccessView> bentUav;
-            ThrowIfFailed(device.Device()->CreateUnorderedAccessView(bentBuffer.Get(), &uavDesc, &bentUav), "bent normalのUAVの作成に失敗しました");
-
-            BakeConstants constants{};
-            constants.TexelCount = texelCount;
-            constants.RayCount = options.RayCount;
-            constants.BentRayCount = options.BentNormalRayCount;
-            constants.RayLength = rayLength;
-            // 自己交差を避ける浮かせ量。レイ長に比例させ、スケールの異なるモデルでも同じ挙動にする
-            constants.NormalOffset = rayLength * 1e-3f;
-
-            D3D11_MAPPED_SUBRESOURCE mapped{};
-            ThrowIfFailed(device.Context()->Map(device.Constants(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped), "定数バッファのMapに失敗しました");
-            std::memcpy(mapped.pData, &constants, sizeof(constants));
-            device.Context()->Unmap(device.Constants(), 0);
-
-            ID3D11ShaderResourceView* srvs[] = { triangleSrv.Get(), nodeSrv.Get(), texelSrv.Get(), validSrv.Get() };
-            ID3D11UnorderedAccessView* uavs[] = { resultUav.Get(), bentUav.Get() };
-            ID3D11Buffer* cbs[] = { device.Constants() };
-
-            device.Context()->CSSetShader(device.Shader(), nullptr, 0);
-            device.Context()->CSSetShaderResources(0, 4, srvs);
-            device.Context()->CSSetUnorderedAccessViews(0, 2, uavs, nullptr);
-            device.Context()->CSSetConstantBuffers(0, 1, cbs);
-            device.Context()->Dispatch((texelCount + 63) / 64, 1, 1);
-
-            // バインドを外してからリードバックする(次のメッシュで同じスロットを使い回すため)
-            ID3D11ShaderResourceView* nullSrvs[4] = {};
-            ID3D11UnorderedAccessView* nullUavs[2] = {};
-            device.Context()->CSSetShaderResources(0, 4, nullSrvs);
-            device.Context()->CSSetUnorderedAccessViews(0, 2, nullUavs, nullptr);
-
-            D3D11_BUFFER_DESC stagingDesc = resultDesc;
-            stagingDesc.Usage = D3D11_USAGE_STAGING;
-            stagingDesc.BindFlags = 0;
-            stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            ComPtr<ID3D11Buffer> staging;
-            ThrowIfFailed(device.Device()->CreateBuffer(&stagingDesc, nullptr, &staging), "リードバック用バッファの作成に失敗しました");
-            device.Context()->CopyResource(staging.Get(), resultBuffer.Get());
-
-            D3D11_MAPPED_SUBRESOURCE readback{};
-            ThrowIfFailed(device.Context()->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &readback), "リードバックのMapに失敗しました");
-            const float* ao = static_cast<const float*>(readback.pData);
-
-            std::vector<uint8_t> texture(texelCount);
-            for (uint32_t i = 0; i < texelCount; ++i)
-            {
-                const float clamped = std::clamp(ao[i], 0.0f, 1.0f);
-                texture[i] = static_cast<uint8_t>(clamped * 255.0f + 0.5f);
-            }
-
-            // bent normalのリードバック。AO(float)とは別バッファなのでステージングも別に要る
-            std::vector<float> bentTexture;
-            if (options.BentNormalRayCount > 0)
-            {
-                D3D11_BUFFER_DESC bentStagingDesc = bentDesc;
-                bentStagingDesc.Usage = D3D11_USAGE_STAGING;
-                bentStagingDesc.BindFlags = 0;
-                bentStagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-                ComPtr<ID3D11Buffer> bentStaging;
-                ThrowIfFailed(device.Device()->CreateBuffer(&bentStagingDesc, nullptr, &bentStaging),
-                    "bent normalのリードバック用バッファの作成に失敗しました");
-                device.Context()->CopyResource(bentStaging.Get(), bentBuffer.Get());
-
-                D3D11_MAPPED_SUBRESOURCE bentReadback{};
-                ThrowIfFailed(device.Context()->Map(bentStaging.Get(), 0, D3D11_MAP_READ, 0, &bentReadback),
-                    "bent normalのリードバックのMapに失敗しました");
-                const float* bent = static_cast<const float*>(bentReadback.pData);
-
-                bentTexture.assign(bent, bent + static_cast<size_t>(texelCount) * 4);
-
-                // 仕様書§7のチェックリストを量子化前のfloat32で集計する。
-                // ここで既存AOとの一致を見ておかないと、後段で見つけた誤差が
-                // ベイクのバグなのかfp16量子化なのか切り分けられない
-                AccumulateBentStats(bent, ao, valid, texelCount, meshIndex, stats);
-
-                device.Context()->Unmap(bentStaging.Get(), 0);
-            }
-
-            device.Context()->Unmap(staging.Get(), 0);
-            timings.DispatchSeconds += SecondsSince(dispatchStart);
-
-            const Clock::time_point dilateStart = Clock::now();
-            Dilate(texture, valid, options.Resolution, options.DilationPixels);
-            if (!bentTexture.empty())
-            {
-                DilateBentNormal(bentTexture, valid, options.Resolution, options.DilationPixels);
-                // ダイレーション後(=実際にミップ生成へ渡す状態)で測る
-                AccumulateMipStability(bentTexture, options.Resolution, stats);
-                result.MeshBentNormals[meshIndex] = std::move(bentTexture);
-            }
-            timings.DilateSeconds += SecondsSince(dilateStart);
-
-            result.MeshTextures[meshIndex] = std::move(texture);
-            ++result.BakedMeshCount;
+            BakeMeshOcclusion(
+                sourceModel, options, meshIndex, unwrapped, rayLength, device, triangleSrv, nodeSrv,
+                texelCount, timings, stats, result);
         }
 
-        // === 4. 計測結果 ===
-        //
-        // フェーズ別に出すのは「どこを速くすべきか」を推測せずに決めるため。
-        // レイ/秒はGPUトラバーサルの改善を評価する唯一の指標なので、必ず残すこと
-        const double totalSeconds = SecondsSince(bakeStart);
-        Info("ベイク完了 (合計 " + FormatSeconds(totalSeconds) + ")");
-        Info("  UV展開       " + FormatSeconds(timings.UnwrapSeconds));
-        Info("  BVH構築      " + FormatSeconds(timings.BvhSeconds));
-        Info("  ラスタライズ " + FormatSeconds(timings.RasterizeSeconds));
-        Info("  レイキャスト " + FormatSeconds(timings.DispatchSeconds) + " (GPU待ちを含む)");
-        Info("  ダイレーション " + FormatSeconds(timings.DilateSeconds));
-        if (timings.DispatchSeconds > 0.0 && timings.TotalRays > 0)
-        {
-            const double raysPerSecondM =
-                static_cast<double>(timings.TotalRays) / timings.DispatchSeconds / 1.0e6;
-            Info("  レイ " + std::to_string(timings.TotalRays) + "本 / "
-                + Format2(raysPerSecondM) + " 百万レイ毎秒");
-        }
+        LogBakeTimings(timings, bakeStart);
+        VerifyBentNormals(stats);
 
-        // === 5. bent normalの検証(仕様書§7) ===
-        //
-        // 上から2項目が通れば地平線の二重計上が無いこと、
-        // 「既存AOとの一致」が通ればサンプリングと正規化係数が正しいことが確認できる
-        if (stats.SampleCount > 0)
-        {
-            const double rms = std::sqrt(stats.SumSqError / static_cast<double>(stats.SampleCount));
-            const double occludedRatio =
-                static_cast<double>(stats.FullyOccludedCount) / static_cast<double>(stats.SampleCount) * 100.0;
-
-            Info("bent normalの検証 (量子化前のfloat32、有効テクセル " + std::to_string(stats.SampleCount) + "個):");
-            Info("  max|bRaw|         " + Format4(stats.MaxLength) + " (1.0以下であること)");
-            Info("  max(aoN - aoB)    " + Format4(stats.MaxAoNMinusAoB) + " (0.0以下であること)");
-            Info("  既存AOとの誤差    RMS " + Format4(rms) + " / 最大 " + Format4(stats.MaxError));
-            Info("  完全遮蔽の割合    " + Format2(occludedRatio) + "%");
-            Info("  ミップ耐性        " + Format4(stats.WorstMipRatio)
-                + " (mip " + std::to_string(stats.WorstMipLevel) + "、0.85以上であること)");
-
-            // 一致していないということは、同じ積分の別推定量になっていないということ。
-            // 0.05はモンテカルロ誤差(256本で数%)に安全側の余裕を見た値
-            if (rms > 0.05)
-            {
-                Warn("bent normalのaoN(= dot(N,bRaw))が既存AOと一致していません (RMS " + Format4(rms)
-                    + ")。一様半球サンプリングの正規化係数(2/本数)かレイの基底を確認してください");
-            }
-            if (stats.MaxLength > 1.05)
-            {
-                Warn("bent normalの長さが1を大きく超えています (max " + Format4(stats.MaxLength) + ")");
-            }
-            if (stats.MaxAoNMinusAoB > 0.05)
-            {
-                Warn("aoNがaoBを上回っています (max " + Format4(stats.MaxAoNMinusAoB)
-                    + ")。コーシー・シュワルツの不等式に反するため、どちらかの計算が誤っています");
-            }
-            if (stats.NanCount > 0)
-            {
-                Warn("bent normalにNaN/Infが合計 " + std::to_string(stats.NanCount) + "テクセルありました");
-            }
-            // 浅い段で0.85を下回るということは、格納しているベクトルが法線の向きに
-            // 引きずられていてミップで打ち消し合っているということ。消費側は縮小するほど暗くなる
-            if (stats.WorstMipRatio < 0.85)
-            {
-                Warn("bent normalのミップ耐性が不足しています (mip " + std::to_string(stats.WorstMipLevel)
-                    + " で " + Format4(stats.WorstMipRatio)
-                    + ")。接空間への変換(基底がGBuffer.hlslのComputeTangentFrameと一致しているか)を確認してください");
-            }
-        }
 
         return result;
     }
