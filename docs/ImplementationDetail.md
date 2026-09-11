@@ -5626,7 +5626,7 @@ LOD2 3タイル、`StreamingDistance = 1500`)で測った(RTX 4070 Ti / DX12 / R
 
 ## 49. bindlessマテリアルと1モデル1ドロー — 判断の根拠
 
-設計そのものは `docs/Architecture.html` 39章(38.9)にある。ここには**数値の根拠**だけを置く。
+設計そのものは `docs/Architecture.html` 39章 39.9節にある。ここには**数値の根拠**だけを置く。
 
 ### 49.1 bindless区画を 8192 → 65536 にした根拠
 

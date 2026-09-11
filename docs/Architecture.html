@@ -5810,6 +5810,17 @@ cbufferは宣言順レイアウトなので、途中のフィールドを宣言�
 使わないが、<strong>宣言だけは必要</strong>である。
 </p>
 <h3 id="ch34-7">34.7 検証</h3>
+<p>
+ベイカー内のfloat32(量子化前)で<code>max|bRaw| &le; 1</code>・<code>aoN &le; aoB</code>・
+22章のAOとの一致を測り、実機ではWhite Furnace Testの球が背景へ溶けることを見ます。
+<strong>この表はすべてmip 0しか見ていない</strong>ため、ミップ耐性(34.9)を併せて測ること。
+数値と手順は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 34.7節。
+</p>
+<p>
+求積バイアスの大きさ、錐体モデルが地平線の遮蔽を過大に見積もること、<code>aoB</code>を下限に
+置くのが誤りである理由、係数kを当てはまりで決めてはいけない理由は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 34章。
+</p>
 <h3>34.8 既知の制約</h3>
 <ul>
 <li><strong>容量が大きい</strong>。符号付きベクトルのためBC4/BC7で圧縮できず無圧縮のfp16で書き出す。
@@ -5959,18 +5970,6 @@ SGモデルも「<code>SO</code>は立体角比であってBRDF重み付き積�
 単一コーンへの還元そのものが複雑な凹形状の情報を失っており、SGはそれを「潰さない」方向へ
 緩和する正則化であって真の可視性分布の再現ではない。
 残りを埋めるには跳ね返り光の加算(<a href="#ch34-10-3">34.10.3</a>)が要る(未実装)。
-</p>
-<h3>34.7 検証</h3>
-<p>
-ベイカー内のfloat32(量子化前)で<code>max|bRaw| &le; 1</code>・<code>aoN &le; aoB</code>・
-22章のAOとの一致を測り、実機ではWhite Furnace Testの球が背景へ溶けることを見ます。
-<strong>この表はすべてmip 0しか見ていない</strong>ため、ミップ耐性(34.9)を併せて測ること。
-数値と手順は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 34.7節。
-</p>
-<p>
-求積バイアスの大きさ、錐体モデルが地平線の遮蔽を過大に見積もること、<code>aoB</code>を下限に
-置くのが誤りである理由、係数kを当てはまりで決めてはいけない理由は
-<a href="ImplementationDetail.md">ImplementationDetail.md</a> 34章。
 </p>
 </section>
 
@@ -6980,7 +6979,7 @@ GPUバッファへの転送は従来どおりレンダーグラフ構築の直�
 残り2つの前提にもなる。よって<strong>bindless → メッシュレット生成 → 描画 → RTとの統合</strong>の順で積んだ。
 </p>
 
-<h3>38.1 bindless: ヒープの末尾に恒久区画を切る</h3>
+<h3>39.1 bindless: ヒープの末尾に恒久区画を切る</h3>
 <p>
 <code>ResourceDescriptorHeap[i]</code>は「そのとき束ねられているシェーダ可視ヒープの
 先頭からi番目」を指す。つまりbindlessで引けるようにするとは、
@@ -7006,7 +7005,7 @@ GPUバッファへの転送は従来どおりレンダーグラフ構築の直�
 分割できない。登録はリソース生成時にしか起きず頻度が低いので、素直に<code>std::mutex</code>で守っている。
 </p>
 
-<h3>38.2 bindlessが使えるかの判定は3つ見る</h3>
+<h3>39.2 bindlessが使えるかの判定は3つ見る</h3>
 <p>
 <code>DetectBindlessSupport</code>が確認するのは次の3つで、1つでも欠けると無効になる。
 </p>
@@ -7030,7 +7029,7 @@ SM 6.6のプロファイル(<code>vs_6_6</code>等)を知らない。GPUが6.6�
 古いD3D12ランタイムは未知のフラグとしてシリアライズを失敗させるため。
 </p>
 
-<h3>38.3 レイトレーシングのヒット面をテクスチャ化する</h3>
+<h3>39.3 レイトレーシングのヒット面をテクスチャ化する</h3>
 <p>
 <code>RaytracingMaterial</code>へ4つのbindless番号(ベースカラー・法線・メタリック/ラフネス・自発光)を
 足し、<code>FetchHitSurface</code>が<strong>サンプル結果を係数へ畳み込んで返す</strong>方式にした。
@@ -7055,7 +7054,7 @@ metallic/roughnessだけは「テクスチャがあるときだけ」畳み込�
 破綻が少ない。
 </p>
 
-<h3>38.4 メッシュレットの生成はオフラインで</h3>
+<h3>39.4 メッシュレットの生成はオフラインで</h3>
 <p>
 分割はmeshoptimizer(<code>meshopt_buildMeshlets</code>)に任せ、
 <strong>KurenaiPackerが焼く</strong>。分割は入力ジオメトリだけで決まり実行時に変化しない一方、
@@ -7075,7 +7074,7 @@ RHI・DX11/DX12の両実装・ディスクリプタ周りに新しい種類の�
 20万三角形のモデルで増えるのは0.2MBに過ぎず、割に合わない。
 </p>
 
-<h3>38.5 インデックスをメッシュレット順に並べ替える</h3>
+<h3>39.5 インデックスをメッシュレット順に並べ替える</h3>
 <p>
 <code>.kgeom</code> v3から、インデックスバッファの三角形は<strong>メッシュレットの並び順そのもの</strong>に
 なっている。これはラスタライズのためではなく、<strong>レイトレーシング側のため</strong>の変更である。
@@ -7094,7 +7093,7 @@ RHI・DX11/DX12の両実装・ディスクリプタ周りに新しい種類の�
 キャッシュ効率が落ちることはない(むしろ改善方向)。
 </p>
 
-<h3>38.6 描画パス: 専用ルートシグネチャが要る理由</h3>
+<h3>39.6 描画パス: 専用ルートシグネチャが要る理由</h3>
 <p>
 メッシュシェーダーPSOは既存のグラフィックス用ルートシグネチャでは作れない。2点が噛み合わないため。
 </p>
@@ -7140,7 +7139,7 @@ meshoptimizerは<code>cone_cutoff = 1</code>・<code>cone_axis = (0,0,0)</code>�
 カリングの利得がほとんど無いため。
 </p>
 
-<h3>38.7 レイトレーシングへ送るのはTriangleOffsetだけ</h3>
+<h3>39.7 レイトレーシングへ送るのはTriangleOffsetだけ</h3>
 <p>
 RT側の<code>RTMeshInfo</code>へ<code>MeshletOffset</code>/<code>MeshletCount</code>を足し、
 シーン全体で連結した<strong><code>uint</code>1本の表</strong>を別に持たせた。
@@ -7163,7 +7162,7 @@ RT側に載る頂点属性・インデックスはすべて<code>.kgeom</code>�
 写して2つに増やすと、片方だけ直したときに<strong>確認そのものが成立しなくなる</strong>ため。
 </p>
 
-<h3>38.8 実測(確認用シーンのドラゴン)</h3>
+<h3>39.8 実測(確認用シーンのドラゴン)</h3>
 <p>
 <code>Tools/generate_dragon.py</code>が生成する代替メッシュ(トーラスノット、19.7万三角形)での
 オフライン計測。
@@ -7181,7 +7180,7 @@ RT側に載る頂点属性・インデックスはすべて<code>.kgeom</code>�
 </tbody>
 </table>
 
-<h3>38.9 1モデル1ドロー: マテリアルをテーブルにする</h3>
+<h3>39.9 1モデル1ドロー: マテリアルをテーブルにする</h3>
 <p>
 メッシュレットで三角形を間引けても、<strong>ドローの発行回数はメッシュの数のまま</strong>だった。
 マテリアルを描画直前の<code>SetTexture(t0..t6)</code>と定数バッファで渡している限り、
@@ -7269,7 +7268,7 @@ BLENDのメッシュは実体のまま影を落とす。
 <strong>両パスが同じ判断関数(<code>ShouldUseModelMeshletPath</code>)で経路を選ぶ</strong>ことが要点である。
 </p>
 
-<h3>38.10 残した制約</h3>
+<h3>39.10 残した制約</h3>
 <ul>
 <li><strong>レイトレーシングのヒット面に法線マップを適用していない。</strong>
 接空間の基底が要るが、<code>RTVertexAttribute</code>は16バイトに抑えるため法線とUVしか持っていない
@@ -8104,7 +8103,7 @@ KurenaiPackerがメッシュごとに<code>meshopt_simplify</code>で段を焼�
 (41.5の表)。性能の基準機であるIntel UHD Graphics 620では一度も実行されません。
 </p>
 
-<h3>43.1 段はモデル単位で1つに決まる</h3>
+<h3>44.1 段はモデル単位で1つに決まる</h3>
 
 <p>
 混ざらないことは<strong>2つ</strong>で担保しています。片方だけでは足りません。
@@ -8131,7 +8130,7 @@ KurenaiPackerがメッシュごとに<code>meshopt_simplify</code>で段を焼�
 その代償として粒度は粗くなります(43.5)。
 </p>
 
-<h3>43.2 選び方</h3>
+<h3>44.2 選び方</h3>
 
 <pre><code>投影直径[画素] = 2 × r × pixelScale / sqrt(d² - r²)      (d ≦ r なら画面いっぱい扱い)
 しきい値[画素] = MeshletLODQuality × sqrt(4 × モデルのLOD0三角形数 / π)
@@ -8150,7 +8149,7 @@ KurenaiPackerがメッシュごとに<code>meshopt_simplify</code>で段を焼�
 影を落とす形と本体の形が違う段になるため、<strong>主カメラの位置と拡大率を全パスへ配ります</strong>。
 </p>
 
-<h3>43.3 表には全段が載っている</h3>
+<h3>44.3 表には全段が載っている</h3>
 
 <p>
 ランタイムのメッシュレット表(<code>Model::MeshletBuffer</code>)はLOD0だけでなく<strong>全段</strong>を連結して持ちます。
@@ -8165,7 +8164,7 @@ KurenaiPackerがメッシュごとに<code>meshopt_simplify</code>で段を焼�
 全段の合計は <code>Mesh::MeshletTotalCount</code> が持ちます。
 </p>
 
-<h3>43.4 段の解決は1箇所に集約する</h3>
+<h3>44.4 段の解決は1箇所に集約する</h3>
 
 <p>
 段を決めるのは <code>Meshlet.hlsli</code> の <code>MeshletResolveLODLevel</code> だけで、
@@ -8181,7 +8180,7 @@ G-Buffer・シャドウ・深度プリパスがすべてこの関数を通りま
 塊自身の段は <code>GpuMeshlet::Flags</code> の上位ビットに詰めてあります(64バイト固定を保つため)。
 </p>
 
-<h3>43.5 効く範囲と効かない範囲</h3>
+<h3>44.5 効く範囲と効かない範囲</h3>
 
 <table>
 <tr><th>対象</th><th>効くか</th><th>理由</th></tr>
