@@ -35,6 +35,36 @@ DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジンで�
 `.gltf` / `.fbx` / `.obj` 等のソースモデルは、付属のオフラインツール **KurenaiPacker.exe** で
 `.kmodel` へ事前変換してから使います(「[5. アセットの準備(KurenaiPacker)](#5-アセットの準備kurenaipacker)」)。
 
+<!-- toc:begin (Claude/stage9/make_readme_toc.py が生成する。手で編集しない) -->
+
+## 目次
+
+- [ドキュメント](#ドキュメント)
+  - [AIコーディングエージェント向け](#aiコーディングエージェント向け)
+- [構成](#構成)
+- [必要環境](#必要環境)
+- [セットアップ手順](#セットアップ手順)
+  - [1. Submoduleの取得](#1-submoduleの取得)
+  - [2. assimpのビルド (CMake)](#2-assimpのビルド-cmake)
+  - [3. DirectXTexのビルド](#3-directxtexのビルド)
+  - [4. 本体・サンプルのビルド](#4-本体サンプルのビルド)
+  - [5. アセットの準備(KurenaiPacker)](#5-アセットの準備kurenaipacker)
+  - [ドローンショー](#ドローンショー)
+  - [ショーの作成(KurenaiShowEditor)](#ショーの作成kurenaishoweditor)
+- [実行(Sample3D)](#実行sample3d)
+  - [起動スクリプト](#起動スクリプト)
+  - [コマンドラインから直接起動する](#コマンドラインから直接起動する)
+  - [エミッシブ光源(自発光メッシュを光源として扱う)](#エミッシブ光源自発光メッシュを光源として扱う)
+- [操作方法(Sample3D)](#操作方法sample3d)
+  - [ImGuiパネル](#imguiパネル)
+- [サンプルプログラム](#サンプルプログラム)
+  - [Sample3D](#sample3d)
+  - [Sample2D](#sample2d)
+- [Assetsフォルダについて](#assetsフォルダについて)
+
+---
+<!-- toc:end -->
+
 ## ドキュメント
 
 **このREADMEが持つのは「使う側に必要なこと」だけです** —— 必要環境・セットアップ・ビルド・
