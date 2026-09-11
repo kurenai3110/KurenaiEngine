@@ -23,12 +23,14 @@ namespace Kurenai
         };
 
         // register(b0)のFrameConstantsとレイアウトを一致させる
+        // (HLSL側の並びは Shaders/2D/Constants2D.hlsli に1本だけ置いてある)
         struct alignas(16) FrameConstants
         {
             DirectX::XMFLOAT4X4 ViewProj;
         };
 
         // register(b1)のObjectConstantsとレイアウトを一致させる
+        // (HLSL側の並びは Shaders/2D/Constants2D.hlsli に1本だけ置いてある)
         struct alignas(16) ObjectConstants
         {
             DirectX::XMFLOAT4X4 World;
@@ -41,6 +43,22 @@ namespace Kurenai
             // DrawRoundedRect専用。枠線の色
             DirectX::XMFLOAT4 BorderColor = { 0.0f, 0.0f, 0.0f, 0.0f };
         };
+
+        // 【HLSLとC++のレイアウト照合】Shaders/2D/Constants2D.hlsli の並びと対にしてある。
+        // 片方だけフィールドを足すとここで止まる。3D側(Passes/*Constants.h)と同じ作法。
+        //
+        // 【守れるのはオフセットとサイズだけ】フィールドの意味までは見ていないので、
+        // 同じ大きさの別物へ入れ替えると素通りする
+        static_assert(sizeof(FrameConstants) == 64, "FrameConstantsはfloat4x4 1本(64バイト)であること");
+        static_assert(offsetof(FrameConstants, ViewProj) == 0, "ViewProjはb0の先頭であること");
+
+        static_assert(sizeof(ObjectConstants) == 128, "ObjectConstantsはHLSL側と同じ128バイトであること");
+        static_assert(offsetof(ObjectConstants, World) == 0, "Worldの位置がHLSL側と食い違っています");
+        static_assert(offsetof(ObjectConstants, Color) == 64, "Colorの位置がHLSL側と食い違っています");
+        static_assert(
+            offsetof(ObjectConstants, UVOffsetScale) == 80, "UVOffsetScaleの位置がHLSL側と食い違っています");
+        static_assert(offsetof(ObjectConstants, ShapeParams) == 96, "ShapeParamsの位置がHLSL側と食い違っています");
+        static_assert(offsetof(ObjectConstants, BorderColor) == 112, "BorderColorの位置がHLSL側と食い違っています");
 
         // --- DrawPolylineの上限 ---
         //
@@ -103,10 +121,157 @@ namespace Kurenai
         // 2Dの外積(符号付き面積の2倍)。正なら反時計回り(ワールドはY-up)
         float Cross(const Float2& a, const Float2& b) { return a.X * b.Y - a.Y * b.X; }
         float Length(const Float2& v) { return std::sqrt(v.X * v.X + v.Y * v.Y); }
+
+        // 折れ線の各点の左右レール。接合がベベルになる点だけ、外側が「入る側」「出る側」の
+        // 2点に割れる
+        struct PolylineJoint
+        {
+            Float2 LeftIn, LeftOut;   // 手前のセグメントが使う点 / 次のセグメントが使う点
+            Float2 RightIn, RightOut;
+            bool Bevel = false;
+            bool LeftIsOuter = false; // ベベル時、どちら側が2点に割れているか
+        };
+
+        // 折れ線から各点の左右レールを組み立てる。戻り値は重複を除いた有効な点の数で、
+        // 2未満なら描くものが無い(その場でログを出す)
+        size_t BuildPolylineJoints(
+            const std::vector<float>& points, float halfThickness, std::vector<PolylineJoint>& joints)
+        {
+        // 連続する重複点は方向ベクトルが定義できないので除去する
+        std::vector<Float2> path;
+        path.reserve(points.size() / 2);
+        for (size_t i = 0; i + 1 < points.size(); i += 2)
+        {
+            const Float2 p{ points[i], points[i + 1] };
+            if (!path.empty() && Length(p - path.back()) < 1e-6f)
+            {
+                continue;
+            }
+            path.push_back(p);
+            if (path.size() >= kMaxPolylinePoints)
+            {
+                break;
+            }
+        }
+
+        if (path.size() < 2)
+        {
+            Core::Logger::Error("2D", "DrawPolyline: 重複点を除いた有効な点が2点未満です。描画しません");
+            return 0;
+        }
+        const size_t pointCount = path.size();
+        const size_t segmentCount = pointCount - 1;
+
+        // セグメントごとの単位方向と左法線(ワールドはY-upなので、進行方向の左は(-dy, dx))
+        std::vector<Float2> directions(segmentCount);
+        std::vector<Float2> normals(segmentCount);
+        std::vector<float> lengths(segmentCount);
+        for (size_t i = 0; i < segmentCount; ++i)
+        {
+            const Float2 delta = path[i + 1] - path[i];
+            lengths[i] = Length(delta);
+            directions[i] = delta * (1.0f / lengths[i]);
+            normals[i] = { -directions[i].Y, directions[i].X };
+        }
+
+            joints.assign(pointCount, PolylineJoint{});
+
+        // 端点(バットキャップ)。DrawLineが回転矩形=切りっぱなしなのに揃える
+        joints[0].LeftIn = joints[0].LeftOut = path[0] + normals[0] * halfThickness;
+        joints[0].RightIn = joints[0].RightOut = path[0] - normals[0] * halfThickness;
+        const size_t last = pointCount - 1;
+        joints[last].LeftIn = joints[last].LeftOut = path[last] + normals[segmentCount - 1] * halfThickness;
+        joints[last].RightIn = joints[last].RightOut = path[last] - normals[segmentCount - 1] * halfThickness;
+
+        for (size_t i = 1; i < last; ++i)
+        {
+            const Float2& prevNormal = normals[i - 1];
+            const Float2& nextNormal = normals[i];
+            const Float2 sum = prevNormal + nextNormal;
+            const float sumLength = Length(sum);
+
+            PolylineJoint& joint = joints[i];
+            if (sumLength < 1e-6f)
+            {
+                // 180度の折り返し。normalize()が0除算でNaNになり、そのまま描くと画面全体が消えるため、
+                // ここで潰す。オフセット0(接合点=元の点)のベベル扱いにする
+                joint.Bevel = true;
+                joint.LeftIsOuter = true;
+                joint.LeftIn = path[i] + prevNormal * halfThickness;
+                joint.LeftOut = path[i] + nextNormal * halfThickness;
+                joint.RightIn = joint.RightOut = path[i];
+                continue;
+            }
+
+            const Float2 miterDirection = sum * (1.0f / sumLength);
+            const float denominator = Dot(miterDirection, prevNormal);
+            const float miterLength = halfThickness / denominator;
+
+            // 旋回方向。左へ曲がるなら左側が内側になる
+            const float turn = Cross(directions[i - 1], directions[i]);
+            const bool leftIsOuter = turn < 0.0f;
+
+            // 内側は隣接する2セグメントの短いほうの長さでクランプする。これを忘れると
+            // 鋭角+太線で内側レールが隣のセグメントを突き抜け、帯が自己交差して
+            // その部分だけ色が濃くなる
+            const float shorterSegment = (std::min)(lengths[i - 1], lengths[i]);
+            const float innerLength = (std::min)(miterLength, shorterSegment);
+
+            if (miterLength > halfThickness * kPolylineMiterLimit)
+            {
+                // 鋭角すぎるのでベベルへフォールバックする(外側だけ2点に割る)
+                joint.Bevel = true;
+                joint.LeftIsOuter = leftIsOuter;
+                if (leftIsOuter)
+                {
+                    joint.LeftIn = path[i] + prevNormal * halfThickness;
+                    joint.LeftOut = path[i] + nextNormal * halfThickness;
+                    joint.RightIn = joint.RightOut = path[i] - miterDirection * innerLength;
+                }
+                else
+                {
+                    joint.RightIn = path[i] - prevNormal * halfThickness;
+                    joint.RightOut = path[i] - nextNormal * halfThickness;
+                    joint.LeftIn = joint.LeftOut = path[i] + miterDirection * innerLength;
+                }
+            }
+            else
+            {
+                // マイター。外側は交点まで伸ばし、内側はクランプ後の長さを使う
+                const float leftLength = leftIsOuter ? miterLength : innerLength;
+                const float rightLength = leftIsOuter ? innerLength : miterLength;
+                joint.LeftIn = joint.LeftOut = path[i] + miterDirection * leftLength;
+                joint.RightIn = joint.RightOut = path[i] - miterDirection * rightLength;
+            }
+        }
+
+            return pointCount;
+        }
+
+        // GDIが描いたDIB(BGRA、白文字/黒背景)を、RGB=白・アルファ=被覆率のテクスチャへ直す。
+        // 色は DrawText の Color で乗算ティントするため、ここでは常に白にしておく
+        void ConvertGdiBitmapToAlphaTexels(
+            const void* bits, uint32_t atlasWidth, uint32_t atlasHeight, std::vector<uint8_t>& outPixels)
+        {
+            outPixels.assign(static_cast<size_t>(atlasWidth) * atlasHeight * 4, 0);
+            const uint8_t* src = static_cast<const uint8_t*>(bits);
+            const size_t pixelCount = static_cast<size_t>(atlasWidth) * atlasHeight;
+            for (size_t p = 0; p < pixelCount; ++p)
+            {
+                const uint8_t coverage = src[p * 4 + 0]; // DIBはBGRA順。B成分=R=G(グレースケールAA)をアルファに使う
+                outPixels[p * 4 + 0] = 255;
+                outPixels[p * 4 + 1] = 255;
+                outPixels[p * 4 + 2] = 255;
+                outPixels[p * 4 + 3] = coverage;
+            }
+        }
     }
 
-    KurenaiEngine2D::KurenaiEngine2D(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api)
-        : KurenaiEngineBase(title, width, height, api)
+    // 【この3つを呼ぶ順序を入れ替えないこと】DX12はディスクリプタ枠を生成順に割り当てる。
+    // 順序が変わるとシェーダーが読む枠と実際のリソースがずれる(3D側のCreateSceneResourcesと同じ)
+
+    // シェーダーとパイプラインステート、折れ線用のバッファを作る
+    void KurenaiEngine2D::CreatePipelineStates()
     {
         // ShadersはビルドでKurenaiEngine.dllと同じフォルダにコピーされる
         const std::wstring shaderPath = GetModuleDirectory() + L"Shaders\\Sprite2D.kshader";
@@ -167,7 +332,11 @@ namespace Kurenai
         // 全シェーダーの生成が終わったので、読み込んだ.kshaderのキャッシュは捨てる
         m_Device->ReleaseShaderPackages();
         m_PolylineVertices.reserve(kMaxPolylineVertices);
+    }
 
+    // スプライトが使う単位クアッドの頂点/インデックスバッファを作る
+    void KurenaiEngine2D::CreateQuadBuffers()
+    {
         // 原点中心の単位クアッド(-0.5〜0.5)。スプライトごとの位置/大きさ/回転はWorld行列側で表現する
         const Vertex2D quadVertices[] = {
             { { -0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f } },
@@ -190,7 +359,11 @@ namespace Kurenai
         indexBufferDesc.StrideInBytes = sizeof(uint32_t);
         indexBufferDesc.InitialData = quadIndices;
         m_QuadIndexBuffer = m_Device->CreateBuffer(indexBufferDesc);
+    }
 
+    // サンプラーセット(フィルタ×アドレスモードの全組み合わせ)・定数バッファ・白テクスチャを作る
+    void KurenaiEngine2D::CreateSamplersAndConstantBuffers()
+    {
         // スプライト用のサンプラーセットを、フィルタ×アドレスモードの全組み合わせぶん作り置きする。
         // CreateSamplerSetは描画開始前にしか呼べないため、SetSpriteFilter/SetSpriteAddressModeは
         // ここで作ったセットの選択しか行わない(KurenaiEngine2D.hのm_SpriteSamplerSets参照)。
@@ -229,6 +402,16 @@ namespace Kurenai
         m_ObjectConstantBuffer = m_Device->CreateBuffer(objectConstantBufferDesc);
 
         m_WhiteTexture = CreateSolidColorTexture(255, 255, 255, 255); // DrawLineが使う
+    }
+
+    KurenaiEngine2D::KurenaiEngine2D(const std::wstring& title, uint32_t width, uint32_t height, GraphicsAPI api)
+        : KurenaiEngineBase(title, width, height, api)
+    {
+        // 【この順序を入れ替えないこと】理由は各関数の直前のコメント参照
+        CreatePipelineStates();
+        CreateQuadBuffers();
+        CreateSamplersAndConstantBuffers();
+
 
         // BuildFontAtlasはコンストラクタで(BeginFrame/Drawの前に)呼ぶ必要がある。DX12の
         // CreateTextureFromMemoryは内部でSubmitAndWaitIdle(コマンドリストのフラッシュ+リセット)を
@@ -655,122 +838,14 @@ namespace Kurenai
 
     uint32_t KurenaiEngine2D::BuildPolylineGeometry(const std::vector<float>& points, float halfThickness)
     {
-        // 連続する重複点は方向ベクトルが定義できないので除去する
-        std::vector<Float2> path;
-        path.reserve(points.size() / 2);
-        for (size_t i = 0; i + 1 < points.size(); i += 2)
+        std::vector<PolylineJoint> joints;
+        const size_t pointCount = BuildPolylineJoints(points, halfThickness, joints);
+        if (pointCount < 2)
         {
-            const Float2 p{ points[i], points[i + 1] };
-            if (!path.empty() && Length(p - path.back()) < 1e-6f)
-            {
-                continue;
-            }
-            path.push_back(p);
-            if (path.size() >= kMaxPolylinePoints)
-            {
-                break;
-            }
-        }
-
-        if (path.size() < 2)
-        {
-            Core::Logger::Error("2D", "DrawPolyline: 重複点を除いた有効な点が2点未満です。描画しません");
             return 0;
         }
-
-        const size_t pointCount = path.size();
         const size_t segmentCount = pointCount - 1;
-
-        // セグメントごとの単位方向と左法線(ワールドはY-upなので、進行方向の左は(-dy, dx))
-        std::vector<Float2> directions(segmentCount);
-        std::vector<Float2> normals(segmentCount);
-        std::vector<float> lengths(segmentCount);
-        for (size_t i = 0; i < segmentCount; ++i)
-        {
-            const Float2 delta = path[i + 1] - path[i];
-            lengths[i] = Length(delta);
-            directions[i] = delta * (1.0f / lengths[i]);
-            normals[i] = { -directions[i].Y, directions[i].X };
-        }
-
-        // 各点の左右レール。接合がベベルになる点だけ、外側が「入る側」「出る側」の2点に割れる
-        struct Joint
-        {
-            Float2 LeftIn, LeftOut;   // 手前のセグメントが使う点 / 次のセグメントが使う点
-            Float2 RightIn, RightOut;
-            bool Bevel = false;
-            bool LeftIsOuter = false; // ベベル時、どちら側が2点に割れているか
-        };
-        std::vector<Joint> joints(pointCount);
-
-        // 端点(バットキャップ)。DrawLineが回転矩形=切りっぱなしなのに揃える
-        joints[0].LeftIn = joints[0].LeftOut = path[0] + normals[0] * halfThickness;
-        joints[0].RightIn = joints[0].RightOut = path[0] - normals[0] * halfThickness;
         const size_t last = pointCount - 1;
-        joints[last].LeftIn = joints[last].LeftOut = path[last] + normals[segmentCount - 1] * halfThickness;
-        joints[last].RightIn = joints[last].RightOut = path[last] - normals[segmentCount - 1] * halfThickness;
-
-        for (size_t i = 1; i < last; ++i)
-        {
-            const Float2& prevNormal = normals[i - 1];
-            const Float2& nextNormal = normals[i];
-            const Float2 sum = prevNormal + nextNormal;
-            const float sumLength = Length(sum);
-
-            Joint& joint = joints[i];
-            if (sumLength < 1e-6f)
-            {
-                // 180度の折り返し。normalize()が0除算でNaNになり、そのまま描くと画面全体が消えるため、
-                // ここで潰す。オフセット0(接合点=元の点)のベベル扱いにする
-                joint.Bevel = true;
-                joint.LeftIsOuter = true;
-                joint.LeftIn = path[i] + prevNormal * halfThickness;
-                joint.LeftOut = path[i] + nextNormal * halfThickness;
-                joint.RightIn = joint.RightOut = path[i];
-                continue;
-            }
-
-            const Float2 miterDirection = sum * (1.0f / sumLength);
-            const float denominator = Dot(miterDirection, prevNormal);
-            const float miterLength = halfThickness / denominator;
-
-            // 旋回方向。左へ曲がるなら左側が内側になる
-            const float turn = Cross(directions[i - 1], directions[i]);
-            const bool leftIsOuter = turn < 0.0f;
-
-            // 内側は隣接する2セグメントの短いほうの長さでクランプする。これを忘れると
-            // 鋭角+太線で内側レールが隣のセグメントを突き抜け、帯が自己交差して
-            // その部分だけ色が濃くなる
-            const float shorterSegment = (std::min)(lengths[i - 1], lengths[i]);
-            const float innerLength = (std::min)(miterLength, shorterSegment);
-
-            if (miterLength > halfThickness * kPolylineMiterLimit)
-            {
-                // 鋭角すぎるのでベベルへフォールバックする(外側だけ2点に割る)
-                joint.Bevel = true;
-                joint.LeftIsOuter = leftIsOuter;
-                if (leftIsOuter)
-                {
-                    joint.LeftIn = path[i] + prevNormal * halfThickness;
-                    joint.LeftOut = path[i] + nextNormal * halfThickness;
-                    joint.RightIn = joint.RightOut = path[i] - miterDirection * innerLength;
-                }
-                else
-                {
-                    joint.RightIn = path[i] - prevNormal * halfThickness;
-                    joint.RightOut = path[i] - nextNormal * halfThickness;
-                    joint.LeftIn = joint.LeftOut = path[i] + miterDirection * innerLength;
-                }
-            }
-            else
-            {
-                // マイター。外側は交点まで伸ばし、内側はクランプ後の長さを使う
-                const float leftLength = leftIsOuter ? miterLength : innerLength;
-                const float rightLength = leftIsOuter ? innerLength : miterLength;
-                joint.LeftIn = joint.LeftOut = path[i] + miterDirection * leftLength;
-                joint.RightIn = joint.RightOut = path[i] - miterDirection * rightLength;
-            }
-        }
 
         // 三角形を積む。2DのPSOは既定のラスタライザ(裏面カリング有効、時計回りが表)で作られており、
         // ワールドはY-upなので「符号付き面積が負(=Y-upで時計回り)」が表になる
@@ -800,7 +875,7 @@ namespace Kurenai
 
         for (size_t i = 1; i < last; ++i)
         {
-            const Joint& joint = joints[i];
+            const PolylineJoint& joint = joints[i];
             if (!joint.Bevel)
             {
                 continue;
@@ -1043,17 +1118,8 @@ namespace Kurenai
 
         GdiFlush();
 
-        std::vector<uint8_t> pixels(static_cast<size_t>(atlasWidth) * atlasHeight * 4);
-        const uint8_t* src = static_cast<const uint8_t*>(bits);
-        const size_t pixelCount = static_cast<size_t>(atlasWidth) * atlasHeight;
-        for (size_t p = 0; p < pixelCount; ++p)
-        {
-            const uint8_t coverage = src[p * 4 + 0]; // DIBはBGRA順。B成分=R=G(グレースケールAA)をアルファに使う
-            pixels[p * 4 + 0] = 255;
-            pixels[p * 4 + 1] = 255;
-            pixels[p * 4 + 2] = 255;
-            pixels[p * 4 + 3] = coverage;
-        }
+        std::vector<uint8_t> pixels;
+        ConvertGdiBitmapToAlphaTexels(bits, atlasWidth, atlasHeight, pixels);
 
         SelectObject(memDC, oldBitmap);
         DeleteObject(bitmap);

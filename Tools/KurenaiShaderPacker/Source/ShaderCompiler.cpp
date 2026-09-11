@@ -1,9 +1,20 @@
 #include "ShaderCompiler.h"
+#include "ShaderInterop/GroupSizes.h"
+#include "RHI/RHIBindingLimits.h"
+#include "Passes/EnvironmentConstants.h"
+#include "Passes/GeometryConstants.h"
+#include "Passes/LightingConstants.h"
+#include "Passes/MegaLightsConstants.h"
+#include "Passes/PostProcessConstants.h"
+#include "Passes/ReflectionConstants.h"
+#include "Passes/ReflectionProbeConstants.h"
+#include "Passes/DDGIConstants.h"
 
 #include <d3dcompiler.h>
 #include <dxcapi.h>
 
 #include <atomic>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 
@@ -12,6 +23,137 @@
 
 using Microsoft::WRL::ComPtr;
 
+// C++側が持つ値を、
+// KURENAI_EXPECT_* として HLSL へ渡す。受け取った GroupSizes.hlsli は自分の #define と
+// 突き合わせ、食い違っていれば #error でこのコンパイルを落とす。
+//
+// 【なぜ値そのものを -D で置き換えないのか】-D が来ない経路(shader-check スキルが
+// fxc/dxc を直接叩く場合)でも HLSL 単体でコンパイルできる必要があるため。
+// 実数値は両方に置いたまま、一致だけを機械で確かめる。
+//
+// 【ここへ足すときは3箇所そろえる】C++側の定数・HLSL側の #define と #if・この表。
+// 1つでも欠けると、その値は黙って照合されなくなる。
+// 出所はグループサイズが ShaderInterop/GroupSizes.h、スロット数が RHI/RHIBindingLimits.h
+namespace
+{
+    struct ShaderConstantExpectation
+    {
+        const wchar_t* Name;
+        uint32_t Value;
+    };
+
+    const ShaderConstantExpectation kShaderConstantExpectations[] = {
+        { L"KURENAI_EXPECT_AMPLIFICATION_GROUP_SIZE",   Kurenai::ShaderInterop::kAmplificationGroupSize },
+        { L"KURENAI_EXPECT_MODEL_CULL_GROUP_SIZE",      Kurenai::ShaderInterop::kModelCullGroupSize },
+        { L"KURENAI_EXPECT_SWRASTER_RESOLVE_GROUP_SIZE", Kurenai::ShaderInterop::kSWRasterResolveGroupSize },
+        { L"KURENAI_EXPECT_INDIRECT_ARG_STRIDE",        Kurenai::ShaderInterop::kDispatchMeshIndirectArgStride },
+        { L"KURENAI_EXPECT_MESH_GROUP_SIZE",           Kurenai::ShaderInterop::kMeshGroupSize },
+        { L"KURENAI_EXPECT_SWRASTER_GROUP_SIZE",       Kurenai::ShaderInterop::kSWRasterGroupSize },
+        { L"KURENAI_EXPECT_SAMPLER_SLOT_COUNT",        Kurenai::RHI::RHIBindingLimits::kSamplerSlotCount },
+    };
+
+    // cbuffer の大きさを、**コンパイラが実際に作ったレイアウトから**確かめるための表。
+    //
+    // 【なぜ #define の突き合わせではないのか】HLSLには自分のcbufferの大きさを前処理時に
+    // 知る手立てが無い。HLSL側へ数字を手で書いて #if で比べる形にすると、
+    // 「HLSLへフィールドを足して数字を直し忘れた」場合に素通りする ―― いちばん起きやすい
+    // 壊れ方を捕まえられない。SM 5.0 の経路は D3DReflect が使えるので、焼いた結果を読む。
+    //
+    // 【ここに無いcbufferは照合されない】足すときはこの表へ1行足すだけでよい。
+    // C++側の型が唯一の出所で、HLSL側に書く数字は無い。
+    //
+    // 【限界】見ているのは合計サイズだけで、**フィールドの並び順は見ていない**。
+    // 並びの取り違えはC++側の offsetof の static_assert がC++側でだけ止める。
+    struct ConstantBufferExpectation
+    {
+        const char* Name;   // HLSLの cbuffer 名
+        uint32_t Size;      // C++側の sizeof
+    };
+
+    const ConstantBufferExpectation kConstantBufferExpectations[] = {
+        { "LightingConstants",           sizeof(Kurenai::Passes::LightingConstants) },
+        { "SSAOConstants",               sizeof(Kurenai::Passes::SSAOConstants) },
+        { "SSILConstants",               sizeof(Kurenai::Passes::SSILConstants) },
+        { "LightCullingConstants",       sizeof(Kurenai::Passes::LightCullingConstants) },
+        { "MegaLightsConstants",         sizeof(Kurenai::Passes::MegaLightsConstants) },
+        { "MegaLightsTilePoolConstants", sizeof(Kurenai::Passes::MegaLightsTilePoolConstants) },
+        { "MegaLightsAccumConstants",    sizeof(Kurenai::Passes::MegaLightsAccumConstants) },
+        { "MegaLightsDenoiseConstants",  sizeof(Kurenai::Passes::MegaLightsDenoiseConstants) },
+        { "TonemapConstants",            sizeof(Kurenai::Passes::TonemapConstants) },
+        { "UpscaleConstants",            sizeof(Kurenai::Passes::UpscaleConstants) },
+        { "BloomConstants",              sizeof(Kurenai::Passes::BloomConstants) },
+        { "AutoExposureConstants",       sizeof(Kurenai::Passes::AutoExposureConstants) },
+        { "TAAConstants",                sizeof(Kurenai::Passes::TAAConstants) },
+        // PresentConstants は Passes/PresentPass.h の中にあり、そこを引くと
+        // エンジン一式を巻き込むためこの表には無い(照合されない)
+        { "SSRConstants",                sizeof(Kurenai::Passes::SSRConstants) },
+        { "RTReflectionConstants",       sizeof(Kurenai::Passes::RTReflectionConstants) },
+        { "RTShadowConstants",           sizeof(Kurenai::Passes::RTShadowConstants) },
+        { "RTAOConstants",               sizeof(Kurenai::Passes::RTAOConstants) },
+        { "HiZConstants",                sizeof(Kurenai::Passes::HiZConstants) },
+        { "ModelCullConstants",          sizeof(Kurenai::Passes::ModelCullConstants) },
+        { "SWRasterConstants",           sizeof(Kurenai::Passes::SWRasterConstants) },
+        { "SkyBakeConstants",            sizeof(Kurenai::Passes::SkyBakeConstants) },
+        { "SkyIntegrateConstants",       sizeof(Kurenai::Passes::SkyIntegrateConstants) },
+        { "AtmosphereConstants",         sizeof(Kurenai::Passes::AtmosphereConstants) },
+        { "IBLFaceConstants",            sizeof(Kurenai::Passes::IBLFaceConstants) },
+        { "DDGIUpdateConstants",         sizeof(Kurenai::Passes::DDGIUpdateConstants) },
+        { "DDGITraceConstants",          sizeof(Kurenai::Passes::DDGITraceConstants) },
+    };
+
+    // 焼き上がったバイトコードのcbufferの大きさを、上の表と突き合わせる。
+    // 表に無いcbufferは素通りさせる(照合したいものだけを表に載せる方針)
+    bool VerifyConstantBufferSizes(ID3DBlob* bytecode, std::string& outMismatch)
+    {
+        Microsoft::WRL::ComPtr<ID3D11ShaderReflection> reflection;
+        const HRESULT hr = D3DReflect(
+            bytecode->GetBufferPointer(), bytecode->GetBufferSize(),
+            __uuidof(ID3D11ShaderReflection), reinterpret_cast<void**>(reflection.GetAddressOf()));
+        if (FAILED(hr) || !reflection)
+        {
+            // 【照合できないことを失敗にしない】リフレクションが使えない状況でも
+            // 焼くこと自体は成立する。照合が空回りしていないかは、わざと壊す試験で見る
+            return true;
+        }
+
+        D3D11_SHADER_DESC shaderDesc{};
+        if (FAILED(reflection->GetDesc(&shaderDesc)))
+        {
+            return true;
+        }
+
+        for (UINT i = 0; i < shaderDesc.ConstantBuffers; ++i)
+        {
+            ID3D11ShaderReflectionConstantBuffer* const buffer = reflection->GetConstantBufferByIndex(i);
+            if (!buffer)
+            {
+                continue;
+            }
+            D3D11_SHADER_BUFFER_DESC bufferDesc{};
+            if (FAILED(buffer->GetDesc(&bufferDesc)) || !bufferDesc.Name)
+            {
+                continue;
+            }
+            for (const ConstantBufferExpectation& expectation : kConstantBufferExpectations)
+            {
+                if (std::strcmp(bufferDesc.Name, expectation.Name) != 0)
+                {
+                    continue;
+                }
+                if (bufferDesc.Size != expectation.Size)
+                {
+                    outMismatch = std::string("cbuffer ") + expectation.Name +
+                        " の大きさがC++側と食い違っています(HLSL " + std::to_string(bufferDesc.Size) +
+                        " バイト / C++ " + std::to_string(expectation.Size) +
+                        " バイト)。どちらかにフィールドを足して片方だけ直していないか確かめること";
+                    return false;
+                }
+                break;
+            }
+        }
+        return true;
+    }
+}
 namespace Kurenai::ShaderPacker
 {
     namespace
@@ -307,6 +449,18 @@ namespace Kurenai::ShaderPacker
         {
             defines.push_back(DxcDefine{ L"KURENAI_BINDLESS", L"1" });
         }
+        // スレッドグループサイズの突き合わせ用。値そのものは HLSL 側にもあり、
+        // ここで渡すのは「C++側はこう思っている」という期待値だけ(上の表のコメント参照)
+        std::vector<std::wstring> expectationValues;
+        expectationValues.reserve(std::size(kShaderConstantExpectations));
+        for (const ShaderConstantExpectation& expectation : kShaderConstantExpectations)
+        {
+            expectationValues.push_back(std::to_wstring(expectation.Value));
+        }
+        for (size_t i = 0; i < std::size(kShaderConstantExpectations); ++i)
+        {
+            defines.push_back(DxcDefine{ kShaderConstantExpectations[i].Name, expectationValues[i].c_str() });
+        }
 
         ComPtr<IDxcOperationResult> operationResult;
         const HRESULT compileHr = m_Compiler->Compile(
@@ -389,11 +543,31 @@ namespace Kurenai::ShaderPacker
             compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
         }
 
+        // dxc 側と同じ期待値を渡す(GroupSizes.hlsli の #if は両方の経路で効かせる)。
+        // D3D_SHADER_MACRO は UTF-8 の char* なので、ワイド文字の名前を変換して持ち替える
+        std::vector<std::string> macroNames;
+        std::vector<std::string> macroValues;
+        macroNames.reserve(std::size(kShaderConstantExpectations));
+        macroValues.reserve(std::size(kShaderConstantExpectations));
+        for (const ShaderConstantExpectation& expectation : kShaderConstantExpectations)
+        {
+            macroNames.push_back(Core::WideToUtf8(expectation.Name));
+            macroValues.push_back(std::to_string(expectation.Value));
+        }
+        std::vector<D3D_SHADER_MACRO> macros;
+        macros.reserve(macroNames.size() + 1);
+        for (size_t i = 0; i < macroNames.size(); ++i)
+        {
+            macros.push_back(D3D_SHADER_MACRO{ macroNames[i].c_str(), macroValues[i].c_str() });
+        }
+        // D3DCompileFromFile は終端を {nullptr, nullptr} で判定する
+        macros.push_back(D3D_SHADER_MACRO{ nullptr, nullptr });
+
         ComPtr<ID3DBlob> bytecode;
         ComPtr<ID3DBlob> errorBlob;
         const HRESULT hr = D3DCompileFromFile(
             filePath.c_str(),
-            nullptr,
+            macros.data(),
             D3D_COMPILE_STANDARD_FILE_INCLUDE,
             entryPoint.c_str(),
             target.c_str(),
@@ -416,6 +590,19 @@ namespace Kurenai::ShaderPacker
                 result.Diagnostics = "D3DCompileFromFileが失敗しました(HRESULT=0x" + std::to_string(hr) + ")";
             }
             return result;
+        }
+
+        // 【焼いた結果からcbufferの大きさを確かめる】表に載っているcbufferを使っている
+        // シェーダーなら、コンパイラが作ったレイアウトとC++側の sizeof を突き合わせる。
+        // 食い違ったらここで落とす —— 通してしまうと、定数バッファの後ろ半分が
+        // 別のフィールドとして読まれ、**絵は出るが値だけが狂う**という形で出る
+        {
+            std::string mismatch;
+            if (!VerifyConstantBufferSizes(bytecode.Get(), mismatch))
+            {
+                result.Diagnostics = mismatch;
+                return result;
+            }
         }
 
         const auto* data = static_cast<const uint8_t*>(bytecode->GetBufferPointer());

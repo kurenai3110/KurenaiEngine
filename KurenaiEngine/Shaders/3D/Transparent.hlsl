@@ -22,7 +22,7 @@
 // このシェーダーでも、BRDF積分LUT(BRDFLUT.hlsl)と同じ可視性項を使う必要があるため共有する
 #include "SpecularEnergy.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
 // 反射プローブ(19章)の環境ソースと鏡面IBLの重み。DeferredLighting.hlsl・SSR.hlslと同じ定義を
 // 共有する。空きスロットが違うだけでレジスタ番号は各シェーダーが決める(ReflectionProbe.hlsli冒頭)。
@@ -39,70 +39,13 @@ static const float PI = 3.14159265359f;
 #define KURENAI_DDGI_IRRADIANCE_REGISTER t15
 #define KURENAI_DDGI_DISTANCE_REGISTER t16
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    float4 ShadowParams;
-    // 半透明パス専用。x=t8のライトリストの有効数(DirectLighting.hlsl側のLightingConstants.LightCount.xと
-    // 同じ値)。他のシェーダーはこのフィールドを宣言していないため、末尾に追加してもオフセットは変わらない
-    float4 ActiveLightCount;
-    // x: 拡散イラディアンス(グローバルIBL)の取得元(0=プリフィルタ済み鏡面の最終ミップ、
-    // 1=専用イラディアンスマップ)。ReflectionProbe.hlsliのSampleGlobalIrradiance参照。yzwは未使用
-    float4 IBLParams;
-    // 反射プローブ用(19章)。x=有効プローブ数、y=影響範囲のデバッグ表示フラグ(このパスでは未使用)、
-    // z=視差補正の有効フラグ、w=プローブ間ブレンドの有効フラグ。
-    // DeferredLighting.hlslと同じ値が入っているため、半透明と不透明で環境ソースが食い違うことはない
-    float4 ProbeParams;
-    // 距離キューブ用(19.12節)。意味はDeferredLighting.hlslと同じ
-    float4 ProbeParams2;
-    // 【以下2つはこのシェーダーでは使わないが宣言だけ必要】cbufferは宣言順レイアウトなので、
-    // 後ろのDDGIParams/OcclusionParamsを正しいオフセットで読むには途中のフィールドを飛ばせない。
-    // C++側のFrameConstantsと並びを必ず一致させること
-    float4x4 PrevViewProj;
-    float4 TAAParams;
-    // DDGI用(22章、M11 Stage 1)。レイアウトはC++側 KurenaiEngine3D.cpp の FrameConstants の
-    // コメント参照。DDGI.hlsliがこの5本を読む
-    float4 DDGIParams0;
-    float4 DDGIParams1;
-    float4 DDGIParams2;
-    float4 DDGIParams3;
-    float4 DDGIParams4;
-    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
-    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
-    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
-    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
-    float4 DDGILODOrigin[4];
-    float4 DDGILODBase[4];
-    // bent normalによる遮蔽(34章)。DeferredLighting.hlslと同じ規則を適用する
-    float4 OcclusionParams;
-    // これ以降(TimeParams / Sky* / Cloud* / PlanarReflectionPlane / Fog* / WaterBodyColor)は
-    // このシェーダーでは一切読まないため宣言しない。
-    // 【半透明メッシュにフォグを掛けない理由】AerialPerspective.hlslはこのTransparentパスより
-    // 後のTAA直前に置かれるため、Transparentが描いた色も含めて後段でまとめてフォグが掛かる
-    // (このシェーダー自体でフォグを計算する必要が無い)
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 // GBuffer.hlslのObjectConstantsと同じレイアウト(AlphaCutoffはBLENDマテリアルでは常に0で
 // 実質未使用だが、同じルートシグネチャ/定数バッファを共有するため並び順を合わせる)。
 #include "ObjectConstants.hlsli"
 
-// DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
-struct GPULight
-{
-    float4 PositionType;
-    float4 ColorRange;
-    float4 DirectionAngle;
-    float4 Params;
-};
+#include "ShaderInterop/GPULight.hlsli"
 StructuredBuffer<GPULight> Lights : register(t8);
 
 Texture2D BaseColorTexture : register(t0);

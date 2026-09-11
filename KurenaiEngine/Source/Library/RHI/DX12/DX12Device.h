@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <d3d12.h>
 #include <d3d12sdklayers.h> // ID3D12InfoQueue(デバッグレイヤーのメッセージ引き取り用)
@@ -25,6 +26,8 @@ namespace Kurenai::RHI
 {
     class DX12CommandList;
     struct DX12TiledTextureState;
+    class DX12Texture;
+    class DX12PendingTextureContents;
 
     class DX12Device : public IRHIDevice
     {
@@ -62,7 +65,6 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHITexture> CreateUAVTexture(uint32_t width, uint32_t height, Format format) override;
         std::unique_ptr<IRHITexture> CreateUAVTexture3D(
             uint32_t width, uint32_t height, uint32_t depth, Format format) override;
-        std::unique_ptr<IRHITexture> CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels) override;
         std::unique_ptr<IRHITexture> CreateMippedUAVTexture(uint32_t width, uint32_t height, Format format, uint32_t mipLevels) override;
         std::unique_ptr<IRHITexture> CreateUAVTextureCube(uint32_t size, Format format) override;
         std::unique_ptr<IRHITexture> CreateMippedUAVTextureCube(uint32_t size, Format format, uint32_t mipLevels) override;
@@ -74,6 +76,7 @@ namespace Kurenai::RHI
         std::unique_ptr<IRHITexture> CreateReadbackTexture(IRHITexture* source, uint32_t mipLevel = 0) override;
         std::unique_ptr<IRHISamplerSet> CreateSamplerSet(const SamplerDesc* descs, uint32_t count) override;
         IRHICommandList* GetImmediateCommandList() override;
+        void ApplyPendingResourceInvalidation() override;
 
         std::unique_ptr<IRHIImGuiBackend> CreateImGuiBackend(void* windowHandle) override;
         std::unique_ptr<IRHIGPUProfiler> CreateGPUProfiler() override;
@@ -112,6 +115,11 @@ namespace Kurenai::RHI
         // 「未バインドのスロットは0を返す」というDX11と同じ挙動を構造的に保証する
         D3D12_CPU_DESCRIPTOR_HANDLE GetNullSrvCpuHandle() const { return m_RenderSrvCpuHeap->GetCpuHandle(m_NullSrvIndex); }
         D3D12_CPU_DESCRIPTOR_HANDLE GetNullUavCpuHandle() const { return m_RenderSrvCpuHeap->GetCpuHandle(m_NullUavIndex); }
+
+        // GPUリソースの破棄を、コマンドリストのシャドウへ伝える(DX12CommandList参照)
+        void OnGPUResourceDestroyed();
+        // 保留中の破棄通知をRenderスレッドでシャドウへ反映する。
+        void ApplyPendingShadowedDescriptorInvalidation();
 
         // フレームごとに1ずつ増える通し番号。DX12Bufferがリングへの書き込み回数を
         // 「同一フレーム内で何回目か」として数えるために参照する(ResetCommandList()で進む)
@@ -235,6 +243,16 @@ namespace Kurenai::RHI
         // 両者はSRVの次元とキューブ枚数以外まったく同じ手順のため1箇所にまとめている
         std::unique_ptr<IRHITexture> CreateCubeTextureInternal(
             uint32_t size, Format format, uint32_t mipLevels, uint32_t cubeCount, bool asArray);
+        // Initializeの4段。**この順序に意味がある**ので入れ替えないこと
+        // (機能判定はルートシグネチャの作成より前でなければならない)。
+        // デバッグレイヤー・DXGIファクトリ・D3D12デバイス・InfoQueue
+        void CreateDeviceAndDebugFacilities();
+        // コマンドキュー・アロケータ・コマンドリスト・フェンスと、アップロード専用の一式
+        void CreateQueuesAndCommandLists();
+        // 機能判定(シェーダーモデル/レイトレ/bindless/メッシュシェーダー/自前ラスタ/タイル)
+        void DetectDeviceCapabilities();
+        // ディスクリプタヒープ一式と、既定サンプラー・nullディスクリプタの初期化
+        void CreateDescriptorHeaps();
         // 現在のフレームスロット(m_FrameIndex)のコマンドアロケータ/リストを開き直す
         void ResetCommandList();
         // デバッグレイヤーが溜めたメッセージを引き取ってエンジンのログ(KurenaiEngine_DX12.log)へ
@@ -242,6 +260,20 @@ namespace Kurenai::RHI
         // そのままではデバッガの出力ウィンドウにしか出ず、デバッガを繋がない実行で気付けないため
         void DrainDebugMessages();
         Microsoft::WRL::ComPtr<ID3D12Resource> CreateUploadBuffer(uint64_t sizeInBytes);
+        // CreateBufferのUsageごとの実装。ヒープ種別・作成時のリソース状態・ステージングリングの
+        // 段数がUsageごとに違い、取り違えても多くのUsageは動いてしまうため、手順をUsage単位で
+        // 独立させてある。
+        // 【いずれもm_UploadMutexを保持したまま呼ばれる】CreateBufferが先頭で確保している。
+        // std::mutexは再帰ロックできないので、これらの中で取り直してはいけない
+        std::unique_ptr<IRHIBuffer> CreateStructuredBuffer(const BufferDesc& desc);
+        std::unique_ptr<IRHIBuffer> CreateStructuredRWBuffer(const BufferDesc& desc);
+        std::unique_ptr<IRHIBuffer> CreateStructuredImmutableBuffer(const BufferDesc& desc);
+        std::unique_ptr<IRHIBuffer> CreateStructuredReadOnlyBuffer(const BufferDesc& desc);
+        std::unique_ptr<IRHIBuffer> CreateReadbackBuffer(const BufferDesc& desc);
+        std::unique_ptr<IRHIBuffer> CreateIndirectArgsBuffer(const BufferDesc& desc);
+        std::unique_ptr<IRHIBuffer> CreateConstantRingBuffer(const BufferDesc& desc);
+        // Vertex/Indexと、上のいずれにも当たらないUsageの受け皿(分割前の末尾のフォールスルー)
+        std::unique_ptr<IRHIBuffer> CreateVertexIndexBuffer(const BufferDesc& desc);
         // 公開APIのCreateTextureFromImage(const TextureImage&)から、内部のTexMetadata/ScratchImageを
         // 取り出して実際のGPUリソース作成を行う共通処理(CreateTextureFromFile/CreateSolidColorTexture/
         // CreateTextureFromMemoryからも使う)
@@ -271,6 +303,21 @@ namespace Kurenai::RHI
         void MapStandardMip(
             ID3D12Resource* resource, const DX12TiledTextureState& state, uint32_t mip,
             const std::vector<DX12TilePool::Tile>& tiles);
+        // PrepareTiledTextureResidencyの3段。いずれもm_UploadMutexを保持したまま呼ばれる
+        // (std::mutexは再帰ロックできないので、この中で取り直してはいけない)。
+        // 予約リソースを作り、タイルの形とミップテールを実測して常駐状態を組み立てる
+        std::unique_ptr<DX12TiledTextureState> CreateReservedTiledResource(
+            const TiledTextureDesc& desc, Microsoft::WRL::ComPtr<ID3D12Resource>& resource);
+        // 常駐するミップの範囲をfirstMipへ寄せる。粗くする側は外す予約をpendingへ積むだけにする
+        bool UpdateTiledMipResidency(
+            const TiledTextureDesc& desc, DX12Texture* texture, const Microsoft::WRL::ComPtr<ID3D12Resource>& resource,
+            DX12TiledTextureState* state, uint32_t firstMip, uint32_t oldFirstMip, uint32_t standardMips,
+            DX12PendingTextureContents* pending);
+        // 新しく貼ったミップへ画像データを流し込む
+        bool UploadTiledMipContents(
+            const TiledTextureDesc& desc, const TextureImage& image, DX12Texture* texture,
+            const Microsoft::WRL::ComPtr<ID3D12Resource>& resource, const DX12TiledTextureState* state,
+            uint32_t firstMip, uint32_t oldFirstMip);
         // m_UploadCommandListへ記録した内容をクローズして実行投入し、完了を同期的に待ってから開き直す。
         // CreateBuffer/CreateTextureFromImageの初期データアップロード専用(詳細はm_UploadCommandListの
         // コメント参照)
@@ -421,6 +468,7 @@ namespace Kurenai::RHI
         uint64_t m_FrameStamp = 0;
 
         std::unique_ptr<DX12CommandList> m_ImmediateCommandList;
+        std::atomic<bool> m_ShadowedDescriptorsDirty{ false };
 
         uint32_t m_NextSrvTableIndex = 0;
         // 1フレームあたりの払い出しブロック数の検証用(実際のリング位置には影響しない)。

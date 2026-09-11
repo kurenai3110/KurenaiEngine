@@ -33,14 +33,7 @@
 // メッシュシェーダー(ShadowMeshlet.hlsl)と共有するため。写して2つに増やすと
 // 片方だけ直したときにジオメトリの読み方が静かに食い違う
 
-// 増幅シェーダー1グループが判定するメッシュレット数。
-// 生き残ったメッシュレット番号をペイロードで渡すため、ペイロードの配列長でもある。
-// メッシュシェーダーのペイロードは16KBまでだが、ここでは32×4バイト=128バイトしか使わない
-#define KURENAI_AMPLIFICATION_GROUP_SIZE 32
-
-// メッシュシェーダーの1グループのスレッド数。1スレッドが頂点1つと三角形1つを担当するため、
-// メッシュレットの上限(頂点64・三角形124、Assets::kMeshletMax*)以上あればよい
-#define KURENAI_MESH_GROUP_SIZE 128
+#include "ShaderInterop/GroupSizes.hlsli"
 
 struct MeshletPayload
 {

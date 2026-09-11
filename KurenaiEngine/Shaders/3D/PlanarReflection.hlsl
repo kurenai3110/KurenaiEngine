@@ -50,100 +50,13 @@
 #define KURENAI_SKYVIEW_REGISTER t15
 #include "Sky.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;    // 反射用ViewProj(R * View * jitteredProj)。ラスタライズに使う
-    float4x4 InvViewProj; // このシェーダーでは未使用(オフセット合わせのためだけに宣言する)
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition; // 鏡映したカメラ位置(視線ベクトルVの起点。ファイル冒頭参照)
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View; // カメラのビュー行列をそのまま渡す(理由はファイル冒頭を参照。ProbeCaptureとは異なる)
-    float4x4 Proj; // このシェーダーでは未使用(オフセット合わせのためだけに宣言する)
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    float4 ShadowParams;
-    // x=t8のライトリストの有効数(ProbeCapture.hlslと同じく末尾で受け取る)
-    float4 ActiveLightCount;
-    float4 IBLParams;
-    // 反射プローブ用。このシェーダーではプローブを一切参照しない(ファイル冒頭参照)ため未使用だが、
-    // 後続のDDGIParamsのオフセットを合わせる目的で宣言する(ProbeCapture.hlslと同じ理由)
-    float4 ProbeParams;
-    float4 ProbeParams2;
-    // TAA(23章)用。このシェーダーでは未使用だが、C++側でDDGIParamsより手前に置かれているため
-    // オフセット合わせのためだけに宣言する。ProbeCaptureと同じくPrevViewProj/TAAParamsの実際の値は
-    // C++側(KurenaiEngine3D::Render)で「今フレーム=前フレーム、ジッター無し」に明示的に潰される
-    float4x4 PrevViewProj;
-    float4 TAAParams;
-    // DDGI(22章)。多重バウンスのために前フレームのイラディアンスを引くのに使う
-    float4 DDGIParams0;
-    float4 DDGIParams1;
-    float4 DDGIParams2;
-    float4 DDGIParams3;
-    // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
-    float4 DDGIParams4;
-    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
-    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
-    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
-    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
-    float4 DDGILODOrigin[4];
-    float4 DDGILODBase[4];
-    // bent normalによる遮蔽(34章)。このシェーダーでは読まないが、C++側のFrameConstantsでは
-    // DDGIParams4の直後にあるため、**宣言しないと以降のフィールドが16バイトずれる**。
-    // 実際このマージで一度宣言し忘れ、PlanarReflectionPlaneが16バイトずれた結果
-    // SV_ClipDistance0が全ジオメトリを切り落とし、水面の鏡像が丸ごと消えた
-    float4 OcclusionParams;
-    // 水面用。このシェーダーでは未使用だが、cbufferのレイアウトは宣言順で決まり
-    // 途中のフィールドを飛ばせないため、末尾のPlanarReflectionPlaneのオフセットを
-    // C++側 KurenaiEngine3D.cpp の FrameConstants と合わせる目的だけで宣言する
-    // (DeferredLighting.hlsl/SSR.hlslの同名フィールドと同じ扱い。SkyZenithTint/
-    // SkyHorizonTint/SkyGroundTint/SkySunGlowTintの4本はFrameConstantsではなく
-    // SkyParametersBufferにあるため、ここでも宣言しない)
-    float4 TimeParams;
-    // 空の解析評価用・雲。大気遠近のin-scatter項(下記MakeSkyParameters/SkyColor)が
-    // 読むため、このシェーダーでも実際に使う。xyz=太陽が「ある」向き(未正規化のまま渡ってくる。
-    // MakeSkyParametersでnormalizeする)、w=未使用
-    float4 SkySunDirection;
-    // x=未使用、y=このシェーダーでは未使用(背景の解析評価トグルはDeferredLighting.hlsl専用)、
-    // z=太陽照度/空照度比(SunToSkyIlluminanceRatio。MakeSkyParametersが読み、
-    // Sky.hlsliのEvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う)、w=未使用
-    float4 SkyParams;
-    // CloudParams0: x=被覆率(0で雲なし)、y=雲底の高度[m](カメラ基準)、
-    //               z=UVスケール[ノイズ空間/m]、w=消散係数。MakeSkyParametersが読む
-    float4 CloudParams0;
-    // CloudParams1: xy=風によるノイズ空間の移動量(kCloudNoisePeriodでwrap済み)、
-    //               z=Henyey-Greensteinの非対称パラメータ、w=未使用。MakeSkyParametersが読む
-    float4 CloudParams1;
-    // 巻雲(さらに末尾に追加)。このシェーダーでは未使用だが、C++側 KurenaiEngine3D.cpp の
-    // FrameConstants::CloudParams2/3 と揃える目的だけで宣言する
-    // (DeferredLighting.hlsl/SSR.hlslの同名フィールドと同じ扱い)
-    float4 CloudParams2;
-    float4 CloudParams3;
-    // 平面反射。xyz=水面平面の法線(現状は常に(0,1,0))、w=平面の距離項
-    // (SV_ClipDistance0 = dot(worldPos, xyz) + w が水面より上で正になるように詰める)
-    float4 PlanarReflectionPlane;
-    // 大気遠近(末尾に追加)。鏡像にも同じフォグを掛けるため、AerialPerspective.hlslと同じ値を読む。
-    // x=基準高度での消散係数[1/m]、y=スケールハイト[m]、z=基準高度[m](ワールドY)、
-    // w=有効フラグ(0で無効。C++側の判断はAerialPerspective.hlslのFogParams0.wコメント参照)
-    float4 FogParams0;
-    // x=不透明度の上限、yzw=未使用
-    float4 FogParams1;
-    // 水中項。このシェーダーでは未使用(オフセット合わせのためだけに宣言する)。Water.hlslが読む
-    float4 WaterBodyColor;
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 #include "ObjectConstants.hlsli"
 
-// DirectLighting.hlsl側のstruct GPULightと並び・ストライド(64バイト)を一致させる必要がある
-struct GPULight
-{
-    float4 PositionType;
-    float4 ColorRange;
-    float4 DirectionAngle;
-    float4 Params;
-};
+#include "ShaderInterop/GPULight.hlsli"
 StructuredBuffer<GPULight> Lights : register(t8);
 
 Texture2D BaseColorTexture : register(t0);
@@ -215,48 +128,7 @@ PSInput VSMain(VSInput input, uint instanceID : SV_InstanceID)
     return output;
 }
 
-// FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる。大気遠近の
-// in-scatter項にだけ使う(このパス自体のライティングは従来どおりIBLキューブマップを使う。
-// ファイル冒頭のEvaluateGlobalIBL参照)。
-// SSR.hlsl/DeferredLighting.hlsl/AerialPerspective.hlslのMakeSkyParametersと完全に同一の内容で
-// あること(正規化の扱いを含む)。4つのシェーダーはcbufferをそれぞれ別に宣言しているため
-// 関数そのものは共有できず複製しているが、中身がずれると「背景の空」「水面に映る空」
-// 「フォグの合成先の色」が互いに食い違ってしまうため、中身を変える場合は必ず4つとも同時に直すこと
-SkyParameters MakeSkyParameters(float2 pixelPosition)
-{
-    SkyParameters params;
-    params.SunDirection = normalize(SkySunDirection.xyz);
-    params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
-    // 太陽照度/空照度比(SkyParams.zに詰めてある。KurenaiEngine3D.cppのSkyParams.zコメント参照)。
-    // EvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う
-    params.SunToSkyIlluminanceRatio = SkyParams.z;
-    params.CloudCoverage = CloudParams0.x;
-    params.CloudAltitude = CloudParams0.y;
-    params.CloudUvScale = CloudParams0.z;
-    params.CloudDensity = CloudParams0.w;
-    params.CloudScrollOffset = CloudParams1.xy;
-    params.CloudForwardG = CloudParams1.z;
-    // 積雲の厚み[m](CloudParams1.wの枠に詰めてある)。
-    // 0ならレイマーチせず平面として扱う
-    params.CloudThickness = CloudParams1.w;
-    params.CirrusCoverage = CloudParams2.x;
-    params.CirrusAltitude = CloudParams2.y;
-    params.CirrusUvScale = CloudParams2.z;
-    params.CirrusDensity = CloudParams2.w;
-    params.CirrusScrollOffset = CloudParams3.xy;
-    params.CirrusAnisotropy = CloudParams3.z;
-    // 雲の種類の偏り(C4)。CloudParams3.wはこれまで未使用だった枠なので、FrameConstantsは1バイトも増えない
-    params.CloudTypeBias = CloudParams3.w;
-    // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer参照)。
-    // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける。
-    // 【このCameraPositionは鏡映後のカメラ位置(yが負になる)】このシェーダーはSkyColorUpperしか
-    // 呼ばずEvaluateCloudLayerへ到達しないため影響は無いが、P17でこの引数はレイの起点そのものに
-    // なった。SkyColor/SkyColorWithRayを呼ぶよう変えるなら、鏡映前のカメラ位置を渡し直すこと
-    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
-    // レイマーチの開始位置を画素ごとにずらす量(C2)。スライスの縞をディザへ変える
-    params.RaymarchJitter = CloudRaymarchDither(pixelPosition);
-    return params;
-}
+#include "ShaderInterop/SkyFrameParameters.hlsli"
 
 // GBuffer.hlsl/ProbeCapture.hlslのComputeTangentFrameと同じ(ピクセル単位でGram-Schmidt再直交化する)
 float3x3 ComputeTangentFrame(float3 N, float4 tangent)
@@ -279,96 +151,7 @@ float3 FresnelSchlick(float cosTheta, float3 F0)
     return F0 + (1.0f - F0) * pow(saturate(1.0f - cosTheta), 5.0f);
 }
 
-// DirectLighting.hlsl/ProbeCapture.hlslのEvaluateDirectBRDFと同じ(拡散+鏡面を足した1つの値を返す)
-float3 EvaluateDirectBRDF(
-    float3 N, float3 V, float3 L, float NdotV, float3 albedo, float metallic, float roughness,
-    SpecularEnergyContext energy)
-{
-    float3 H = normalize(V + L);
-    float NdotL = saturate(dot(N, L));
-    float NdotH = saturate(dot(N, H));
-    float VdotH = saturate(dot(V, H));
-
-    float3 F0 = lerp(float3(0.04f, 0.04f, 0.04f), albedo, metallic);
-    float D = DistributionGGX(NdotH, roughness);
-    float G = GeometrySmith(NdotV, NdotL, roughness);
-    float3 F = FresnelSchlick(VdotH, F0);
-
-    float3 specular = (D * G * F) / max(4.0f * NdotV * NdotL, 1e-4f) * energy.Compensation;
-
-    if (energy.Mode == KURENAI_SPEC_COMP_KULLACONTY)
-    {
-        // 加算ローブはE(NdotL)を要る(DirectLighting.hlslの同じ箇所と同一の処理)
-        const float2 brdfL = BRDFLUTTexture.SampleLevel(ColorSampler, float2(NdotL, energy.Roughness), 0).rg;
-        specular += SpecularMultiScatterLobe(F0, energy.EssV, brdfL.x + brdfL.y, energy.Eavg, energy.Mode);
-    }
-
-    float3 kd = (1.0f - F) * (1.0f - metallic);
-    float3 diffuse = kd * albedo / PI;
-
-    return (diffuse + specular) * NdotL;
-}
-
-// 距離減衰。定義は LightAttenuation.hlsli にただ1つある
-#include "LightAttenuation.hlsli"
-
-float SpotAttenuation(float3 spotDirection, float3 L, float angleScale, float angleOffset)
-{
-    float t = saturate(dot(spotDirection, -L) * angleScale + angleOffset);
-    return t * t;
-}
-
-// DirectLighting.hlsl/ProbeCapture.hlslのEvaluateLightと同じ(影なし)
-float3 EvaluateLight(
-    GPULight light, float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo, float metallic, float roughness,
-    SpecularEnergyContext energy)
-{
-    uint lightType = (uint)light.PositionType.w;
-    float range = light.ColorRange.w;
-
-    float3 L;
-    float atten = 1.0f;
-
-    if (lightType == 0u)
-    {
-        L = normalize(-light.DirectionAngle.xyz);
-    }
-    else
-    {
-        float3 toLight = light.PositionType.xyz - worldPos;
-        float distSq = dot(toLight, toLight);
-        if (distSq > range * range)
-        {
-            return float3(0.0f, 0.0f, 0.0f);
-        }
-
-        atten = LightAttenuation(
-            lightType, toLight, distSq, range, light.Params.z, light.DirectionAngle.xyz, light.Params.w);
-        if (atten <= 0.0f)
-        {
-            return float3(0.0f, 0.0f, 0.0f);
-        }
-
-        L = toLight * rsqrt(max(distSq, 1e-8f));
-
-        if (lightType == 2u)
-        {
-            float spotAtten = SpotAttenuation(light.DirectionAngle.xyz, L, light.DirectionAngle.w, light.Params.x);
-            if (spotAtten <= 0.0f)
-            {
-                return float3(0.0f, 0.0f, 0.0f);
-            }
-            atten *= spotAtten;
-        }
-    }
-
-    if (dot(N, L) <= 0.0f)
-    {
-        return float3(0.0f, 0.0f, 0.0f);
-    }
-
-    return EvaluateDirectBRDF(N, V, L, NdotV, albedo, metallic, roughness, energy) * light.ColorRange.rgb * atten;
-}
+#include "PunctualEvaluate.hlsli"
 
 // スカイボックス由来のグローバルIBL(ProbeCapture.hlslのEvaluateGlobalIBLと同一の式)。
 // 焼いた絵とメインパスの絵が食い違わないよう、aoにはマテリアルの遮蔽マップを渡す

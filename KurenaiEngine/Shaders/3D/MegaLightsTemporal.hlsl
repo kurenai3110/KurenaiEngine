@@ -25,8 +25,7 @@
 // 【時間検証レイ ―― 履歴の固着を防ぐ要】履歴のサンプルは前のフレームの抽選結果で、
 // この画素からの可視性は検証されていない。検証せずに使うと、遮蔽された灯を掴んだ画素が
 // M上限ぶんの慣性で黒いまま固まり、外れた瞬間に明るく戻る ―― これが「遅い明滅」として
-// 見える(実測: 検証なし・M上限640で、256フレーム蓄積しても厳密に0のままの画素が
-// 画面の47%に達した)。初期可視レイが有効なときは、採用した履歴のサンプルへ
+// 見える(実測は docs/ImplementationDetail.md 61.7f.5)。初期可視レイが有効なときは、採用した履歴のサンプルへ
 // 1本撃ち直し、遮蔽されていたら殺す(どの灯を殺したかは残す)。これで
 // 「生きているリザーバは、このフレーム・この画素で可視」という不変条件が全パスで成り立ち、
 // 空間再利用の可視性込みの分母(Z)の前提も守られる。
@@ -36,45 +35,11 @@
 #include "NormalEncoding.hlsli"
 #include "SpecularEnergy.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    // w にスペキュラのエネルギー補正のモードが入っている
-    float4 ShadowParams;
-    // 【宣言はここで止めている】読むのは ShadowParams まで
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
-cbuffer MegaLightsStochasticConstants : register(b1)
-{
-    // x=出力幅, y=出力高, z=初期候補数M(このパスでは未使用), w=影レイを撃つか(未使用)
-    uint4 Params0;
-    // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
-    uint4 Params1;
-    // xyz=空間再利用用(未使用)、w=初期可視レイの有無(未使用)。
-    // 【途中を飛ばして宣言してはいけない】飛ばすと誤ったオフセットを読み、
-    // コンパイルは通り絵もそれらしく出るため気付けない
-    uint4 Params2;
-    // x=射影行列の(0,0)成分(未使用), y=同(1,1)成分(未使用),
-    // z=未使用(かつてプリ露出の補正倍率を入れていたが、Wは露出に不変と実測で分かった。
-    //   理由は下の「プリ露出の補正は要らない」を参照), w=履歴のMの上限
-    float4 Params3;
-    // x=履歴が使えるか(0なら履歴を読まない), yzw=未使用。
-    // 【0のときは読むこと自体をやめる】解像度が変わった直後などは、履歴バッファに
-    // 前の解像度のままの内容が残っている。RHIにバッファのクリアが無いため、
-    // 混ぜる割合を0にするだけでは足りない(添字の意味が変わっているので中身は別画素のもの)
-    uint4 Params4;
-};
+#include "ShaderInterop/MegaLightsStochasticConstants.hlsli"
 
 RaytracingAccelerationStructure SceneTLAS : register(t0);
 
@@ -104,12 +69,7 @@ static const float kMaxRelativeDepthDiff = 0.05f;
 static const float kMinNormalDot = 0.9f;
 static const float kMaxMaterialDiff = 0.1f;
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 uint HashUint(uint x)
 {
@@ -305,9 +265,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 分子も分母も p̂ に比例し、p_source は正規化された確率なので露出に依存しない。
         // **露出が約分されるので W は露出に対して不変**であり、掛けるべき係数は 1。
         //
-        // 【両方向を実測して確かめた】履歴のWへ「今/前」(=1/4)を掛けると露出+2段の直後に
-        // 4倍暗くなり、「前/今」(=4)を掛けると4倍明るいまま居座った。掛けないときだけ
-        // 正解(履歴を持たない経路の値)と一致する。**静止画では絶対に気付けない誤り**なので、
+        // 【両方向を実測して確かめてある】掛けないときだけ正解と一致する
+        // (docs/ImplementationDetail.md 61.7b.3)。**静止画では絶対に気付けない誤り**なので、
         // 露出を跳ばす摂動(-megalightsperturb 2)で測ること
         // 【Mのクランプ】無いと新しいサンプルが採用されなくなり、灯を消しても残る
         history.M = min(history.M, max(Params3.w, 1.0f));

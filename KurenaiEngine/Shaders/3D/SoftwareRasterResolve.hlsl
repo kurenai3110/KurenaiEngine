@@ -19,7 +19,7 @@
 #include "NormalEncoding.hlsli"
 #include "SoftwareRasterCommon.hlsli"
 
-#define KURENAI_SWRASTER_RESOLVE_GROUP_SIZE 8
+#include "ShaderInterop/GroupSizes.hlsli"
 
 StructuredBuffer<SWRasterMeshInfo> MeshInfos : register(t0);
 StructuredBuffer<uint64_t> VisibilityRead : register(t1);

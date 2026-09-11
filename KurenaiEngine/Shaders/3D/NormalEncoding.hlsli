@@ -4,6 +4,9 @@
 // チャンネル数を4→2に減らしつつビット深度を8bit→16bitへ増やす目的で導入した
 // (参考: Cigolle et al., "A Survey of Efficient Representations for Independent Unit Vectors", 2014)
 
+#ifndef KURENAI_NORMAL_ENCODING_HLSLI
+#define KURENAI_NORMAL_ENCODING_HLSLI
+
 float2 OctEncode(float3 n)
 {
     n /= (abs(n.x) + abs(n.y) + abs(n.z));
@@ -23,3 +26,5 @@ float3 OctDecode(float2 f)
     n.y += n.y >= 0.0f ? -t : t;
     return normalize(n);
 }
+
+#endif

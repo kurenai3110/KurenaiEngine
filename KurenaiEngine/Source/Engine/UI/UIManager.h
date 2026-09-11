@@ -4,11 +4,7 @@
 #include <vector>
 
 #include "UI/IPanel.h"
-
-namespace Kurenai
-{
-    class KurenaiEngine3D;
-}
+#include "EngineUIHost.h"
 
 namespace Kurenai::UI
 {
@@ -18,7 +14,7 @@ namespace Kurenai::UI
     class UIManager
     {
     public:
-        explicit UIManager(KurenaiEngine3D& engine);
+        explicit UIManager(IEngineUIHost& engine);
         ~UIManager();
 
         UIManager(const UIManager&) = delete;
@@ -51,7 +47,7 @@ namespace Kurenai::UI
         // ドックに入らない独立したウィンドウで、読み込みが終われば消える
         void DrawSceneLoadProgress();
 
-        KurenaiEngine3D& m_Engine;
+        IEngineUIHost& m_Engine;
         std::vector<std::unique_ptr<IPanel>> m_Panels;
 
         // ImGuiID(実体はunsigned int)。このヘッダをimgui.hに依存させないため素の型で持つ

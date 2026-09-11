@@ -1,0 +1,64 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+#include <DirectXMath.h>
+
+// MegaLights の確率的サンプリング経路が register(b1) で共有する定数バッファ。
+//
+// 【HLSL側の宣言はここが唯一の出所】同じレイアウトを
+// KurenaiEngine/Shaders/3D/ShaderInterop/MegaLightsStochasticConstants.hlsli が宣言する。
+// 以前は 5 本の .hlsl が「先頭からの前方一致」として手で再宣言しており、宣言の深さは
+// 3〜7 フィールドとばらついていた。FrameConstants とまったく同じ壊れ方
+// (途中へ挿すと後ろを宣言している側が黙ってオフセットずれを起こす)をするので、
+// 同じやり方で 1 本にした。経緯は docs/ImplementationHistory.md 83節
+
+namespace Kurenai::ShaderInterop
+{
+    struct alignas(16) MegaLightsStochasticConstants
+    {
+        // x=出力幅, y=出力高, z=1ピクセルあたりの初期候補数M, w=影レイを撃つか(0で撃たない)
+        DirectX::XMUINT4 Params0;
+        // x=候補プールの有効タイル数X(格子ジッター有効時だけ+1)、
+        // y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
+        DirectX::XMUINT4 Params1;
+        // x=借りる近傍の数, y=探す半径(ピクセル),
+        // z=空間再利用の結合方式(0=confidence重み, 1=不偏化のZ),
+        // w=初期可視レイでリザーバを殺すか(Initialが読む)。
+        DirectX::XMUINT4 Params2;
+        // x=射影行列の(0,0)成分, y=同(1,1)成分(空間再利用のMIS用。
+        // 「その灯が隣のタイルへ届くか」を判定するために隣のタイルの錐台を組み立て直す。
+        // **候補プールが使ったのと同じ行列から取ること**。ずれると定義域がずれる)、
+        // z=プリ露出の補正倍率(時間再利用用。今の露出 / 前フレームの露出)、
+        // w=履歴のMの上限(同)
+        DirectX::XMFLOAT4 Params3;
+        // x=履歴が使えるか(時間再利用用。0なら履歴を読まない。Initialは
+        //   遮蔽が確定した灯のキャッシュを信用してよいかの判定にも使う)、
+        // y=空間再利用の反復番号(0起点。近傍の型板の種に混ぜて反復ごとに別の近傍を選ばせる)、
+        // z=クアッド共有を行うか(手法3。Resolveが読む。0なら自分の標本だけを使う)、
+        // w=クアッドで候補スロットを分けて引くか(手法3の層化。Initialが読む)
+        DirectX::XMUINT4 Params4;
+        // x=1画素あたりの標本数(リザーバの本数。Initialが書きResolveが読む)。
+        // 手法3だけが1より大きくなる ―― 手法2の時間・空間再利用は
+        // 「1画素1リザーバ」を前提に添字を組み立てているため。
+        // yzw=未使用
+        DirectX::XMUINT4 Params5;
+        // xy=候補プールのタイル格子オフセット(画素、各0〜15)、zw=未使用。
+        // 書き手と全読み手で同じ値を使わないと、別タイルの候補を静かに読む
+        DirectX::XMUINT4 Params6;
+    };
+
+    // 【レイアウトを固定する本体】HLSL側は宣言順でオフセットが決まる。
+    // 並べ替え・挿入・型変更が起きればここで落ちるので、MegaLightsStochasticConstants.hlsli を
+    // 直し忘れたまま黙って別の値を読むことはない。
+    // **通すために期待値を書き換えないこと**(FrameConstants.h と同じ規約)
+    static_assert(offsetof(MegaLightsStochasticConstants, Params0) == 0, "MegaLightsStochasticConstants.hlsli の Params0 と位置が食い違っている");
+    static_assert(offsetof(MegaLightsStochasticConstants, Params1) == 16, "MegaLightsStochasticConstants.hlsli の Params1 と位置が食い違っている");
+    static_assert(offsetof(MegaLightsStochasticConstants, Params2) == 32, "MegaLightsStochasticConstants.hlsli の Params2 と位置が食い違っている");
+    static_assert(offsetof(MegaLightsStochasticConstants, Params3) == 48, "MegaLightsStochasticConstants.hlsli の Params3 と位置が食い違っている");
+    static_assert(offsetof(MegaLightsStochasticConstants, Params4) == 64, "MegaLightsStochasticConstants.hlsli の Params4 と位置が食い違っている");
+    static_assert(offsetof(MegaLightsStochasticConstants, Params5) == 80, "MegaLightsStochasticConstants.hlsli の Params5 と位置が食い違っている");
+    static_assert(offsetof(MegaLightsStochasticConstants, Params6) == 96, "MegaLightsStochasticConstants.hlsli の Params6 と位置が食い違っている");
+    static_assert(sizeof(MegaLightsStochasticConstants) == 112, "MegaLightsStochasticConstants の総サイズが変わっている");
+}

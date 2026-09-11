@@ -4,9 +4,13 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <fstream>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -315,7 +319,7 @@ namespace
             const std::string optionNameUtf8 = Kurenai::Core::WideToUtf8(optionName);
             if (i + 1 >= argc)
             {
-                Kurenai::Core::Logger::Warning(
+                Kurenai::Core::Logger::Error(
                     "Main", optionNameUtf8 + "の後に値が指定されていないため、既定のままにします");
                 break;
             }
@@ -323,7 +327,7 @@ namespace
             const long parsed = wcstol(argv[i + 1], &end, 10);
             if (end == argv[i + 1] || (end != nullptr && *end != 0))
             {
-                Kurenai::Core::Logger::Warning(
+                Kurenai::Core::Logger::Error(
                     "Main",
                     optionNameUtf8 + "の引数が数値ではないため、既定のままにします: " +
                         Kurenai::Core::WideToUtf8(argv[i + 1]));
@@ -358,7 +362,7 @@ namespace
             const std::string optionNameUtf8 = Kurenai::Core::WideToUtf8(optionName);
             if (i + 1 >= argc)
             {
-                Kurenai::Core::Logger::Warning(
+                Kurenai::Core::Logger::Error(
                     "Main", optionNameUtf8 + "の後に値が指定されていないため、既定のままにします");
                 break;
             }
@@ -366,7 +370,7 @@ namespace
             const double parsed = wcstod(argv[i + 1], &end);
             if (end == argv[i + 1] || (end != nullptr && *end != 0))
             {
-                Kurenai::Core::Logger::Warning(
+                Kurenai::Core::Logger::Error(
                     "Main",
                     optionNameUtf8 + "の引数が数値ではないため、既定のままにします: " +
                         Kurenai::Core::WideToUtf8(argv[i + 1]));
@@ -493,12 +497,155 @@ namespace
         return dumps;
     }
 
+    // -recreate <フレーム> <指示> を全部拾う。ベースライン採取だけでは通らない解像度・精度・
+    // シーン切り替え時のGPUリソース作り直し経路を、無人の採取スクリプトから検証するために使う。
+    std::vector<Kurenai::ScheduledRecreation> ParseScheduledRecreations()
+    {
+        std::vector<Kurenai::ScheduledRecreation> recreations;
+
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            Kurenai::Core::Logger::Error("Main", "-recreateのコマンドライン取得に失敗しました");
+            return recreations;
+        }
+
+        const auto logInvalid = [](const wchar_t* frame, const wchar_t* instruction)
+        {
+            Kurenai::Core::Logger::Error(
+                "Main", "-recreateの指定が不正なため無視します: frame=" + Kurenai::Core::WideToUtf8(frame) +
+                    ", instruction=" + Kurenai::Core::WideToUtf8(instruction));
+        };
+        const auto parseDimension = [](const std::wstring& text, uint32_t& value)
+        {
+            if (text.empty() || text[0] == L'-')
+            {
+                return false;
+            }
+            errno = 0;
+            wchar_t* end = nullptr;
+            const unsigned long parsed = wcstoul(text.c_str(), &end, 10);
+            if (errno == ERANGE || end == text.c_str() || (end != nullptr && *end != L'\0') || parsed == 0 ||
+                parsed > (std::numeric_limits<uint32_t>::max)())
+            {
+                return false;
+            }
+            value = static_cast<uint32_t>(parsed);
+            return true;
+        };
+
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-recreate") != 0)
+            {
+                continue;
+            }
+            if (i + 2 >= argc)
+            {
+                Kurenai::Core::Logger::Error("Main", "-recreate は「-recreate <フレーム> <指示>」の形で指定します。無視します");
+                break;
+            }
+
+            errno = 0;
+            wchar_t* frameEnd = nullptr;
+            const long frame = wcstol(argv[i + 1], &frameEnd, 10);
+            if (errno == ERANGE || frameEnd == argv[i + 1] || (frameEnd != nullptr && *frameEnd != L'\0') || frame < 0)
+            {
+                logInvalid(argv[i + 1], argv[i + 2]);
+                i += 2;
+                continue;
+            }
+
+            Kurenai::ScheduledRecreation request;
+            request.Frame = static_cast<uint32_t>(frame);
+            const std::wstring instruction = argv[i + 2];
+            const auto parseResolution = [&](const wchar_t* prefix)
+            {
+                const size_t prefixLength = wcslen(prefix);
+                if (instruction.size() <= prefixLength || _wcsnicmp(instruction.c_str(), prefix, prefixLength) != 0)
+                {
+                    return false;
+                }
+                const std::wstring size = instruction.substr(prefixLength);
+                const size_t x = size.find(L'x');
+                if (x == std::wstring::npos || size.find(L'x', x + 1) != std::wstring::npos ||
+                    !parseDimension(size.substr(0, x), request.Width) || !parseDimension(size.substr(x + 1), request.Height))
+                {
+                    return false;
+                }
+                return true;
+            };
+
+            bool valid = true;
+            if (_wcsnicmp(instruction.c_str(), L"renderres=", 10) == 0)
+            {
+                request.Kind = Kurenai::ScheduledRecreationKind::RenderResolution;
+                valid = parseResolution(L"renderres=");
+            }
+            else if (_wcsnicmp(instruction.c_str(), L"upscale=", 8) == 0)
+            {
+                request.Kind = Kurenai::ScheduledRecreationKind::UpscaleOutput;
+                valid = parseResolution(L"upscale=");
+            }
+            else if (_wcsicmp(instruction.c_str(), L"precision=hdr") == 0)
+            {
+                request.Kind = Kurenai::ScheduledRecreationKind::BufferPrecision;
+                request.Precision = Kurenai::BufferPrecision::HDR;
+            }
+            else if (_wcsicmp(instruction.c_str(), L"precision=legacy8bit") == 0)
+            {
+                request.Kind = Kurenai::ScheduledRecreationKind::BufferPrecision;
+                request.Precision = Kurenai::BufferPrecision::Legacy8bit;
+            }
+            else if (_wcsnicmp(instruction.c_str(), L"scene=", 6) == 0 && instruction.size() > 6)
+            {
+                request.Kind = Kurenai::ScheduledRecreationKind::SceneLoad;
+                request.SceneName = instruction.substr(6);
+            }
+            else
+            {
+                valid = false;
+            }
+
+            if (!valid)
+            {
+                logInvalid(argv[i + 1], argv[i + 2]);
+            }
+            else
+            {
+                recreations.push_back(std::move(request));
+            }
+            i += 2;
+        }
+
+        LocalFree(argv);
+        return recreations;
+    }
+
+    // -sceneを指定したのに解決できなかったときに投げる。
+    //
+    // 【既定のシーンへ落とさない】以前は警告を1行出して0番(一覧の先頭)で起動していたが、
+    // 終了コードも0のままなので、**無人実行では指定ミスが静かに別のシーンの計測になる**。
+    // 実際に -scene LODSwitchTest が _PlateauDebug.kscene を読み、
+    // 新旧ビルドのバイト比較が丸ごと別シーンのものになった
+    // (docs/ImplementationHistory.md 85章)。
+    //
+    // 【専用の型にしてMessageBoxを出さない理由】wWinMainのstd::exceptionハンドラは
+    // ダイアログを出す。無人実行ではそこで止まってしまうため、この失敗だけは
+    // ログと終了コードだけで返す
+    struct SceneNotResolvedError : std::runtime_error
+    {
+        using std::runtime_error::runtime_error;
+    };
+
     // コマンドラインの「-scene <名前>」(拡張子を除いたファイル名。例: MontSaintMichel)を、
     // KurenaiEngine3Dが構築するシーン一覧上の番号へ解決する。
     // 一覧の作り方(列挙→_wcsicmpで昇順ソート→Assets::ReadSceneNameが成功したものだけ採用)は
     // KurenaiEngine3D::DiscoverScenes()(KurenaiEngine3D.cpp)と厳密に一致させる必要がある
     // (手順がずれると番号が一覧側とずれ、意図と別のシーンが開いてしまう)。
-    // 指定が無い/見つからない場合は0を返す(従来どおり一覧の先頭シーンで起動する)
+    // 【-sceneの指定が無いときだけ0を返す】指定があって解決できないときは
+    // SceneNotResolvedErrorを投げる(上のコメント参照)
     size_t ParseInitialSceneIndex()
     {
         int argc = 0;
@@ -532,9 +679,9 @@ namespace
 
         if (requestedName.empty())
         {
-            Kurenai::Core::Logger::Warning(
-                "Main", "-sceneの後にシーン名が指定されていないため、既定のシーンで起動します");
-            return 0;
+            Kurenai::Core::Logger::Error(
+                "Main", "-sceneの後にシーン名が指定されていません");
+            throw SceneNotResolvedError("-sceneの後にシーン名が指定されていません");
         }
 
         // 実行ファイル(Sample3D.exe)自身のあるディレクトリを求める。
@@ -547,9 +694,9 @@ namespace
         DWORD exePathLength = GetModuleFileNameW(nullptr, exePathBuffer, MAX_PATH);
         if (exePathLength == 0 || exePathLength == MAX_PATH)
         {
-            Kurenai::Core::Logger::Warning(
-                "Main", "実行ファイルのパス取得に失敗したため、既定のシーンで起動します");
-            return 0;
+            Kurenai::Core::Logger::Error(
+                "Main", "実行ファイルのパス取得に失敗したため、-sceneの指定を解決できません");
+            throw SceneNotResolvedError("実行ファイルのパス取得に失敗しました");
         }
 
         const std::wstring exePath(exePathBuffer, exePathLength);
@@ -574,11 +721,10 @@ namespace
         }
         else
         {
-            Kurenai::Core::Logger::Warning(
-                "Main",
-                "シーンフォルダを開けなかったため、既定のシーンで起動します (" +
-                    Kurenai::Core::WideToUtf8(sceneDirectory) + ")");
-            return 0;
+            const std::string message =
+                "シーンフォルダを開けませんでした (" + Kurenai::Core::WideToUtf8(sceneDirectory) + ")";
+            Kurenai::Core::Logger::Error("Main", message);
+            throw SceneNotResolvedError(message);
         }
 
         std::sort(fileNames.begin(), fileNames.end(), [](const std::wstring& a, const std::wstring& b)
@@ -619,11 +765,22 @@ namespace
             ++resolvedIndex;
         }
 
-        Kurenai::Core::Logger::Warning(
-            "Main",
-            "指定されたシーンが見つからなかったため、既定のシーンで起動します: " +
-                Kurenai::Core::WideToUtf8(requestedName));
-        return 0;
+        // 【候補を並べて出す】名前の綴りではなく「そのシーンが配布先に無い」ことが
+        // 原因のことがある。エンジンが読むのはビルド出力の Assets\Scenes\ で、
+        // Git管理下の Scenes\ からの自動コピーは無い
+        std::string candidates;
+        for (const std::wstring& fileName : fileNames)
+        {
+            const size_t dotPos = fileName.find_last_of(L'.');
+            const std::wstring stem = dotPos == std::wstring::npos ? fileName : fileName.substr(0, dotPos);
+            if (!candidates.empty()) { candidates += ", "; }
+            candidates += Kurenai::Core::WideToUtf8(stem);
+        }
+        const std::string message =
+            "指定されたシーンが見つかりません: " + Kurenai::Core::WideToUtf8(requestedName) +
+            " (探した場所: " + Kurenai::Core::WideToUtf8(sceneDirectory) + " / 候補: " + candidates + ")";
+        Kurenai::Core::Logger::Error("Main", message);
+        throw SceneNotResolvedError(message);
     }
 }
 
@@ -746,10 +903,21 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
         const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
         const int perfDumpFrames = ParseIntOption(L"-perfdumpframes", 120);
+        // -passmanifest <パス>。RenderGraph の登録順と実行順を比較用テキストへ書き出す。
+        const std::wstring passManifestPath = ParseStringOption(L"-passmanifest");
+        int passManifestFrames = ParseIntOption(L"-passmanifestframes", 1);
+        if (passManifestFrames < 1)
+        {
+            Kurenai::Core::Logger::Warning("Main", "-passmanifestframes は1以上で指定します。1に丸めます");
+            passManifestFrames = 1;
+        }
         // -dumptex <名前> <パス> (繰り返し可) / -dumptexmip <N> / -dumptexslice <N> /
         // -dumpframe <N> / -exitafterdump。中間レンダーターゲットを線形の生値で書き出す。
         // 「コンパイルは通るが絵が違う」を、8bitのスクリーンショットではなく数値で切り分けるための経路
         const std::vector<TextureDumpArg> textureDumps = ParseTextureDumps();
+        // -recreate <フレーム> <renderres=<幅>x<高さ>|upscale=<幅>x<高さ>|precision=hdr|precision=legacy8bit|scene=<名前>>
+        // (繰り返し可)。GPUリソースの作り直し経路を指定フレームで無人検証する。
+        const std::vector<Kurenai::ScheduledRecreation> scheduledRecreations = ParseScheduledRecreations();
         const int textureDumpFrame = ParseIntOption(L"-dumpframe", -1);
         const bool exitAfterDump = HasFlagOption(L"-exitafterdump");
         // -taa の読み取りは下の `taa` で行う(ダンプの比較でも同じ指定を使う)
@@ -762,6 +930,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // なければならないので、有無で絵が1画素も変わらないことが正しさの定義になる。
         // その突き合わせをUIのチェックボックスでやると撮影ごとに操作を再現できない
         const int occlusionCull = ParseIntOption(L"-occlusioncull", -1);
+        constexpr int kMissingValidationOption = (std::numeric_limits<int>::min)();
+        // -aotechnique: 0=SSAO、1=SSIL(Visibility Bitmask)、2=Raytraced AO。
+        const int aoTechnique = ParseIntOption(L"-aotechnique", kMissingValidationOption);
+        const int softwareRaster = ParseIntOption(L"-swraster", kMissingValidationOption);
+        const int ddgiHalfResolution = ParseIntOption(L"-ddgihalfres", kMissingValidationOption);
+        // -probeupdate: 0=Baked、1=OnDemand、2=Realtime。
+        const int probeUpdate = ParseIntOption(L"-probeupdate", kMissingValidationOption);
+        const int upscale = ParseIntOption(L"-upscale", kMissingValidationOption);
+        constexpr float kMissingFixedTimeStep = (std::numeric_limits<float>::lowest)();
+        const float fixedTimeStep = ParseFloatOption(L"-fixedstep", kMissingFixedTimeStep);
         // -taa 0|1。TAAは時間方向に蓄積するため、画素単位の一致を測るときは切る
         const int taa = ParseIntOption(L"-taa", -1);
         // -meshlet 0|1。メッシュレット描画の有無。切ると従来の頂点シェーダー経路へ落ち、
@@ -787,6 +965,72 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (occlusionCull >= 0)
             {
                 engine.SetOcclusionCullingEnabled(occlusionCull != 0);
+            }
+            if (aoTechnique != kMissingValidationOption)
+            {
+                if (aoTechnique < 0 || aoTechnique > 2)
+                {
+                    Kurenai::Core::Logger::Error("Main", "-aotechnique の値が範囲外です: " + std::to_string(aoTechnique));
+                }
+                else
+                {
+                    engine.SetAOTechnique(aoTechnique);
+                }
+            }
+            if (softwareRaster != kMissingValidationOption)
+            {
+                if (softwareRaster != 0 && softwareRaster != 1)
+                {
+                    Kurenai::Core::Logger::Error("Main", "-swraster の値が不正です: " + std::to_string(softwareRaster));
+                }
+                else
+                {
+                    engine.SetSoftwareRasterEnabled(softwareRaster != 0);
+                }
+            }
+            if (ddgiHalfResolution != kMissingValidationOption)
+            {
+                if (ddgiHalfResolution != 0 && ddgiHalfResolution != 1)
+                {
+                    Kurenai::Core::Logger::Error("Main", "-ddgihalfres の値が不正です: " + std::to_string(ddgiHalfResolution));
+                }
+                else
+                {
+                    engine.SetDDGIHalfResolutionEnabled(ddgiHalfResolution != 0);
+                }
+            }
+            if (probeUpdate != kMissingValidationOption)
+            {
+                if (probeUpdate < 0 || probeUpdate > 2)
+                {
+                    Kurenai::Core::Logger::Error("Main", "-probeupdate の値が範囲外です: " + std::to_string(probeUpdate));
+                }
+                else
+                {
+                    engine.SetProbeUpdateMode(probeUpdate);
+                }
+            }
+            if (upscale != kMissingValidationOption)
+            {
+                if (upscale != 0 && upscale != 1)
+                {
+                    Kurenai::Core::Logger::Error("Main", "-upscale の値が不正です: " + std::to_string(upscale));
+                }
+                else
+                {
+                    engine.SetUpscaleEnabled(upscale != 0);
+                }
+            }
+            if (fixedTimeStep != kMissingFixedTimeStep)
+            {
+                if (!std::isfinite(fixedTimeStep) || fixedTimeStep <= 0.0f)
+                {
+                    Kurenai::Core::Logger::Error("Main", "-fixedstep の値が不正です: " + std::to_string(fixedTimeStep));
+                }
+                else
+                {
+                    engine.SetFixedTimeStep(fixedTimeStep);
+                }
             }
             if (taa >= 0)
             {
@@ -891,6 +1135,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetPerfDump(perfDumpPath.c_str(), perfDumpFrames);
             }
+            if (!passManifestPath.empty())
+            {
+                engine.SetPassManifest(passManifestPath.c_str(), passManifestFrames);
+            }
             // 【ループの中で適用する】APIを切り替えて作り直したときも同じ指定が効くようにする
             // (debugViewIndexを毎回適用しているのと同じ理由)
             for (const TextureDumpArg& dump : textureDumps)
@@ -898,9 +1146,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 engine.AddTextureDump(
                     dump.Name.c_str(), dump.Path.c_str(), dump.MipLevel, dump.ArraySlice, dump.Frames, dump.Stride);
             }
-            if (!textureDumps.empty())
+            for (const Kurenai::ScheduledRecreation& recreation : scheduledRecreations)
+            {
+                engine.AddScheduledRecreation(recreation);
+            }
+            if (!textureDumps.empty() || (!passManifestPath.empty() && passManifestFrames == 1))
             {
                 engine.SetTextureDumpFrame(textureDumpFrame);
+            }
+            if (!textureDumps.empty())
+            {
                 engine.SetExitAfterDump(exitAfterDump);
             }
             engine.Run();
@@ -917,6 +1172,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             renderHeight = engine.GetRenderHeight();
             sceneIndex = engine.GetCurrentSceneIndex();
         }
+    }
+    catch (const SceneNotResolvedError&)
+    {
+        // 【MessageBoxを出さない】ログには既に出してある。無人実行が
+        // ダイアログで止まらないよう、終了コードだけで失敗を伝える
+        exitCode = 1;
     }
     catch (const std::exception& e)
     {

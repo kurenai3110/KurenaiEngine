@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|x64">
@@ -32,6 +32,7 @@
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <Import Project="Kurenai.Common.props" />
   <ImportGroup Label="ExtensionSettings">
   </ImportGroup>
   <ImportGroup Label="Shared">
@@ -43,44 +44,28 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <OutDir>$(ProjectDir)..\Build\Bin\$(Platform)\$(Configuration)\$(ProjectName)\</OutDir>
-    <IntDir>$(ProjectDir)..\Build\Intermediate\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>$(ProjectDir)..\Build\Bin\$(Platform)\$(Configuration)\$(ProjectName)\</OutDir>
-    <IntDir>$(ProjectDir)..\Build\Intermediate\$(Platform)\$(Configuration)\$(ProjectName)\</IntDir>
-  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
-      <SDLCheck>true</SDLCheck>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <ForcedIncludeFiles>pch.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <PreprocessorDefinitions>KURENAI_ENGINE3D_EXPORTS;IMGUI_API=__declspec(dllimport);_DEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
-      <WarningLevel>Level3</WarningLevel>
-      <FunctionLevelLinking>true</FunctionLevelLinking>
-      <IntrinsicFunctions>true</IntrinsicFunctions>
-      <SDLCheck>true</SDLCheck>
+      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <ForcedIncludeFiles>pch.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <PreprocessorDefinitions>KURENAI_ENGINE3D_EXPORTS;IMGUI_API=__declspec(dllimport);NDEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <ConformanceMode>true</ConformanceMode>
-      <LanguageStandard>stdcpp20</LanguageStandard>
       <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <GenerateDebugInformation>true</GenerateDebugInformation>
-      <EnableCOMDATFolding>true</EnableCOMDATFolding>
-      <OptimizeReferences>true</OptimizeReferences>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
@@ -97,9 +82,75 @@
     </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClInclude Include="Source\pch.h" />
     <ClInclude Include="Source\Engine\KurenaiTypes.h" />
     <ClInclude Include="Source\Engine\KurenaiEngine3D.h" />
     <ClInclude Include="Source\Engine\EngineDefaults.h" />
+    <ClInclude Include="Source\Engine\Diagnostics\RenderCapabilities.h" />
+    <ClInclude Include="Source\Engine\Diagnostics\RenderDumpService.h" />
+    <ClInclude Include="Source\Engine\Diagnostics\RenderStats.h" />
+    <ClInclude Include="Source\Engine\Diagnostics\ScheduledRecreation.h" />
+    <ClInclude Include="Source\Engine\ShaderInterop\CascadeConstants.h" />
+    <ClInclude Include="Source\Engine\ShaderInterop\FrameConstants.h" />
+    <ClInclude Include="Source\Engine\ShaderInterop\MegaLightsStochasticConstants.h" />
+    <ClInclude Include="Source\Engine\ShaderInterop\GroupSizes.h" />
+    <ClInclude Include="Source\Engine\Settings\AmbientOcclusionSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\CloudSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\DDGISettings.h" />
+    <ClInclude Include="Source\Engine\Settings\DebugViewSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\EmissiveLightSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\FogSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\GeometrySettings.h" />
+    <ClInclude Include="Source\Engine\Settings\IBLSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\MegaLightsSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\PostProcessSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\QualitySettings.h" />
+    <ClInclude Include="Source\Engine\Rendering\GeometryDrawLoop.h" />
+    <ClInclude Include="Source\Engine\Rendering\GeometryDrawTypes.h" />
+    <ClInclude Include="Source\Engine\Rendering\RenderSettingsSnapshot.h" />
+    <ClInclude Include="Source\Engine\Rendering\MeshletLODFrameConstants.h" />
+    <ClInclude Include="Source\Engine\Rendering\IBLResources.h" />
+    <ClInclude Include="Source\Engine\Rendering\SkyResources.h" />
+    <ClInclude Include="Source\Engine\Rendering\SceneGPUResources.h" />
+    <ClInclude Include="Source\Engine\Rendering\GIResources.h" />
+    <ClInclude Include="Source\Engine\Rendering\RenderTargets.h" />
+    <ClInclude Include="Source\Engine\Rendering\ShadowConstants.h" />
+    <ClInclude Include="Source\Engine\Rendering\RenderBlackboard.h" />
+    <ClInclude Include="Source\Engine\Rendering\RenderFrameContext.h" />
+    <ClInclude Include="Source\Engine\Passes\DDGIConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\ReflectionProbeConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\DDGIPasses.h" />
+    <ClInclude Include="Source\Engine\Passes\EnvironmentConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\EnvironmentPasses.h" />
+    <ClInclude Include="Source\Engine\Rendering\SunLighting.h" />
+    <ClInclude Include="Source\Engine\Passes\MegaLightsConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\MegaLightsPasses.h" />
+    <ClInclude Include="Source\Engine\Passes\PostProcessConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\GeometryConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\GeometryPasses.h" />
+    <ClInclude Include="Source\Engine\Passes\LightingConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\LightingPasses.h" />
+    <ClInclude Include="Source\Engine\Rendering\GPULight.h" />
+    <ClInclude Include="Source\Engine\Rendering\CloudTransmittance.h" />
+    <ClInclude Include="Source\Engine\Rendering\GPULightBuild.h" />
+    <ClInclude Include="Source\Engine\Rendering\GPUReflectionProbe.h" />
+    <ClInclude Include="Source\Engine\Rendering\SampleSequence.h" />
+    <ClInclude Include="Source\Engine\Passes\ReflectionConstants.h" />
+    <ClInclude Include="Source\Engine\Passes\ReflectionPasses.h" />
+    <ClInclude Include="Source\Engine\Passes\ReflectionProbePasses.h" />
+    <ClInclude Include="Source\Engine\Rendering\CubeFaceMath.h" />
+    <ClInclude Include="Source\Engine\Passes\ShadowPasses.h" />
+    <ClInclude Include="Source\Engine\Rendering\ObjectConstants.h" />
+    <ClInclude Include="Source\Engine\Rendering\ExposureMath.h" />
+    <ClInclude Include="Source\Engine\Passes\PostProcessPasses.h" />
+    <ClInclude Include="Source\Engine\Passes\PresentPass.h" />
+    <ClInclude Include="Source\Engine\Settings\ReflectionProbeSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\ReflectionSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\ShadowSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\SkySettings.h" />
+    <ClInclude Include="Source\Engine\Settings\StarsSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\SystemSettings.h" />
+    <ClInclude Include="Source\Engine\Settings\WaterSettings.h" />
     <ClInclude Include="Source\Engine\DroneShow.h" />
     <ClInclude Include="Source\Engine\UI\IPanel.h" />
     <ClInclude Include="Source\Engine\UI\UIManager.h" />
@@ -115,9 +166,60 @@
     <ClInclude Include="Source\Engine\UI\ProfilerPanel.h" />
     <ClInclude Include="Source\Engine\UI\ReflectionProbePanel.h" />
     <ClInclude Include="..\ThirdParty\imgui\imgui.h" />
+    <ClInclude Include="Source\Engine\Diagnostics\CullStatsReadback.h" />
+    <ClInclude Include="Source\Engine\Diagnostics\FrameStatsLogger.h" />
+    <ClInclude Include="Source\Engine\Diagnostics\RenderDumpServiceState.h" />
+    <ClInclude Include="Source\Engine\Diagnostics\ScheduledRecreationQueue.h" />
+    <ClInclude Include="Source\Engine\GI\DDGIGrid.h" />
+    <ClInclude Include="Source\Engine\Passes\PassHost.h" />
+    <ClInclude Include="Source\Engine\Rendering\DroneShowSystem.h" />
+    <ClInclude Include="Source\Engine\Rendering\FrameHistoryState.h" />
+    <ClInclude Include="Source\Engine\Rendering\GeometryDrawHost.h" />
+    <ClInclude Include="Source\Engine\Rendering\SceneDrawList.h" />
+    <ClInclude Include="Source\Engine\Scene\EmissiveLightSet.h" />
+    <ClInclude Include="Source\Engine\Scene\InstanceLODState.h" />
+    <ClInclude Include="Source\Engine\Scene\ModelStreamingState.h" />
+    <ClInclude Include="Source\Engine\Scene\RaytracingRebuildState.h" />
+    <ClInclude Include="Source\Engine\Scene\SceneLoadHandoff.h" />
+    <ClInclude Include="Source\Engine\Settings\EngineSettings.h" />
+    <ClInclude Include="Source\Engine\UI\EngineUIHost.h" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="Source\pch.cpp">
+      <!-- このファイルだけが .pch を作る(/Yc) -->
+      <PrecompiledHeader>Create</PrecompiledHeader>
+      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
     <ClCompile Include="Source\Engine\KurenaiEngine3D.cpp" />
+    <ClCompile Include="Source\Engine\Settings\QualitySettings.cpp" />
+    <ClCompile Include="Source\Engine\Diagnostics\RenderDumpService.cpp" />
+    <ClCompile Include="Source\Engine\Diagnostics\CullStatsReadback.cpp" />
+    <ClCompile Include="Source\Engine\Diagnostics\FrameStatsLogger.cpp" />
+    <ClCompile Include="Source\Engine\Diagnostics\PerfLogging.cpp" />
+    <ClCompile Include="Source\Engine\Diagnostics\RenderDumpServiceState.cpp" />
+    <ClCompile Include="Source\Engine\Diagnostics\ScheduledRecreationQueue.cpp" />
+    <ClCompile Include="Source\Engine\GI\DDGISystem.cpp" />
+    <ClCompile Include="Source\Engine\GI\DDGIGrid.cpp" />
+    <ClCompile Include="Source\Engine\Scene\ModelResidencySystem.cpp" />
+    <ClCompile Include="Source\Engine\Scene\SceneLoadService.cpp" />
+    <ClCompile Include="Source\Engine\Rendering\GeometryDrawLoop.cpp" />
+    <ClCompile Include="Source\Engine\Rendering\SceneDrawList.cpp" />
+    <ClCompile Include="Source\Engine\Rendering\IBLResources.cpp" />
+    <ClCompile Include="Source\Engine\Rendering\SkyResources.cpp" />
+    <ClCompile Include="Source\Engine\Rendering\RenderTargets.cpp" />
+    <ClCompile Include="Source\Engine\Rendering\RenderFrame.cpp" />
+    <ClCompile Include="Source\Engine\Rendering\RenderFrameBuild.cpp" />
+    <ClCompile Include="Source\Engine\Passes\DDGIPasses.cpp" />
+    <ClCompile Include="Source\Engine\Passes\EnvironmentPasses.cpp" />
+    <ClCompile Include="Source\Engine\Passes\MegaLightsPasses.cpp" />
+    <ClCompile Include="Source\Engine\Passes\PostProcessPasses.cpp" />
+    <ClCompile Include="Source\Engine\Passes\GeometryPasses.cpp" />
+    <ClCompile Include="Source\Engine\Passes\LightingPasses.cpp" />
+    <ClCompile Include="Source\Engine\Passes\ReflectionPasses.cpp" />
+    <ClCompile Include="Source\Engine\Passes\ReflectionProbePasses.cpp" />
+    <ClCompile Include="Source\Engine\Passes\ShadowPasses.cpp" />
+    <ClCompile Include="Source\Engine\Passes\PresentPass.cpp" />
     <ClCompile Include="Source\Engine\DroneShow.cpp" />
     <ClCompile Include="Source\Engine\UI\UIManager.cpp" />
     <ClCompile Include="Source\Engine\UI\UITheme.cpp" />

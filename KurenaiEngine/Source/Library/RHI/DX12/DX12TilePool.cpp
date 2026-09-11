@@ -96,6 +96,24 @@ namespace Kurenai::RHI
         m_UsedTileCount -= (m_UsedTileCount >= count) ? count : m_UsedTileCount;
     }
 
+    uint32_t DX12TilePool::GetContiguousRunLength(const std::vector<Tile>& tiles, uint32_t from)
+    {
+        if (from >= tiles.size())
+        {
+            Core::Logger::Error("DX12", "タイル列の範囲外から連続本数を数えようとしました");
+            return 0;
+        }
+
+        const uint32_t heapIndex = tiles[from].HeapIndex;
+        uint32_t run = 1;
+        while (from + run < tiles.size() && tiles[from + run].HeapIndex == heapIndex &&
+               tiles[from + run].TileIndex == tiles[from + run - 1].TileIndex + 1)
+        {
+            ++run;
+        }
+        return run;
+    }
+
     ID3D12Heap* DX12TilePool::GetHeap(uint32_t heapIndex) const
     {
         std::lock_guard<std::mutex> lock(m_Mutex);

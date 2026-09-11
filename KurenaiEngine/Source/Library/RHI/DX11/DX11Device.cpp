@@ -21,6 +21,9 @@
 #include "DX11SwapChain.h"
 #include "DX11Texture.h"
 #include "DX11Util.h"
+#include "RHI/DXGIFormatUtil.h"
+#include "RHI/PipelineStateNormalize.h"
+#include "RHI/ReadbackUtil.h"
 #include "RHI/RHIReadbackFormat.h"
 #include "RHI/RHIShaderPackage.h"
 #include "RHI/TextureImage.h"
@@ -29,30 +32,6 @@ namespace Kurenai::RHI
 {
     namespace
     {
-        DXGI_FORMAT ToDXGIFormat(Format format)
-        {
-            switch (format)
-            {
-            case Format::R32G32_Float:
-                return DXGI_FORMAT_R32G32_FLOAT;
-            case Format::R32G32B32_Float:
-                return DXGI_FORMAT_R32G32B32_FLOAT;
-            case Format::R8G8B8A8_UNorm:
-                return DXGI_FORMAT_R8G8B8A8_UNORM;
-            case Format::R32_Float:
-                return DXGI_FORMAT_R32_FLOAT;
-            case Format::R16G16_Float:
-                return DXGI_FORMAT_R16G16_FLOAT;
-            case Format::R16G16B16A16_Float:
-                return DXGI_FORMAT_R16G16B16A16_FLOAT;
-            case Format::R11G11B10_Float:
-                return DXGI_FORMAT_R11G11B10_FLOAT;
-            case Format::R32G32B32A32_Float:
-            default:
-                return DXGI_FORMAT_R32G32B32A32_FLOAT;
-            }
-        }
-
         UINT ToBindFlags(BufferUsage usage)
         {
             switch (usage)
@@ -64,6 +43,82 @@ namespace Kurenai::RHI
             case BufferUsage::Constant:
             default:
                 return D3D11_BIND_CONSTANT_BUFFER;
+            }
+        }
+
+        // --- 意味値 → D3D11 の型 ---------------------------------------------------------
+        // どう振る舞うかを決めているのは PipelineStateNormalize.{h,cpp} で、ここは型の詰め替えだけ。
+        // 判断がここに入り込むと、DX12側と食い違っても誰も気づけなくなる
+
+        D3D11_BLEND ToD3D11Blend(BlendFactorValue factor)
+        {
+            switch (factor)
+            {
+            case BlendFactorValue::Zero:
+                return D3D11_BLEND_ZERO;
+            case BlendFactorValue::SrcAlpha:
+                return D3D11_BLEND_SRC_ALPHA;
+            case BlendFactorValue::InvSrcAlpha:
+                return D3D11_BLEND_INV_SRC_ALPHA;
+            case BlendFactorValue::DestColor:
+                return D3D11_BLEND_DEST_COLOR;
+            case BlendFactorValue::DestAlpha:
+                return D3D11_BLEND_DEST_ALPHA;
+            case BlendFactorValue::One:
+            default:
+                return D3D11_BLEND_ONE;
+            }
+        }
+
+        D3D11_BLEND_OP ToD3D11BlendOp(BlendOpValue op)
+        {
+            switch (op)
+            {
+            case BlendOpValue::Add:
+            default:
+                return D3D11_BLEND_OP_ADD;
+            }
+        }
+
+        D3D11_COMPARISON_FUNC ToD3D11Comparison(DepthCompareValue compare)
+        {
+            switch (compare)
+            {
+            case DepthCompareValue::LessEqual:
+                return D3D11_COMPARISON_LESS_EQUAL;
+            case DepthCompareValue::Greater:
+                return D3D11_COMPARISON_GREATER;
+            case DepthCompareValue::GreaterEqual:
+                return D3D11_COMPARISON_GREATER_EQUAL;
+            case DepthCompareValue::Less:
+            default:
+                return D3D11_COMPARISON_LESS;
+            }
+        }
+
+        D3D11_FILTER ToD3D11Filter(SamplerFilterValue filter)
+        {
+            switch (filter)
+            {
+            case SamplerFilterValue::Anisotropic:
+                return D3D11_FILTER_ANISOTROPIC;
+            case SamplerFilterValue::Point:
+                return D3D11_FILTER_MIN_MAG_MIP_POINT;
+            case SamplerFilterValue::Linear:
+            default:
+                return D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+            }
+        }
+
+        D3D11_TEXTURE_ADDRESS_MODE ToD3D11AddressMode(SamplerAddressValue addressMode)
+        {
+            switch (addressMode)
+            {
+            case SamplerAddressValue::Clamp:
+                return D3D11_TEXTURE_ADDRESS_CLAMP;
+            case SamplerAddressValue::Wrap:
+            default:
+                return D3D11_TEXTURE_ADDRESS_WRAP;
             }
         }
     }
@@ -483,9 +538,7 @@ namespace Kurenai::RHI
         D3D11_DEPTH_STENCIL_DESC depthStencilDesc{};
         depthStencilDesc.DepthEnable = desc.HasDepthStencil ? TRUE : FALSE;
         depthStencilDesc.DepthWriteMask = desc.DepthWriteEnabled ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
-        depthStencilDesc.DepthFunc = desc.ReverseZ
-            ? (desc.DepthAllowEqual ? D3D11_COMPARISON_GREATER_EQUAL : D3D11_COMPARISON_GREATER)
-            : (desc.DepthAllowEqual ? D3D11_COMPARISON_LESS_EQUAL : D3D11_COMPARISON_LESS);
+        depthStencilDesc.DepthFunc = ToD3D11Comparison(NormalizeDepthCompare(desc.ReverseZ, desc.DepthAllowEqual));
         depthStencilDesc.StencilEnable = FALSE;
 
         Microsoft::WRL::ComPtr<ID3D11DepthStencilState> depthStencilState;
@@ -496,48 +549,16 @@ namespace Kurenai::RHI
         D3D11_BLEND_DESC blendDesc{};
         D3D11_RENDER_TARGET_BLEND_DESC& rt0 = blendDesc.RenderTarget[0];
         rt0.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-        switch (desc.BlendMode)
+        const BlendStateValues blend = NormalizeBlendMode(desc.BlendMode);
+        rt0.BlendEnable = blend.Enable ? TRUE : FALSE;
+        if (blend.Enable)
         {
-        case BlendMode::AlphaBlend:
-            rt0.BlendEnable = TRUE;
-            rt0.SrcBlend = D3D11_BLEND_SRC_ALPHA;
-            rt0.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-            rt0.BlendOp = D3D11_BLEND_OP_ADD;
-            rt0.SrcBlendAlpha = D3D11_BLEND_ONE;
-            rt0.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-            rt0.BlendOpAlpha = D3D11_BLEND_OP_ADD;
-            break;
-        case BlendMode::Additive:
-            rt0.BlendEnable = TRUE;
-            rt0.SrcBlend = D3D11_BLEND_SRC_ALPHA;
-            rt0.DestBlend = D3D11_BLEND_ONE;
-            rt0.BlendOp = D3D11_BLEND_OP_ADD;
-            rt0.SrcBlendAlpha = D3D11_BLEND_ONE;
-            rt0.DestBlendAlpha = D3D11_BLEND_ONE;
-            rt0.BlendOpAlpha = D3D11_BLEND_OP_ADD;
-            break;
-        case BlendMode::Multiply:
-            rt0.BlendEnable = TRUE;
-            rt0.SrcBlend = D3D11_BLEND_DEST_COLOR;
-            rt0.DestBlend = D3D11_BLEND_ZERO;
-            rt0.BlendOp = D3D11_BLEND_OP_ADD;
-            rt0.SrcBlendAlpha = D3D11_BLEND_DEST_ALPHA;
-            rt0.DestBlendAlpha = D3D11_BLEND_ZERO;
-            rt0.BlendOpAlpha = D3D11_BLEND_OP_ADD;
-            break;
-        case BlendMode::PremultipliedAlpha:
-            rt0.BlendEnable = TRUE;
-            rt0.SrcBlend = D3D11_BLEND_ONE;
-            rt0.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
-            rt0.BlendOp = D3D11_BLEND_OP_ADD;
-            rt0.SrcBlendAlpha = D3D11_BLEND_ONE;
-            rt0.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
-            rt0.BlendOpAlpha = D3D11_BLEND_OP_ADD;
-            break;
-        case BlendMode::Opaque:
-        default:
-            rt0.BlendEnable = FALSE;
-            break;
+            rt0.SrcBlend = ToD3D11Blend(blend.SrcColor);
+            rt0.DestBlend = ToD3D11Blend(blend.DestColor);
+            rt0.BlendOp = ToD3D11BlendOp(blend.ColorOp);
+            rt0.SrcBlendAlpha = ToD3D11Blend(blend.SrcAlpha);
+            rt0.DestBlendAlpha = ToD3D11Blend(blend.DestAlpha);
+            rt0.BlendOpAlpha = ToD3D11BlendOp(blend.AlphaOp);
         }
 
         Microsoft::WRL::ComPtr<ID3D11BlendState> blendState;
@@ -798,11 +819,6 @@ namespace Kurenai::RHI
             "3D UAVテクスチャのアンオーダードアクセスビューの作成に失敗しました");
 
         return std::make_unique<DX11Texture>(srv, nullptr, nullptr, uav);
-    }
-
-    std::unique_ptr<IRHITexture> DX11Device::CreateHiZTexture(uint32_t width, uint32_t height, uint32_t mipLevels)
-    {
-        return CreateMippedUAVTexture(width, height, Format::R32_Float, mipLevels);
     }
 
     std::unique_ptr<IRHITexture> DX11Device::CreateMippedUAVTexture(uint32_t width, uint32_t height, Format format, uint32_t mipLevels)
@@ -1093,35 +1109,19 @@ namespace Kurenai::RHI
 
         D3D11_TEXTURE2D_DESC sourceDesc{};
         sourceTexture->GetDesc(&sourceDesc);
-        if (mipLevel >= sourceDesc.MipLevels)
-        {
-            Core::Logger::Error(
-                "DX11",
-                "CreateReadbackTexture: ミップレベルが範囲外です (mipLevel=" + std::to_string(mipLevel) +
-                    ", MipLevels=" + std::to_string(sourceDesc.MipLevels) + ")");
-            return nullptr;
-        }
 
-        const uint32_t mipWidth = std::max<uint32_t>(1u, sourceDesc.Width >> mipLevel);
-        const uint32_t mipHeight = std::max<uint32_t>(1u, sourceDesc.Height >> mipLevel);
-
-        // 【DX12とまったく同じ表を引く】RHIReadbackFormat.hに置いてあるのは、
-        // ここを別々に書くと片方だけ直したときに静かに食い違うため
-        const TextureReadbackDesc readbackDesc = DescribeReadbackFormat(sourceDesc.Format, mipWidth, mipHeight);
-        if (readbackDesc.ElementType == TextureElementType::Unknown)
+        // 【DX12とまったく同じ判定と表を引く】ここを別々に書くと片方だけ直したときに静かに食い違う
+        TextureReadbackDesc readbackDesc{};
+        if (!PrepareReadbackTextureDesc(
+                "DX11", mipLevel, sourceDesc.MipLevels, sourceDesc.Width, sourceDesc.Height, sourceDesc.Format,
+                readbackDesc))
         {
-            // BC圧縮のアセットテクスチャなど。**黙って0で埋めた結果を返さない**
-            Core::Logger::Error(
-                "DX11",
-                "CreateReadbackTexture: 対応していないフォーマットです (DXGI_FORMAT=" +
-                    std::to_string(static_cast<int>(sourceDesc.Format)) +
-                    ")。RHIReadbackFormat.hの対応表に無いため読み出せません");
             return nullptr;
         }
 
         D3D11_TEXTURE2D_DESC stagingDesc{};
-        stagingDesc.Width = mipWidth;
-        stagingDesc.Height = mipHeight;
+        stagingDesc.Width = readbackDesc.Width;
+        stagingDesc.Height = readbackDesc.Height;
         stagingDesc.MipLevels = 1;
         stagingDesc.ArraySize = 1;
         // 【typelessのまま作らない】深度はDSVとSRVを両立させるためR32_TYPELESSで作られている。
@@ -1145,7 +1145,7 @@ namespace Kurenai::RHI
             Core::Logger::Error(
                 "DX11",
                 "CreateReadbackTexture: リードバックテクスチャの作成に失敗しました (" +
-                    std::to_string(mipWidth) + "x" + std::to_string(mipHeight) + ")");
+                    std::to_string(readbackDesc.Width) + "x" + std::to_string(readbackDesc.Height) + ")");
             return nullptr;
         }
 
@@ -1168,43 +1168,10 @@ namespace Kurenai::RHI
             const SamplerDesc& desc = descs[i];
 
             D3D11_SAMPLER_DESC samplerDesc{};
-            switch (desc.Filter)
-            {
-            case SamplerFilter::Anisotropic:
-                samplerDesc.Filter = D3D11_FILTER_ANISOTROPIC;
-                break;
-            case SamplerFilter::Point:
-                samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
-                break;
-            case SamplerFilter::Linear:
-                samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-                break;
-            default:
-                Core::Logger::Warning(
-                    "DX11",
-                    "CreateSamplerSet: 未知のSamplerFilter(" + std::to_string(static_cast<int>(desc.Filter)) +
-                        ")が指定されたためLinearで代用します");
-                samplerDesc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-                break;
-            }
+            samplerDesc.Filter = ToD3D11Filter(NormalizeSamplerFilter(desc.Filter, "DX11"));
 
-            D3D11_TEXTURE_ADDRESS_MODE addressMode = D3D11_TEXTURE_ADDRESS_WRAP;
-            switch (desc.AddressMode)
-            {
-            case SamplerAddressMode::Clamp:
-                addressMode = D3D11_TEXTURE_ADDRESS_CLAMP;
-                break;
-            case SamplerAddressMode::Wrap:
-                addressMode = D3D11_TEXTURE_ADDRESS_WRAP;
-                break;
-            default:
-                Core::Logger::Warning(
-                    "DX11",
-                    "CreateSamplerSet: 未知のSamplerAddressMode(" + std::to_string(static_cast<int>(desc.AddressMode)) +
-                        ")が指定されたためWrapで代用します");
-                addressMode = D3D11_TEXTURE_ADDRESS_WRAP;
-                break;
-            }
+            const D3D11_TEXTURE_ADDRESS_MODE addressMode =
+                ToD3D11AddressMode(NormalizeSamplerAddressMode(desc.AddressMode, "DX11"));
             samplerDesc.AddressU = addressMode;
             samplerDesc.AddressV = addressMode;
             samplerDesc.AddressW = addressMode;
@@ -1226,6 +1193,12 @@ namespace Kurenai::RHI
     IRHICommandList* DX11Device::GetImmediateCommandList()
     {
         return m_ImmediateCommandList.get();
+    }
+
+    void DX11Device::ApplyPendingResourceInvalidation()
+    {
+        // DX11はSRVを参照カウント付きのCOMポインタで直接バインドし、CPUディスクリプタハンドルの
+        // シャドウを持たないため、破棄済みリソースのハンドルが残る問題自体が起こらない。
     }
 
     void DX11Device::WaitForGPUIdle()

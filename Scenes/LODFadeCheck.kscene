@@ -1,0 +1,38 @@
+# モデルLODのクロスディザ(2段重ね)を、カメラを動かさずに決定的に起こす検証シーン。
+#
+# 【なぜ既存のLODDitherTest / LODSwitchTestでは足りないか】どちらもカメラが
+# LOD境界の手前にあり、起動してもLODの切り替えが1回も起きない
+# (性能ログの「モデルLOD: 切り替え 0回 / フェード 0」で確認できる)。
+# 観察するには手でカメラを動かす必要があり、無人の検証に使えない。
+#
+# 【ここでの仕掛け】UpdateModelLODは状態を必ずLOD0から始め、1フレームに1段しか
+# 動かさない。そこで起動時点でLOD1が選ばれる距離にカメラを置くと、
+# フレーム1で必ず切り替わりFadeT=0になる。LODFadeDurationの既定は0.25秒なので、
+# -fixedstep 0.0166667 ならフレーム1〜15がフェード中で、そこを -dumpframe で狙える。
+#
+# 【LOD0とLOD1に同じ.kmodelを指定する理由】LODDitherTestと同じ。フェード中は2段が
+# 同時に描かれ、同じモデルなら深度が完全に一致するため、
+#   ・2段が同じ画素を取り合っていれば -> Zファイティング
+#   ・どちらも描かない画素があれば     -> 穴
+#   ・排他に分け合えていれば           -> 通常描画と被覆画素数が一致する
+# となる。フェード中とフェード後(フレーム100など)でGBufferDepthの被覆画素数を
+# 数えれば、排他性と完全性が数値で出る。
+#
+# 【走らせるには Assets/Packed/Scenes/ へコピーが要る】エンジンが読むのは
+# ビルド出力の Assets/Scenes/ で、その元は Assets/Packed/Scenes/。
+# このフォルダ(Scenes/)からの自動コピーは無い。
+[Scene]
+Name = LOD フェード検証
+
+[Model]
+Path        = MaterialTest/MaterialTest.kmodel
+LODPath     = MaterialTest/MaterialTest.kmodel
+LODDistance = 25
+
+[Camera]
+Position = 0.0, 3.0, 60.0
+Yaw = 180.0
+Pitch = -3.0
+
+[Sun]
+TimeOfDay = 10.0

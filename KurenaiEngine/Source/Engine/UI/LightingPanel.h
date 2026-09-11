@@ -3,11 +3,7 @@
 #include <array>
 
 #include "UI/IPanel.h"
-
-namespace Kurenai
-{
-    class KurenaiEngine3D;
-}
+#include "EngineUIHost.h"
 
 namespace Kurenai::UI
 {
@@ -15,7 +11,7 @@ namespace Kurenai::UI
     class LightingPanel final : public IPanel
     {
     public:
-        explicit LightingPanel(KurenaiEngine3D& engine) : m_Engine(engine) {}
+        explicit LightingPanel(IEngineUIHost& engine) : m_Engine(engine) {}
 
         // ###以降がウィンドウIDになる。imgui.iniとドックレイアウトのキーになるため
         // ###以降は変更しないこと(表示名だけなら変更してよい)
@@ -31,7 +27,7 @@ namespace Kurenai::UI
         void DrawLightsSection(const PanelDrawContext& context);
         void DrawSelectedLightEditor();
 
-        KurenaiEngine3D& m_Engine;
+        IEngineUIHost& m_Engine;
 
         // ImGui::InputTextは複数フレームにまたがって自身のバッファを編集し、IMEの未確定文字列も
         // そこに入る。毎フレームlight.Nameから詰め直すと変換中の文字が消えてしまうため、

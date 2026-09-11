@@ -24,55 +24,9 @@
 #include "SpecularEnergy.hlsli"
 #include "Samplers.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    float4 ShadowParams;
-    // x=t8のライトリストの有効数(Transparent.hlslと同じくFrameConstants末尾で受け取る。
-    // b1はObjectConstantsが占有していてLightingConstantsを置けないため)
-    float4 ActiveLightCount;
-    // ここから下はこのシェーダーでは使わないが、cbufferのレイアウトは宣言順で決まり
-    // 途中のフィールドを飛ばせないため、後続のDDGIParams/OcclusionParamsのオフセットを合わせる目的で
-    // 宣言する(C++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること)
-    float4 IBLParams;
-    float4 ProbeParams;
-    float4 ProbeParams2;
-    // TAA(23章)用。このシェーダーでは未使用だが、C++側でDDGIParamsより手前に置かれているため
-    // オフセット合わせのためだけに宣言する
-    float4x4 PrevViewProj;
-    float4 TAAParams;
-    // DDGI(22章)。多重バウンスのために前フレームのイラディアンスを引くのに使う
-    float4 DDGIParams0;
-    float4 DDGIParams1;
-    float4 DDGIParams2;
-    float4 DDGIParams3;
-    // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
-    float4 DDGIParams4;
-    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
-    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
-    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
-    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
-    float4 DDGILODOrigin[4];
-    float4 DDGILODBase[4];
-    // bent normalによる遮蔽(34章)。プローブの中身も不透明パスと同じ規則で焼かないと、
-    // つまみを動かしたときにプローブだけ古い見た目のまま残る。
-    // KurenaiEngine3D側の再ベイク署名にもこの値を混ぜてあること
-    float4 OcclusionParams;
-    // これ以降(TimeParams / Sky* / Cloud* / PlanarReflectionPlane / Fog* / WaterBodyColor)は
-    // このシェーダーでは一切読まないため宣言しない。読まないフィールドを並べても
-    // オフセットの担保にはならず、実際にずれていても気づけないため
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 #include "ObjectConstants.hlsli"
 

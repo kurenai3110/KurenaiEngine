@@ -1,0 +1,434 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source\Engine\Settings">
+      <UniqueIdentifier>{a00a339d-0000-4000-8000-d0bba00a339d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine\Scene">
+      <UniqueIdentifier>{751ac03b-0000-4000-8000-ea4e751ac03b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine\Rendering">
+      <UniqueIdentifier>{38964407-0000-4000-8000-36af38964407}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine\Passes">
+      <UniqueIdentifier>{c1fd0510-0000-4000-8000-ad21c1fd0510}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine\GI">
+      <UniqueIdentifier>{2ea77ef9-0000-4000-8000-4f272ea77ef9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine\Diagnostics">
+      <UniqueIdentifier>{3a58b060-0000-4000-8000-51ca3a58b060}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Shaders">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000001}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Shaders\3D">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000002}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000003}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000004}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source\Engine\UI">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000005}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="ThirdParty">
+      <UniqueIdentifier>{00000000-0000-0000-0000-000000000006}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="Source\Engine\KurenaiTypes.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\KurenaiEngine3D.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\GeometryDrawTypes.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\CloudTransmittance.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\GPULightBuild.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\GPUReflectionProbe.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\SampleSequence.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\RenderSettingsSnapshot.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\MeshletLODFrameConstants.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\RenderTargets.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\ShadowConstants.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Passes\ReflectionProbeConstants.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\EngineDefaults.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Diagnostics\RenderCapabilities.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Diagnostics\RenderDumpService.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Diagnostics\RenderStats.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Diagnostics\ScheduledRecreation.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\AmbientOcclusionSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\CloudSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\DDGISettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\DebugViewSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\EmissiveLightSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\FogSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\GeometrySettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\IBLSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\MegaLightsSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\PostProcessSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\QualitySettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\ReflectionProbeSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\ReflectionSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\ShadowSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\SkySettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\StarsSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\SystemSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\WaterSettings.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\DroneShow.h">
+      <Filter>Source\Engine</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\IPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\UIManager.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\UITheme.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\UIWidgets.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\RenderingPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\SystemPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\ScenePanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\StreamingPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\PostProcessPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\DebugViewPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\LightingPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\ProfilerPanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\ReflectionProbePanel.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClInclude Include="..\ThirdParty\imgui\imgui.h">
+      <Filter>ThirdParty</Filter>
+    </ClInclude>
+    <ClCompile Include="Source\Engine\KurenaiEngine3D.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Rendering\RenderTargets.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Rendering\RenderFrame.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Rendering\RenderFrameBuild.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Rendering\SceneDrawList.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Settings\QualitySettings.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Diagnostics\RenderDumpService.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Diagnostics\CullStatsReadback.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Diagnostics\FrameStatsLogger.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Diagnostics\PerfLogging.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Diagnostics\RenderDumpServiceState.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Diagnostics\ScheduledRecreationQueue.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\GI\DDGISystem.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\GI\DDGIGrid.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Scene\ModelResidencySystem.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\Scene\SceneLoadService.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\DroneShow.cpp">
+      <Filter>Source\Engine</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\UIManager.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\UITheme.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\UIWidgets.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\RenderingPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\SystemPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\ScenePanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\StreamingPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\PostProcessPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\DebugViewPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\LightingPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\ProfilerPanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Engine\UI\ReflectionProbePanel.cpp">
+      <Filter>Source\Engine\UI</Filter>
+    </ClCompile>
+    <None Include="Shaders\3D\GBuffer.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\GBufferMeshlet.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SoftwareRaster.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SoftwareRasterResolve.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SoftwareRasterCommon.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\DirectLighting.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\DeferredLighting.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\HiZ.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\LightCulling.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\NormalEncoding.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\Bindless.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\Meshlet.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SpecularEnergy.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\CubeFace.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\ProbeShading.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\ScreenSpaceShadow.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\Present.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SSAO.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SSIL_VisibilityBitmask.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SSR.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\RTReflection.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\RTShadow.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\RTAO.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\DDGIProbeTrace.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\RaytracingScene.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\Shadow.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\ShadowMeshlet.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\TAA.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\Tonemap.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\SkyGenerate.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\AutoExposure.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <None Include="Shaders\3D\Bloom.hlsl">
+      <Filter>Shaders\3D</Filter>
+    </None>
+    <ClInclude Include="Source\Engine\Diagnostics\CullStatsReadback.h">
+      <Filter>Source\Engine\Diagnostics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Diagnostics\FrameStatsLogger.h">
+      <Filter>Source\Engine\Diagnostics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Diagnostics\RenderDumpServiceState.h">
+      <Filter>Source\Engine\Diagnostics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Diagnostics\ScheduledRecreationQueue.h">
+      <Filter>Source\Engine\Diagnostics</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\GI\DDGIGrid.h">
+      <Filter>Source\Engine\GI</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Passes\PassHost.h">
+      <Filter>Source\Engine\Passes</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\DroneShowSystem.h">
+      <Filter>Source\Engine\Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\FrameHistoryState.h">
+      <Filter>Source\Engine\Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\GeometryDrawHost.h">
+      <Filter>Source\Engine\Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Rendering\SceneDrawList.h">
+      <Filter>Source\Engine\Rendering</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Scene\EmissiveLightSet.h">
+      <Filter>Source\Engine\Scene</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Scene\InstanceLODState.h">
+      <Filter>Source\Engine\Scene</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Scene\ModelStreamingState.h">
+      <Filter>Source\Engine\Scene</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Scene\RaytracingRebuildState.h">
+      <Filter>Source\Engine\Scene</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Scene\SceneLoadHandoff.h">
+      <Filter>Source\Engine\Scene</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\Settings\EngineSettings.h">
+      <Filter>Source\Engine\Settings</Filter>
+    </ClInclude>
+    <ClInclude Include="Source\Engine\UI\EngineUIHost.h">
+      <Filter>Source\Engine\UI</Filter>
+    </ClInclude>
+    <ClCompile Include="Source\pch.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClInclude Include="Source\pch.h">
+      <Filter>Source</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
+

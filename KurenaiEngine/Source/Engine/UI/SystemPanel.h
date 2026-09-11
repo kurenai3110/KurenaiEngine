@@ -1,11 +1,7 @@
 #pragma once
 
 #include "UI/IPanel.h"
-
-namespace Kurenai
-{
-    class KurenaiEngine3D;
-}
+#include "EngineUIHost.h"
 
 namespace Kurenai::UI
 {
@@ -19,7 +15,7 @@ namespace Kurenai::UI
     class SystemPanel final : public IPanel
     {
     public:
-        SystemPanel(KurenaiEngine3D& engine, UIManager& uiManager) : m_Engine(engine), m_UIManager(uiManager) {}
+        SystemPanel(IEngineUIHost& engine, UIManager& uiManager) : m_Engine(engine), m_UIManager(uiManager) {}
 
         // ###以降がウィンドウIDになる。imgui.iniとドックレイアウトのキーになるため
         // ###以降は変更しないこと(表示名だけなら変更してよい)
@@ -38,7 +34,7 @@ namespace Kurenai::UI
         void DrawTextureStreamingSection();
         void DrawUISection();
 
-        KurenaiEngine3D& m_Engine;
+        IEngineUIHost& m_Engine;
         UIManager& m_UIManager;
     };
 }

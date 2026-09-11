@@ -21,17 +21,11 @@
 #include "Bindless.hlsli"
 #include "Meshlet.hlsli"
 
-// シャドウパス専用の定数バッファ。カスケードごとにこの1つの行列だけを差し替えて
-// 同じジオメトリを描き直す(頂点シェーダー版のShadow.hlslと同じもの)
-cbuffer CascadeConstants : register(b0)
-{
-    float4x4 ViewProj;
-};
+#include "ShaderInterop/CascadeConstants.hlsli"
 
 #include "ObjectConstants.hlsli"
 
-#define KURENAI_AMPLIFICATION_GROUP_SIZE 32
-#define KURENAI_MESH_GROUP_SIZE 128
+#include "ShaderInterop/GroupSizes.hlsli"
 
 struct MeshletPayload
 {

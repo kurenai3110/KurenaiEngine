@@ -71,8 +71,7 @@ namespace Kurenai::Assets
         // 最小値ではなく1割の位置を採るのは、UVが潰れかけた細長い三角形が最小値を支配し、
         // どのテクスチャも常に全ミップ常駐になってしまうため。
         //
-        // 【実測】中央値(従来)とp90で比べると、p90はbias -2で0.80を下回るタイルが3枚→14枚、
-        // 最悪タイルが0.572→0.175へ悪化した。密度は高く見積もるほどぼける。
+        // 密度は高く見積もるほどぼける(中央値とp90の比較は docs/ImplementationDetail.md 48章)。
         //
         // 【全三角形を見ない】読み込み時間に効く(LOD2の1タイルで11万三角形×1715メッシュ)。
         // 先頭64個ではなく等間隔に抜くのは、メッシュの一部だけに偏った密度を代表値にしないため
@@ -252,23 +251,14 @@ namespace Kurenai::Assets
         // 1%以下になる。1m を選ぶと 5m 以遠で1%に収まり、屋内で照明の効き方を判断する距離
         // スケール(およそ5m)と噛み合う。
         //
-        // 【併合が要る理由は実測で決まった】段Bまで通すと EmeraldSquare が 3370個になり、
-        // kMaxLights(1024)を大きく超える。**上限で切り捨てて逃げてはいけない** ――
-        // その3370個を面積の大きい順に並べても、上位256個で総面積の46.7%、
-        // 上位1024個でも84.9%にしかならず、発光の相当量を黙って捨てることになる。
-        // 面積の分布は最小 3.6e-4 / 中央値 8.2e-2 / 最大 3.66 m^2 で、
-        // 上位が支配していない ―― 切り捨てが安全になる形の裾ではない。
-        // 併合ならエネルギーは厳密に保存される(総面積 864.231 m^2 は3段すべてで同値)。
+        // 【併合が要る理由は実測で決まった】段Bまで通すと kMaxLights を大きく超える。
+        // **上限で切り捨てて逃げてはいけない** ―― 面積の裾は上位が支配しておらず、
+        // 切り捨てると発光の相当量を黙って捨てることになる。併合ならエネルギーは
+        // 厳密に保存される。段ごとの個数の実測は docs/ImplementationDetail.md 62.2。
         //
-        // 実測(メッシュ内で完結。段ごとの個数):
-        //           段A(連結成分)  段A+B(分割後)  段C(併合後)  最近接クラスタ間
-        //   Bistro         7             7            7          2.96 m
-        //   ProbeTest     14            28           28          1.86 m
-        //   EmeraldSquare 1427        3370          651          0.011 m
-        //
-        // 【段Bは個数を増やす側にも働く】ProbeTest は連結成分14個が分割で28個になっている。
+        // 【段Bは個数を増やす側にも働く】分割で個数が増えるシーンがあるので、
         // 「分割を切れば併合の効果が分かる」わけではない ―― 両方を同時に切ると
-        // ProbeTest では符号すら逆に見える
+        // 符号すら逆に見える
         //
         // 【平面パネルには効かない】分割しても面積等価半径とRangeの比は変わらない
         // (A ∝ s^2 かつ Range ∝ sqrt(E*A) ∝ s)。改善するのは「位置の局所性」だけで、
@@ -343,260 +333,47 @@ namespace Kurenai::Assets
             }
         }
 
-        // outTriangleCluster に nullptr 以外を渡すと、三角形ごとの「どのかたまりに属するか」を
-        // 返す(要素数 = indexCount/3、どこにも属さない三角形は kEmissiveTriangleUnassigned)。
-        //
-        // 【段階2のメッシュライトが要る】三角形を面積比で引くとき、まずかたまりを選んでから
-        // その中の三角形を引く2段構えにする。**かたまりの中身が分からないと第2段が書けない**
-        std::vector<EmissiveCluster> BuildEmissiveClusters(
-            const Vertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount,
-            const float boundsMin[3], const float boundsMax[3], float clusterScale,
-            std::vector<uint32_t>* outTriangleCluster = nullptr)
+        // 位置を格子へ量子化した鍵。頂点の溶接(段A)と、かたまりの近傍探索(段C)の
+        // 両方で使うため、関数の外に置いてある
+        struct QuantizedKey
         {
-            std::vector<EmissiveCluster> result;
-            if (outTriangleCluster != nullptr)
+            int64_t X, Y, Z;
+            bool operator==(const QuantizedKey& other) const
             {
-                outTriangleCluster->assign(indexCount / 3, kEmissiveTriangleUnassigned);
+                return X == other.X && Y == other.Y && Z == other.Z;
             }
-            if (vertices == nullptr || indices == nullptr || vertexCount == 0 || indexCount < 3)
+        };
+        struct QuantizedKeyHash
+        {
+            size_t operator()(const QuantizedKey& k) const
             {
-                return result;
+                size_t h = static_cast<size_t>(k.X) * 0x9E3779B97F4A7C15ull;
+                h ^= static_cast<size_t>(k.Y) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                h ^= static_cast<size_t>(k.Z) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                return h;
             }
-            const uint32_t triangleCount = indexCount / 3;
+        };
 
-            // --- 頂点を位置で溶接する ---
-            //
-            // 【素の頂点番号で連結成分を取ってはいけない】.kgeom の頂点は meshopt を通した後で、
-            // 法線やUVが違えば同じ位置でも別の頂点になっている。溶接を省くと**1個の電球が
-            // 数十片に割れる**。しかも「細かい光源がたくさん出た」だけに見えるので気付けない。
-            //
-            // 【しきい値はメッシュの大きさに比例させる】絶対値で固定すると、1.1km四方の
-            // PLATEAU タイルで float32 の分解能(1000m 付近で約 6e-5)を割り込む。
-            // 相対 1e-5 は float32 の仮数(約 1.2e-7 相対)に対して十分な余裕があり、
-            // DCC の頂点溶接許容(ふつう 1e-4 m 前後)よりは細かい
-            float diagonal = 0.0f;
-            for (int axis = 0; axis < 3; ++axis)
-            {
-                const float d = boundsMax[axis] - boundsMin[axis];
-                diagonal += d * d;
-            }
-            diagonal = std::sqrt(diagonal);
-            const float weldEpsilon = std::clamp(1e-5f * diagonal, 1e-5f, 1e-3f);
-            const float invWeld = 1.0f / weldEpsilon;
+        // 発光のかたまりを累積するための入れ物。BuildEmissiveClustersと、そこから
+        // 切り出した段が共有するため、関数の外に置いてある
+        struct Accum
+        {
+            double Area = 0.0;
+            double CentroidSum[3] = { 0.0, 0.0, 0.0 }; // Σ A_i c_i
+            double NormalSum[3] = { 0.0, 0.0, 0.0 };   // Σ A_i n_i (= Σ cross_i / 2)
+            double OwnMoment = 0.0;                    // Σ (A_i/36)(|ab|^2+|bc|^2+|ca|^2)
+            float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
+            float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
+            uint32_t TriangleCount = 0;
+        };
 
-            struct QuantizedKey
-            {
-                int64_t X, Y, Z;
-                bool operator==(const QuantizedKey& other) const
-                {
-                    return X == other.X && Y == other.Y && Z == other.Z;
-                }
-            };
-            struct QuantizedKeyHash
-            {
-                size_t operator()(const QuantizedKey& k) const
-                {
-                    size_t h = static_cast<size_t>(k.X) * 0x9E3779B97F4A7C15ull;
-                    h ^= static_cast<size_t>(k.Y) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
-                    h ^= static_cast<size_t>(k.Z) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
-                    return h;
-                }
-            };
-
-            // union-find の親配列。溶接と三角形の連結の両方に使う
-            std::vector<uint32_t> parent(vertexCount);
-            for (uint32_t v = 0; v < vertexCount; ++v)
-            {
-                parent[v] = v;
-            }
-            // 経路圧縮。再帰にすると頂点数ぶんの深さになりうるのでループで書く
-            const auto findRoot = [&parent](uint32_t v) -> uint32_t
-            {
-                uint32_t root = v;
-                while (parent[root] != root) { root = parent[root]; }
-                while (parent[v] != root) { const uint32_t next = parent[v]; parent[v] = root; v = next; }
-                return root;
-            };
-            // 【小さい番号を親にする】結合の向きを入力順に依存させないための決定性の要件
-            const auto unite = [&parent, &findRoot](uint32_t a, uint32_t b)
-            {
-                const uint32_t ra = findRoot(a);
-                const uint32_t rb = findRoot(b);
-                if (ra == rb) { return; }
-                if (ra < rb) { parent[rb] = ra; } else { parent[ra] = rb; }
-            };
-
-            {
-                std::unordered_map<QuantizedKey, uint32_t, QuantizedKeyHash> weldMap;
-                weldMap.reserve(vertexCount);
-                for (uint32_t v = 0; v < vertexCount; ++v)
-                {
-                    QuantizedKey key;
-                    key.X = std::llround(static_cast<double>(vertices[v].Position[0]) * invWeld);
-                    key.Y = std::llround(static_cast<double>(vertices[v].Position[1]) * invWeld);
-                    key.Z = std::llround(static_cast<double>(vertices[v].Position[2]) * invWeld);
-                    const auto inserted = weldMap.emplace(key, v);
-                    if (!inserted.second)
-                    {
-                        unite(inserted.first->second, v);
-                    }
-                }
-            }
-
-            // --- 三角形の3頂点をつないで連結成分にする ---
-            for (uint32_t tri = 0; tri < triangleCount; ++tri)
-            {
-                const uint32_t i0 = indices[tri * 3 + 0];
-                const uint32_t i1 = indices[tri * 3 + 1];
-                const uint32_t i2 = indices[tri * 3 + 2];
-                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
-                {
-                    continue;
-                }
-                unite(i0, i1);
-                unite(i1, i2);
-            }
-
-            // --- 三角形を「かたまり」へ割り当てて累積する ---
-            struct GroupKey
-            {
-                uint32_t Root;
-                int64_t CellX, CellY, CellZ; // 段Bのグリッドセル(分割しないときは常に0)
-                bool operator==(const GroupKey& o) const
-                {
-                    return Root == o.Root && CellX == o.CellX && CellY == o.CellY && CellZ == o.CellZ;
-                }
-            };
-            struct GroupKeyHash
-            {
-                size_t operator()(const GroupKey& k) const
-                {
-                    size_t h = static_cast<size_t>(k.Root) * 0x9E3779B97F4A7C15ull;
-                    h ^= static_cast<size_t>(k.CellX) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
-                    h ^= static_cast<size_t>(k.CellY) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
-                    h ^= static_cast<size_t>(k.CellZ) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
-                    return h;
-                }
-            };
-
-            struct Accum
-            {
-                double Area = 0.0;
-                double CentroidSum[3] = { 0.0, 0.0, 0.0 }; // Σ A_i c_i
-                double NormalSum[3] = { 0.0, 0.0, 0.0 };   // Σ A_i n_i (= Σ cross_i / 2)
-                double OwnMoment = 0.0;                    // Σ (A_i/36)(|ab|^2+|bc|^2+|ca|^2)
-                float BoundsMin[3] = { 0.0f, 0.0f, 0.0f };
-                float BoundsMax[3] = { 0.0f, 0.0f, 0.0f };
-                uint32_t TriangleCount = 0;
-            };
-            std::vector<Accum> groups;
-            std::unordered_map<GroupKey, uint32_t, GroupKeyHash> groupIndexOf;
-            std::vector<uint32_t> triangleGroup(triangleCount, 0xFFFFFFFFu);
-
-            const bool splitEnabled = clusterScale > 0.0f;
-            const float invSplit = splitEnabled ? (1.0f / clusterScale) : 0.0f;
-
-            for (uint32_t tri = 0; tri < triangleCount; ++tri)
-            {
-                const uint32_t i0 = indices[tri * 3 + 0];
-                const uint32_t i1 = indices[tri * 3 + 1];
-                const uint32_t i2 = indices[tri * 3 + 2];
-                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
-                {
-                    continue;
-                }
-                const float* p0 = vertices[i0].Position;
-                const float* p1 = vertices[i1].Position;
-                const float* p2 = vertices[i2].Position;
-
-                const double e1[3] = { static_cast<double>(p1[0]) - p0[0], static_cast<double>(p1[1]) - p0[1], static_cast<double>(p1[2]) - p0[2] };
-                const double e2[3] = { static_cast<double>(p2[0]) - p0[0], static_cast<double>(p2[1]) - p0[1], static_cast<double>(p2[2]) - p0[2] };
-                const double cross[3] = {
-                    e1[1] * e2[2] - e1[2] * e2[1],
-                    e1[2] * e2[0] - e1[0] * e2[2],
-                    e1[0] * e2[1] - e1[1] * e2[0],
-                };
-                const double area =
-                    0.5 * std::sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
-                // 縮退した三角形は面積0で法線の向きも決まらない。重心にも寄与しないので飛ばす
-                if (area <= 1e-12)
-                {
-                    continue;
-                }
-
-                const double centroid[3] = {
-                    (static_cast<double>(p0[0]) + p1[0] + p2[0]) / 3.0,
-                    (static_cast<double>(p0[1]) + p1[1] + p2[1]) / 3.0,
-                    (static_cast<double>(p0[2]) + p1[2] + p2[2]) / 3.0,
-                };
-
-                GroupKey key{};
-                key.Root = findRoot(i0);
-                key.CellX = key.CellY = key.CellZ = 0;
-                if (splitEnabled)
-                {
-                    // 【重心でセルを決める】頂点で決めると1枚の三角形が複数セルに跨る。
-                    // セルの原点はメッシュのAABB最小コーナーで、インスタンス変換に依存しない
-                    key.CellX = static_cast<int64_t>(std::floor((centroid[0] - boundsMin[0]) * invSplit));
-                    key.CellY = static_cast<int64_t>(std::floor((centroid[1] - boundsMin[1]) * invSplit));
-                    key.CellZ = static_cast<int64_t>(std::floor((centroid[2] - boundsMin[2]) * invSplit));
-                }
-
-                uint32_t groupIndex;
-                const auto found = groupIndexOf.find(key);
-                if (found == groupIndexOf.end())
-                {
-                    groupIndex = static_cast<uint32_t>(groups.size());
-                    groupIndexOf.emplace(key, groupIndex);
-                    groups.emplace_back();
-                    for (int axis = 0; axis < 3; ++axis)
-                    {
-                        groups[groupIndex].BoundsMin[axis] = p0[axis];
-                        groups[groupIndex].BoundsMax[axis] = p0[axis];
-                    }
-                }
-                else
-                {
-                    groupIndex = found->second;
-                }
-                triangleGroup[tri] = groupIndex;
-
-                Accum& acc = groups[groupIndex];
-                acc.Area += area;
-                acc.TriangleCount += 1u;
-                for (int axis = 0; axis < 3; ++axis)
-                {
-                    acc.CentroidSum[axis] += area * centroid[axis];
-                    // Σ A_i n_i は Σ cross_i / 2 と厳密に等しい(crossの長さが 2*A_i)。
-                    // 正規化してから面積を掛け直すより丸めが1段少ない
-                    acc.NormalSum[axis] += 0.5 * cross[axis];
-                    acc.BoundsMin[axis] = std::min({ acc.BoundsMin[axis], p0[axis], p1[axis], p2[axis] });
-                    acc.BoundsMax[axis] = std::max({ acc.BoundsMax[axis], p0[axis], p1[axis], p2[axis] });
-                }
-
-                // 三角形自身の広がり(自分の重心まわりの二次モーメント)。
-                // ∫|x-g|^2 dA = (A/36)(|ab|^2 + |bc|^2 + |ca|^2)
-                //
-                // 【これを落とすと三角形1枚のかたまりで半径が厳密に0になる】重心の散らばりだけを
-                // 見ると1枚しかないときに0になる。半径0は点光源を意味し、半影が消え、
-                // 近傍のクランプ(d^2 + R^2)も効かなくなる
-                const double ab[3] = { static_cast<double>(p1[0]) - p0[0], static_cast<double>(p1[1]) - p0[1], static_cast<double>(p1[2]) - p0[2] };
-                const double bc[3] = { static_cast<double>(p2[0]) - p1[0], static_cast<double>(p2[1]) - p1[1], static_cast<double>(p2[2]) - p1[2] };
-                const double ca[3] = { static_cast<double>(p0[0]) - p2[0], static_cast<double>(p0[1]) - p2[1], static_cast<double>(p0[2]) - p2[2] };
-                const double edgeSq =
-                    ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2] +
-                    bc[0] * bc[0] + bc[1] * bc[1] + bc[2] * bc[2] +
-                    ca[0] * ca[0] + ca[1] * ca[1] + ca[2] * ca[2];
-                acc.OwnMoment += area * edgeSq / 36.0;
-            }
-
-            if (groups.empty())
-            {
-                return result;
-            }
-
-            // --- 段C: 近すぎるかたまりを併合する ---
-            //
+        // --- 段C: 近すぎるかたまりを併合する ---
+        //
+        // 面積の大きい順に上位を残す形にすると発光の半分以上を黙って捨てることになる。
+        // 併合ならエネルギーは厳密に保存される(理由は本体のコメント)
+        void MergeCloseEmissiveClusters(
+            float clusterScale, std::vector<Accum>& groups, std::vector<uint32_t>& triangleGroup)
+        {
             // 【上限で切り捨てて逃げてはいけない】街区の看板のように「小さな発光面がばらばらに
             // 大量にある」形は段Aで数千個に割れる。面積の大きい順に上位を残す形にすると、
             // EmeraldSquare では上位256個で総面積の46.7%にしかならず、発光の半分以上を
@@ -738,7 +515,15 @@ namespace Kurenai::Assets
                     g = mergedOf[g];
                 }
             }
+        }
 
+        // 二次モーメントの第2段(重心が確定してから重心の散らばりを足す)と、
+        // かたまりごとの値の確定。**かたまり番号と出力の添字は一致しない**
+        void FinalizeEmissiveClusters(
+            const Vertex* vertices, const uint32_t* indices, uint32_t triangleCount,
+            const std::vector<Accum>& groups, std::vector<uint32_t>& triangleGroup,
+            std::vector<EmissiveCluster>& result, std::vector<uint32_t>* outTriangleCluster)
+        {
             // --- 二次モーメントの第2段(重心が確定してから、重心の散らばりを足す) ---
             std::vector<double> centroidSpread(groups.size(), 0.0);
             for (uint32_t tri = 0; tri < triangleCount; ++tri)
@@ -836,8 +621,238 @@ namespace Kurenai::Assets
                 }
             }
 
+        }
+
+        // outTriangleCluster に nullptr 以外を渡すと、三角形ごとの「どのかたまりに属するか」を
+        // 返す(要素数 = indexCount/3、どこにも属さない三角形は kEmissiveTriangleUnassigned)。
+        //
+        // 【段階2のメッシュライトが要る】三角形を面積比で引くとき、まずかたまりを選んでから
+        // その中の三角形を引く2段構えにする。**かたまりの中身が分からないと第2段が書けない**
+        std::vector<EmissiveCluster> BuildEmissiveClusters(
+            const Vertex* vertices, uint32_t vertexCount, const uint32_t* indices, uint32_t indexCount,
+            const float boundsMin[3], const float boundsMax[3], float clusterScale,
+            std::vector<uint32_t>* outTriangleCluster = nullptr)
+        {
+            std::vector<EmissiveCluster> result;
+            if (outTriangleCluster != nullptr)
+            {
+                outTriangleCluster->assign(indexCount / 3, kEmissiveTriangleUnassigned);
+            }
+            if (vertices == nullptr || indices == nullptr || vertexCount == 0 || indexCount < 3)
+            {
+                return result;
+            }
+            const uint32_t triangleCount = indexCount / 3;
+
+            // --- 頂点を位置で溶接する ---
+            //
+            // 【素の頂点番号で連結成分を取ってはいけない】.kgeom の頂点は meshopt を通した後で、
+            // 法線やUVが違えば同じ位置でも別の頂点になっている。溶接を省くと**1個の電球が
+            // 数十片に割れる**。しかも「細かい光源がたくさん出た」だけに見えるので気付けない。
+            //
+            // 【しきい値はメッシュの大きさに比例させる】絶対値で固定すると、1.1km四方の
+            // PLATEAU タイルで float32 の分解能(1000m 付近で約 6e-5)を割り込む。
+            // 相対 1e-5 は float32 の仮数(約 1.2e-7 相対)に対して十分な余裕があり、
+            // DCC の頂点溶接許容(ふつう 1e-4 m 前後)よりは細かい
+            float diagonal = 0.0f;
+            for (int axis = 0; axis < 3; ++axis)
+            {
+                const float d = boundsMax[axis] - boundsMin[axis];
+                diagonal += d * d;
+            }
+            diagonal = std::sqrt(diagonal);
+            const float weldEpsilon = std::clamp(1e-5f * diagonal, 1e-5f, 1e-3f);
+            const float invWeld = 1.0f / weldEpsilon;
+
+
+            // union-find の親配列。溶接と三角形の連結の両方に使う
+            std::vector<uint32_t> parent(vertexCount);
+            for (uint32_t v = 0; v < vertexCount; ++v)
+            {
+                parent[v] = v;
+            }
+            // 経路圧縮。再帰にすると頂点数ぶんの深さになりうるのでループで書く
+            const auto findRoot = [&parent](uint32_t v) -> uint32_t
+            {
+                uint32_t root = v;
+                while (parent[root] != root) { root = parent[root]; }
+                while (parent[v] != root) { const uint32_t next = parent[v]; parent[v] = root; v = next; }
+                return root;
+            };
+            // 【小さい番号を親にする】結合の向きを入力順に依存させないための決定性の要件
+            const auto unite = [&parent, &findRoot](uint32_t a, uint32_t b)
+            {
+                const uint32_t ra = findRoot(a);
+                const uint32_t rb = findRoot(b);
+                if (ra == rb) { return; }
+                if (ra < rb) { parent[rb] = ra; } else { parent[ra] = rb; }
+            };
+
+            {
+                std::unordered_map<QuantizedKey, uint32_t, QuantizedKeyHash> weldMap;
+                weldMap.reserve(vertexCount);
+                for (uint32_t v = 0; v < vertexCount; ++v)
+                {
+                    QuantizedKey key;
+                    key.X = std::llround(static_cast<double>(vertices[v].Position[0]) * invWeld);
+                    key.Y = std::llround(static_cast<double>(vertices[v].Position[1]) * invWeld);
+                    key.Z = std::llround(static_cast<double>(vertices[v].Position[2]) * invWeld);
+                    const auto inserted = weldMap.emplace(key, v);
+                    if (!inserted.second)
+                    {
+                        unite(inserted.first->second, v);
+                    }
+                }
+            }
+
+            // --- 三角形の3頂点をつないで連結成分にする ---
+            for (uint32_t tri = 0; tri < triangleCount; ++tri)
+            {
+                const uint32_t i0 = indices[tri * 3 + 0];
+                const uint32_t i1 = indices[tri * 3 + 1];
+                const uint32_t i2 = indices[tri * 3 + 2];
+                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
+                {
+                    continue;
+                }
+                unite(i0, i1);
+                unite(i1, i2);
+            }
+
+            // --- 三角形を「かたまり」へ割り当てて累積する ---
+            struct GroupKey
+            {
+                uint32_t Root;
+                int64_t CellX, CellY, CellZ; // 段Bのグリッドセル(分割しないときは常に0)
+                bool operator==(const GroupKey& o) const
+                {
+                    return Root == o.Root && CellX == o.CellX && CellY == o.CellY && CellZ == o.CellZ;
+                }
+            };
+            struct GroupKeyHash
+            {
+                size_t operator()(const GroupKey& k) const
+                {
+                    size_t h = static_cast<size_t>(k.Root) * 0x9E3779B97F4A7C15ull;
+                    h ^= static_cast<size_t>(k.CellX) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                    h ^= static_cast<size_t>(k.CellY) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                    h ^= static_cast<size_t>(k.CellZ) + 0x9E3779B97F4A7C15ull + (h << 6) + (h >> 2);
+                    return h;
+                }
+            };
+
+            std::vector<Accum> groups;
+            std::unordered_map<GroupKey, uint32_t, GroupKeyHash> groupIndexOf;
+            std::vector<uint32_t> triangleGroup(triangleCount, 0xFFFFFFFFu);
+
+            const bool splitEnabled = clusterScale > 0.0f;
+            const float invSplit = splitEnabled ? (1.0f / clusterScale) : 0.0f;
+
+            for (uint32_t tri = 0; tri < triangleCount; ++tri)
+            {
+                const uint32_t i0 = indices[tri * 3 + 0];
+                const uint32_t i1 = indices[tri * 3 + 1];
+                const uint32_t i2 = indices[tri * 3 + 2];
+                if (i0 >= vertexCount || i1 >= vertexCount || i2 >= vertexCount)
+                {
+                    continue;
+                }
+                const float* p0 = vertices[i0].Position;
+                const float* p1 = vertices[i1].Position;
+                const float* p2 = vertices[i2].Position;
+
+                const double e1[3] = { static_cast<double>(p1[0]) - p0[0], static_cast<double>(p1[1]) - p0[1], static_cast<double>(p1[2]) - p0[2] };
+                const double e2[3] = { static_cast<double>(p2[0]) - p0[0], static_cast<double>(p2[1]) - p0[1], static_cast<double>(p2[2]) - p0[2] };
+                const double cross[3] = {
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                };
+                const double area =
+                    0.5 * std::sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+                // 縮退した三角形は面積0で法線の向きも決まらない。重心にも寄与しないので飛ばす
+                if (area <= 1e-12)
+                {
+                    continue;
+                }
+
+                const double centroid[3] = {
+                    (static_cast<double>(p0[0]) + p1[0] + p2[0]) / 3.0,
+                    (static_cast<double>(p0[1]) + p1[1] + p2[1]) / 3.0,
+                    (static_cast<double>(p0[2]) + p1[2] + p2[2]) / 3.0,
+                };
+
+                GroupKey key{};
+                key.Root = findRoot(i0);
+                key.CellX = key.CellY = key.CellZ = 0;
+                if (splitEnabled)
+                {
+                    // 【重心でセルを決める】頂点で決めると1枚の三角形が複数セルに跨る。
+                    // セルの原点はメッシュのAABB最小コーナーで、インスタンス変換に依存しない
+                    key.CellX = static_cast<int64_t>(std::floor((centroid[0] - boundsMin[0]) * invSplit));
+                    key.CellY = static_cast<int64_t>(std::floor((centroid[1] - boundsMin[1]) * invSplit));
+                    key.CellZ = static_cast<int64_t>(std::floor((centroid[2] - boundsMin[2]) * invSplit));
+                }
+
+                uint32_t groupIndex;
+                const auto found = groupIndexOf.find(key);
+                if (found == groupIndexOf.end())
+                {
+                    groupIndex = static_cast<uint32_t>(groups.size());
+                    groupIndexOf.emplace(key, groupIndex);
+                    groups.emplace_back();
+                    for (int axis = 0; axis < 3; ++axis)
+                    {
+                        groups[groupIndex].BoundsMin[axis] = p0[axis];
+                        groups[groupIndex].BoundsMax[axis] = p0[axis];
+                    }
+                }
+                else
+                {
+                    groupIndex = found->second;
+                }
+                triangleGroup[tri] = groupIndex;
+
+                Accum& acc = groups[groupIndex];
+                acc.Area += area;
+                acc.TriangleCount += 1u;
+                for (int axis = 0; axis < 3; ++axis)
+                {
+                    acc.CentroidSum[axis] += area * centroid[axis];
+                    // Σ A_i n_i は Σ cross_i / 2 と厳密に等しい(crossの長さが 2*A_i)。
+                    // 正規化してから面積を掛け直すより丸めが1段少ない
+                    acc.NormalSum[axis] += 0.5 * cross[axis];
+                    acc.BoundsMin[axis] = std::min({ acc.BoundsMin[axis], p0[axis], p1[axis], p2[axis] });
+                    acc.BoundsMax[axis] = std::max({ acc.BoundsMax[axis], p0[axis], p1[axis], p2[axis] });
+                }
+
+                // 三角形自身の広がり(自分の重心まわりの二次モーメント)。
+                // ∫|x-g|^2 dA = (A/36)(|ab|^2 + |bc|^2 + |ca|^2)
+                //
+                // 【これを落とすと三角形1枚のかたまりで半径が厳密に0になる】重心の散らばりだけを
+                // 見ると1枚しかないときに0になる。半径0は点光源を意味し、半影が消え、
+                // 近傍のクランプ(d^2 + R^2)も効かなくなる
+                const double ab[3] = { static_cast<double>(p1[0]) - p0[0], static_cast<double>(p1[1]) - p0[1], static_cast<double>(p1[2]) - p0[2] };
+                const double bc[3] = { static_cast<double>(p2[0]) - p1[0], static_cast<double>(p2[1]) - p1[1], static_cast<double>(p2[2]) - p1[2] };
+                const double ca[3] = { static_cast<double>(p0[0]) - p2[0], static_cast<double>(p0[1]) - p2[1], static_cast<double>(p0[2]) - p2[2] };
+                const double edgeSq =
+                    ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2] +
+                    bc[0] * bc[0] + bc[1] * bc[1] + bc[2] * bc[2] +
+                    ca[0] * ca[0] + ca[1] * ca[1] + ca[2] * ca[2];
+                acc.OwnMoment += area * edgeSq / 36.0;
+            }
+
+            if (groups.empty())
+            {
+                return result;
+            }
+
+            MergeCloseEmissiveClusters(clusterScale, groups, triangleGroup);
+            FinalizeEmissiveClusters(
+                vertices, indices, triangleCount, groups, triangleGroup, result, outTriangleCluster);
             return result;
         }
+
 
         // テクスチャの読み込みとキャッシュ・共有インスタンス(白/フラット法線/マゼンタ)の管理。
         // .kmodelのTextureEntryは既にKurenaiPacker側でユニーク化(同じ画像+同じsRGBは1件に集約)
@@ -1302,341 +1317,223 @@ namespace Kurenai::Assets
         }
     }
 
-    Model LoadModel(RHI::IRHIDevice& device, const std::wstring& filePath, SharedTexturePool* sharedTextures)
+    namespace
     {
-        const auto startTime = std::chrono::steady_clock::now();
-        const std::wstring directory = GetDirectory(filePath);
-
-        // 既定のstreambufバッファ(通常数百バイト~数KB)のままだと、Bistro級の.kgeom
-        // (100MB超)を細切れのreadで読むことになりオーバーヘッドが無視できないため、
-        // openより前に大きめ(1MB)のバッファを設定しておく。ioBufferはinより先に構築し
-        // (=inより後に破棄され)、in使用中は常に有効な状態を保つ
-        std::vector<char> manifestIoBuffer(1 << 20);
-        std::ifstream in;
-        in.rdbuf()->pubsetbuf(manifestIoBuffer.data(), static_cast<std::streamsize>(manifestIoBuffer.size()));
-        in.open(filePath, std::ios::binary);
-        if (!in.is_open())
+        void ReadModelManifest(
+            const std::wstring& filePath, PackageHeader& header, std::vector<TextureEntry>& textureEntries,
+            std::vector<MaterialEntry>& materialEntries, std::vector<MeshEntry>& meshEntries,
+            std::vector<LightEntry>& lightEntries, std::string& stringPool)
         {
-            throw std::runtime_error("モデルパッケージを開けませんでした: " + WideToUtf8(filePath));
-        }
-
-        PackageHeader header{};
-        std::vector<TextureEntry> textureEntries;
-        std::vector<MaterialEntry> materialEntries;
-        std::vector<MeshEntry> meshEntries;
-        std::vector<LightEntry> lightEntries;
-        std::string stringPool;
-
-        try
-        {
-            in.exceptions(std::ios::failbit | std::ios::badbit);
-
-            in.read(reinterpret_cast<char*>(&header), sizeof(header));
-            if (std::memcmp(header.Magic, kPackageMagic, sizeof(kPackageMagic)) != 0)
+            // 既定のstreambufバッファ(通常数百バイト~数KB)のままだと、Bistro級の.kgeom
+            // (100MB超)を細切れのreadで読むことになりオーバーヘッドが無視できないため、
+            // openより前に大きめ(1MB)のバッファを設定しておく。ioBufferはinより先に構築し
+            // (=inより後に破棄され)、in使用中は常に有効な状態を保つ
+            std::vector<char> manifestIoBuffer(1 << 20);
+            std::ifstream in;
+            in.rdbuf()->pubsetbuf(manifestIoBuffer.data(), static_cast<std::streamsize>(manifestIoBuffer.size()));
+            in.open(filePath, std::ios::binary);
+            if (!in.is_open())
             {
-                throw std::runtime_error("マジックナンバーが不正です");
+                throw std::runtime_error("モデルパッケージを開けませんでした: " + WideToUtf8(filePath));
             }
-            if (header.Version != kPackageVersion)
+            try
             {
-                throw std::runtime_error(
-                    "バージョンが対応していません(ファイル: " + std::to_string(header.Version) +
-                    ", ランタイム: " + std::to_string(kPackageVersion) + ")");
-            }
-            if (header.VertexStride != sizeof(Vertex) || header.IndexStride != sizeof(uint32_t))
-            {
-                throw std::runtime_error("頂点/インデックスのレイアウトが現在のランタイムと一致しません");
-            }
+                in.exceptions(std::ios::failbit | std::ios::badbit);
 
-            textureEntries.resize(header.TextureCount);
-            if (header.TextureCount > 0)
-            {
-                in.read(reinterpret_cast<char*>(textureEntries.data()), static_cast<std::streamsize>(textureEntries.size() * sizeof(TextureEntry)));
-            }
-
-            // マテリアルはテクスチャ番号を参照するのでテクスチャの後ろ、メッシュの前
-            // (v10で追加。ModelPackage.hのファイルレイアウト参照)
-            materialEntries.resize(header.MaterialCount);
-            if (header.MaterialCount > 0)
-            {
-                in.read(reinterpret_cast<char*>(materialEntries.data()), static_cast<std::streamsize>(materialEntries.size() * sizeof(MaterialEntry)));
-            }
-
-            meshEntries.resize(header.MeshCount);
-            if (header.MeshCount > 0)
-            {
-                in.read(reinterpret_cast<char*>(meshEntries.data()), static_cast<std::streamsize>(meshEntries.size() * sizeof(MeshEntry)));
-            }
-
-            lightEntries.resize(header.LightCount);
-            if (header.LightCount > 0)
-            {
-                in.read(reinterpret_cast<char*>(lightEntries.data()), static_cast<std::streamsize>(lightEntries.size() * sizeof(LightEntry)));
-            }
-
-            stringPool.resize(header.StringPoolSize);
-            if (header.StringPoolSize > 0)
-            {
-                in.read(stringPool.data(), static_cast<std::streamsize>(stringPool.size()));
-            }
-        }
-        catch (const std::exception& e)
-        {
-            throw std::runtime_error("モデルパッケージの読み込みに失敗しました(" + WideToUtf8(filePath) + "): " + e.what());
-        }
-
-        if (meshEntries.empty())
-        {
-            throw std::runtime_error("モデルパッケージにメッシュが含まれていません: " + WideToUtf8(filePath));
-        }
-
-        // StringPoolからジオメトリ/テクスチャのパスを解決する(.kmodel自身のディレクトリからの相対パス)
-        const std::wstring geometryPath = directory + Utf8ToWide(
-            ReadPoolString(stringPool, header.GeometryPathOffset, header.GeometryPathLength, "GeometryPath"));
-
-        std::vector<std::wstring> texturePaths(textureEntries.size());
-        for (size_t i = 0; i < textureEntries.size(); ++i)
-        {
-            texturePaths[i] = directory + Utf8ToWide(
-                ReadPoolString(stringPool, textureEntries[i].PathOffset, textureEntries[i].PathLength, "TexturePath"));
-        }
-
-        const auto manifestReadTime = std::chrono::steady_clock::now();
-
-        // .kgeomを読み込む。Bistro級では100MBを超えるため、こちらにも大きめのI/Oバッファを設定する
-        std::vector<char> geometryIoBuffer(1 << 20);
-        std::ifstream geomIn;
-        geomIn.rdbuf()->pubsetbuf(geometryIoBuffer.data(), static_cast<std::streamsize>(geometryIoBuffer.size()));
-        geomIn.open(geometryPath, std::ios::binary);
-        if (!geomIn.is_open())
-        {
-            throw std::runtime_error("ジオメトリファイルを開けませんでした: " + WideToUtf8(geometryPath));
-        }
-
-        std::vector<uint8_t> geometryPayload;
-        try
-        {
-            geomIn.exceptions(std::ios::failbit | std::ios::badbit);
-
-            GeometryHeader geomHeader{};
-            geomIn.read(reinterpret_cast<char*>(&geomHeader), sizeof(geomHeader));
-            if (std::memcmp(geomHeader.Magic, kGeometryMagic, sizeof(kGeometryMagic)) != 0)
-            {
-                throw std::runtime_error("マジックナンバーが不正です");
-            }
-            if (geomHeader.Version != kGeometryVersion)
-            {
-                throw std::runtime_error("バージョンが対応していません");
-            }
-            if (geomHeader.VertexStride != sizeof(Vertex) || geomHeader.IndexStride != sizeof(uint32_t))
-            {
-                throw std::runtime_error("頂点/インデックスのレイアウトが現在のランタイムと一致しません");
-            }
-
-            geometryPayload.resize(geomHeader.PayloadSize);
-            if (geomHeader.PayloadSize > 0)
-            {
-                geomIn.read(reinterpret_cast<char*>(geometryPayload.data()), static_cast<std::streamsize>(geometryPayload.size()));
-            }
-        }
-        catch (const std::exception& e)
-        {
-            throw std::runtime_error("ジオメトリファイルの読み込みに失敗しました(" + WideToUtf8(geometryPath) + "): " + e.what());
-        }
-
-        // 各MeshEntryのオフセット/カウントがペイロード範囲内かを必ず検証する。不正な.kmodelを
-        // 読んだ場合にバッファオーバーラン(境界外の頂点/インデックスデータを読む)を防ぐため
-        for (size_t i = 0; i < meshEntries.size(); ++i)
-        {
-            const MeshEntry& mesh = meshEntries[i];
-            const uint64_t vertexEnd = mesh.VertexOffset + static_cast<uint64_t>(mesh.VertexCount) * sizeof(Vertex);
-            const uint64_t indexEnd = mesh.IndexOffset + static_cast<uint64_t>(mesh.IndexCount) * sizeof(uint32_t);
-            // メッシュレットの3ブロックも同様に検証する。カウントが0の場合はオフセットが
-            // ペイロード末尾を指しうるが、末尾ちょうどは範囲内として扱ってよい(0バイト読む)
-            const uint64_t meshletEnd =
-                mesh.MeshletOffset + static_cast<uint64_t>(mesh.MeshletCount) * sizeof(MeshletEntry);
-            const uint64_t meshletVertexEnd =
-                mesh.MeshletVertexOffset + static_cast<uint64_t>(mesh.MeshletVertexCount) * sizeof(uint32_t);
-            const uint64_t meshletTriangleEnd =
-                mesh.MeshletTriangleOffset + static_cast<uint64_t>(mesh.MeshletTriangleCount) * sizeof(uint32_t);
-            if (vertexEnd > geometryPayload.size() || indexEnd > geometryPayload.size() ||
-                meshletEnd > geometryPayload.size() || meshletVertexEnd > geometryPayload.size() ||
-                meshletTriangleEnd > geometryPayload.size())
-            {
-                throw std::runtime_error(
-                    "メッシュ[" + std::to_string(i) + "]がジオメトリペイロードの範囲外を参照しています: " + WideToUtf8(geometryPath));
-            }
-            // メッシュレットの段は、範囲がメッシュレット配列に収まっていなければならない。
-            // 段の範囲が壊れていると、描画時に他のメッシュのメッシュレットを掴む
-            if (mesh.MeshletLODCount > kMaxMeshletLODCount)
-            {
-                throw std::runtime_error(
-                    "メッシュ[" + std::to_string(i) + "]のメッシュレットLODの段数が上限を超えています: " + WideToUtf8(filePath));
-            }
-            for (uint32_t lod = 0; lod < mesh.MeshletLODCount; ++lod)
-            {
-                const uint64_t lodEnd =
-                    static_cast<uint64_t>(mesh.MeshletLODOffsets[lod]) + mesh.MeshletLODCounts[lod];
-                if (lodEnd > mesh.MeshletCount)
+                in.read(reinterpret_cast<char*>(&header), sizeof(header));
+                if (std::memcmp(header.Magic, kPackageMagic, sizeof(kPackageMagic)) != 0)
+                {
+                    throw std::runtime_error("マジックナンバーが不正です");
+                }
+                if (header.Version != kPackageVersion)
                 {
                     throw std::runtime_error(
-                        "メッシュ[" + std::to_string(i) + "]のメッシュレットLOD[" + std::to_string(lod) +
-                        "]がメッシュレット配列の範囲外です: " + WideToUtf8(filePath));
+                        "バージョンが対応していません(ファイル: " + std::to_string(header.Version) +
+                        ", ランタイム: " + std::to_string(kPackageVersion) + ")");
+                }
+                if (header.VertexStride != sizeof(Vertex) || header.IndexStride != sizeof(uint32_t))
+                {
+                    throw std::runtime_error("頂点/インデックスのレイアウトが現在のランタイムと一致しません");
+                }
+
+                textureEntries.resize(header.TextureCount);
+                if (header.TextureCount > 0)
+                {
+                    in.read(reinterpret_cast<char*>(textureEntries.data()), static_cast<std::streamsize>(textureEntries.size() * sizeof(TextureEntry)));
+                }
+
+                // マテリアルはテクスチャ番号を参照するのでテクスチャの後ろ、メッシュの前
+                // (v10で追加。ModelPackage.hのファイルレイアウト参照)
+                materialEntries.resize(header.MaterialCount);
+                if (header.MaterialCount > 0)
+                {
+                    in.read(reinterpret_cast<char*>(materialEntries.data()), static_cast<std::streamsize>(materialEntries.size() * sizeof(MaterialEntry)));
+                }
+
+                meshEntries.resize(header.MeshCount);
+                if (header.MeshCount > 0)
+                {
+                    in.read(reinterpret_cast<char*>(meshEntries.data()), static_cast<std::streamsize>(meshEntries.size() * sizeof(MeshEntry)));
+                }
+
+                lightEntries.resize(header.LightCount);
+                if (header.LightCount > 0)
+                {
+                    in.read(reinterpret_cast<char*>(lightEntries.data()), static_cast<std::streamsize>(lightEntries.size() * sizeof(LightEntry)));
+                }
+
+                stringPool.resize(header.StringPoolSize);
+                if (header.StringPoolSize > 0)
+                {
+                    in.read(stringPool.data(), static_cast<std::streamsize>(stringPool.size()));
+                }
+            }
+            catch (const std::exception& e)
+            {
+                throw std::runtime_error("モデルパッケージの読み込みに失敗しました(" + WideToUtf8(filePath) + "): " + e.what());
+            }
+
+            if (meshEntries.empty())
+            {
+                throw std::runtime_error("モデルパッケージにメッシュが含まれていません: " + WideToUtf8(filePath));
+            }
+        }
+
+        void ReadGeometryAndValidate(
+            const std::wstring& filePath, const std::wstring& geometryPath, std::vector<uint8_t>& geometryPayload,
+            const std::vector<TextureEntry>& textureEntries, const std::vector<MaterialEntry>& materialEntries,
+            const std::vector<MeshEntry>& meshEntries)
+        {
+            // .kgeomを読み込む。Bistro級では100MBを超えるため、こちらにも大きめのI/Oバッファを設定する
+            std::vector<char> geometryIoBuffer(1 << 20);
+            std::ifstream geomIn;
+            geomIn.rdbuf()->pubsetbuf(geometryIoBuffer.data(), static_cast<std::streamsize>(geometryIoBuffer.size()));
+            geomIn.open(geometryPath, std::ios::binary);
+            if (!geomIn.is_open())
+            {
+                throw std::runtime_error("ジオメトリファイルを開けませんでした: " + WideToUtf8(geometryPath));
+            }
+
+            try
+            {
+                geomIn.exceptions(std::ios::failbit | std::ios::badbit);
+
+                GeometryHeader geomHeader{};
+                geomIn.read(reinterpret_cast<char*>(&geomHeader), sizeof(geomHeader));
+                if (std::memcmp(geomHeader.Magic, kGeometryMagic, sizeof(kGeometryMagic)) != 0)
+                {
+                    throw std::runtime_error("マジックナンバーが不正です");
+                }
+                if (geomHeader.Version != kGeometryVersion)
+                {
+                    throw std::runtime_error("バージョンが対応していません");
+                }
+                if (geomHeader.VertexStride != sizeof(Vertex) || geomHeader.IndexStride != sizeof(uint32_t))
+                {
+                    throw std::runtime_error("頂点/インデックスのレイアウトが現在のランタイムと一致しません");
+                }
+
+                geometryPayload.resize(geomHeader.PayloadSize);
+                if (geomHeader.PayloadSize > 0)
+                {
+                    geomIn.read(reinterpret_cast<char*>(geometryPayload.data()), static_cast<std::streamsize>(geometryPayload.size()));
+                }
+            }
+            catch (const std::exception& e)
+            {
+                throw std::runtime_error("ジオメトリファイルの読み込みに失敗しました(" + WideToUtf8(geometryPath) + "): " + e.what());
+            }
+
+            // 各MeshEntryのオフセット/カウントがペイロード範囲内かを必ず検証する。不正な.kmodelを
+            // 読んだ場合にバッファオーバーラン(境界外の頂点/インデックスデータを読む)を防ぐため
+            for (size_t i = 0; i < meshEntries.size(); ++i)
+            {
+                const MeshEntry& mesh = meshEntries[i];
+                const uint64_t vertexEnd = mesh.VertexOffset + static_cast<uint64_t>(mesh.VertexCount) * sizeof(Vertex);
+                const uint64_t indexEnd = mesh.IndexOffset + static_cast<uint64_t>(mesh.IndexCount) * sizeof(uint32_t);
+                // メッシュレットの3ブロックも同様に検証する。カウントが0の場合はオフセットが
+                // ペイロード末尾を指しうるが、末尾ちょうどは範囲内として扱ってよい(0バイト読む)
+                const uint64_t meshletEnd =
+                    mesh.MeshletOffset + static_cast<uint64_t>(mesh.MeshletCount) * sizeof(MeshletEntry);
+                const uint64_t meshletVertexEnd =
+                    mesh.MeshletVertexOffset + static_cast<uint64_t>(mesh.MeshletVertexCount) * sizeof(uint32_t);
+                const uint64_t meshletTriangleEnd =
+                    mesh.MeshletTriangleOffset + static_cast<uint64_t>(mesh.MeshletTriangleCount) * sizeof(uint32_t);
+                if (vertexEnd > geometryPayload.size() || indexEnd > geometryPayload.size() ||
+                    meshletEnd > geometryPayload.size() || meshletVertexEnd > geometryPayload.size() ||
+                    meshletTriangleEnd > geometryPayload.size())
+                {
+                    throw std::runtime_error(
+                        "メッシュ[" + std::to_string(i) + "]がジオメトリペイロードの範囲外を参照しています: " + WideToUtf8(geometryPath));
+                }
+                // メッシュレットの段は、範囲がメッシュレット配列に収まっていなければならない。
+                // 段の範囲が壊れていると、描画時に他のメッシュのメッシュレットを掴む
+                if (mesh.MeshletLODCount > kMaxMeshletLODCount)
+                {
+                    throw std::runtime_error(
+                        "メッシュ[" + std::to_string(i) + "]のメッシュレットLODの段数が上限を超えています: " + WideToUtf8(filePath));
+                }
+                for (uint32_t lod = 0; lod < mesh.MeshletLODCount; ++lod)
+                {
+                    const uint64_t lodEnd =
+                        static_cast<uint64_t>(mesh.MeshletLODOffsets[lod]) + mesh.MeshletLODCounts[lod];
+                    if (lodEnd > mesh.MeshletCount)
+                    {
+                        throw std::runtime_error(
+                            "メッシュ[" + std::to_string(i) + "]のメッシュレットLOD[" + std::to_string(lod) +
+                            "]がメッシュレット配列の範囲外です: " + WideToUtf8(filePath));
+                    }
+                }
+
+                if (mesh.MaterialIndex < 0 || mesh.MaterialIndex >= static_cast<int32_t>(materialEntries.size()))
+                {
+                    throw std::runtime_error("メッシュ[" + std::to_string(i) + "]が範囲外のマテリアルを参照しています: " + WideToUtf8(filePath));
                 }
             }
 
-            if (mesh.MaterialIndex < 0 || mesh.MaterialIndex >= static_cast<int32_t>(materialEntries.size()))
+            // テクスチャ番号の検証はマテリアル側で行う(v10で材質がMeshEntryから移ったため)
+            for (size_t i = 0; i < materialEntries.size(); ++i)
             {
-                throw std::runtime_error("メッシュ[" + std::to_string(i) + "]が範囲外のマテリアルを参照しています: " + WideToUtf8(filePath));
+                const MaterialEntry& material = materialEntries[i];
+                if (material.BaseColorTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                    material.NormalTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                    material.MetallicRoughnessTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                    material.EmissiveTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                    material.OcclusionTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
+                    material.BentNormalTextureIndex >= static_cast<int32_t>(textureEntries.size()))
+                {
+                    throw std::runtime_error("マテリアル[" + std::to_string(i) + "]が範囲外のテクスチャを参照しています: " + WideToUtf8(filePath));
+                }
             }
         }
 
-        // テクスチャ番号の検証はマテリアル側で行う(v10で材質がMeshEntryから移ったため)
-        for (size_t i = 0; i < materialEntries.size(); ++i)
+        void LoadTextures(
+            TextureLoader& textureLoader, const std::vector<MaterialEntry>& materialEntries,
+            const std::vector<std::wstring>& texturePaths, std::vector<RHI::IRHITexture*>& resolvedTextures,
+            std::unordered_map<int32_t, std::vector<float>>& emissiveThumbnails)
         {
-            const MaterialEntry& material = materialEntries[i];
-            if (material.BaseColorTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                material.NormalTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                material.MetallicRoughnessTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                material.EmissiveTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                material.OcclusionTextureIndex >= static_cast<int32_t>(textureEntries.size()) ||
-                material.BentNormalTextureIndex >= static_cast<int32_t>(textureEntries.size()))
+            // 自発光の光源プロキシに要るテクスチャだけサムネイルを残す。
+            // **係数が0のマテリアルは対象外** ―― 掛け算の結果が黒になるので光源にもならない
+            // (BistroMcGuire の看板は map_Ke を持つのに Ke=0 で、画面でも真っ黒)
+            std::unordered_set<int32_t> emissiveTextureIndices;
+            for (const MaterialEntry& material : materialEntries)
             {
-                throw std::runtime_error("マテリアル[" + std::to_string(i) + "]が範囲外のテクスチャを参照しています: " + WideToUtf8(filePath));
+                const bool hasEmissive = material.EmissiveFactor[0] > 0.0f || material.EmissiveFactor[1] > 0.0f ||
+                                         material.EmissiveFactor[2] > 0.0f;
+                if (hasEmissive && material.EmissiveTextureIndex >= 0)
+                {
+                    emissiveTextureIndices.insert(material.EmissiveTextureIndex);
+                }
             }
+            textureLoader.LoadAll(texturePaths, resolvedTextures, emissiveTextureIndices, emissiveThumbnails);
         }
 
-        const auto geometryReadTime = std::chrono::steady_clock::now();
-
-        Model model;
-        model.BoundsMin[0] = header.BoundsMin[0];
-        model.BoundsMin[1] = header.BoundsMin[1];
-        model.BoundsMin[2] = header.BoundsMin[2];
-        model.BoundsMax[0] = header.BoundsMax[0];
-        model.BoundsMax[1] = header.BoundsMax[1];
-        model.BoundsMax[2] = header.BoundsMax[2];
-
-        TextureLoader textureLoader(device, model, sharedTextures);
-        std::vector<RHI::IRHITexture*> resolvedTextures;
-        // 自発光の光源プロキシに要るテクスチャだけサムネイルを残す。
-        // **係数が0のマテリアルは対象外** ―― 掛け算の結果が黒になるので光源にもならない
-        // (BistroMcGuire の看板は map_Ke を持つのに Ke=0 で、画面でも真っ黒)
-        std::unordered_set<int32_t> emissiveTextureIndices;
-        for (const MaterialEntry& material : materialEntries)
+        void PopulateMeshResources(
+            RHI::IRHIDevice& device, const std::vector<uint8_t>& geometryPayload, const std::wstring& filePath,
+            bool shaderReadableGeometry, bool buildMeshletGeometry, std::vector<GpuMeshlet>& modelMeshlets,
+            std::vector<uint32_t>& modelMeshletVertices, std::vector<uint32_t>& modelMeshletTriangles,
+            const MeshEntry& mesh, Mesh& outMesh)
         {
-            const bool hasEmissive = material.EmissiveFactor[0] > 0.0f || material.EmissiveFactor[1] > 0.0f ||
-                                     material.EmissiveFactor[2] > 0.0f;
-            if (hasEmissive && material.EmissiveTextureIndex >= 0)
-            {
-                emissiveTextureIndices.insert(material.EmissiveTextureIndex);
-            }
-        }
-        std::unordered_map<int32_t, std::vector<float>> emissiveThumbnails;
-        textureLoader.LoadAll(texturePaths, resolvedTextures, emissiveTextureIndices, emissiveThumbnails);
-
-        const auto textureLoadTime = std::chrono::steady_clock::now();
-
-        // -1(指定なし)は白/フラット法線、指定されていたのに読み込みに失敗した場合は
-        // マゼンタ/フラット法線を使う(詳細はGetMagentaPlaceholder/GetFlatNormalのコメント参照)
-        auto resolveBaseColorOrMetallicRoughness = [&](int32_t index) -> RHI::IRHITexture*
-        {
-            if (index == kNoTextureIndex)
-            {
-                return textureLoader.GetWhite();
-            }
-            RHI::IRHITexture* texture = resolvedTextures[static_cast<size_t>(index)];
-            return texture ? texture : textureLoader.GetMagentaPlaceholder();
-        };
-        auto resolveNormal = [&](int32_t index) -> RHI::IRHITexture*
-        {
-            if (index == kNoTextureIndex)
-            {
-                return textureLoader.GetFlatNormal();
-            }
-            RHI::IRHITexture* texture = resolvedTextures[static_cast<size_t>(index)];
-            return texture ? texture : textureLoader.GetFlatNormal();
-        };
-        // 読み込みに失敗した場合も黒(=有効フラグ0)へ落とす。マゼンタのような目立つ色にすると
-        // bRawとして解釈された結果が不定になるため、ここは「データ無し」で縮退させるのが正しい
-        auto resolveBentNormal = [&](int32_t index) -> RHI::IRHITexture*
-        {
-            if (index == kNoTextureIndex)
-            {
-                return textureLoader.GetBlack();
-            }
-            RHI::IRHITexture* texture = resolvedTextures[static_cast<size_t>(index)];
-            return texture ? texture : textureLoader.GetBlack();
-        };
-
-        // レイトレーシング用の頂点属性・インデックスを作るか。デバイスが非対応なら作らない
-        // (Bistro級では100MB規模になるため、使わない環境で確保しない)
-        const bool buildRaytracingGeometry = device.SupportsRaytracing();
-        if (buildRaytracingGeometry)
-        {
-            size_t totalVertexCount = 0;
-            size_t totalIndexCount = 0;
-            for (const MeshEntry& mesh : meshEntries)
-            {
-                totalVertexCount += mesh.VertexCount;
-                totalIndexCount += mesh.IndexCount;
-            }
-            model.RaytracingAttributes.reserve(totalVertexCount);
-            model.RaytracingIndices.reserve(totalIndexCount);
-        }
-
-        // メッシュレットのGPUバッファを作るか。デバイスがメッシュシェーダーに対応していない、
-        // あるいは.kmodelが--no-meshletsで焼かれている場合は作らない
-        // (読まれないバッファでVRAMを占有しないため。レイトレーシング用配列と同じ考え方)
-        const bool buildMeshletGeometry = device.SupportsMeshShader();
-
-        // 頂点/インデックスバッファへSRVを重ねて張り、bindlessで引けるようにするか。
-        // 使うのはメッシュシェーダー経路(頂点のみ)とコンピュートシェーダーによる
-        // 自前ラスタライザ経路(頂点+インデックス)。
-        //
-        // 【メッシュシェーダー対応と連動させない】SM 6.6には対応しているがメッシュシェーダーを
-        // 持たないGPU(NVIDIA Pascal世代など)では、buildMeshletGeometryがfalseのまま
-        // 自前ラスタライザだけが使える。連動させるとその環境でジオメトリを引けなくなる。
-        //
-        // 追加コストはメッシュあたりSRV 2本ぶんのディスクリプタだけで、
-        // バッファ本体は頂点バッファビュー/インデックスバッファビューと同一リソースを共有する
-        const bool shaderReadableGeometry = buildMeshletGeometry || device.SupportsSoftwareRaster();
-
-        // モデル単位に連結したメッシュレットの3ブロック(GPUバッファはメッシュのループを
-        // 抜けてから1本ずつ作る。理由はループ内のコメント参照)
-        std::vector<GpuMeshlet> modelMeshlets;
-        // Model::MeshletLODLevelCapは「全メッシュの最小」なので、最初の1件は
-        // 比較ではなく代入で入れる(0で初期化したまま min を取ると常に0になる)
-        bool meshletLODCapInitialized = false;
-        std::vector<uint32_t> modelMeshletVertices;
-        std::vector<uint32_t> modelMeshletTriangles;
-        if (buildMeshletGeometry)
-        {
-            size_t totalMeshletCount = 0;
-            size_t totalMeshletVertexCount = 0;
-            size_t totalMeshletTriangleCount = 0;
-            for (const MeshEntry& mesh : meshEntries)
-            {
-                totalMeshletCount += mesh.MeshletCount;
-                totalMeshletVertexCount += mesh.MeshletVertexCount;
-                totalMeshletTriangleCount += mesh.MeshletTriangleCount;
-            }
-            modelMeshlets.reserve(totalMeshletCount);
-            modelMeshletVertices.reserve(totalMeshletVertexCount);
-            modelMeshletTriangles.reserve(totalMeshletTriangleCount);
-        }
-
-        // エミッシブから起こした光源の集計(読み込み後に1行だけログへ出す)。
-        // メッシュごとに出すとEmeraldSquareで12行になり、他のログに埋もれる
-        uint32_t emissiveMeshCount = 0;
-        uint32_t emissiveClusterCount = 0;
-        uint32_t emissiveTriangleCount = 0;
-        uint32_t emissiveTexturedMeshCount = 0;
-        std::vector<float> emissiveTextureLuminances;
-
-        model.Meshes.reserve(meshEntries.size());
-        for (const MeshEntry& mesh : meshEntries)
-        {
-            Mesh outMesh;
-
             RHI::BufferDesc vertexBufferDesc;
             vertexBufferDesc.Usage = RHI::BufferUsage::Vertex;
             vertexBufferDesc.SizeInBytes = static_cast<uint32_t>(mesh.VertexCount) * sizeof(Vertex);
@@ -1792,7 +1689,18 @@ namespace Kurenai::Assets
                     modelMeshletTriangles.end(), srcMeshletTriangles,
                     srcMeshletTriangles + mesh.MeshletTriangleCount);
             }
+        }
 
+        template <typename ResolveBaseColorOrMetallicRoughness, typename ResolveNormal, typename ResolveBentNormal>
+        void PopulateMeshRaytracingMaterialAndEmissive(
+            Model& model, const std::vector<uint8_t>& geometryPayload, bool buildRaytracingGeometry,
+            const MeshEntry& mesh, Mesh& outMesh, const std::vector<MaterialEntry>& materialEntries,
+            const ResolveBaseColorOrMetallicRoughness& resolveBaseColorOrMetallicRoughness,
+            const ResolveNormal& resolveNormal, const ResolveBentNormal& resolveBentNormal,
+            const std::unordered_map<int32_t, std::vector<float>>& emissiveThumbnails,
+            uint32_t& emissiveMeshCount, uint32_t& emissiveClusterCount, uint32_t& emissiveTriangleCount,
+            uint32_t& emissiveTexturedMeshCount, std::vector<float>& emissiveTextureLuminances)
+        {
             if (buildRaytracingGeometry)
             {
                 // geometryPayloadがまだ生存しているこの場でしか元データを読めないため、
@@ -1939,100 +1847,286 @@ namespace Kurenai::Assets
                             " m^2(材質 " + std::to_string(mesh.MaterialIndex) + ")");
                 }
             }
-
-            // LOD0の三角形数を積む(メッシュレットLODのしきい値の基準。Model::TotalTriangleCount)
-            model.TotalTriangleCount += outMesh.IndexCount / 3;
-
-            // モデルが選べる最も粗い段は、全メッシュが持っている段の共通部分。
-            // 【メッシュレットを持たないメッシュは数えない】そのメッシュは
-            // メッシュシェーダー経路に載らないので、段の上限を縛る理由が無い
-            if (outMesh.MeshletLODCount > 0)
-            {
-                const uint32_t meshCap = outMesh.MeshletLODCount - 1u;
-                model.MeshletLODLevelCap = meshletLODCapInitialized
-                    ? std::min(model.MeshletLODLevelCap, meshCap)
-                    : meshCap;
-                meshletLODCapInitialized = true;
-            }
-            model.Meshes.push_back(std::move(outMesh));
         }
 
-        // 【0件でも黙らない】エミッシブなメッシュが有るのにかたまりが0個なら、
-        // 溶接や縮退の判定が効きすぎている。逆にメッシュ1個から数十個出ていたら
-        // 溶接が効いていない(法線違いで頂点が割れたまま連結成分を取った形)。
-        // どちらも絵からは分からないので、数を出しておく
-        if (emissiveMeshCount > 0)
+        void BuildModelMeshes(
+            RHI::IRHIDevice& device, Model& model, TextureLoader& textureLoader,
+            const std::vector<RHI::IRHITexture*>& resolvedTextures,
+            const std::vector<MaterialEntry>& materialEntries, const std::vector<MeshEntry>& meshEntries,
+            const std::vector<uint8_t>& geometryPayload, const std::wstring& filePath,
+            std::unordered_map<int32_t, std::vector<float>>& emissiveThumbnails,
+            std::vector<GpuMeshlet>& modelMeshlets, std::vector<uint32_t>& modelMeshletVertices,
+            std::vector<uint32_t>& modelMeshletTriangles)
         {
-            Core::Logger::Info(
-                "ModelLoader",
-                "エミッシブな光源: " + std::to_string(emissiveClusterCount) + "個(" +
-                    std::to_string(emissiveMeshCount) + "メッシュ由来 / 三角形 " +
-                    std::to_string(emissiveTriangleCount) + "枚)");
-            if (!emissiveTextureLuminances.empty())
+            // -1(指定なし)は白/フラット法線、指定されていたのに読み込みに失敗した場合は
+            // マゼンタ/フラット法線を使う(詳細はGetMagentaPlaceholder/GetFlatNormalのコメント参照)
+            auto resolveBaseColorOrMetallicRoughness = [&](int32_t index) -> RHI::IRHITexture*
             {
-                std::sort(emissiveTextureLuminances.begin(), emissiveTextureLuminances.end());
-                char buffer[192];
-                std::snprintf(
-                    buffer, sizeof(buffer),
-                    "自発光テクスチャの平均色: %zuメッシュ / 輝度 最小 %.4f 中央 %.4f 最大 %.4f",
-                    emissiveTextureLuminances.size(), emissiveTextureLuminances.front(),
-                    emissiveTextureLuminances[emissiveTextureLuminances.size() / 2],
-                    emissiveTextureLuminances.back());
-                Core::Logger::Info("ModelLoader", buffer);
+                if (index == kNoTextureIndex)
+                {
+                    return textureLoader.GetWhite();
+                }
+                RHI::IRHITexture* texture = resolvedTextures[static_cast<size_t>(index)];
+                return texture ? texture : textureLoader.GetMagentaPlaceholder();
+            };
+            auto resolveNormal = [&](int32_t index) -> RHI::IRHITexture*
+            {
+                if (index == kNoTextureIndex)
+                {
+                    return textureLoader.GetFlatNormal();
+                }
+                RHI::IRHITexture* texture = resolvedTextures[static_cast<size_t>(index)];
+                return texture ? texture : textureLoader.GetFlatNormal();
+            };
+            // 読み込みに失敗した場合も黒(=有効フラグ0)へ落とす。マゼンタのような目立つ色にすると
+            // bRawとして解釈された結果が不定になるため、ここは「データ無し」で縮退させるのが正しい
+            auto resolveBentNormal = [&](int32_t index) -> RHI::IRHITexture*
+            {
+                if (index == kNoTextureIndex)
+                {
+                    return textureLoader.GetBlack();
+                }
+                RHI::IRHITexture* texture = resolvedTextures[static_cast<size_t>(index)];
+                return texture ? texture : textureLoader.GetBlack();
+            };
+
+            // レイトレーシング用の頂点属性・インデックスを作るか。デバイスが非対応なら作らない
+            // (Bistro級では100MB規模になるため、使わない環境で確保しない)
+            const bool buildRaytracingGeometry = device.SupportsRaytracing();
+            if (buildRaytracingGeometry)
+            {
+                size_t totalVertexCount = 0;
+                size_t totalIndexCount = 0;
+                for (const MeshEntry& mesh : meshEntries)
+                {
+                    totalVertexCount += mesh.VertexCount;
+                    totalIndexCount += mesh.IndexCount;
+                }
+                model.RaytracingAttributes.reserve(totalVertexCount);
+                model.RaytracingIndices.reserve(totalIndexCount);
             }
-            if (emissiveTexturedMeshCount > 0)
+
+            // メッシュレットのGPUバッファを作るか。デバイスがメッシュシェーダーに対応していない、
+            // あるいは.kmodelが--no-meshletsで焼かれている場合は作らない
+            // (読まれないバッファでVRAMを占有しないため。レイトレーシング用配列と同じ考え方)
+            const bool buildMeshletGeometry = device.SupportsMeshShader();
+
+            // 頂点/インデックスバッファへSRVを重ねて張り、bindlessで引けるようにするか。
+            // 使うのはメッシュシェーダー経路(頂点のみ)とコンピュートシェーダーによる
+            // 自前ラスタライザ経路(頂点+インデックス)。
+            //
+            // 【メッシュシェーダー対応と連動させない】SM 6.6には対応しているがメッシュシェーダーを
+            // 持たないGPU(NVIDIA Pascal世代など)では、buildMeshletGeometryがfalseのまま
+            // 自前ラスタライザだけが使える。連動させるとその環境でジオメトリを引けなくなる。
+            //
+            // 追加コストはメッシュあたりSRV 2本ぶんのディスクリプタだけで、
+            // バッファ本体は頂点バッファビュー/インデックスバッファビューと同一リソースを共有する
+            const bool shaderReadableGeometry = buildMeshletGeometry || device.SupportsSoftwareRaster();
+
+            // モデル単位に連結したメッシュレットの3ブロック(GPUバッファはメッシュのループを
+            // 抜けてから1本ずつ作る。理由はループ内のコメント参照)
+            // Model::MeshletLODLevelCapは「全メッシュの最小」なので、最初の1件は
+            // 比較ではなく代入で入れる(0で初期化したまま min を取ると常に0になる)
+            bool meshletLODCapInitialized = false;
+            if (buildMeshletGeometry)
             {
-                Core::Logger::Warning(
+                size_t totalMeshletCount = 0;
+                size_t totalMeshletVertexCount = 0;
+                size_t totalMeshletTriangleCount = 0;
+                for (const MeshEntry& mesh : meshEntries)
+                {
+                    totalMeshletCount += mesh.MeshletCount;
+                    totalMeshletVertexCount += mesh.MeshletVertexCount;
+                    totalMeshletTriangleCount += mesh.MeshletTriangleCount;
+                }
+                modelMeshlets.reserve(totalMeshletCount);
+                modelMeshletVertices.reserve(totalMeshletVertexCount);
+                modelMeshletTriangles.reserve(totalMeshletTriangleCount);
+            }
+
+            // エミッシブから起こした光源の集計(読み込み後に1行だけログへ出す)。
+            // メッシュごとに出すとEmeraldSquareで12行になり、他のログに埋もれる
+            uint32_t emissiveMeshCount = 0;
+            uint32_t emissiveClusterCount = 0;
+            uint32_t emissiveTriangleCount = 0;
+            uint32_t emissiveTexturedMeshCount = 0;
+            std::vector<float> emissiveTextureLuminances;
+
+            model.Meshes.reserve(meshEntries.size());
+            for (const MeshEntry& mesh : meshEntries)
+            {
+                Mesh outMesh;
+
+                PopulateMeshResources(
+                    device, geometryPayload, filePath, shaderReadableGeometry, buildMeshletGeometry, modelMeshlets,
+                    modelMeshletVertices, modelMeshletTriangles, mesh, outMesh);
+
+                PopulateMeshRaytracingMaterialAndEmissive(
+                    model, geometryPayload, buildRaytracingGeometry, mesh, outMesh, materialEntries,
+                    resolveBaseColorOrMetallicRoughness, resolveNormal, resolveBentNormal, emissiveThumbnails,
+                    emissiveMeshCount, emissiveClusterCount, emissiveTriangleCount, emissiveTexturedMeshCount,
+                    emissiveTextureLuminances);
+                // LOD0の三角形数を積む(メッシュレットLODのしきい値の基準。Model::TotalTriangleCount)
+                model.TotalTriangleCount += outMesh.IndexCount / 3;
+
+                // モデルが選べる最も粗い段は、全メッシュが持っている段の共通部分。
+                // 【メッシュレットを持たないメッシュは数えない】そのメッシュは
+                // メッシュシェーダー経路に載らないので、段の上限を縛る理由が無い
+                if (outMesh.MeshletLODCount > 0)
+                {
+                    const uint32_t meshCap = outMesh.MeshletLODCount - 1u;
+                    model.MeshletLODLevelCap = meshletLODCapInitialized
+                        ? std::min(model.MeshletLODLevelCap, meshCap)
+                        : meshCap;
+                    meshletLODCapInitialized = true;
+                }
+                model.Meshes.push_back(std::move(outMesh));
+            }
+            // 【0件でも黙らない】エミッシブなメッシュが有るのにかたまりが0個なら、
+            // 溶接や縮退の判定が効きすぎている。逆にメッシュ1個から数十個出ていたら
+            // 溶接が効いていない(法線違いで頂点が割れたまま連結成分を取った形)。
+            // どちらも絵からは分からないので、数を出しておく
+            if (emissiveMeshCount > 0)
+            {
+                Core::Logger::Info(
                     "ModelLoader",
-                    "自発光テクスチャの平均色を取り出せなかったメッシュが " +
-                        std::to_string(emissiveTexturedMeshCount) +
-                        "個あります。白として扱うため、これらの光源プロキシは実際より明るくなります");
+                    "エミッシブな光源: " + std::to_string(emissiveClusterCount) + "個(" +
+                        std::to_string(emissiveMeshCount) + "メッシュ由来 / 三角形 " +
+                        std::to_string(emissiveTriangleCount) + "枚)");
+                if (!emissiveTextureLuminances.empty())
+                {
+                    std::sort(emissiveTextureLuminances.begin(), emissiveTextureLuminances.end());
+                    char buffer[192];
+                    std::snprintf(
+                        buffer, sizeof(buffer),
+                        "自発光テクスチャの平均色: %zuメッシュ / 輝度 最小 %.4f 中央 %.4f 最大 %.4f",
+                        emissiveTextureLuminances.size(), emissiveTextureLuminances.front(),
+                        emissiveTextureLuminances[emissiveTextureLuminances.size() / 2],
+                        emissiveTextureLuminances.back());
+                    Core::Logger::Info("ModelLoader", buffer);
+                }
+                if (emissiveTexturedMeshCount > 0)
+                {
+                    Core::Logger::Warning(
+                        "ModelLoader",
+                        "自発光テクスチャの平均色を取り出せなかったメッシュが " +
+                            std::to_string(emissiveTexturedMeshCount) +
+                            "個あります。白として扱うため、これらの光源プロキシは実際より明るくなります");
+                }
             }
         }
 
-        model.Lights.reserve(lightEntries.size());
-        for (const LightEntry& entry : lightEntries)
+        void BuildModelLights(Model& model, const std::vector<LightEntry>& lightEntries, const std::string& stringPool)
         {
-            Light light;
-            light.Type = static_cast<LightType>(entry.Type);
-            light.Position[0] = entry.Position[0];
-            light.Position[1] = entry.Position[1];
-            light.Position[2] = entry.Position[2];
-            light.Direction[0] = entry.Direction[0];
-            light.Direction[1] = entry.Direction[1];
-            light.Direction[2] = entry.Direction[2];
-            light.Color[0] = entry.Color[0];
-            light.Color[1] = entry.Color[1];
-            light.Color[2] = entry.Color[2];
-            light.Intensity = entry.Intensity;
-            light.Range = entry.Range;
-            light.SpotInnerConeAngle = entry.SpotInnerConeAngle;
-            light.SpotOuterConeAngle = entry.SpotOuterConeAngle;
-            light.Enabled = entry.Enabled != 0;
-            light.Name = ReadPoolString(stringPool, entry.NameOffset, entry.NameLength, "LightName");
-
-            model.Lights.push_back(std::move(light));
-        }
-
-        // アルファカットアウトの有無はアセット固有の性質なので、**デバイスの機能に依らず**ここで決める。
-        // BuildMaterialTable の中で立てると、bindless非対応(DX11)ではテーブル自体を作らないため
-        // 「カットアウトを持つモデルなのに常にfalse」になる。今の使用箇所はメッシュレット経路の
-        // 内側だけなので実害は出ないが、バックエンドで 0/1 が変わる値を
-        // アセットの性質として持たせるべきではない
-        for (const Mesh& mesh : model.Meshes)
-        {
-            if (mesh.AlphaCutoff > 0.0f)
+            model.Lights.reserve(lightEntries.size());
+            for (const LightEntry& entry : lightEntries)
             {
-                model.HasCutoutMaterial = true;
-                break;
+                Light light;
+                light.Type = static_cast<LightType>(entry.Type);
+                light.Position[0] = entry.Position[0];
+                light.Position[1] = entry.Position[1];
+                light.Position[2] = entry.Position[2];
+                light.Direction[0] = entry.Direction[0];
+                light.Direction[1] = entry.Direction[1];
+                light.Direction[2] = entry.Direction[2];
+                light.Color[0] = entry.Color[0];
+                light.Color[1] = entry.Color[1];
+                light.Color[2] = entry.Color[2];
+                light.Intensity = entry.Intensity;
+                light.Range = entry.Range;
+                light.SpotInnerConeAngle = entry.SpotInnerConeAngle;
+                light.SpotOuterConeAngle = entry.SpotOuterConeAngle;
+                light.Enabled = entry.Enabled != 0;
+                light.Name = ReadPoolString(stringPool, entry.NameOffset, entry.NameLength, "LightName");
+
+                model.Lights.push_back(std::move(light));
             }
         }
 
-        SortMeshesByMaterial(model);
-        // マテリアルテーブルはメッシュの並びが確定してから作る(番号がずれるため)。
-        // メッシュレットの表はさらにその後 ―― 塊1件ごとにマテリアル番号を書き込むため
-        BuildMaterialTable(device, model);
-        BuildMeshletTables(device, model, modelMeshlets, modelMeshletVertices, modelMeshletTriangles);
+        void FinalizeModel(
+            RHI::IRHIDevice& device, Model& model, std::vector<GpuMeshlet>& modelMeshlets,
+            const std::vector<uint32_t>& modelMeshletVertices, const std::vector<uint32_t>& modelMeshletTriangles)
+        {
+            // アルファカットアウトの有無はアセット固有の性質なので、**デバイスの機能に依らず**ここで決める。
+            // BuildMaterialTable の中で立てると、bindless非対応(DX11)ではテーブル自体を作らないため
+            // 「カットアウトを持つモデルなのに常にfalse」になる。今の使用箇所はメッシュレット経路の
+            // 内側だけなので実害は出ないが、バックエンドで 0/1 が変わる値を
+            // アセットの性質として持たせるべきではない
+            for (const Mesh& mesh : model.Meshes)
+            {
+                if (mesh.AlphaCutoff > 0.0f)
+                {
+                    model.HasCutoutMaterial = true;
+                    break;
+                }
+            }
+
+            SortMeshesByMaterial(model);
+            // マテリアルテーブルはメッシュの並びが確定してから作る(番号がずれるため)。
+            // メッシュレットの表はさらにその後 ―― 塊1件ごとにマテリアル番号を書き込むため
+            BuildMaterialTable(device, model);
+            BuildMeshletTables(device, model, modelMeshlets, modelMeshletVertices, modelMeshletTriangles);
+        }
+
+    }
+
+    Model LoadModel(RHI::IRHIDevice& device, const std::wstring& filePath, SharedTexturePool* sharedTextures)
+    {
+        const auto startTime = std::chrono::steady_clock::now();
+        const std::wstring directory = GetDirectory(filePath);
+
+        PackageHeader header{};
+        std::vector<TextureEntry> textureEntries;
+        std::vector<MaterialEntry> materialEntries;
+        std::vector<MeshEntry> meshEntries;
+        std::vector<LightEntry> lightEntries;
+        std::string stringPool;
+
+        ReadModelManifest(filePath, header, textureEntries, materialEntries, meshEntries, lightEntries, stringPool);
+
+        // StringPoolからジオメトリ/テクスチャのパスを解決する(.kmodel自身のディレクトリからの相対パス)
+        const std::wstring geometryPath = directory + Utf8ToWide(
+            ReadPoolString(stringPool, header.GeometryPathOffset, header.GeometryPathLength, "GeometryPath"));
+
+        std::vector<std::wstring> texturePaths(textureEntries.size());
+        for (size_t i = 0; i < textureEntries.size(); ++i)
+        {
+            texturePaths[i] = directory + Utf8ToWide(
+                ReadPoolString(stringPool, textureEntries[i].PathOffset, textureEntries[i].PathLength, "TexturePath"));
+        }
+
+        const auto manifestReadTime = std::chrono::steady_clock::now();
+
+        std::vector<uint8_t> geometryPayload;
+        ReadGeometryAndValidate(
+            filePath, geometryPath, geometryPayload, textureEntries, materialEntries, meshEntries);
+
+        const auto geometryReadTime = std::chrono::steady_clock::now();
+
+        Model model;
+        model.BoundsMin[0] = header.BoundsMin[0];
+        model.BoundsMin[1] = header.BoundsMin[1];
+        model.BoundsMin[2] = header.BoundsMin[2];
+        model.BoundsMax[0] = header.BoundsMax[0];
+        model.BoundsMax[1] = header.BoundsMax[1];
+        model.BoundsMax[2] = header.BoundsMax[2];
+
+        TextureLoader textureLoader(device, model, sharedTextures);
+        std::vector<RHI::IRHITexture*> resolvedTextures;
+        std::unordered_map<int32_t, std::vector<float>> emissiveThumbnails;
+        LoadTextures(textureLoader, materialEntries, texturePaths, resolvedTextures, emissiveThumbnails);
+
+        const auto textureLoadTime = std::chrono::steady_clock::now();
+
+        std::vector<GpuMeshlet> modelMeshlets;
+        std::vector<uint32_t> modelMeshletVertices;
+        std::vector<uint32_t> modelMeshletTriangles;
+        BuildModelMeshes(
+            device, model, textureLoader, resolvedTextures, materialEntries, meshEntries, geometryPayload, filePath,
+            emissiveThumbnails, modelMeshlets, modelMeshletVertices, modelMeshletTriangles);
+
+        BuildModelLights(model, lightEntries, stringPool);
+        FinalizeModel(device, model, modelMeshlets, modelMeshletVertices, modelMeshletTriangles);
 
         const auto endTime = std::chrono::steady_clock::now();
         Core::Logger::Info(

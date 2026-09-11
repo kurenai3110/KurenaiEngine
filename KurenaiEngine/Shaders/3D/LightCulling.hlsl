@@ -23,11 +23,11 @@
 // (MegaLightsの候補プールと同じ判定を使うための共有ヘッダー。GPULightの宣言より後で読む)。
 
 // 1タイルが保持できるライト数の上限。groupshared配列のサイズに使うためコンパイル時定数である必要がある。
-// C++側 KurenaiEngine3D.cpp の kLightTileCapacity、および DirectLighting.hlsl の同名の定数と
-// 必ず同じ値にすること(バッファのストライドがこの値で決まる)
+// C++側 Passes/MegaLightsConstants.h の kLightTileCapacity、および DirectLighting.hlsl の
+// 同名の定数と必ず同じ値にすること(バッファのストライドがこの値で決まる)
 static const uint kMaxLightsPerTile = 64u;
 
-// C++側 KurenaiEngine3D.cpp の LightCullingConstants と並びを一致させること
+// C++側 Passes/MegaLightsConstants.h の LightCullingConstants と並びを一致させること
 cbuffer LightCullingConstants : register(b0)
 {
     // ワールド座標をView空間へ変換する行列(ライトの位置をタイル錐台と同じ空間へ持ち込むため)

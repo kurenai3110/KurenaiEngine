@@ -1,4 +1,6 @@
 #include "UI/ReflectionProbePanel.h"
+#include "../Rendering/CubeFaceMath.h"
+#include "../Passes/ReflectionProbeConstants.h"
 
 #include <imgui.h>
 
@@ -6,7 +8,6 @@
 #include <cstdio>
 
 #include "EngineDefaults.h"
-#include "KurenaiEngine3D.h"
 #include "UI/UIWidgets.h"
 
 namespace Kurenai::UI
@@ -27,8 +28,8 @@ namespace Kurenai::UI
         ImGui::Separator();
         DrawProbeList();
 
-        const bool hasSelection = m_Engine.m_SelectedProbeIndex >= 0 &&
-                                  m_Engine.m_SelectedProbeIndex < static_cast<int>(m_Engine.m_ReflectionProbes.size());
+        const bool hasSelection = m_Engine.GetSelectedProbeIndex() >= 0 &&
+                                  m_Engine.GetSelectedProbeIndex() < static_cast<int>(m_Engine.GetReflectionProbes().size());
         if (hasSelection)
         {
             ImGui::Separator();
@@ -40,28 +41,28 @@ namespace Kurenai::UI
 
     void ReflectionProbePanel::DrawGlobalSettings()
     {
-        using ProbeUpdateMode = KurenaiEngine3D::ProbeUpdateMode;
+        using ProbeUpdateMode = Kurenai::ProbeUpdateMode;
 
         BeginParamGroup();
 
         CheckboxEx(
-            "反射プローブを有効にする###EnableReflectionProbes", &m_Engine.m_ReflectionProbeEnabled,
+            "反射プローブを有効にする###EnableReflectionProbes", &m_Engine.GetSettings().ReflectionProbe.Enabled,
             Defaults::ReflectionProbeEnabled,
             "無効にすると、鏡面反射の環境項がすべてスカイボックス由来のグローバルIBLになる");
 
         // 以下2つは球形・単一選択・視差補正なしの旧構成との見比べ用。どちらも焼き直し不要で、
         // 環境ソースの引き方だけが変わる
         CheckboxEx(
-            "視差補正###ProbeParallaxCorrection", &m_Engine.m_ProbeParallaxCorrectionEnabled,
+            "視差補正###ProbeParallaxCorrection", &m_Engine.GetSettings().ReflectionProbe.ParallaxCorrectionEnabled,
             Defaults::ProbeParallaxCorrectionEnabled,
             "Box形状のときのみ有効。反射ベクトルを箱と交差させることで、プローブの中心から離れた"
             "場所でも反射の位置が合うようにする");
 
         // 視差補正の方式(19.12節)。上のトグルが有効なときだけ意味を持つ
-        ImGui::BeginDisabled(!m_Engine.m_ProbeParallaxCorrectionEnabled);
+        ImGui::BeginDisabled(!m_Engine.GetSettings().ReflectionProbe.ParallaxCorrectionEnabled);
         ImGui::Indent();
         CheckboxEx(
-            "距離キューブを使う###ProbeDepthParallax", &m_Engine.m_ProbeDepthParallaxEnabled,
+            "距離キューブを使う###ProbeDepthParallax", &m_Engine.GetSettings().ReflectionProbe.DepthParallaxEnabled,
             Defaults::ProbeDepthParallaxEnabled,
             "部屋を直方体とみなす代わりに、キャプチャ時に一緒に焼いた距離を辿って実際の形状へ"
             "反射を当てる。交差が見つからなければ箱の交点へフォールバックする。\n"
@@ -71,11 +72,11 @@ namespace Kurenai::UI
         ImGui::EndDisabled();
 
         CheckboxEx(
-            "プローブのブレンド###ProbeBlending", &m_Engine.m_ProbeBlendingEnabled, Defaults::ProbeBlendingEnabled,
+            "プローブのブレンド###ProbeBlending", &m_Engine.GetSettings().ReflectionProbe.BlendingEnabled, Defaults::ProbeBlendingEnabled,
             "影響範囲の境界から内側へブレンド距離ぶんかけて重みを立ち上げる。"
             "無効にすると最も近いプローブだけを使うため、境界に継ぎ目が出る");
         CheckboxEx(
-            "遮蔽判定(光漏れの抑制)###ProbeOcclusion", &m_Engine.m_ProbeOcclusionEnabled,
+            "遮蔽判定(光漏れの抑制)###ProbeOcclusion", &m_Engine.GetSettings().ReflectionProbe.OcclusionEnabled,
             Defaults::ProbeOcclusionEnabled,
             "プローブから見て記録面より奥にあるピクセル(=壁の向こう)で、そのプローブの重みを落とす。\n"
             "ただしプローブが少ないうちは落ちた重みをより明るい空由来のIBLが埋めるため、"
@@ -85,7 +86,7 @@ namespace Kurenai::UI
         // プロファイラの ProbeBakeCaptureN / ProbeBakeConvolvePrefilterN /
         // ProbeRealtimeCapture / ProbeRealtimeConvolvePrefilterStep と見比べながら選べるようにしてある
         static const char* kUpdateModeNames[] = { "焼き込み", "変化を検出して焼き直す", "毎フレーム少しずつ" };
-        int updateModeIndex = static_cast<int>(m_Engine.m_ProbeUpdateMode);
+        int updateModeIndex = static_cast<int>(m_Engine.GetSettings().ReflectionProbe.UpdateMode);
         if (ComboEx(
                 "更新モード###ProbeUpdateMode", &updateModeIndex, kUpdateModeNames, IM_ARRAYSIZE(kUpdateModeNames),
                 static_cast<int>(ProbeUpdateMode::Baked),
@@ -94,31 +95,31 @@ namespace Kurenai::UI
                 "毎フレーム少しずつ: さらに1プローブを12フレームかけて焼き直し(6フレームで6面を\n"
                 "キャプチャ→6フレームで畳み込み)、プローブをラウンドロビンで回る"))
         {
-            m_Engine.m_ProbeUpdateMode = static_cast<ProbeUpdateMode>(updateModeIndex);
+            m_Engine.GetSettings().ReflectionProbe.UpdateMode = static_cast<ProbeUpdateMode>(updateModeIndex);
         }
 
         EndParamGroup();
 
         ImGui::Text(
-            "プローブ数: %zu / %u", m_Engine.m_ReflectionProbes.size(), KurenaiEngine3D::kMaxReflectionProbes);
+            "プローブ数: %zu / %u", m_Engine.GetReflectionProbes().size(), Passes::kMaxReflectionProbes);
 
-        if (!m_Engine.m_ProbeBaked && !m_Engine.m_ReflectionProbes.empty())
+        if (!m_Engine.GetProbeBaked() && !m_Engine.GetReflectionProbes().empty())
         {
             ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "まだ焼かれていません");
         }
-        else if (m_Engine.m_ProbeUpdateMode == ProbeUpdateMode::Realtime && !m_Engine.m_ReflectionProbes.empty())
+        else if (m_Engine.GetSettings().ReflectionProbe.UpdateMode == ProbeUpdateMode::Realtime && !m_Engine.GetReflectionProbes().empty())
         {
             // 今どのプローブの何面目を焼いているか。1周にプローブ数×6フレームかかるので、
             // 「変化が反射へ現れるまでの遅れ」がこの進行から読める
             ImGui::Text(
-                "更新中: プローブ %u の %u / %u 面目", m_Engine.m_ProbeRealtimeProbeIndex,
-                m_Engine.m_ProbeRealtimeFace + 1, KurenaiEngine3D::kCubeFaceCount);
+                "更新中: プローブ %u の %u / %u 面目", m_Engine.GetProbeRealtimeProbeIndex(),
+                m_Engine.GetProbeRealtimeFace() + 1, kCubeFaceCount);
         }
     }
 
     void ReflectionProbePanel::DrawProbeList()
     {
-        if (m_Engine.m_ReflectionProbes.empty())
+        if (m_Engine.GetReflectionProbes().empty())
         {
             ImGui::TextDisabled("このシーンには反射プローブがありません");
         }
@@ -127,7 +128,7 @@ namespace Kurenai::UI
                      ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter,
                      ImVec2(0.0f, ImGui::GetFontSize() * 6.0f)))
         {
-            for (size_t i = 0; i < m_Engine.m_ReflectionProbes.size(); ++i)
+            for (size_t i = 0; i < m_Engine.GetReflectionProbes().size(); ++i)
             {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
@@ -136,11 +137,11 @@ namespace Kurenai::UI
                 char label[192];
                 std::snprintf(
                     label, sizeof(label), "[%zu] %s", i,
-                    m_Engine.m_ReflectionProbes[i].Name.empty() ? "(名前なし)"
-                                                                : m_Engine.m_ReflectionProbes[i].Name.c_str());
-                if (ImGui::Selectable(label, m_Engine.m_SelectedProbeIndex == static_cast<int>(i)))
+                    m_Engine.GetReflectionProbes()[i].Name.empty() ? "(名前なし)"
+                                                                : m_Engine.GetReflectionProbes()[i].Name.c_str());
+                if (ImGui::Selectable(label, m_Engine.GetSelectedProbeIndex() == static_cast<int>(i)))
                 {
-                    m_Engine.m_SelectedProbeIndex = static_cast<int>(i);
+                    m_Engine.GetSelectedProbeIndex() = static_cast<int>(i);
                 }
 
                 ImGui::PopID();
@@ -149,50 +150,50 @@ namespace Kurenai::UI
         }
 
         // キューブマップ配列は固定容量のため、上限に達したら追加できない
-        ImGui::BeginDisabled(m_Engine.m_ReflectionProbes.size() >= KurenaiEngine3D::kMaxReflectionProbes);
+        ImGui::BeginDisabled(m_Engine.GetReflectionProbes().size() >= Passes::kMaxReflectionProbes);
         if (ImGui::Button("追加"))
         {
             // 追加位置はカメラ位置ではなくシーンAABBの中心にする(カメラ位置だと壁や地面へ
             // めり込んだ位置に置かれやすく、そのまま焼くと真っ暗なプローブになるため)
             Assets::ReflectionProbe newProbe;
-            newProbe.Position[0] = (m_Engine.m_Scene.BoundsMin[0] + m_Engine.m_Scene.BoundsMax[0]) * 0.5f;
-            newProbe.Position[1] = (m_Engine.m_Scene.BoundsMin[1] + m_Engine.m_Scene.BoundsMax[1]) * 0.5f;
-            newProbe.Position[2] = (m_Engine.m_Scene.BoundsMin[2] + m_Engine.m_Scene.BoundsMax[2]) * 0.5f;
+            newProbe.Position[0] = (m_Engine.GetScene().BoundsMin[0] + m_Engine.GetScene().BoundsMax[0]) * 0.5f;
+            newProbe.Position[1] = (m_Engine.GetScene().BoundsMin[1] + m_Engine.GetScene().BoundsMax[1]) * 0.5f;
+            newProbe.Position[2] = (m_Engine.GetScene().BoundsMin[2] + m_Engine.GetScene().BoundsMax[2]) * 0.5f;
             newProbe.Name = "New Probe";
-            m_Engine.m_ReflectionProbes.push_back(newProbe);
-            m_Engine.m_SelectedProbeIndex = static_cast<int>(m_Engine.m_ReflectionProbes.size()) - 1;
-            m_Engine.m_ProbeBakeRequested = true;
+            m_Engine.GetReflectionProbes().push_back(newProbe);
+            m_Engine.GetSelectedProbeIndex() = static_cast<int>(m_Engine.GetReflectionProbes().size()) - 1;
+            m_Engine.GetProbeBakeRequested() = true;
             // 選択が変わるので名前バッファを詰め直させる
             m_NameBufferProbeIndex = -1;
         }
         ImGui::EndDisabled();
         ItemHelp("シーンAABBの中心に新しいプローブを置く。キューブマップ配列の容量まで追加できる");
 
-        const bool hasSelection = m_Engine.m_SelectedProbeIndex >= 0 &&
-                                  m_Engine.m_SelectedProbeIndex < static_cast<int>(m_Engine.m_ReflectionProbes.size());
+        const bool hasSelection = m_Engine.GetSelectedProbeIndex() >= 0 &&
+                                  m_Engine.GetSelectedProbeIndex() < static_cast<int>(m_Engine.GetReflectionProbes().size());
 
         ImGui::SameLine();
         ImGui::BeginDisabled(!hasSelection);
         if (ImGui::Button("削除") && hasSelection)
         {
-            m_Engine.m_ReflectionProbes.erase(m_Engine.m_ReflectionProbes.begin() + m_Engine.m_SelectedProbeIndex);
-            m_Engine.m_SelectedProbeIndex =
-                m_Engine.m_ReflectionProbes.empty()
+            m_Engine.GetReflectionProbes().erase(m_Engine.GetReflectionProbes().begin() + m_Engine.GetSelectedProbeIndex());
+            m_Engine.GetSelectedProbeIndex() =
+                m_Engine.GetReflectionProbes().empty()
                     ? -1
-                    : std::min(m_Engine.m_SelectedProbeIndex, static_cast<int>(m_Engine.m_ReflectionProbes.size()) - 1);
+                    : std::min(m_Engine.GetSelectedProbeIndex(), static_cast<int>(m_Engine.GetReflectionProbes().size()) - 1);
             // 番号がずれるため残り全部を焼き直す
-            m_Engine.m_ProbeBakeRequested = !m_Engine.m_ReflectionProbes.empty();
-            m_Engine.m_ProbeBaked = m_Engine.m_ProbeBaked && !m_Engine.m_ReflectionProbes.empty();
+            m_Engine.GetProbeBakeRequested() = !m_Engine.GetReflectionProbes().empty();
+            m_Engine.GetProbeBaked() = m_Engine.GetProbeBaked() && !m_Engine.GetReflectionProbes().empty();
             // 削除でインデックスが同じまま別のプローブを指す場合があるため、必ず詰め直させる
             m_NameBufferProbeIndex = -1;
         }
         ImGui::EndDisabled();
 
         ImGui::SameLine();
-        ImGui::BeginDisabled(m_Engine.m_ReflectionProbes.empty());
+        ImGui::BeginDisabled(m_Engine.GetReflectionProbes().empty());
         if (ImGui::Button("焼き直す"))
         {
-            m_Engine.m_ProbeBakeRequested = true;
+            m_Engine.GetProbeBakeRequested() = true;
         }
         ImGui::EndDisabled();
         ItemHelp("全プローブを現在のライティングで撮り直す");
@@ -200,13 +201,13 @@ namespace Kurenai::UI
 
     void ReflectionProbePanel::DrawSelectedProbeEditor()
     {
-        Assets::ReflectionProbe& probe = m_Engine.m_ReflectionProbes[static_cast<size_t>(m_Engine.m_SelectedProbeIndex)];
+        Assets::ReflectionProbe& probe = m_Engine.GetReflectionProbes()[static_cast<size_t>(m_Engine.GetSelectedProbeIndex())];
 
         BeginParamGroup();
 
-        if (m_NameBufferProbeIndex != m_Engine.m_SelectedProbeIndex)
+        if (m_NameBufferProbeIndex != m_Engine.GetSelectedProbeIndex())
         {
-            m_NameBufferProbeIndex = m_Engine.m_SelectedProbeIndex;
+            m_NameBufferProbeIndex = m_Engine.GetSelectedProbeIndex();
             std::snprintf(m_NameBuffer.data(), m_NameBuffer.size(), "%s", probe.Name.c_str());
         }
         if (ImGui::InputText("名前###ProbeName", m_NameBuffer.data(), m_NameBuffer.size()))
@@ -217,7 +218,7 @@ namespace Kurenai::UI
         // 位置はキャプチャ内容そのものを変えるため、動かしたら焼き直す必要がある
         if (ImGui::DragFloat3("位置###ProbePosition", probe.Position, 0.1f))
         {
-            m_Engine.m_ProbeBakeRequested = true;
+            m_Engine.GetProbeBakeRequested() = true;
         }
         ItemHelp("6方向を撮る位置。動かすと焼き直しが要る");
 

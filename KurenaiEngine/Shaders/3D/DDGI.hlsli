@@ -12,8 +12,8 @@
 //   KURENAI_DDGI_IRRADIANCE_REGISTER   イラディアンスアトラス(Texture2D)
 //   KURENAI_DDGI_DISTANCE_REGISTER     距離モーメントアトラス(Texture2D)
 //
-// FrameConstants(b0)の DDGIParams0〜3 を参照する。C++側 KurenaiEngine3D.cpp の
-// FrameConstantsと並びを一致させること。
+// FrameConstants(b0)の DDGIParams0〜3 を参照するので、
+// インクルードする側は ShaderInterop/FrameConstants.hlsli も取り込んでおくこと。
 #ifndef KURENAI_DDGI_HLSLI
 #define KURENAI_DDGI_HLSLI
 

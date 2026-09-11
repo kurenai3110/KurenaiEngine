@@ -23,6 +23,11 @@ namespace Kurenai::Core
     {
         const wchar_t* kWindowClassName = L"KurenaiEngineWindowClass";
 
+        // 自動化時にウィンドウを逃がす先。仮想デスクトップの外なので画面には出ない。
+        // 【大きさは変えない】位置だけを動かすので、クライアント領域は通常起動と同一
+        constexpr int kAutomationOffscreenX = -32000;
+        constexpr int kAutomationOffscreenY = -32000;
+
         // ウィンドウ配置の保存先。imgui.iniと同じく、起動時の作業ディレクトリに依存させず
         // KurenaiEngine.dllと同じフォルダに固定する(サンプルごとに出力フォルダが分かれるため、
         // Sample2DとSample3Dで記録が混ざることもない)
@@ -227,7 +232,35 @@ namespace Kurenai::Core
         // 表示前に配置を済ませることで、既定サイズのウィンドウが一瞬見えてから
         // 復元後のサイズへ飛ぶのを避ける
         const int showCommand = ApplySavedPlacement();
-        ShowWindow(m_Handle, showCommand);
+        if (m_MouseLeaveSuppressionEnabled && showCommand == SW_SHOW)
+        {
+            // 【自動化中はフォアグラウンドを奪わない】ベースライン採取は10構成を続けて起動するため、
+            // そのたびに前面へ出るとユーザーのデスクトップを占有してしまう。SW_SHOWNOACTIVATEは
+            // アクティブ化だけを省く指定で、描画も入力の受け取り(PostMessage)もそのまま働く。
+            //
+            // 【最大化復元のときは従来どおり】SW_SHOWMAXIMIZEDにはアクティブ化しない対の指定が
+            // 無い。採取で使うwindow.iniはMaximized=0なのでこの経路は通らない
+            ShowWindow(m_Handle, SW_SHOWNOACTIVATE);
+
+            // アクティブ化を省いても、Z順の手前に置かれてユーザーの画面を覆ってしまう
+            // (最背面へ落とすだけでは足りず、実測でも手前から5番目に残った)。
+            // 【大きさは変えない】SWP_NOSIZEなのでクライアント領域は通常起動と同一のまま
+            // = スワップチェインの解像度も中間バッファの内容も変わらない。動かすのは位置だけ。
+            // 最小化や非表示にしないのは、前者がクライアント領域を変え、後者がDXGIの
+            // 遮蔽判定でPresentの挙動を変えうるため
+            if (!SetWindowPos(m_Handle, HWND_BOTTOM, kAutomationOffscreenX, kAutomationOffscreenY, 0, 0,
+                    SWP_NOSIZE | SWP_NOACTIVATE))
+            {
+                Logger::Warning(
+                    "Window",
+                    "自動化時の画面外への退避に失敗しました。ウィンドウが画面に出ます (GetLastError: " +
+                        std::to_string(GetLastError()) + ")");
+            }
+        }
+        else
+        {
+            ShowWindow(m_Handle, showCommand);
+        }
 
         // 復元や最大化でクライアント領域はコンストラクタ引数のサイズと変わるため、
         // WM_SIZE経由の更新を待たずここで実測して確定させる。この値がそのまま
@@ -380,6 +413,13 @@ namespace Kurenai::Core
 
     void Window::SaveCurrentPlacement() const
     {
+        if (m_MouseLeaveSuppressionEnabled)
+        {
+            // 自動化中は画面外へ逃がしてあるので、その座標を保存すると次の通常起動が
+            // 画面に出なくなる。前回の通常起動で保存した配置をそのまま残す
+            return;
+        }
+
         WINDOWPLACEMENT placement{};
         placement.length = sizeof(placement);
         if (!GetWindowPlacement(m_Handle, &placement))

@@ -1,11 +1,7 @@
 // DDGIの拡散間接光だけを低解像度で評価するパス。Lightingパスの直前に走る。
 //
-// 【なぜ分離したか】ProbeTest / 1280x720 / DX11 / Release の実測(A/B)では、
-// Lightingパス23.9msの内訳は
-//   ・DDGIのサンプリング                                  約10.2ms (43%)
-//   ・その他のEvaluateIBL(反射プローブ + 鏡面IBL + BRDF)  約 7.6ms (32%)
-//   ・残り(背景の空合成 + G-Buffer読み + 直接光合成)      約 6.1ms (26%)
-// で、DDGIのサンプリングが単独最大だった。SampleDDGIIrradianceは1画素あたり
+// 【なぜ分離したか】Lightingパスの内訳を測るとDDGIのサンプリングが単独最大だった
+// (実測は docs/ImplementationHistory.md 41.15)。SampleDDGIIrradianceは1画素あたり
 // 周囲8プローブを走査し、各プローブでチェビシェフ可視性(距離アトラス)とイラディアンスの
 // 2回サンプルを行う ―― つまり1画素16サンプル + 相応の演算になる。
 //
@@ -37,72 +33,16 @@
 #define KURENAI_DDGI_IRRADIANCE_REGISTER t0
 #define KURENAI_DDGI_DISTANCE_REGISTER t1
 
-// C++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること。
-// このシェーダーが実際に読むのは InvViewProj / CameraPosition / DDGIParams0-4 だけだが、
-// cbufferのレイアウトは宣言順で決まり途中のフィールドを飛ばせないため、
-// 手前のフィールドはオフセット合わせのためだけに宣言する
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    float4 ShadowParams;
-    float4 ActiveLightCount;
-    float4 IBLParams;
-    float4 ProbeParams;
-    float4 ProbeParams2;
-    float4x4 PrevViewProj;
-    float4 TAAParams;
-    float4 DDGIParams0;
-    float4 DDGIParams1;
-    float4 DDGIParams2;
-    float4 DDGIParams3;
-    float4 DDGIParams4;
-    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
-    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
-    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
-    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
-    float4 DDGILODOrigin[4];
-    float4 DDGILODBase[4];
-    // 【宣言はここで止めている】このシェーダーが読むのはDDGIParams4までで、
-    // それより後ろ(OcclusionParams以降)は使わない。DDGI.hlsliもこの範囲しか参照しない
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 #include "DDGI.hlsli"
 
 Texture2D DepthTexture : register(t2);
 Texture2D NormalTexture : register(t3);
 
-struct PSInput
-{
-    float4 Position : SV_POSITION;
-    float2 UV : TEXCOORD0;
-};
+#include "ShaderInterop/FullscreenTriangle.hlsli"
 
-// 頂点バッファ無しのフルスクリーン三角形(DeferredLighting.hlslのVSMainと同一)
-PSInput VSMain(uint vertexID : SV_VertexID)
-{
-    PSInput output;
-    output.UV = float2((vertexID << 1) & 2, vertexID & 2);
-    output.Position = float4(output.UV.x * 2.0f - 1.0f, 1.0f - output.UV.y * 2.0f, 0.0f, 1.0f);
-    return output;
-}
-
-// DeferredLighting.hlslのReconstructWorldPosと同一の内容
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    float4 clipPos = float4(ndc, depth, 1.0f);
-    float4 worldPos = mul(clipPos, InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 struct PSOutput
 {

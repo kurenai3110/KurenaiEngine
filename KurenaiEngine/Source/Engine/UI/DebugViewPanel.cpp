@@ -1,9 +1,11 @@
 #include "UI/DebugViewPanel.h"
+#include "../Passes/EnvironmentConstants.h"
+#include "../Rendering/ShadowConstants.h"
+#include "../Passes/MegaLightsConstants.h"
 
 #include <imgui.h>
 
 #include "EngineDefaults.h"
-#include "KurenaiEngine3D.h"
 #include "UI/UIWidgets.h"
 
 namespace Kurenai::UI
@@ -18,10 +20,10 @@ namespace Kurenai::UI
             return;
         }
 
-        using DebugView = KurenaiEngine3D::DebugView;
+        using DebugView = Kurenai::DebugView;
 
         // DebugView::AtmosphereLUTで表示するLUTの選択肢。
-        // 並びはKurenaiEngine3D::m_AtmosphereLUTDebugIndexの意味と一致させること
+        // 並びはKurenaiEngine3D::m_Settings.Sky.AtmosphereLUTDebugIndexの意味と一致させること
         static const char* kAtmosphereLUTNames[] =
         {
             "Transmittance (256x64)",
@@ -80,85 +82,85 @@ namespace Kurenai::UI
             static_cast<int>(DebugView::MegaLightsAverage) == 39,
             "kDebugViewNamesの並びをDebugView enumと一致させること(末尾はMegaLightsAverage)");
         static_assert(
-            IM_ARRAYSIZE(kDebugViewNames) == KurenaiEngine3D::kDebugViewCount,
+            IM_ARRAYSIZE(kDebugViewNames) == Kurenai::kDebugViewCount,
             "kDebugViewNamesの要素数をDebugViewの総数と一致させること");
 
         DrawUsageHint();
         BeginParamGroup();
 
-        int currentIndex = static_cast<int>(m_Engine.m_DebugView);
+        int currentIndex = static_cast<int>(m_Engine.GetSettings().DebugView.View);
         if (ComboEx(
                 "表示するバッファ###View", &currentIndex, kDebugViewNames, IM_ARRAYSIZE(kDebugViewNames),
                 static_cast<int>(DebugView::Final),
                 "Presentパスで画面に出す内容。最終結果以外を選ぶと各パスの中間結果をそのまま表示する"))
         {
-            m_Engine.m_DebugView = static_cast<DebugView>(currentIndex);
+            m_Engine.GetSettings().DebugView.View = static_cast<DebugView>(currentIndex);
         }
 
-        if (m_Engine.m_DebugView == DebugView::HiZ)
+        if (m_Engine.GetSettings().DebugView.View == DebugView::HiZ)
         {
             SliderIntEx(
-                "Hi-Z ミップレベル###HiZMip", &m_Engine.m_HiZDebugMipLevel, 0,
-                static_cast<int>(m_Engine.m_HiZMipLevels) - 1, 0, "表示する深度ミップチェーンの段");
+                "Hi-Z ミップレベル###HiZMip", &m_Engine.GetSettings().DebugView.HiZDebugMipLevel, 0,
+                static_cast<int>(m_Engine.GetHiZMipLevels()) - 1, 0, "表示する深度ミップチェーンの段");
         }
 
-        if (m_Engine.m_DebugView == DebugView::ShadowMap)
+        if (m_Engine.GetSettings().DebugView.View == DebugView::ShadowMap)
         {
             SliderIntEx(
-                "シャドウカスケード###ShadowCascade", &m_Engine.m_ShadowDebugCascade, 0,
-                static_cast<int>(KurenaiEngine3D::kCascadeCount) - 1, 0,
+                "シャドウカスケード###ShadowCascade", &m_Engine.GetSettings().Shadow.DebugCascade, 0,
+                static_cast<int>(Rendering::kCascadeCount) - 1, 0,
                 "表示するカスケードの番号。0がカメラに最も近い範囲");
         }
 
-        if (m_Engine.m_DebugView == DebugView::IBLPrefilter)
+        if (m_Engine.GetSettings().DebugView.View == DebugView::IBLPrefilter)
         {
             SliderIntEx(
-                "プリフィルタ ミップレベル###PrefilterMip", &m_Engine.m_IBLPrefilterDebugMipLevel, 0,
-                static_cast<int>(KurenaiEngine3D::kIBLPrefilterMipLevels) - 1, 0,
+                "プリフィルタ ミップレベル###PrefilterMip", &m_Engine.GetSettings().IBL.PrefilterDebugMipLevel, 0,
+                static_cast<int>(Passes::kIBLPrefilterMipLevels) - 1, 0,
                 "表示するミップの段。段が進むほど粗い面向けにぼかされている");
         }
 
-        if (m_Engine.m_DebugView == DebugView::ProbePrefilter || m_Engine.m_DebugView == DebugView::ProbeDistance)
+        if (m_Engine.GetSettings().DebugView.View == DebugView::ProbePrefilter || m_Engine.GetSettings().DebugView.View == DebugView::ProbeDistance)
         {
             // プローブが1つも無いシーンでもスライダーの範囲が壊れないよう下限を0に保つ
             const int maxProbeIndex =
-                m_Engine.m_ReflectionProbes.empty() ? 0 : static_cast<int>(m_Engine.m_ReflectionProbes.size()) - 1;
+                m_Engine.GetReflectionProbes().empty() ? 0 : static_cast<int>(m_Engine.GetReflectionProbes().size()) - 1;
             SliderIntEx(
-                "プローブ番号###ProbeIndex", &m_Engine.m_ProbeDebugIndex, 0, maxProbeIndex, 0,
+                "プローブ番号###ProbeIndex", &m_Engine.GetSettings().ReflectionProbe.DebugIndex, 0, maxProbeIndex, 0,
                 "表示する反射プローブの番号。反射プローブパネルの一覧と同じ並び");
 
-            if (m_Engine.m_DebugView == DebugView::ProbePrefilter)
+            if (m_Engine.GetSettings().DebugView.View == DebugView::ProbePrefilter)
             {
                 SliderIntEx(
-                    "プローブ プリフィルタ ミップ###ProbePrefilterMip", &m_Engine.m_ProbePrefilterDebugMipLevel, 0,
-                    static_cast<int>(KurenaiEngine3D::kIBLPrefilterMipLevels) - 1, 0,
+                    "プローブ プリフィルタ ミップ###ProbePrefilterMip", &m_Engine.GetSettings().ReflectionProbe.PrefilterDebugMipLevel, 0,
+                    static_cast<int>(Passes::kIBLPrefilterMipLevels) - 1, 0,
                     "表示するミップの段。ミップ0はぼかす前のキャプチャ結果そのもの");
             }
 
-            if (m_Engine.m_DebugView == DebugView::ProbeDistance)
+            if (m_Engine.GetSettings().DebugView.View == DebugView::ProbeDistance)
             {
                 // 距離キューブに入っているのは色ではなくワールド距離なので、表示輝度の倍率(1倍以上)
                 // ではなく「白になる距離」で正規化する(Render()側でこの逆数をGainとして渡す)
                 SliderFloatEx(
-                    "白になる距離###ProbeDistanceRange", &m_Engine.m_ProbeDistanceDebugRange, 1.0f, 200.0f,
+                    "白になる距離###ProbeDistanceRange", &m_Engine.GetSettings().ReflectionProbe.DistanceDebugRange, 1.0f, 200.0f,
                     Defaults::ProbeDistanceDebugRange, "%.1f", ImGuiSliderFlags_Logarithmic,
                     "この距離で白飽和するようグレースケール化する。部屋の大きさに合わせると形が読める");
             }
         }
 
-        if (m_Engine.m_DebugView == DebugView::CloudNoiseSlice)
+        if (m_Engine.GetSettings().DebugView.View == DebugView::CloudNoiseSlice)
         {
             ImGui::TextWrapped(
                 "画面には2x2タイルぶんを表示している。タイル境界に継ぎ目があれば画面中央の十字線として現れる");
             CheckboxEx(
-                "ディテール(32^3)を見る###CloudNoiseDetail", &m_Engine.m_CloudNoiseDebugShowDetail, false,
+                "ディテール(32^3)を見る###CloudNoiseDetail", &m_Engine.GetSettings().Cloud.NoiseDebugShowDetail, false,
                 "オフで形状ノイズ(128^3、RGB=Perlin-Worley/Worley/Worley)、オンで縁を削るディテールノイズ");
             SliderFloatEx(
-                "スライス位置###CloudNoiseSlice", &m_Engine.m_CloudNoiseDebugSlice, 0.0f, 1.0f, 0.0f, "%.3f", 0,
+                "スライス位置###CloudNoiseSlice", &m_Engine.GetSettings().Cloud.NoiseDebugSlice, 0.0f, 1.0f, 0.0f, "%.3f", 0,
                 "3Dテクスチャのどの断面を見るか(W座標)。動かして中身が変わらなければ焼けていない");
         }
 
-        if (m_Engine.m_DebugView == DebugView::AtmosphereLUT)
+        if (m_Engine.GetSettings().DebugView.View == DebugView::AtmosphereLUT)
         {
             ImGui::TextWrapped(
                 "Transmittance: 横=視線天頂角、縦=高度。地表(下端)から天頂(右端)を見た値が "
@@ -166,7 +168,7 @@ namespace Kurenai::UI
                 "SkyView: 横=太陽の子午線からの方位(左端が太陽側)、"
                 "縦=天頂角(上端が天頂、中央が地平線)");
             ComboEx(
-                "表示するLUT###AtmosphereLUTIndex", &m_Engine.m_AtmosphereLUTDebugIndex,
+                "表示するLUT###AtmosphereLUTIndex", &m_Engine.GetSettings().Sky.AtmosphereLUTDebugIndex,
                 kAtmosphereLUTNames, IM_ARRAYSIZE(kAtmosphereLUTNames), 0,
                 "MultiScatteringは値が小さいので表示輝度の倍率を上げて見る");
         }
@@ -174,15 +176,15 @@ namespace Kurenai::UI
         // ライトタイルとMegaLightsの候補プールは**同じヒートマップの上限**を共有する。
         // 両者は同じ到達判定を使うので、同じ上限で撮った2枚は画素単位で一致するはずであり、
         // つまみが別々だと比べられなくなる
-        if (m_Engine.m_DebugView == DebugView::LightTiles ||
-            m_Engine.m_DebugView == DebugView::MegaLightsTilePool)
+        if (m_Engine.GetSettings().DebugView.View == DebugView::LightTiles ||
+            m_Engine.GetSettings().DebugView.View == DebugView::MegaLightsTilePool)
         {
-            if (m_Engine.m_DebugView == DebugView::LightTiles)
+            if (m_Engine.GetSettings().DebugView.View == DebugView::LightTiles)
             {
                 // ヒートマップの色: 黒=0灯、青=少ない、緑、赤=上限以上、マゼンタ=タイル容量超過
                 ImGui::TextWrapped(
                     "黒=0灯 / 青→緑→赤=ライトが多い / マゼンタ=タイル容量(%uライト)を超過",
-                    KurenaiEngine3D::kLightTileCapacity);
+                    Passes::kLightTileCapacity);
             }
             else
             {
@@ -194,31 +196,31 @@ namespace Kurenai::UI
                     "「ライトタイル」側にマゼンタが出ていたらそこは比べられない。"
                     "また下の上限を上げないと、ライトの多いシーンでは一面が赤に飽和して"
                     "違いが色に出ない(飽和した状態での一致は検出力がほとんど無い)",
-                    KurenaiEngine3D::kLightTileCapacity);
+                    Passes::kLightTileCapacity);
             }
 
             SliderIntEx(
-                "ヒートマップの上限###HeatmapMax", &m_Engine.m_LightTileHeatmapMax, 1,
-                static_cast<int>(KurenaiEngine3D::kLightTileCapacity), Defaults::LightTileHeatmapMax,
+                "ヒートマップの上限###HeatmapMax", &m_Engine.GetSettings().DebugView.LightTileHeatmapMax, 1,
+                static_cast<int>(Passes::kLightTileCapacity), Defaults::LightTileHeatmapMax,
                 "この灯数で赤になるようヒートマップを正規化する。ライトが少ないシーンでは下げると差が見える");
 
-            if (m_Engine.m_DebugView == DebugView::LightTiles && !m_Engine.m_LightCullingEnabled)
+            if (m_Engine.GetSettings().DebugView.View == DebugView::LightTiles && !m_Engine.GetSettings().Geometry.LightCullingEnabled)
             {
                 ImGui::TextWrapped("タイルドライトカリングが無効のため、ライトグリッドは更新されていません");
             }
-            if (m_Engine.m_DebugView == DebugView::MegaLightsTilePool && !m_Engine.ShouldRunMegaLights())
+            if (m_Engine.GetSettings().DebugView.View == DebugView::MegaLightsTilePool && !m_Engine.ShouldRunMegaLights())
             {
                 ImGui::TextWrapped("MegaLightsが無効のため、候補プールは更新されていません");
             }
         }
 
-        if (m_Engine.m_DebugView == DebugView::MotionVector)
+        if (m_Engine.GetSettings().DebugView.View == DebugView::MotionVector)
         {
             ImGui::TextWrapped(
                 "灰色=動いていない / 赤が濃い=画面内容が右へ / 薄い=左へ / 緑が濃い=下へ / 薄い=上へ。"
                 "静止していれば全面が均一な灰色になり、色が付いていたら速度バッファが壊れている。"
                 "下の表示輝度の倍率で感度を変えられる(既定は約20画素/フレームで飽和)");
-            if (!m_Engine.m_TAAEnabled)
+            if (!m_Engine.GetSettings().PostProcess.TAAEnabled)
             {
                 ImGui::TextWrapped("TAAが無効でも速度バッファは常に更新されるため、この表示はそのまま確認できます");
             }
@@ -228,10 +230,10 @@ namespace Kurenai::UI
         // 等倍表示だとほぼ真っ黒で階調の粗さが判別できない。持ち上げて表示することで、
         // 8bit格納時のポスタリゼーションが何段あるかを目視で比較できる。
         // 最終結果は見た目そのものを確認する表示なので倍率を適用しない(Render()側で1.0固定)
-        if (m_Engine.m_DebugView != DebugView::Final)
+        if (m_Engine.GetSettings().DebugView.View != DebugView::Final)
         {
             SliderFloatEx(
-                "表示輝度の倍率###DebugViewGain", &m_Engine.m_DebugViewGain, 1.0f, 64.0f, Defaults::DebugViewGain,
+                "表示輝度の倍率###DebugViewGain", &m_Engine.GetSettings().DebugView.Gain, 1.0f, 64.0f, Defaults::DebugViewGain,
                 "%.1fx", ImGuiSliderFlags_Logarithmic,
                 "暗いバッファを持ち上げて表示する倍率。バッファ精度の比較と併用して"
                 "ポスタリゼーションの段数を目視で確認する。最終結果には適用されない");
@@ -249,12 +251,12 @@ namespace Kurenai::UI
 
     void DebugViewPanel::DrawBufferPrecisionSection()
     {
-        using BufferPrecision = KurenaiEngine3D::BufferPrecision;
+        using BufferPrecision = Kurenai::BufferPrecision;
 
         // 切り替えるとレンダーターゲットとPSOを作り直す必要があるが、ここで直接作り直すと
         // GPUがまだ読んでいるテクスチャを壊すため、フラグだけ立ててRender()側で
         // (WaitForGPUIdleを挟んで)処理する
-        int precisionIndex = static_cast<int>(m_Engine.m_BufferPrecision);
+        int precisionIndex = static_cast<int>(m_Engine.GetSettings().System.Precision);
         bool precisionChanged = ImGui::RadioButton("HDR", &precisionIndex, static_cast<int>(BufferPrecision::HDR));
         ItemHelp("自発光=R11G11B10F、AO/GI=RGBA16F。本来採用したい構成");
         ImGui::SameLine();
@@ -262,10 +264,10 @@ namespace Kurenai::UI
             ImGui::RadioButton("Legacy 8bit", &precisionIndex, static_cast<int>(BufferPrecision::Legacy8bit));
         ItemHelp("中間バッファをすべてRGBA8_UNormにする。暗部の階調が粗くなるのを比較するための経路");
 
-        if (precisionChanged && precisionIndex != static_cast<int>(m_Engine.m_BufferPrecision))
+        if (precisionChanged && precisionIndex != static_cast<int>(m_Engine.GetSettings().System.Precision))
         {
-            m_Engine.m_BufferPrecision = static_cast<BufferPrecision>(precisionIndex);
-            m_Engine.m_BufferPrecisionDirty = true;
+            m_Engine.GetSettings().System.Precision = static_cast<BufferPrecision>(precisionIndex);
+            m_Engine.GetBufferPrecisionDirty() = true;
         }
 
         ImGui::TextWrapped(

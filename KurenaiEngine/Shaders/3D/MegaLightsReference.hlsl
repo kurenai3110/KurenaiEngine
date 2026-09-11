@@ -39,27 +39,9 @@
 // エネルギー補正の前提になるため、DirectLighting.hlsl と定義を共有する
 #include "SpecularEnergy.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    // w にスペキュラのエネルギー補正のモードが入っている(MakeSpecularEnergyContextへ渡す)。
-    // DirectLighting.hlsl と同じ値を使わないとエネルギーがずれる
-    float4 ShadowParams;
-    // 【宣言はここで止めている】読むのは ShadowParams まで。cbufferは宣言順レイアウトなので、
-    // 途中を飛ばして末尾だけを宣言すると誤ったオフセットを読む。しかもコンパイルは通り
-    // 絵も「それらしく」出るため気付けない(DirectLighting.hlsl と同じ注意)
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 cbuffer MegaLightsConstants : register(b1)
 {
@@ -113,12 +95,7 @@ static const float kRayOriginBiasSlope = 1e-4f;
 // 押し出し量を1/NdotLでスケールするときの下限(RTShadow.hlsl と同じ)
 static const float kMinSlopeScaleNdotL = 0.1f;
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 // 1灯ぶんの可視率。punctual なので方向は1つに決まり、半影は出ない(常にハードシャドウ)。
 //
@@ -223,7 +200,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         // 【メッシュライトが有効なフレームは段階1のプロキシ(型3)を数えない】
         // 同じ発光体を下の三角形ループが面積分するので、両方積むと真値が二重に数える。
-        // プロキシ自体は m_LightBuffer に残す ―― DDGI・反射プローブ・半透明・平面反射は
+        // プロキシ自体は m_SceneGPUResources.LightBuffer に残す ―― DDGI・反射プローブ・半透明・平面反射は
         // 面光源を扱えないのでプロキシが要る(消すとそれらから発光体の照明だけが消え、
         // しかもそれらしく見える)
         if (meshLightsActive && (uint)light.PositionType.w == 3u)

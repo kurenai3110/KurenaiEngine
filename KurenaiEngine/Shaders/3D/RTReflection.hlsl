@@ -39,58 +39,7 @@ static const float kPI = 3.14159265359f;
 #define KURENAI_PROBE_PREFILTERED_REGISTER t9
 #define KURENAI_PROBE_BUFFER_REGISTER t10
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    // カスケードシャドウマップ用(このシェーダでは未使用。オフセット合わせのためだけに宣言する)
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    // xyz=太陽の進行方向(光が飛んでいく向き)。太陽へ向かうベクトルは -LightDirection.xyz
-    float4 LightDirection;
-    // rgb=太陽の放射輝度(露出適用済み)。太陽が無効なシーンでは0が入る
-    float4 LightColor;
-    float4x4 View;
-    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
-    float4x4 Proj;
-    float4 AmbientColor;
-    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
-    float4 CascadeSplits;
-    // y: プリフィルタ済み鏡面マップの最大ミップレベル、z: IBL強度倍率、
-    // w: スペキュラのマルチスキャッタリング・エネルギー補正のトグル
-    float4 ShadowParams;
-    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
-    float4 ActiveLightCount;
-    // 拡散イラディアンスの取得元切り替え。ReflectionProbe.hlsliが参照する
-    float4 IBLParams;
-    // 反射プローブ用。ReflectionProbe.hlsliのプローブ選択・ブレンドが読む
-    float4 ProbeParams;
-    // 反射プローブの距離キューブ用。w=焼いた時点の実効プリ露出から現在の実効プリ露出への
-    // 換算倍率(19.14節)で、ReflectionProbe.hlsliのBlendReflectionProbesが読む。x〜zはこの
-    // シェーダでは未使用(視差補正・遮蔽判定のフラグと距離キューブの解像度)
-    float4 ProbeParams2;
-    // 【以下はこのシェーダーでは使わないが宣言だけ必要】cbufferは宣言順レイアウトなので、
-    // 末尾のOcclusionParamsを正しいオフセットで読むには途中のフィールドを飛ばせない。
-    // C++側のFrameConstantsと並びを必ず一致させること
-    float4x4 PrevViewProj;
-    float4 TAAParams;
-    float4 DDGIParams0;
-    float4 DDGIParams1;
-    float4 DDGIParams2;
-    float4 DDGIParams3;
-    float4 DDGIParams4;
-    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
-    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
-    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
-    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
-    float4 DDGILODOrigin[4];
-    float4 DDGILODBase[4];
-    // bent normalによる遮蔽(34章)。y=スペキュラ遮蔽の方式を読む。
-    // DeferredLighting.hlsl・SSR.hlslとまったく同じ読み方をすること(段差防止)
-    float4 OcclusionParams;
-    // これ以降(TimeParams / Sky* / Cloud* / PlanarReflectionPlane / Fog* / WaterBodyColor)は
-    // このシェーダーでは一切読まないため宣言しない
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 cbuffer RTReflectionConstants : register(b1)
 {
@@ -142,12 +91,7 @@ Texture2D BentNormalTexture : register(t16);
 
 RWTexture2D<float4> OutputTexture : register(u0);
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 // 指定位置から太陽へ影レイを撃ち、遮られていなければ1、遮られていれば0を返す
 float TraceSunShadow(float3 position, float3 normal, float3 toSun)

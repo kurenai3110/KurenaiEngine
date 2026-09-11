@@ -35,30 +35,7 @@ static const float kTwoPI = 6.28318530718f;
 // 黄金比の小数部。サンプルごとに方位角をずらす低食い違い量列(Rank-1格子)に使う
 static const float kGoldenRatioFrac = 0.61803398875f;
 
-cbuffer FrameConstants : register(b0)
-{
-    // バウンス面が画面のどこに映っているかを求めるのに使う
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    // xyz=太陽の進行方向(光が飛んでいく向き)。太陽へ向かうベクトルは -LightDirection.xyz
-    float4 LightDirection;
-    // rgb=太陽の放射輝度(露出適用済み)。太陽が無効なシーンでは0が入る
-    float4 LightColor;
-    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    float4 ShadowParams;
-    // 【宣言はここで止めている】このシェーダーが読むのはShadowParamsまでで、それより後ろは使わない。
-    // C++側のFrameConstantsはこの後ろにTimeParams・Sky*・Cloud*・PlanarReflectionPlane・
-    // Fog*・WaterBodyColorを持つが、cbufferは宣言順レイアウトなので、途中を飛ばして末尾だけを
-    // 宣言すると誤ったオフセットを読む。しかもコンパイルは通り絵も「それらしく」出るため気付けない。
-    // これらが必要になったら、C++の並びどおりに間のフィールドをすべて宣言すること
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 cbuffer RTAOConstants : register(b1)
 {
@@ -93,12 +70,7 @@ Texture2D DirectLightTexture : register(t8);
 // rgb=間接拡散光(イラディアンス), a=遮蔽率。SSAO/SSILの出力と同じ意味・同じフォーマット
 RWTexture2D<float4> OutputTexture : register(u0);
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 // PCG系の整数ハッシュ。ピクセルごとにサンプル位置を散らすためだけに使う
 uint HashUint(uint x)

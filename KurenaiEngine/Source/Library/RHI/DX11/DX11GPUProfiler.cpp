@@ -10,7 +10,7 @@ namespace Kurenai::RHI
         : m_Device(std::move(device))
         , m_Context(std::move(context))
     {
-        for (auto& slot : m_Slots)
+        for (auto& slot : m_QuerySlots)
         {
             D3D11_QUERY_DESC disjointDesc{};
             disjointDesc.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
@@ -18,7 +18,7 @@ namespace Kurenai::RHI
 
             slot.FrameStartQuery = CreateTimestampQuery();
             slot.FrameEndQuery = CreateTimestampQuery();
-            for (uint32_t i = 0; i < kMaxScopesPerFrame; ++i)
+            for (uint32_t i = 0; i < GPUProfilerCore::kMaxScopesPerFrame; ++i)
             {
                 slot.BeginQueries[i] = CreateTimestampQuery();
                 slot.EndQueries[i] = CreateTimestampQuery();
@@ -37,71 +37,60 @@ namespace Kurenai::RHI
 
     void DX11GPUProfiler::BeginFrame()
     {
-        FrameSlot& slot = m_Slots[m_WriteIndex];
-        if (slot.Pending)
+        if (m_Core.GetWriteSlot().Pending)
         {
             // このスロットを再利用する前に、前回計測分の結果を必ず確定させておく
             // (確定させないままBegin/Endし直すとクエリの内容が上書きされ結果を取りこぼす)
-            ResolveSlot(slot);
+            ResolveWriteSlot();
         }
 
-        slot.ScopeCount = 0;
-        m_Context->Begin(slot.DisjointQuery.Get());
-        m_Context->End(slot.FrameStartQuery.Get());
+        m_Core.ResetWriteSlotScopes();
+        QuerySlot& queries = m_QuerySlots[m_Core.GetWriteIndex()];
+        m_Context->Begin(queries.DisjointQuery.Get());
+        m_Context->End(queries.FrameStartQuery.Get());
     }
 
     void DX11GPUProfiler::BeginScope(const std::string& name)
     {
-        FrameSlot& slot = m_Slots[m_WriteIndex];
-        if (slot.ScopeCount >= kMaxScopesPerFrame)
+        uint32_t scopeIndex = 0;
+        if (!m_Core.TryBeginScope(name, scopeIndex))
         {
-            // 計測のみスキップする(描画自体には影響しない)。ただしGPU Frame Timeは
-            // 各区間の合計なので、この状態では表示値が実際より小さくなる。黙って捨てると
-            // 最適化の効果測定を誤らせるため一度だけ警告する
-            if (!m_ScopeOverflowLogged)
-            {
-                m_ScopeOverflowLogged = true;
-                Core::Logger::Warning(
-                    "DX11",
-                    "GPUプロファイラの計測区間が上限(" + std::to_string(kMaxScopesPerFrame) + ")を超えました。'" + name +
-                        "'以降は計測されず、GPU Frame Timeも過小表示になります。kMaxScopesPerFrameを増やしてください");
-            }
             return;
         }
-        slot.ScopeNames[slot.ScopeCount] = name;
-        m_Context->End(slot.BeginQueries[slot.ScopeCount].Get());
+        m_Context->End(m_QuerySlots[m_Core.GetWriteIndex()].BeginQueries[scopeIndex].Get());
     }
 
     void DX11GPUProfiler::EndScope()
     {
-        FrameSlot& slot = m_Slots[m_WriteIndex];
-        if (slot.ScopeCount >= kMaxScopesPerFrame)
+        uint32_t scopeIndex = 0;
+        if (!m_Core.TryEndScope(scopeIndex))
         {
             return;
         }
-        m_Context->End(slot.EndQueries[slot.ScopeCount].Get());
-        ++slot.ScopeCount;
+        m_Context->End(m_QuerySlots[m_Core.GetWriteIndex()].EndQueries[scopeIndex].Get());
     }
 
     void DX11GPUProfiler::EndFrame()
     {
-        FrameSlot& slot = m_Slots[m_WriteIndex];
-        m_Context->End(slot.FrameEndQuery.Get());
-        m_Context->End(slot.DisjointQuery.Get());
-        slot.Pending = true;
+        QuerySlot& queries = m_QuerySlots[m_Core.GetWriteIndex()];
+        m_Context->End(queries.FrameEndQuery.Get());
+        m_Context->End(queries.DisjointQuery.Get());
 
-        m_WriteIndex = (m_WriteIndex + 1) % kFrameLatency;
+        m_Core.MarkFrameRecorded();
     }
 
-    void DX11GPUProfiler::ResolveSlot(FrameSlot& slot)
+    void DX11GPUProfiler::ResolveWriteSlot()
     {
+        GPUProfilerCore::FrameSlot& slot = m_Core.GetWriteSlot();
+        QuerySlot& queries = m_QuerySlots[m_Core.GetWriteIndex()];
+
         D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjointData{};
         HRESULT hr = S_FALSE;
         // このスロットのGPU実行はkFrameLatency分前に発行済みのため通常は即座に完了しているが、
         // 念のため上限回数まで待つ。それでも完了しない場合は今回の結果確定を諦め、前回の値を表示し続ける
         for (int attempt = 0; attempt < 1000 && hr != S_OK; ++attempt)
         {
-            hr = m_Context->GetData(slot.DisjointQuery.Get(), &disjointData, sizeof(disjointData), 0);
+            hr = m_Context->GetData(queries.DisjointQuery.Get(), &disjointData, sizeof(disjointData), 0);
         }
 
         slot.Pending = false;
@@ -111,25 +100,15 @@ namespace Kurenai::RHI
             return;
         }
 
-        m_Results.clear();
-        m_Results.reserve(slot.ScopeCount);
-        // GPU Frame Timeは各パスの計測値の合計として算出する(FrameStart~FrameEndの全区間ではない)。
-        // DX11はSetRenderTarget(swapChain)でバックバッファに触れる際、vsyncによる暗黙のバッファ確保待ちが
-        // 同一コマンドストリーム内でGPU側の待ちとして発生しうるが、この待ちはどのスコープにも属さない
-        // (DX11SwapChain::Present()の実測でGPU Waitとして別途報告される)。全区間で計算すると
-        // この待ちが計上されてしまいDX12(フェンス待ちが完全に計測区間外で発生する)と数値の意味が
-        // 揃わなくなるため、両バックエンドとも「各パスの合計」に統一する
-        float totalFrameTimeMs = 0.0f;
+        m_Core.BeginResults(slot.ScopeCount);
         for (uint32_t i = 0; i < slot.ScopeCount; ++i)
         {
             UINT64 begin = 0;
             UINT64 end = 0;
-            m_Context->GetData(slot.BeginQueries[i].Get(), &begin, sizeof(begin), 0);
-            m_Context->GetData(slot.EndQueries[i].Get(), &end, sizeof(end), 0);
-            const float timeMs = static_cast<float>(end - begin) * 1000.0f / static_cast<float>(disjointData.Frequency);
-            m_Results.push_back({ slot.ScopeNames[i], timeMs });
-            totalFrameTimeMs += timeMs;
+            m_Context->GetData(queries.BeginQueries[i].Get(), &begin, sizeof(begin), 0);
+            m_Context->GetData(queries.EndQueries[i].Get(), &end, sizeof(end), 0);
+            m_Core.AddScopeResult(slot.ScopeNames[i], begin, end, disjointData.Frequency);
         }
-        m_TotalFrameTimeMs = totalFrameTimeMs;
+        m_Core.EndResults();
     }
 }

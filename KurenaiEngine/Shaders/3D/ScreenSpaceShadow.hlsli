@@ -5,7 +5,7 @@
 // ShadowSampling.hlsliに次ぐ5つ目の共有ヘッダー。
 //
 // 【インクルードの前提】以下が宣言済みであることを前提にしているため、それらの後ろで
-// #includeすること(既存の共有ヘッダーと同様、インクルードガードは持たない):
+// #includeすること(インクルードガードは二重定義だけを防ぎ、この前提を満たすものではない):
 //   - FrameConstants の ViewProj
 //   - LightingConstants(b1)の SSSParams0 / SSSParams1
 //   - Samplers.hlsli の DataSampler(s2、Point+Clamp)
@@ -23,6 +23,9 @@
 // カリング(「候補は確実に遮蔽されている」の判定)向きの向きであって、レイマーチの空き空間
 // スキップが必要とする「ブロック内に遮蔽物は確実に無い」の判定にはmax=最近が要る。
 // 向きが逆なので流用できず、全解像度の深度を線形マーチしている(18章)。
+
+#ifndef KURENAI_SCREEN_SPACE_SHADOW_HLSLI
+#define KURENAI_SCREEN_SPACE_SHADOW_HLSLI
 
 // レイマーチのステップ数の上限。SSSParams0.xで実際のステップ数を指定するが、
 // 定数上限を置くことでコンパイラがループを有界と扱えるようにする
@@ -196,3 +199,5 @@ float ComputeScreenSpaceShadow(
 
     return saturate(1.0f - occlusion);
 }
+
+#endif

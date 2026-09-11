@@ -8,10 +8,8 @@
 // タイル内で画素ごとに法線が違うため、法線に依存させると「代表法線からは見えないが、
 // ある画素からは見える」灯を落としてしまうからである。その結果、
 // **法線が候補集合と噛み合わない面では候補の半分が背向きになり、提案分布が外れる。**
-// 実測(ManyLightsTest / N=256 / |相対誤差|中央値)では、球で 0.0395 に対し床は 0.0052。
-// これは曲面に固有ではなく、**平らな床でも法線を候補集合と噛み合わない向きに固定すると
-// 0.0052 → 0.0220 と 4.2 倍悪化する**。つまり「その画素の法線から見て候補のうち何割が
-// 背向きか」が効いている。
+// 曲面に固有ではなく「その画素の法線から見て候補のうち何割が背向きか」で決まる
+// (実測は docs/ImplementationDetail.md 61.7f)。
 //
 // 近傍から借りれば、法線の近い画素が既に引き当てた良い灯を使える。プールの提案が
 // 法線を見られないことを、選んだあとで埋め合わせる形になる。
@@ -19,7 +17,6 @@
 // 【結合は2通り持っている】
 //   0 = confidence(M)で重み付ける標準形(Bitterli 2020 Alg.4)。単純だが**不偏ではない** ――
 //       近傍が自分と違う候補集合(違うタイル)から引いている可能性を無視するため。
-//       実測で総和の相対差が +2.2% 出た。
 //   1 = 不偏(Bitterli 2020 Alg.6)。候補の選び方は同じで、**最後に割る数だけが違う**。
 //       ΣM ではなく Z ―― 「選ばれたサンプルを実際に生成しえた候補の confidence の合計」で割る。
 //       「生成しえた」は「その灯がその候補のタイルの候補集合に入る」かつ
@@ -33,60 +30,22 @@
 // 【初期可視レイが有効なときは、Z の判定を可視性まで含めて行う(バイアス補正レイ)】
 // 殺しが入ると各画素のストリームは「可視な灯しか配れない」形に変わる。Z が可視性を
 // 見ずに M を数えると、殺しの起きる画素の周囲(=影の縁)だけ分母が太り、
-// **影が太く・濃くなる**系統誤差になる(実測 -3.6%。一様ではなく縁に集中するので
-// 見た目に出る)。前提は「全ストリームが可視フィルタ済み」であること ――
+// **影が太く・濃くなる**系統誤差になる(一様ではなく縁に集中するので見た目に出る)。
+// 前提は「全ストリームが可視フィルタ済み」であること ――
 // 現フレームは初期可視レイ、履歴は時間検証レイ(MegaLightsTemporal.hlsl)が保証する。
 // 検証されていない履歴が混ざる構成でこの判定を行うと、遮蔽された灯を正当に運ぶ候補を
-// 誤って外し、参照の1万倍級のファイアフライになる(実測: 総和+17.5%。61.7f)。
+// 誤って外し、参照の1万倍級のファイアフライになる(実測は docs/ImplementationDetail.md 61.7f)。
 //
 // RayQuery(SM 6.5)を使うため、DX12 かつ DXR Tier 1.1 のときだけ生成される
 // (KurenaiShaderPacker の kSkipDxbc50Files に登録済み)。
 #include "NormalEncoding.hlsli"
 #include "SpecularEnergy.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    // w にスペキュラのエネルギー補正のモードが入っている
-    float4 ShadowParams;
-    // 【宣言はここで止めている】読むのは ShadowParams まで
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
-cbuffer MegaLightsStochasticConstants : register(b1)
-{
-    // x=出力幅, y=出力高, z=初期候補数M(このパスでは未使用), w=影レイを撃つか(未使用)
-    uint4 Params0;
-    // x=候補プールの有効タイル数X(格子ジッター有効時だけ+1)、
-    // y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
-    uint4 Params1;
-    // x=借りる近傍の数, y=探す半径(ピクセル),
-    // z=結合の方式(0=confidence重み, 1=不偏化のZ),
-    // w=初期可視レイでリザーバを殺すか(Initialが読む。このパスでは未使用)
-    uint4 Params2;
-    // x=射影行列の(0,0)成分, y=同(1,1)成分, zw=未使用。
-    // MIS重みが「その灯が隣のタイルへ届くか」を判定するのに、隣のタイルの錐台を組み立て直す
-    float4 Params3;
-    // x=時間再利用の履歴が有効か。可視性込みのZを使ってよいかの判定に要る(下記)、
-    // y=空間再利用の反復番号(0起点)。近傍の型板の種に混ぜて、反復ごとに別の近傍を選ばせる、
-    // zw=未使用
-    uint4 Params4;
-    // Params5はInitial/Resolveが使う1画素あたりの標本数。このパスでは未使用だが、
-    // 末尾のParams6を正しいオフセットで読むため途中を飛ばさず宣言する
-    uint4 Params5;
-    // xy=候補プールのタイル格子オフセット(画素、各0〜15)、zw=未使用
-    uint4 Params6;
-};
+#include "ShaderInterop/MegaLightsStochasticConstants.hlsli"
 
 RaytracingAccelerationStructure SceneTLAS : register(t0);
 
@@ -131,12 +90,7 @@ static const float kMaxMaterialDiff = 0.1f;
 static const float kTwoPI = 6.28318530718f;
 static const float kGoldenRatioFrac = 0.61803398875f;
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 uint HashUint(uint x)
 {
@@ -547,7 +501,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 【初期可視レイが有効なときは、Z も可視性まで含めて判定する】殺しが入ると
         // 各候補のストリームは「可視な灯しか配れない」形に変わる。選ばれた灯が見えない
         // 候補の M を数えると、殺しの起きる画素の周囲だけ分母が太り、暗い側の系統誤差に
-        // なる(実測 -3.6%。docs/ImplementationDetail.md 61.7f)。
+        // なる(実測は docs/ImplementationDetail.md 61.7f)。
         // この前提が成り立つのは、**履歴も時間検証レイで検証されている**から
         // (MegaLightsTemporal.hlsl)。検証しない構成でここを有効にすると、履歴由来の
         // 「遮蔽された灯を正当に運ぶ」候補をレイで分母から外してしまい、
@@ -602,7 +556,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             // ことが分かった候補は、実際にその灯を配れない ―― 分母から外すのが正しい。
             // 【検証されていない履歴が混ざる構成でこれをやってはいけない】遮蔽された灯を
             // 正当に運ぶ候補を誤って外し、分子に残った寄与が小さな分母で割られて
-            // 参照の1万倍級のファイアフライになる(実測: 総和+17.5%。61.7f)。
+            // 参照の1万倍級のファイアフライになる(実測は docs/ImplementationDetail.md 61.7f)。
             // 勝者自身は自分のサンプルについて可視検証済みなので必ず分母に残り、
             // W = Σw/(Z・p̂) の上界は変わらない(Z ≥ 勝者のM)。
             if (visibilityAware)

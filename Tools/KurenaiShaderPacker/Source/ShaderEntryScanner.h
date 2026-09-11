@@ -40,6 +40,9 @@ namespace Kurenai::ShaderPacker
     // .claude/skills/shader-check/scripts/check-shaders.ps1 は .hlsl しか走査しないため、
     // この種のエントリを今まで一度も検証できていない。
     //
+    // 【入れ子のインクルードは一番外側の .hlsl のフォルダ基準で解決する】fxc の
+    // D3D_COMPILE_STANDARD_FILE_INCLUDE も dxc の -I もそう解決するため、それに合わせる
+    // (見つからなければ含めた側のフォルダも試す。詳細は .cpp の ExpandRecursive)。
     // 同じファイルは1度だけ展開する(#pragma once 相当。循環インクルードで止まらなくなるのを防ぐ)。
     // 山括弧の #include <...> は使っていないため扱わない。
     // 読めないインクルードは、そこだけ空にして続行する(本当に必要ならコンパイラが弾く)

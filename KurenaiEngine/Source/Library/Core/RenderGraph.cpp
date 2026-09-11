@@ -1,6 +1,7 @@
 #include "Core/RenderGraph.h"
 
 #include <queue>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -30,6 +31,92 @@ namespace Kurenai::Core
         }
 
         m_Passes.push_back(std::move(desc));
+    }
+
+    std::string RenderGraph::BuildPassManifest(std::string* executionOrderError) const
+    {
+        if (executionOrderError != nullptr)
+        {
+            executionOrderError->clear();
+        }
+
+        std::unordered_map<const RHI::IRHITexture*, size_t> textureIds;
+        std::unordered_map<const RHI::IRHIBuffer*, size_t> bufferIds;
+        std::ostringstream manifest;
+        manifest << "# KurenaiEngine RenderGraph pass manifest\n";
+        manifest << "# passes=" << m_Passes.size() << "\n[registration]\n";
+
+        const auto formatTextures = [&textureIds](const std::vector<RHI::IRHITexture*>& textures)
+        {
+            std::ostringstream values;
+            for (size_t i = 0; i < textures.size(); ++i)
+            {
+                if (i != 0) values << ',';
+                const RHI::IRHITexture* texture = textures[i];
+                if (texture != nullptr)
+                {
+                    const auto it = textureIds.emplace(texture, textureIds.size()).first;
+                    values << 'T' << it->second;
+                }
+            }
+            return values.str();
+        };
+        const auto formatTexture = [&textureIds](const RHI::IRHITexture* texture)
+        {
+            if (texture == nullptr) return std::string{};
+            const auto it = textureIds.emplace(texture, textureIds.size()).first;
+            return std::string("T") + std::to_string(it->second);
+        };
+        const auto formatBuffers = [&bufferIds](const std::vector<RHI::IRHIBuffer*>& buffers)
+        {
+            std::ostringstream values;
+            for (size_t i = 0; i < buffers.size(); ++i)
+            {
+                if (i != 0) values << ',';
+                const RHI::IRHIBuffer* buffer = buffers[i];
+                if (buffer != nullptr)
+                {
+                    const auto it = bufferIds.emplace(buffer, bufferIds.size()).first;
+                    values << 'B' << it->second;
+                }
+            }
+            return values.str();
+        };
+
+        for (size_t index = 0; index < m_Passes.size(); ++index)
+        {
+            const RenderGraphPassDesc& pass = m_Passes[index];
+            // この順序がリソース ID の仕様なので、列挙順を変えてはならない。
+            const std::string reads = formatTextures(pass.Reads);
+            const std::string renderTargets = formatTextures(pass.RenderTargets);
+            const std::string depthTarget = formatTexture(pass.DepthTarget);
+            const std::string writes = formatTextures(pass.Writes);
+            const std::string bufferReads = formatBuffers(pass.BufferReads);
+            const std::string bufferWrites = formatBuffers(pass.BufferWrites);
+            manifest << index << ' ' << pass.Name
+                     << " reads=" << reads
+                     << " rts=" << renderTargets
+                     << " depth=" << depthTarget
+                     << " writes=" << writes
+                     << " bufreads=" << bufferReads
+                     << " bufwrites=" << bufferWrites
+                     << " swapchain=" << (pass.SwapChainTarget != nullptr ? "yes" : "no") << '\n';
+        }
+
+        try
+        {
+            const std::vector<size_t> order = ResolveExecutionOrder();
+            manifest << "[execution]\n";
+            for (size_t index = 0; index < order.size(); ++index)
+            {
+                manifest << index << ' ' << m_Passes[order[index]].Name << '\n';
+            }
+        }
+        catch (const std::exception& exception)
+        {
+            if (executionOrderError != nullptr) *executionOrderError = exception.what();
+        }
+        return manifest.str();
     }
 
     std::vector<size_t> RenderGraph::ResolveExecutionOrder() const

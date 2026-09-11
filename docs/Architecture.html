@@ -219,7 +219,7 @@
   <div class="toc-title">目次</div>
   <ol>
     <li><a href="#pipeline">1. 描画パイプライン</a></li>
-    <li><a href="#rendergraph">2. RenderGraph</a></li>
+    <li><a href="#rendergraph">2. RenderGraph とパス群</a></li>
     <li><a href="#depth">3. 深度バッファ(Reverse-Z)</a></li>
     <li><a href="#shadow">4. カスケードシャドウマップ(CSM)とPCSS</a></li>
     <li><a href="#tangent">5. 法線マッピングの接線ベクトル計算</a></li>
@@ -342,15 +342,149 @@ Tonemapパスで行う。</strong>後段のSSRパスが反射元として読む�
 </section>
 
 <section id="rendergraph">
-<h2>2. RenderGraph</h2>
+<h2>2. RenderGraph とパス群</h2>
 <p>
 上記の各パスは、内部的には<code>Kurenai::Core::RenderGraph</code>(軽量なレンダーグラフ、
 <code>Source/Library/Core/RenderGraph.h</code>)へパスごとに読み書きするテクスチャを宣言する形で
 登録されており、実行順序はその読み書き依存関係から自動的に解決されます(トランジェントリソースの
 確保・エイリアシングは行わず、永続確保済みテクスチャをそのまま扱う軽量な実装です)。
 レンダーターゲットの自動バインドとCPU/GPUプロファイラのスコープ計測もこのクラスが肩代わりするため、
-<code>KurenaiEngine3D::Render()</code>側は各パスの中身(ビューポート設定・クリア・描画/ディスパッチ呼び出し)を
-書くだけで済みます。
+パスを登録する側は中身(ビューポート設定・クリア・描画/ディスパッチ呼び出し)を書くだけで済みます。
+</p>
+
+<h3>2.1 パスの登録はパス群クラスが持つ</h3>
+<p>
+パスの登録コードは<code>KurenaiEngine3D</code>本体ではなく、<code>Source/Engine/Passes/</code>の
+<strong>10個のパス群クラス</strong>が持ちます ――
+<code>DDGIPasses</code> / <code>EnvironmentPasses</code> / <code>GeometryPasses</code> /
+<code>LightingPasses</code> / <code>MegaLightsPasses</code> / <code>PostProcessPasses</code> /
+<code>ReflectionPasses</code> / <code>ReflectionProbePasses</code> / <code>ShadowPasses</code> /
+<code>PresentPass</code>。<code>Render()</code>はこれらの登録メソッドを<strong>13回</strong>呼びます
+(3つのクラスは登録を2回に分けています ―― <code>ShadowPasses</code>はカスケードと
+レイトレースシャドウ、<code>DDGIPasses</code>はプローブ更新と解決、<code>LightingPasses</code>は
+直接光/AOとシーン合成)。
+</p>
+<p>
+<strong>この13回の呼び出し順は実行順の一部です。</strong>
+<code>RenderGraph::Execute()</code>のトポロジカルソート(Kahn法)は、準備完了のパスが複数あるとき
+<strong>登録順(インデックス最小)を優先します</strong>。読み書き依存が同点になるパスどうしは
+登録した順に実行されるため、<strong>登録の順番を入れ替えると実行順が変わり、絵が変わります</strong>。
+</p>
+
+<h3>2.2 <code>RenderFrameContext</code> ―― パス群へ配る入力</h3>
+<p>
+パス群はエンジンのメンバへ直接触れません。パス群が読む値は
+<code>Rendering::RenderFrameContext</code>(<code>Source/Engine/Rendering/RenderFrameContext.h</code>)
+という<strong>1つのスナップショット</strong>にまとめ、パス群へは<code>const&amp;</code>で配ります。
+現在81フィールドあり、解像度・行列・露出・各パスを走らせるかの述語・デバイス/スワップチェーン/
+サンプラーのほか、共有リソースの束(<code>RenderTargets</code> / <code>IBLResources</code> /
+<code>GIResources</code> / <code>SkyResources</code> / <code>SceneGPUResources</code> /
+<code>DroneShowResources</code>)へのポインタが載っています。
+</p>
+<p>
+大半はフレームの先頭で確定しますが、<strong>6フィールドだけは登録の合間に埋まります</strong> ――
+<code>GBufferViewport</code> / <code>ShadowViewport</code> / <code>BakedLightCount</code> /
+<code>ProbeFaceProjection</code> / <code>ProbeCaptureReads</code> / <code>CascadeViewProj</code>で、
+最初の登録(<code>EnvironmentPasses</code>)の後、2番目の登録の前に<code>RegisterPasses</code>が書きます。
+<strong>これらを読む群より前で書かれていることが前提</strong>なので、登録の並びと同様に
+この書き込みの位置も動かせません。
+</p>
+<p>
+個別の引数で渡さずスナップショットにしてあるのは、パス群が増えるたびに引数が増え、
+どの値がどのパスで要るのかが読めなくなるためです。<code>const&amp;</code>で渡すことで、
+受け取る側が書き換えられないことも型で示せます。
+</p>
+<p>
+パス群が読む設定は<code>Rendering::RenderSettingsSnapshot</code>として14個の設定構造体を
+まとめて写します(エンジンとUIしか読まないSystem / Quality / Fog / Starsは載せません)。
+<strong>写す位置を<code>Render()</code>の先頭へ上げてはいけません</strong> ――
+UIパネルの描画(<code>m_UIManager-&gt;Draw</code>)が終わった後で写す決まりで、
+先頭へ上げるとUIが書き換える前の値を配ることになります。
+</p>
+
+<h3>2.3 <code>RenderBlackboard</code> ―― 登録の途中で確定する出力</h3>
+<p>
+<code>Rendering::RenderBlackboard</code>は<strong>登録が進むにつれて確定していく値</strong>を置く場所で、
+「前の群が書いた先を、後ろの群が読む」ための受け渡しに使います。
+<code>RenderFrameContext</code>が「登録より前に決まる入力」なのに対し(2.2の6フィールドは
+<code>RegisterPasses</code>が埋める例外で、群が書くわけではありません)、こちらは
+<strong>群そのものが登録の途中で書き換えます</strong>。したがって書く側は非<code>const</code>参照、
+読む側は<code>const&amp;</code>で受けます。
+</p>
+<p>
+載っているのは、Tonemapが読むHDRシーンカラー(<code>HdrSceneColor</code>)、ソフトウェアラスタライザ・
+超解像・MegaLightsデノイズを今フレーム走らせたかの3つの旗、モデル単位GPUカリングの候補が
+揃ったか(<code>ModelCullReady</code>)、MegaLightsの蓄積フレーム数です。
+</p>
+<p>
+<strong>ここに置いたポインタを<code>Execute</code>ラムダへ渡すときは必ず値で捕捉してください。</strong>
+Blackboardを参照捕捉すると、あとで別の群が書き換えた値をラムダが読むことになり、
+登録した時点の依存宣言(Reads/Writes)と実際にバインドするテクスチャが食い違います。
+<code>HdrSceneColor</code>はTAAパスを登録した<strong>後</strong>で確定させる決まりで、
+先に差し替えるとTAAが自分の出力を読む形になりグラフが循環します。
+</p>
+
+<h3>2.4 <code>Render()</code>の構成</h3>
+<p>
+<code>Render()</code>自身は<strong>フレームの流れ</strong>を書いた関数で、まとまった処理は名前の付いた
+関数へ出してあります(太陽光・露出・カスケード行列のように、次の段へ渡す短い計算だけが
+<code>Render()</code>に直接残っています)。切り出した関数の定義は
+<code>Source/Engine/Rendering/RenderFrame.cpp</code>
+(<code>KurenaiEngine3D</code>のメンバ関数のまま翻訳単位だけを分けたもの)、
+<code>Diagnostics/RenderDumpService.cpp</code>、および<code>KurenaiEngine3D.cpp</code>にあります。
+</p>
+<ol>
+<li><strong>統計のリセットと作り直しの確定</strong> ―― フレーム単位のカウンタを前フレームぶんへ控えて
+0に戻し、ウィンドウのリサイズ・予約された作り直し・シーンの切り替え・常駐ミップの差し替えを
+確定させる(<code>ApplyPendingRecreations</code>)</li>
+<li><strong>ウィンドウが0x0(最小化)なら、ここで早期<code>return</code></strong>。
+1.は潰れている間も進み、2.以降は走りません。<strong>この境界を動かさないこと</strong></li>
+<li><strong>ImGuiのフレーム開始と、精度/解像度の作り直し</strong>
+(<code>BeginImGuiFrame</code> / <code>RecreateDirtyRenderTargets</code>)。
+作り直しは<code>WaitForGPUIdle()</code>を挟むため、GPUコマンドをまだ1つも積んでいないこの位置で行う</li>
+<li><strong>フレームの値の組み立て</strong>(<code>BuildFrameContext</code>) ―― ジッター・ライト配列・
+空のパラメータ・<code>FrameConstants</code>・<code>LightingConstants</code>を作り、
+<code>RenderFrameContext</code>を埋める</li>
+<li><strong>パスの登録</strong>(<code>RegisterPasses</code>) ―― 2.1の13回</li>
+<li><code>graph.Execute()</code></li>
+<li><strong>フレームの締め</strong> ―― GPUカリング結果の読み戻し、ImGuiの描画とPresent、
+次フレームが参照する前フレーム状態の確定、計測とダンプの回収、履歴バッファのping-pong反転</li>
+</ol>
+
+<h3>2.5 スナップショットが指す先の寿命</h3>
+<p>
+<code>RenderFrameContext</code>の81フィールドのうち<strong>22個は生ポインタ</strong>で、
+そのうち<strong>6個は<code>Render()</code>のローカル変数を指しています</strong>。
+</p>
+<table>
+<thead><tr><th>フィールド</th><th>指す先(<code>Render()</code>のローカル)</th></tr></thead>
+<tbody>
+<tr><td><code>Lights</code></td><td><code>std::vector&lt;GPULight&gt; gpuLights</code></td></tr>
+<tr><td><code>Lighting</code></td><td><code>Passes::LightingConstants lightingConstants</code></td></tr>
+<tr><td><code>Constants</code></td><td><code>ShaderInterop::FrameConstants constants</code></td></tr>
+<tr><td><code>Sun</code></td><td><code>SunLighting sunLighting</code></td></tr>
+<tr><td><code>ProbeCaptureReads</code></td><td><code>std::vector&lt;RHI::IRHITexture*&gt; probeCaptureReads</code></td></tr>
+<tr><td><code>CascadeViewProj</code></td><td><code>DirectX::XMMATRIX cascadeViewProj[kCascadeCount]</code></td></tr>
+</tbody>
+</table>
+<p>
+<strong>この6つの実体は必ず<code>Render()</code>のスコープに置いてください。</strong>
+<code>BuildFrameContext</code>や<code>RegisterPasses</code>のローカルにすると、その関数を抜けた時点で
+解放され、<code>graph.Execute()</code>が解放済みメモリを読みます。
+</p>
+<p>
+そのため、この6つはどれも実体を<code>Render()</code>に置いたまま参照で渡します。
+中身を作るのが関数側の4つ(<code>gpuLights</code> / <code>constants</code> /
+<code>lightingConstants</code> / <code>probeCaptureReads</code>)は<strong>出力引数(非<code>const</code>参照)</strong>、
+<code>Render()</code>が作り終えてから渡す2つ(<code>sunLighting</code> / <code>cascadeViewProj</code>)は
+<strong>入力の<code>const&amp;</code></strong>です。渡し方は違いますが、<strong>実体の寿命が
+<code>Render()</code>のスコープである点は6つとも同じ</strong>で、それが要件です。
+</p>
+<p>
+<strong>この壊れ方は描画結果の比較では捕まりません。</strong>解放直後なら中身が残っているため、
+中間バッファをバイト比較しても同じ絵が出ます。<strong>コードレビューで見張るしかない種類の
+欠陥です。</strong>同じ理由で、パスの<code>Execute</code>ラムダは<code>RenderFrameContext</code>そのものではなく
+<strong>必要な値を値捕捉します</strong> ―― 構造体を参照捕捉すると、登録関数を抜けた時点で参照が浮きます。
 </p>
 </section>
 
@@ -895,6 +1029,52 @@ TRS(平行移動・回転・スケール)から<code>Assets::ModelInstance::Worl
 シーンでは発行されるコマンド列がこの機能を持たない場合と完全に同一</b>になる。半透明パスは奥から手前への
 描画順が正しさの前提で並べ替えられないため、この「必要になった時点で切り替える」方式が必須になる。
 </p>
+<h3>10.3 ジオメトリを描く9箇所が共有する列挙ループ</h3>
+<p>
+ジオメトリを列挙するループは全部で9箇所ある —— シャドウ(カスケード)・反射プローブ・
+DDGI(ラスタ)・深度プリパス・G-Buffer・半透明フォワード・平面反射・
+ソフトウェアラスタライザ・モデル単位GPUカリングの候補集め。
+どれも<b>「インスタンスの列挙 → 錐台カリング → 段(モデルLOD)の選択 →
+メッシュのふるい分け → メッシュ単位のカリング」までは同じ</b>で、違うのは
+PSOの選び方・定数バッファ・張るテクスチャ・ドローの発行だけである。
+</p>
+<p>
+前半を<code>KurenaiEngine3D::ForEachGeometryDraw</code>
+(<code>Source/Engine/Rendering/GeometryDrawLoop.h</code>)に置き、後半を
+コールバックとして呼び出し側に残す。<b>深度プリパスとG-Bufferが同じ組を描くことは、
+同じ引数で同じ関数を呼ぶことで保証される</b>。両者が食い違うと
+「深度は書かれているのに色が書かれない」穴が開くが、これは絵を見ても気づけないため、
+手で揃える方式は採らない。
+</p>
+<p>
+パスごとの違いは<code>GeometryDrawLoopDesc</code>の引数として表に出す。
+<b>次の3つは共通化で潰してはならない差である。</b>
+</p>
+<table>
+<tr><th>引数</th><th>意味</th></tr>
+<tr><td><code>LODMode</code></td><td>
+<code>Coarsest</code>(シャドウ・プローブ・DDGI。テクスチャを読まないので詳細な段に意味が無い) /
+<code>Current</code>(半透明・平面反射・ソフトウェアラスタライザ。<b>クロスディザ非対応</b>なので
+フェード中でも1段に決め打つ) /
+<code>Fade</code>(深度プリパス・G-Buffer。フェード中は2段を重ねる)
+</td></tr>
+<tr><td><code>MeshFilter</code></td><td>
+<code>Opaque</code> / <code>Transparent</code> /
+<code>All</code>(<b>シャドウ専用</b>。BLENDのメッシュも実体のまま影を落とす従来の挙動を保つ)
+</td></tr>
+<tr><td><code>Frustum</code></td><td>
+<code>nullptr</code> なら<b>カリングを一切行わず統計にも入れない</b>。
+DDGIのラスタ経路がこれで、プローブの位置ごとに結果が変わり定数バッファの予算計算と
+食い違うため意図的にカリングを入れていない
+</td></tr>
+</table>
+<p>
+メッシュごとに呼ぶコールバックは1フレームに数千回通るため、
+<code>ForEachGeometryDraw</code>は間接呼び出しを避けてヘッダー上のテンプレートにしてある。
+視錐台の抽出(<code>ExtractFrustumPlanes</code>)・AABB判定(<code>IsAABBVisible</code>)・
+メッシュ単位の判定(<code>IsMeshVisibleWithStats</code>)は非テンプレートで
+<code>GeometryDrawLoop.cpp</code>にある。
+</p>
 <p>
 事前パックにした効果、モデル行列をb1へ同居させているDX12側の事情、
 <code>.kscene</code>をGit管理する理由、ミラーリングで何が起きるか、CULL_NONEを採らない理由は
@@ -1330,21 +1510,38 @@ Renderスレッドはフレームを進め続けるが、<strong>旧シーンは
 </p>
 <p>
 機能を1つ足すときに触るのは原則「そのパネルの<code>.cpp</code>」だけになる。新しいパネルを
-足す場合だけ、<code>UIManager</code>のコンストラクタへの追加・既定ドックスロットへの追加・
-<code>KurenaiEngine3D.h</code>の前方宣言とfriend宣言・<code>kDockSpaceId</code>の世代繰り上げが
-セットで必要になる(いずれか1つでも漏れると、パネルが出ない/privateに触れない/
-既存の<code>imgui.ini</code>のせいで宙に浮く、のいずれかが起きる)。
+足す場合だけ、<code>UIManager</code>のコンストラクタへの追加(<code>UIManager.cpp</code>の
+<code>m_Panels.push_back</code>の並び)・既定ドックスロットへの追加・<code>kDockSpaceId</code>の
+世代繰り上げがセットで必要になる(いずれか1つでも漏れると、パネルが出ない/
+既存の<code>imgui.ini</code>のせいで宙に浮く、のどちらかが起きる)。
+<strong><code>KurenaiEngine3D.h</code>は触らない</strong> ―― パネルはエンジンの公開APIしか使わないため、
+あちら側にパネルの名前が出てくることはない。
 </p>
 <p>
-各パネルは<code>KurenaiEngine3D</code>のパラメータメンバ(<code>m_SSAORadius</code>等)を
-ImGuiウィジェットへアドレスで直接渡すため、<code>KurenaiEngine3D</code>のprivateへアクセスする
-必要がある。ここは<strong>friend宣言</strong>で解決している。
+各パネルはパラメータをImGuiウィジェットへ<strong>アドレスで直接渡す</strong>ため、書き換え可能な参照が要る。
+ここは<code>KurenaiEngine3D</code>が<strong>設定構造体への参照を返す公開アクセサ</strong>
+(<code>GetAmbientOcclusionSettings()</code>・<code>GetShadowSettings()</code>等)を持つことで解決している。
+パラメータは種類ごとの構造体(<code>Settings/*.h</code>)へまとまっており、パネルは
+<code>&amp;m_Engine.GetAmbientOcclusionSettings().SSAORadius</code>のように書く。
+<strong>friend宣言は使っていない</strong> ―― 以前はパネルを<code>friend</code>にしていたが、
+パラメータを設定構造体へ移した結果、公開アクセサ1本で足りるようになった
+(当初friendを選んだ判断と、それが不要になった経緯は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 13.6.1)。
 </p>
 <p>
-<code>m_SceneMutex</code>の保護対象は、UIの描画がRenderスレッドから、<code>LoadScene</code>が
-Updateスレッドから同じメンバを触るという関係で決まる。またfriendは全privateメンバを
-見せてしまうため、<strong>「UIから触ってよいのはパラメータ用メンバだけで、RHIリソース
-(<code>m_GBufferAlbedo</code>等)には触らない」</strong>という規約は各パネルの実装側で守る必要がある。
+シーンの受け渡しを守るミューテックスが2本(<code>m_LoadedSceneMutex</code>: Loader→Renderの完成品、
+<code>m_AppliedSceneMutex</code>: Render→Updateの初期カメラとウィンドウタイトル)あるのは、
+UIの描画がRenderスレッドから、<code>LoadScene</code>がUpdateスレッドから同じメンバを触るという
+関係で決まる。
+パネルが触るのは設定構造体だけではない。表示のための状態(<code>GetRenderStats()</code>・
+<code>GetCPUProfiler()</code>・<code>GetEmissiveProxies()</code>等)はconst参照で読む。
+バックエンド名を出すための<code>GetDevice()</code>は非constのポインタで、
+<strong>型の上では何でもできる</strong>(パネル側が読むだけに留めている)。書き換え可能な参照を返すアクセサも
+設定構造体だけではなく、シーンが持つ配列(<code>GetLights()</code>・<code>GetReflectionProbes()</code>)、
+再計算を要求する旗(<code>GetSkyBakeDirty()</code>等の<code>bool&amp;</code>)、
+スレッド間で共有する状態(<code>GetTAAHistoryValid()</code>等の<code>std::atomic&amp;</code>)にも及ぶ。
+<strong>「RHIリソース(<code>RenderTargets::GBufferAlbedo</code>等)にはUIから触らない」</strong>という規約は
+型では縛れておらず、アクセサを増やすときに守る決めごとである ―― <code>friend</code>で
+全privateを見せていた頃と比べて露出は狭まったが、なくなってはいない。
 </p>
 <p>
 ウィンドウ名は<code>"日本語表示###ASCII_ID"</code>形式にしている。<code>ImHashStr</code>は文字列中に
@@ -1605,8 +1802,10 @@ IBLのために<code>IRHIDevice</code>/<code>IRHICommandList</code>は以下のA
 </p>
 <ul>
 <li><code>CreateMippedUAVTexture(width, height, format, mipLevels)</code> —
-ミップごとに個別のUAVを張るテクスチャを作る。<code>CreateHiZTexture</code>はこの関数を
-R32_Float固定で呼ぶだけの薄いラッパーである。</li>
+ミップごとに個別のUAVを張るテクスチャを作る。Hi-Z(<code>R32_Float</code>)もIBLの
+プリフィルタ済み鏡面(<code>R16G16B16A16_Float</code>)もこの1本で作る
+(以前あった用途名のファクトリ<code>CreateHiZTexture</code>は、フォーマットを固定して
+これへ委譲するだけだったため削除した)。</li>
 <li><code>CreateUAVTextureCube(size, format)</code> / <code>CreateMippedUAVTextureCube(size, format, mipLevels)</code> —
 上記の「キューブマップ版」。DX11は<code>ArraySize=6</code> + <code>D3D11_RESOURCE_MISC_TEXTURECUBE</code>の
 <code>Texture2D</code>として作成し、読み取り用SRVは<code>D3D11_SRV_DIMENSION_TEXTURECUBE</code>(全6面・
@@ -1639,7 +1838,7 @@ t10(BRDFLUT)を使う。DX12は全パイプラインステートで共有する�
 (14.9節のエネルギー補正で<code>Ess = brdf.x + brdf.y</code>が必要なため)。このパスは
 t0〜t3がG-Buffer、t4がシャドウマップ配列(<code>Texture2DArray</code>。4.1節)、
 <b>t8がライトリストの<code>StructuredBuffer</code></b>で埋まっているため、LUTは<code>t9</code>にある。
-RenderGraphの<code>.Reads</code>へ<code>m_BRDFLUTTexture</code>を挙げることで、
+RenderGraphの<code>.Reads</code>へ<code>IBLResources::BRDFLUTTexture</code>を挙げることで、
 このLUTのWriterであるIBLBakeパスより後に自動的に順序付けられる。
 </p>
 <p>
@@ -1823,7 +2022,7 @@ Kulla-Contyの補正式は「乗算先が単一散乱の方向アルベドであ
 <p>
 <b>既定の描画経路はプリフィルタ済み鏡面の最終ミップで、
 専用イラディアンスマップは既定経路から外れている</b>。ただし
-<code>CSIrradiance</code>・<code>m_IrradianceTexture</code>・
+<code>CSIrradiance</code>・<code>IBLResources::IrradianceTexture</code>・
 <code>m_IrradiancePipelineState</code>・デバッグ表示はいずれも<b>削除せずそのまま残してある</b>
 (いつでも両経路を突き合わせて検証できる状態を保つため)。
 <code>FrameConstants</code>末尾へ<code>IBLParams</code>を追加し(末尾追加なので既存シェーダの
@@ -1838,7 +2037,7 @@ Kulla-Contyの補正式は「乗算先が単一散乱の方向アルベドであ
 登録する</b>。
 </p>
 <pre><code>const bool needIrradianceBake =
-    m_IBLUseDedicatedIrradiance || m_DebugView == DebugView::IBLIrradiance;
+    m_IBLSettings.UseDedicatedIrradiance || m_DebugViewSettings.View == DebugView::IBLIrradiance;
 if (needIrradianceBake &amp;&amp; !m_IBLIrradianceBaked) { /* パスを登録 */ }</code></pre>
 <p>
 <code>ShadowParams.y</code>(= ミップ数 - 1 = 最終ミップ番号)は両シェーダで既に利用可能なため
@@ -1856,7 +2055,7 @@ if (needIrradianceBake &amp;&amp; !m_IBLIrradianceBaked) { /* パスを登録 */
 <p>
 環境光(間接光)の<b>拡散成分と鏡面成分に別々に掛かる倍率</b>を、
 <code>FrameConstants.IBLParams.y</code> / <code>.z</code> として渡している
-(C++側は<code>m_AmbientDiffuseScale</code> / <code>m_AmbientSpecularScale</code>、既定は両方1.0)。
+(C++側は<code>m_IBLSettings.AmbientDiffuseScale</code> / <code>m_IBLSettings.AmbientSpecularScale</code>、既定は両方1.0)。
 既存の「IBL 強度」(<code>ShadowParams.z</code>)が拡散と鏡面へ一様に掛かるのに対し、
 こちらは<b>両者の比率を意図的に崩す</b>ための画作り用のつまみである。
 環境の照り返しを保ったまま映り込みだけを増減する、といった調整はIBL強度単独ではできない。
@@ -1974,7 +2173,7 @@ Reads/RenderTargets/DepthTargetから依存関係を機械的に解決する。�
 Write-after-Writeの依存関係から自動的にその後に置かれる。SSRパス(有効時)はSceneColorを
 <strong>読む</strong>ため、Read-after-Writeの依存関係から自動的に半透明フォワードパスの後に置かれる
 (SSRが無効な場合はTonemapパスがSceneColorを直接読むため、同じ理屈でTonemapが後に置かれる)。
-この2つの依存関係だけで、<code>m_SSREnabled</code>の値に関わらず「最終合成→半透明→SSR/Tonemap」の
+この2つの依存関係だけで、<code>m_ReflectionSettings.Mode</code>の値に関わらず「最終合成→半透明→SSR/Tonemap」の
 順序が常に成立する。<code>DepthTarget = GBufferDepth</code>もWriteとして扱われるため
 ジオメトリパスの後に置かれるという(実際には書き込まないため過剰だが無害な)依存関係が追加で
 生まれるが、SceneColor側の依存関係だけで必要な順序は既に確定しているため実害はない。
@@ -2204,7 +2403,7 @@ DX11はイミディエイト実行のためこの制約がないが、両バッ�
 フレーム単位の書き込み回数を数え、上限を超えたらログを出す(バッファごとに1回だけ)。
 読み取り専用構造化バッファのステージングリングは
 「1フレームあたりの更新回数の上限×<code>kFrameCount</code>+1」で確保する
-(<code>m_LightBuffer</code>はDirectLightパスとTransparentパスで1フレームに2回更新されるため、
+(<code>SceneGPUResources::LightBuffer</code>はDirectLightパスとTransparentパスで1フレームに2回更新されるため、
 <code>kFrameCount + 1</code>では足りない)。</p>
 <h3>16.6 その他のDX11/DX12差の是正</h3>
 <table>
@@ -2254,7 +2453,7 @@ sRGBエンコード・ディザ)、<code>AutoExposure.hlsl</code>(輝度ヒス�
 <strong>自動露出の結果をライト強度へ戻してはいけない。</strong>1つは<strong>フィードバックループ</strong>で、
 露出が変わるとHDRバッファの値そのものが動き、その値から測った輝度でまた露出が変わる。
 もう1つは<strong>GPU→CPUのリードバック</strong>が必要になることで、同期待ちかフレーム遅延を強いられる。</p>
-<p>そのため、CPU側の乗算(<code>m_SceneExposureEV100</code>)を<strong>プリ露出</strong>として残し、
+<p>そのため、CPU側の乗算(<code>m_PostProcessSettings.SceneExposureEV100</code>)を<strong>プリ露出</strong>として残し、
 自動露出はGPU上だけで完結させる。HDRバッファには常にプリ露出済みの値が流れるので、
 <code>絶対輝度 = バッファの値 ÷ preExposure</code>で元の測光量へ戻せる。ヒストグラムはこの絶対輝度に対して働くため、
 プリ露出をどう設定しても測定結果は変わらない(プリ露出はバッファの数値レンジを<code>R16G16B16A16_Float</code>の
@@ -2495,7 +2694,7 @@ UAVバインドの直前に同一リソースのSRVスロットを明示的に�
 </p>
 <h3>18.11 RenderGraphにバッファ依存を足した理由</h3>
 <p>
-カリングパスと直接光パスは<strong>どちらも<code>m_GBufferDepth</code>をReadsするだけの「読み手同士」</strong>に
+カリングパスと直接光パスは<strong>どちらも<code>RenderTargets::GBufferDepth</code>をReadsするだけの「読み手同士」</strong>に
 なるため、テクスチャの依存だけでは両者の間に辺が張られない。トポロジカルソートは依存が同点なら
 登録順を優先するのでたまたま正しく動くが、本当の依存関係(カリングが書いたライトグリッドを
 直接光が読む)がグラフ上に現れない状態になる。
@@ -2562,7 +2761,7 @@ RHIには<strong>キューブマップの面ごとのRTV</strong>が無い。こ
 組み立てている。
 </p>
 <ol>
-<li>プローブ位置から1面ぶんを、通常の2Dレンダーターゲット(<code>m_ProbeCaptureColor</code>、
+<li>プローブ位置から1面ぶんを、通常の2Dレンダーターゲット(<code>GIResources::ProbeCaptureColor</code>、
 HDR 128&times;128)へフォワード描画する(<code>ProbeCapture.hlsl</code>)</li>
 <li>コンピュートシェーダー(<code>IBLConvolve.hlsl</code>の<code>CSCopyCaptureToCubeFace</code>)が
 その結果をキューブマップの該当面のUAVへ書き写す</li>
@@ -2592,7 +2791,7 @@ RHIへの追加(<code>CreateMippedUAVTextureCubeArray</code>、
 一方で<strong>畳み込みの入力</strong>だけは<code>TextureCube</code>(配列ではない)でなければならない。
 <code>IBLConvolve.hlsl</code>の<code>SourceSkybox</code>が<code>TextureCube</code>宣言のままだからである。
 プローブは1つずつ順に焼くため、キャプチャした6面を組み上げるスクラッチのキューブマップ
-(<code>m_ProbeRadianceCube</code>)は<strong>1枚だけ</strong>確保して使い回している。
+(<code>GIResources::ProbeRadianceCube</code>)は<strong>1枚だけ</strong>確保して使い回している。
 これにより畳み込みシェーダーを変更せずに済んでいる。
 </p>
 <h3>19.4 キャプチャ時のライティングと定数バッファの与え方</h3>
@@ -2971,7 +3170,7 @@ Tonemap・Bloom・AutoExposureはいずれも同じ値を受け取って割り�
 </p>
 <p>
 <b>(1) シーン読み込みで露出の追従状態を捨てる。</b>
-実効プリ露出は<code>m_EffectiveExposureAdaptSpeed</code>で平滑化されているため、
+実効プリ露出は<code>m_PostProcessSettings.EffectiveExposureAdaptSpeed</code>で平滑化されているため、
 リセットしないとシーンを読み込んだ次のフレーム ―― つまり<strong>プローブを焼くフレーム</strong> ――
 の露出が<b>前のシーンの露出から追従の途中</b>の値になる。
 <code>LoadScene</code>が<code>m_EffectiveExposureInitialized</code>を倒し、次のフレームで新しい時刻の
@@ -2980,7 +3179,7 @@ Tonemap・Bloom・AutoExposureはいずれも同じ値を受け取って割り�
 </p>
 <p>
 自動露出(<a href="#tonemap-exposure-bloom">17章</a>)の順応も同じ扱いが要る。順応の状態はGPU側の
-<code>m_ExposureTexture</code>にあり、初回だけ順応を飛ばすフラグもそのテクセルに入っている
+<code>RenderTargets::ExposureTexture</code>にあり、初回だけ順応を飛ばすフラグもそのテクセルに入っている
 (UAVがゼロ初期化されることを利用している)。CPU側から「初回に戻す」ために定数へ
 <code>ResetAdaptation</code>を持たせ、<code>LoadScene</code>が立てた要求を1フレームだけ渡す。
 </p>
@@ -3096,7 +3295,7 @@ SHのような低次項への圧縮が効かない。反射プローブの畳み
 (1フレームへ集中させるとそこだけスパイクになる)。
 キャプチャフェーズ(6フレーム)→プリフィルタフェーズ(6フレーム)を交互に繰り返す
 対称なデューティ比で、プリフィルタ中は次のプローブのキャプチャを止める
-(同じ<code>m_ProbeRadianceCube</code>を読み続ける必要があるため)。
+(同じ<code>GIResources::ProbeRadianceCube</code>を読み続ける必要があるため)。
 1プローブの一巡は12フレームになる。
 </p>
 <p>
@@ -3603,7 +3802,7 @@ HLSLの<code>InterlockedAdd</code>はSM6.6未満では整数専用でfloatを加
 </p>
 <p>
 結果(ティント4本+正規化済みの天頂輝度)は要素数1の構造化バッファ
-(<code>GPUSkyParameters</code>、C++側 <code>m_SkyParametersBuffer</code>)へ書く。
+(<code>GPUSkyParameters</code>、C++側 <code>m_SkyResources.ParametersBuffer</code>)へ書く。
 <code>SkyGenerate.hlsl</code>(IBL用キューブマップのベイク)・<code>DeferredLighting.hlsl</code>
 (背景の解析評価)・<code>SSR.hlsl</code>(水面の解析空フォールバック)の3者はこのバッファを
 <code>Sky.hlsli</code>の<code>ApplySkyParametersFromBuffer</code>で読むだけである
@@ -3721,12 +3920,12 @@ AOを持たないパスへ無条件に掛けても見た目が変わらないこ
 アルベドがそのまま環境光の減衰係数として掛かり、色付きで極端に暗い絵になる。</p>
 <h3>22.4.1 実行時に遮蔽マップだけを切るトグル</h3>
 <p>
-「レンダリング」パネルの<b>AO / 間接光を有効にする</b>(<code>m_AOEnabled</code>)は
+「レンダリング」パネルの<b>AO / 間接光を有効にする</b>(<code>m_AmbientOcclusionSettings.Enabled</code>)は
 スクリーンスペースAO/GI(SSAO / SSIL / RTAO)専用で、無効にしても
 <code>m_AODisabledTexture</code>(遮蔽なし・間接光なし)が差し替わるだけであり、
 G-Bufferの<code>material.b</code>に載った<b>遮蔽マップは素通しで効き続ける</b>。
 遮蔽マップの寄与だけを切って見比べるトグルは
-<code>m_OcclusionMapEnabled</code>(既定ON)で、別系統として持つ。
+<code>m_AmbientOcclusionSettings.OcclusionMapEnabled</code>(既定ON)で、別系統として持つ。
 </p>
 <p>
 実装は<b>シェーダー側に一切手を入れていない</b>。各パスは
@@ -3830,7 +4029,7 @@ TEXCOORD0はレンガや石畳をタイリングして貼るためのUVであり
 </p>
 <h3>23.2 速度(モーションベクター)の定義</h3>
 <p>
-<code>m_GBufferVelocity</code>(<code>R16G16_Float</code>、G-Bufferの5枚目)に、
+<code>RenderTargets::GBufferVelocity</code>(<code>R16G16_Float</code>、G-Bufferの5枚目)に、
 <strong>UV単位・デジッター済み・カメラ由来のみ</strong>の2Dベクトルとして書く。
 定義は「この画素に映っているものが、前フレームでは画面のどこにいたか」からの変位である。
 </p>
@@ -3844,7 +4043,7 @@ TAA側は <code>historyUv = uv - velocity</code> で履歴を引く。
 </p>
 <h3>23.3 ジッターの入れ方(行ベクトル規約での導出)</h3>
 <p>
-Halton(2,3)列の8サンプルを使い、<code>offsetPx = (halton - 0.5) * m_TAAJitterScale</code> を
+Halton(2,3)列の8サンプルを使い、<code>offsetPx = (halton - 0.5) * m_PostProcessSettings.TAAJitterScale</code> を
 NDCへ直して投影行列へ入れる。Halton列の添字は1から始める(添字0はradical inverseの定義上
 どの基数でも0となり、オフセットがピクセルの角へ偏る)。
 </p>
@@ -3907,7 +4106,7 @@ DX12のルートシグネチャはCBVをb0/b1の2枠しか持たないので、b
 色空間はYCoCg——RGBのまま行うと色相ごと動いてしまうため、輝度と色差を別軸として扱う。
 引き戻しは各軸独立の<code>clamp</code>ではなく、<strong>中心から履歴へ向かう線分とAABBの交点まで
 縮める</strong>方式にしている。<code>clamp</code>だとAABBの角へ寄った不自然な色になり色ずれが目立つ。
-γ(<code>m_TAAClipGamma</code>、既定1.25)と積集合を取るかどうか(<code>m_TAAClipMode</code>)は
+γ(<code>m_PostProcessSettings.TAAClipGamma</code>、既定1.25)と積集合を取るかどうか(<code>m_PostProcessSettings.TAAClip</code>)は
 UIから変更でき、ゴーストとちらつきのトレードオフを比較できる。
 </p>
 <h3>23.6.1 静止時のちらつき抑制</h3>
@@ -3922,10 +4121,10 @@ UIから変更でき、ゴーストとちらつきのトレードオフを比較
 </p>
 <pre><code>speedPixels = length(velocity * レンダー解像度)
 motion      = saturate(speedPixels / 0.5)        // 0.5画素/フレームで完全に「動いている」
-relax       = (1 - motion) * m_TAAAntiFlicker
+relax       = (1 - motion) * m_PostProcessSettings.TAAAntiFlicker
 
-blendWeight = m_TAABlendWeight * lerp(1, 0.2, relax)   // 静止時は 0.10 → 0.02
-clipGamma   = m_TAAClipGamma   * lerp(1, 8.0, relax)   // 静止時は 1.25 → 10
+blendWeight = m_PostProcessSettings.TAABlendWeight * lerp(1, 0.2, relax)   // 静止時は 0.10 → 0.02
+clipGamma   = m_PostProcessSettings.TAAClipGamma   * lerp(1, 8.0, relax)   // 静止時は 1.25 → 10
 
 // 近傍の実在min/maxとの積集合も同じrelaxで外側へ開く
 expand = (neighborMax - neighborMin) * (relax * 4.0)
@@ -3981,7 +4180,7 @@ TAAが無効なときはCPU側が<code>Sharpness = 0</code>を渡し、この分
 </p>
 <h3>23.8 履歴のピンポンとリセット条件</h3>
 <p>
-読みながら同じテクスチャへ書けないため、<code>m_TAAHistory[2]</code>を毎フレーム入れ替える
+読みながら同じテクスチャへ書けないため、<code>RenderTargets::TAAHistory[2]</code>を毎フレーム入れ替える
 (<code>m_TAAHistoryIndex</code>が今フレームの書き込み先)。バッファ精度を<code>Legacy8bit</code>に
 落としても<strong>履歴は常にfp16のまま</strong>にしている。履歴は何十フレームぶんもの蓄積結果であり、
 ここを8bitにすると量子化誤差が積み上がってバンディングになるため。
@@ -4012,7 +4211,7 @@ TAAが無効なときはCPU側が<code>Sharpness = 0</code>を渡し、この分
 <p>
 <strong>WAR(Write-after-Read)の辺は張られない。</strong>「あるパスが読んでいるテクスチャを、
 後から登録した別パスが書き潰す」形は保護されない。現在の構成はその形にならないが、
-<code>hdrSceneColor</code>をTAA出力へ差し替えたあとで別パスが<code>m_SceneColor</code>へ
+<code>hdrSceneColor</code>をTAA出力へ差し替えたあとで別パスが<code>RenderTargets::SceneColor</code>へ
 書き足すような変更を加えると静かに壊れる。
 </p>
 <p>
@@ -4331,7 +4530,7 @@ Loaderスレッドが作る・壊すのは<strong>アセット由来のリソー
 <tbody>
 <tr><td>頂点/インデックスバッファ</td><td>G-Buffer・SceneColor・SSAO/SSIL・SSR・Tonemap等(<code>CreateRenderTexture</code>)</td></tr>
 <tr><td>マテリアルテクスチャ(<code>CreateTextureFromImage</code>)</td><td>深度・シャドウマップ配列(<code>CreateDepthTexture</code>系)</td></tr>
-<tr><td>スカイボックス(<code>CreateTextureFromFile</code>)</td><td>Hi-Z・ブルームチェーン(<code>CreateHiZTexture</code> / <code>CreateMippedUAVTexture</code>)</td></tr>
+<tr><td>スカイボックス(<code>CreateTextureFromFile</code>)</td><td>Hi-Z・ブルームチェーン(<code>CreateMippedUAVTexture</code>)</td></tr>
 <tr><td>RT統合ジオメトリバッファ(<code>StructuredImmutable</code>)</td><td>IBL・反射プローブのキューブマップ(<code>CreateUAVTextureCube</code>系)</td></tr>
 <tr><td>BLAS / TLAS</td><td>ライトタイルバッファ・サンプラーセット・PSO・スワップチェーンのリサイズ</td></tr>
 </tbody>
@@ -4345,7 +4544,7 @@ Loaderスレッドが作る・壊すのは<strong>アセット由来のリソー
 </p>
 <pre><code>m_AssetSrvCpuHeap   … CreateTextureFromFile / FromImage / SolidColor / FromMemory /
                         CreateBuffer(StructuredImmutable) / CreateTopLevelAS  → Loaderのみ
-m_RenderSrvCpuHeap  … CreateRenderTexture / CreateUAVTexture / CreateHiZTexture /
+m_RenderSrvCpuHeap  … CreateRenderTexture / CreateUAVTexture /
                         CreateMippedUAVTexture / CreateUAVTextureCube系 /
                         CreateDepthTexture系 / CreateBuffer(Structured系) /
                         nullディスクリプタ                                    → Renderのみ</code></pre>
@@ -4729,12 +4928,12 @@ BRDFの評価もライトの色も手法によらず共通なので、「CSMとR
 どちらもピクセルシェーダーであり、このエンジンで高速化構造をバインドできるのは
 コンピュート用ルートシグネチャだけ(28章)なので、自前でレイを撃つこともできない。
 そのため<strong>RTシャドウは不透明サーフェスの直接光パスだけを置き換える</strong>という位置づけにし、
-シャドウパスは<code>m_ShadowMode != ShadowMode::Off</code>の条件で従来どおり実行している。
+シャドウパスは<code>m_ShadowSettings.Mode != ShadowMode::Off</code>の条件で従来どおり実行している。
 結果としてRTシャドウは描画コストを減らす機能ではなく、<strong>品質だけを上げる機能</strong>になる。
 </p>
 <p>
 この割り切りの副作用として、反射プローブの焼き直しハッシュ(<code>ComputeProbeBakeHash</code>)に
-混ぜるのは手法ではなく<code>m_ShadowMode != ShadowMode::Off</code>の真偽値にしてある。
+混ぜるのは手法ではなく<code>m_ShadowSettings.Mode != ShadowMode::Off</code>の真偽値にしてある。
 CSMとRaytracedでプローブの焼き上がりは変わらないため、手法を切り替えるたびに
 全プローブを焼き直すのは無駄だからである。
 </p>
@@ -5379,7 +5578,7 @@ DX11/DX12の切り替えは、<code>m_Device</code>だけを差し替えるの�
 <p>
 デバイスだけを差し替えてはいけない。<code>KurenaiEngine3D</code>はデバイス由来の
 <code>unique_ptr</code>を150個以上(テクスチャ・シェーダー・PSO・バッファ)と<code>m_Scene</code> /
-<code>m_RaytracingScene</code>を抱えているため、<code>ReleaseDeviceResources()</code>のような
+<code>SceneGPUResources::RaytracingScene</code>を抱えているため、<code>ReleaseDeviceResources()</code>のような
 解放関数を手書きすると、以後メンバを1つ足すたびにそこへ追記することになり、
 <strong>忘れても何もエラーが出ないまま壊れる</strong>二重管理になる。
 </p>
@@ -5425,7 +5624,7 @@ AMD FidelityFX Super Resolution 1.0 のEASU(方向性エッジ再構成)とRCAS(
 </p>
 <p>
 <strong><code>m_RenderWidth</code> / <code>m_RenderHeight</code>の意味は変えていない。</strong>
-足したのは「出力解像度」(<code>m_UpscaleOutputWidth</code> / <code>m_UpscaleOutputHeight</code>)
+足したのは「出力解像度」(<code>m_PostProcessSettings.UpscaleOutputWidth</code> / <code>m_PostProcessSettings.UpscaleOutputHeight</code>)
 という一段外側の概念だけで、<code>出力解像度 ÷ 品質モードの倍率</code>を
 <code>RequestRenderResolution()</code>へ流し込む関係になっている。こうしてあるため、
 33.1が挙げている「<code>Render()</code>の20箇所ほどから読まれる」参照を
@@ -5434,7 +5633,7 @@ LightCullのタイル・Hi-Zのミップ連鎖・Bloomのピラミッド・SkyCl
 いずれも2の冪で割っていくため。
 </p>
 <p>
-出力解像度のテクスチャ(<code>m_UpscaleTexture</code> / <code>m_UpscaleSharpTexture</code>)は
+出力解像度のテクスチャ(<code>RenderTargets::UpscaleTexture</code> / <code>RenderTargets::UpscaleSharpTexture</code>)は
 <code>CreateRenderTargets()</code>ではなく<code>CreateUpscaleTargets()</code>が持つ。
 内部解像度用とは作り直す契機が違う(出力解像度が変わらない限り作り直す必要がない)ためだが、
 GPUがそれらを参照していない状態で作り直す必要があるのは同じなので、
@@ -5468,6 +5667,309 @@ DX11 → DX12 → DX11 と切り替えたときに<code>Logger::SetFileSuffix</c
 </p>
 <p>
 具体的な手順と理由は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 33章。
+</p>
+</section>
+
+<section id="bent-normal">
+<h2>34. Bent Normalによる遮蔽(ディフューズ / スペキュラ)</h2>
+<p>
+22章の遮蔽マップは<strong>スカラーの遮蔽率しか持っていない</strong>。「どれだけ隠れているか」は
+分かるが「<strong>どの方向が開いているか</strong>」を捨てている。そのためスペキュラ遮蔽は
+Frostbiteの近似(<code>pow(NdotV + ao, exp2(-16r-1)) - 1 + ao</code>)に頼るしかなく、
+これは反射ベクトルRがどちらを向いていても同じ値を返す &mdash;&mdash;
+壁際で壁を向いた反射も、壁と反対を向いた反射も、同じだけ暗くなる。
+</p>
+<p>
+そこで<strong>正規化しないbent normalベクトル</strong><code>bRaw</code>をベイクし、消費側で3つへ分解する。
+</p>
+<table>
+<tr><th>量</th><th>式</th><th>用途</th></tr>
+<tr><td>軸 <code>axis</code></td><td><code>normalize(bRaw)</code></td><td>遮蔽コーンの向き</td></tr>
+<tr><td><code>aoB</code></td><td><code>length(bRaw)</code> = sin&sup2;&alpha;v</td><td>スペキュラ遮蔽の錐体の広がり</td></tr>
+<tr><td><code>aoN</code></td><td><code>dot(N, bRaw)</code></td><td>ディフューズAO(<strong>定義そのもの</strong>、厳密)</td></tr>
+</table>
+<p>
+定義は次のとおり。<code>V(&omega;)</code>は可視関数(遮られていなければ1)。
+</p>
+<pre><code>bRaw = (1/&pi;) &int; V(&omega;) &omega; d&omega;</code></pre>
+<p>
+遮蔽が無ければ<code>&int;&omega;d&omega; = &pi;N</code>なので<code>bRaw = N</code>となり、長さがちょうど1になる。
+また<code>dot(N, bRaw) = (1/&pi;)&int;V(&omega;)cos&theta;d&omega;</code>はコサイン重み付きAOの定義そのもので、
+22章のベイク済みAOと<strong>同じ量の別推定量</strong>になる。この一致がそのまま実装の検証になる。
+</p>
+<p>
+<strong>従来の「AOスカラー + 正規化済みbent normal」構成では不十分</strong>である点に注意。
+正規化するとコーンの広がり(<code>aoB</code>)の情報が失われ、スペキュラ遮蔽の錐体交差を
+構成できなくなる。だから正規化せずに焼く。
+</p>
+<h3>34.1 ベイク &mdash;&mdash; なぜコサイン重点サンプリングを使えないのか</h3>
+<p>
+レイ本数の既定は<strong>256</strong>(AO側の128より多い)。スカラーの平均よりベクトル和のほうが
+収束が遅いため。<code>--bent-rays</code>で変更でき、0で生成を無効にできる。
+</p>
+<h3 id="ch34-2">34.2 ダイレーションとミップは「ベクトルのまま」行う</h3>
+<p>
+そのため<code>length()</code>を取るのは<strong>消費側(シェーダー)だけ</strong>に限る。
+ダイレーション(<code>DilateBentNormal</code>)はベクトルを平均し、ミップ生成のボックスフィルタも
+fp32のベクトルのまま行ってから一括でfp16へ落とす。サンプリング時のバイリニア補間も
+ベクトルを補間してから消費側で長さを取るので、順序は自動的に正しくなる。
+</p>
+<h3 id="ch34-3">34.3 なぜ「有効フラグ」が要るのか</h3>
+<p>
+そこで<code>.a</code>を明示的な有効フラグにして曖昧さを消した。bent normalを持たないマテリアルには
+<strong>黒1x1</strong>(他のテクスチャの白1x1とは違う)をバインドし、消費側の
+<code>DecodeBentOcclusion</code>が<code>axis = N</code>・<code>aoB = 1</code>・<code>aoN = 1</code>(遮蔽なし)へ落とす。
+</p>
+<p>
+<strong>フラグをフィルタ対象に残してはいけない。</strong>チャート外のテクセルを
+<code>(0,0,0,0)</code>のままにすると、ミップ生成のボックスフィルタが有効テクセルとの間で
+<code>.a</code>を中間値へ均してしまい、<code>a &lt; 0.5</code>というしきい値がテクセル単位で反転する
+(「遮蔽なし」と「ほぼ完全遮蔽」の間で跳ねるため細かい点になる)。
+接空間格納(<a href="#ch34-9">34.9</a>)なら遮蔽なしを定数<code>(0,0,1)</code>で表せるので、
+ダイレーションで届かなかったテクセルもこれで埋めて<code>.a = 1</code>にする
+&mdash;&mdash; 遮蔽マップ(R8)が余りを255で埋めるのと同じ扱い。
+結果、実マップ内の<code>.a</code>は全テクセル1になり、しきい値は
+<strong>1x1のフォールバックと本物のマップを区別するためだけ</strong>に使われる。
+</p>
+<h3>34.4 スペキュラ遮蔽 &mdash;&mdash; 錐体交差とratio estimator</h3>
+<p>
+可視コーン(軸<code>axis</code>・半頂角&alpha;v)と鏡面反射ローブ(軸<code>R</code>・ラフネス由来の半頂角&alpha;s)の
+<strong>球冠どうしの交差</strong>を解き、その面積比を遮蔽率とする(Oat &amp; Sander,
+"Ambient Aperture Lighting", 2007)。<code>aoB = sin&sup2;&alpha;v</code>の定義から
+&alpha;v = <code>asin(sqrt(aoB))</code>。
+</p>
+<pre><code>const float inter = SphericalCapIntersectionArea(av,      as, acos(dot(axis, R)));
+const float ref   = SphericalCapIntersectionArea(kHalfPi, as, acos(dot(N,    R)));
+return ref &gt; 1e-6f ? saturate(inter / ref) : 0.0f;</code></pre>
+<p>
+この球冠交差モデルには<a href="#ch34-10">34.10</a>で見つかった構造的な穴がある
+(<code>d &ge; &alpha;v + &alpha;s</code>で交差面積が厳密に0になり、金属の凹部が純黒へ潰れる)。
+<a href="#ch34-11">34.11</a>で球面ガウスへ置き換えたものを既定にしたが、この球冠交差モデル自体は
+UIの3値切替(Frostbite近似 / 球冠交差 / 球面ガウス)に残してあり、比較用に選択できる。
+</p>
+<h4>34.4.1 スクリーンスペース由来の遮蔽との合成</h4>
+<p>
+ベイクしたbent normalは方向を持つが、SSAO/SSILは持たない。両者は由来が独立なので積を取る。
+どちらも「遮蔽なし」で厳密に1を返すため、片方しか持たないパス(半透明・プローブ焼き込み)へ
+無条件に掛けてよい。
+</p>
+<pre><code>SO = SpecularOcclusionBand(axis, N, R, aoB, roughness)  // ベイク由来(方向あり)
+   * SpecularOcclusion(NdotV, roughness, ssao);          // スクリーンスペース由来(方向なし)</code></pre>
+<p>
+<strong>bent normal経路ではmaterialAO(遮蔽マップのスカラー)を掛けない。</strong>
+同じベイクの方向付きの表現であるbent normalへ役割ごと置き換わるため、両方掛けると
+同じ遮蔽を二重に数えることになる。
+</p>
+<p>
+トグルを切った従来経路は<code>SpecularOcclusion(NdotV, roughness, materialAO * ssao)</code>と、
+<strong>以前とまったく同じ式</strong>にしてある。<code>pow()</code>は非線形なので
+「それぞれ通してから掛ける」に変えると結果が変わり、回帰確認にならないため。
+</p>
+<h3>34.5 ディフューズ側 &mdash;&mdash; 方向バイアスの解消</h3>
+<p>
+拡散側は<code>aoN</code>を使い、さらに<strong>イラディアンスを<code>N</code>ではなく<code>axis</code>方向で評価する</strong>。
+遮蔽されている方向からはどのみち光が来ないので、開いている方向の環境を引くほうが正しい。
+壁際・窓際で「壁の側の空の色まで平均してしまう」方向バイアスがこれで解消される。
+鏡面の<code>R</code>は変えない &mdash;&mdash; あちらは反射方向そのものが物理的に決まっているため。
+</p>
+<p>
+あわせて<strong>multi-bounce AO</strong>(Jimenez et al., SIGGRAPH 2016)も入れた。アルベドが明るいほど
+AOを弱める補正で、物理的にはより正しいが<strong>見た目を大きく変える</strong>。
+bent normal自体の検証を汚さないよう独立したトグルにし、<strong>既定は無効</strong>にしてある。
+</p>
+<h3>34.6 スロット割り当てとRHIの上限引き上げ</h3>
+<p>
+bent normalはライトマップUV空間のテクスチャなので、ライティング時にはUV1が無く直接引けない。
+そのため<strong>G-Bufferを1枚増やす</strong>(<code>SV_TARGET5</code>、<code>R16G16B16A16_Float</code>)。
+<code>R11G11B10_Float</code>は<strong>使えない</strong> &mdash;&mdash; 符号なしのため負の成分が落ち、半球の半分の方向を失う。
+</p>
+<table>
+<tr><th>パス</th><th>スロット</th><th>備考</th></tr>
+<tr><td>GBuffer / ProbeCapture</td><td>t6</td><td>t4=シャドウ配列、t5=遮蔽マップ</td></tr>
+<tr><td>Transparent</td><td>t14</td><td>DDGIはt15/t16へ回した(下記)</td></tr>
+<tr><td>SSR</td><td>t11</td><td></td></tr>
+<tr><td>DeferredLighting</td><td><strong>t15</strong></td><td>t0〜t14が満杯 &rarr; 上限引き上げが必要</td></tr>
+</table>
+<p>
+<strong>DDGI(19.15節)とのスロットの割り当て</strong>: bent normalは半透明パスで<code>t14</code>を取り、
+DDGIは不透明・半透明とも<code>t15</code>/<code>t16</code>を取る。<strong>両パスで番号を揃えること</strong> &mdash;&mdash;
+同じ番号を別々の用途へ割り当てても<strong>コンパイル時には衝突が出ない</strong>。C++側の
+<code>SetTexture(14, ...)</code>がパス冒頭でDDGIアトラスを張り、その後メッシュごとのループが
+同じ14番をbent normalで<strong>黙って上書きする</strong>、という形で絵にだけ出る。
+</p>
+<p>
+DeferredLightingがt14まで使い切っていたため、<code>kTextureSlotCount</code>を<strong>15 &rarr; 16</strong>へ上げた。
+定数は3か所にあり、すべて揃える必要がある:
+<code>DX12CommandList.h</code>(追跡配列)、<code>DX12Device.cpp</code>(ルートシグネチャのSRVレンジ幅)、
+<code>DX11CommandList.h</code>(UAV衝突回避の追跡配列)。
+</p>
+<p>
+<strong>cbufferの落とし穴</strong>: <code>FrameConstants</code>末尾へ<code>OcclusionParams</code>を足したが、
+cbufferは宣言順レイアウトなので、途中のフィールドを宣言していないシェーダーでは
+オフセットがずれる。SSR/Transparent/ProbeCaptureは<code>PrevViewProj</code>・<code>TAAParams</code>を
+使わないが、<strong>宣言だけは必要</strong>である。
+</p>
+<h3 id="ch34-7">34.7 検証</h3>
+<p>
+ベイカー内のfloat32(量子化前)で<code>max|bRaw| &le; 1</code>・<code>aoN &le; aoB</code>・
+22章のAOとの一致を測り、実機ではWhite Furnace Testの球が背景へ溶けることを見ます。
+<strong>この表はすべてmip 0しか見ていない</strong>ため、ミップ耐性(34.9)を併せて測ること。
+数値と手順は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 34.7節。
+</p>
+<p>
+求積バイアスの大きさ、錐体モデルが地平線の遮蔽を過大に見積もること、<code>aoB</code>を下限に
+置くのが誤りである理由、係数kを当てはまりで決めてはいけない理由は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 34章。
+</p>
+<h3>34.8 既知の制約</h3>
+<ul>
+<li><strong>容量が大きい</strong>。符号付きベクトルのためBC4/BC7で圧縮できず無圧縮のfp16で書き出す。
+512&sup2;でミップ込み1メッシュあたり約2.7MB、数百メッシュのモデルでは合計がGB級になる。
+圧縮(BC6H_SF16)とオクタヘドラル化は第2段階へ回した</li>
+<li><strong>非一様スケールでコーンの方位がわずかにずれる</strong>。シェーダーのGram-Schmidt
+再直交化はワールド空間で行われるが、ベイカーはモデル空間で行うため、非一様スケールが
+入ると両者の基底が法線まわりにわずかに回る。<code>aoN</code>(=z成分)と<code>aoB</code>(=長さ)は
+基底の回転で不変なので影響を受けず、ずれるのはコーンの方位だけ</li>
+<li><strong>&gamma; + &alpha;v &gt; 90&deg; で過大評価</strong>になる。球冠交差の近似が
+2つの境界をsmoothstepで繋ぐ形のため、厳密な球面二角形の面積とはずれる</li>
+<li><strong>非対称な遮蔽では軸が正しくない</strong>。複数の方向から別々に遮られている場合、
+それらの平均方向は「開いている方向」を代表しない</li>
+<li><strong><code>SO</code>は立体角の比であってBRDF重み付き積分ではない</strong>。
+コーン内でのBRDFの分布は考慮していない</li>
+<li><strong>生成はオフラインベイカーのみ</strong>。スクリーンスペース(SSIL)側は未対応。
+将来やる場合、このエンジンは2本の地平線角ではなく32セクタのビットマスク
+(<code>SSIL_VisibilityBitmask.hlsl</code>)なので、可視セクタごとに積算する形へ読み替える必要がある。
+さらにSSILの現在のAO出力は<code>1 - countbits(mask)/32</code>(角度に一様なセクタ比)であって
+コサイン重み付きではないため、<code>dot(N, bRaw)</code>とは一致しない</li>
+</ul>
+<h3 id="ch34-9">34.9 モデル空間では格納しない &mdash;&mdash; ミップで長さが崩壊する</h3>
+<h4>34.9.1 接空間で格納する</h4>
+<p>
+<code>bRaw</code>を頂点接線基底へ射影して格納する。
+</p>
+<pre><code>bTS = (dot(bRaw, T), dot(bRaw, B), dot(bRaw, N))</code></pre>
+<p>
+こうすると<strong>遮蔽なしは曲率によらず常に<code>(0,0,1)</code></strong>になる。曲面をまたいで平均しても
+長さは1のまま保たれ、縮むのは<em>本当に遮蔽の量が違うとき</em>だけになる &mdash;&mdash;
+<a href="#ch34-2">34.2</a>で意図していた挙動がここで初めて成立する。
+基底は正規直交なので<code>aoB</code>(長さ)も<code>aoN</code>(<code>N</code>成分 = <code>bTS.z</code>)も
+変換で厳密に保たれる(既存AOとの誤差RMSは格納空間を変えても変わらない)。
+</p>
+<p>
+おまけに「遮蔽なし」が定数で書けるようになったので、ダイレーションで届かなかったテクセルも
+<code>(0,0,1)</code>で埋めて<code>.a = 1</code>にできる。これで<code>.a</code>がフィルタ対象から外れ、
+上の副次的な不具合も消える。遮蔽マップ(R8)が余りを255で埋めるのとまったく同じ扱い。
+</p>
+<p>
+基底は<code>GBuffer.hlsl</code>の<code>ComputeTangentFrame</code>と<strong>まったく同じ手順</strong>で組む必要がある。
+頂点接線はパッカー自身(<code>ModelSource.cpp</code>)が計算していてエンジンと同一なので、
+ベイカー側で同じGram-Schmidt再直交化を行えば一致する。消費側は
+<code>mul(bentSample.xyz, tbn)</code>でワールドへ戻すだけでよい。
+</p>
+<p>
+ミラーされたインスタンスも正しく動く。<code>TangentSignFlip</code>(ワールド行列の行列式が負なら-1)が
+<code>B = cross(N,T) * tangent.w</code>へ効くため、ワールド空間の基底はモデル空間の基底の
+正しい像になる &mdash;&mdash; 法線マップがミラーで破綻しないのとまったく同じ理屈。
+</p>
+<p>
+レイアウトは変わらなくても<strong>テクスチャの中身の意味が変わる</strong>ときは
+<code>.kmodel</code>の<code>Version</code>を上げる(接空間化では v7 &rarr; v8)。構造体サイズが
+同じだとVersionでしか判別できず、上げないと古いアセットを黙って誤って解釈することになる。
+</p>
+<h4>34.9.2 ミップ耐性の検証</h4>
+<h3 id="ch34-10">34.10 求積バイアス &mdash;&mdash; 正規化係数に理論値を使わない</h3>
+<p>
+<code>bRaw</code>の正規化係数の理論値は次のとおりだが、<strong>これを使ってはいけない</strong>。
+</p>
+<pre><code>(1/&pi;) &divide; pdf(=1/2&pi;) &divide; 本数 = 2/本数</code></pre>
+<p>
+そのため理論値ではなく<strong>同じ列で求めた「全方向の和」の長さ</strong>で割る。
+</p>
+<pre><code>bAll += dirB;                      // 遮蔽判定に関わらず必ず積算
+if (!Occluded(...)) bRaw += dirB;
+...
+bRaw /= length(bAll);</code></pre>
+<h4 id="ch34-10-2">34.10.2 凹部が純黒へ潰れる &mdash;&mdash; <code>aoB</code>を下限に置くのは誤り</h4>
+<h4 id="ch34-10-3">34.10.3 方向性を保ったまま純黒を避ける</h4>
+<p>
+1つめの筋(柔らかい分布 &mdash; 球面ガウス)を採用している(<a href="#ch34-11">34.11</a>)。
+2つめ(跳ね返り光の加算)は見た目への影響がより広範囲(遮蔽の弱い場所にも常時足される項になる)
+かつ別途バウンス量の推定が要るため未実装である。
+</p>
+<h3 id="ch34-11">34.11 可視性を球面ガウスへ &mdash;&mdash; 純黒の解消</h3>
+<h4>34.11.1 球冠を球面ガウス(SG)に置き換える</h4>
+<p>
+振幅1・軸<code>p</code>・鋭さ&lambda;の
+SGを<code>G(&omega;) = exp(&lambda;(&omega;&middot;p - 1))</code>とすると、2つのSGの球面内積は
+閉形式で書ける(Wang et al., "All-Frequency Rendering of Dynamic, Spatially-Varying Reflectance", 2009):
+</p>
+<pre><code>integral(G1 * G2) domega = 4*pi * exp(-l1-l2) * sinh(dm) / dm ,   dm = |l1*p1 + l2*p2|</code></pre>
+<p>
+<code>sinh</code>は0でしか0にならないため、<strong>この量は常に正</strong>になる。
+球冠交差の<code>SphericalCapIntersectionArea</code>が<code>d &ge; a1+a2</code>で厳密に0を
+返していたのに対し、SGは遮蔽側にも<code>d</code>に応じた小さな残りを持つ。これが純黒が消える理由。
+</p>
+<h4 id="ch34-11-2">34.11.2 球冠の半頂角とSGの鋭さの対応づけ</h4>
+<p>
+半頂角&alpha;の球冠の立体角は<code>2&pi;(1 - cos&alpha;)</code>、鋭さ&lambda;のSGの立体角は
+おおむね<code>2&pi;/&lambda;</code>。両者を揃えると<code>&lambda; = 1 / (1 - cos&alpha;)</code>。
+一般化して<code>&lambda; = k / (1 - cos&alpha;)</code>と書くと、<code>k</code>は
+「球冠をどれだけ柔らかくするか」の係数になり、大きいほど硬い球冠に近づく。
+<strong>採用値は立体角の一致からそのまま出てくる<code>k = 1</code></strong>
+(<a href="#ch34-11-4">34.11.4</a>)。この対応づけにより三角関数がすべて消える:
+</p>
+<table>
+<tr><th>量</th><th>球冠交差(34.4節)</th><th>SG</th></tr>
+<tr><td>可視コーン</td><td><code>&alpha;v = asin(sqrt(aoB))</code></td><td><code>1 - cos&alpha;v = 1 - sqrt(1 - aoB)</code></td></tr>
+<tr><td>鏡面ローブ</td><td><code>&alpha;s = acos(1 - r&sup2;)</code></td><td><code>1 - cos&alpha;s = r&sup2;</code></td></tr>
+<tr><td>交差の角度</td><td><code>d = acos(dot(axis, R))</code></td><td><code>dot(axis, R)</code>をそのまま使う</td></tr>
+</table>
+<h4>34.11.3 白炉テストが厳密に保たれる理由</h4>
+<p>
+基準値<code>ref</code>は「遮蔽なし = &alpha;v 90&deg;」のSG。<code>1 - cos90&deg; = 1</code>なので
+<code>&lambda;_ref = k</code>。<code>aoB = 1</code>のとき<code>1 - sqrt(1-1) = 1</code>より
+<code>&lambda;v = k = &lambda;_ref</code>、かつ<code>axis = N</code>なので
+<code>dot(axis,R) = dot(N,R)</code> &mdash;&mdash; <code>inter</code>と<code>ref</code>が同一の式になり
+<strong><code>SO = 1</code>が厳密</strong>になる。<code>.a</code>フラグが0(bent normalを持たない
+マテリアル)の経路も<code>axis = N, aoB = 1</code>へ落ちるため同様に厳密に1で、
+<strong>bent normalを持たないモデルの見た目は一切変わらない</strong>。
+</p>
+<p>
+桁落ち対策: roughnessの下限0.045で<code>&lambda;s</code>は数万のオーダーまで大きくなる。
+<code>dm - &lambda;1 - &lambda;2</code>をそのまま引くとfp32で桁落ちするため、次の形へ
+変形して常に0以下の指数だけを扱う:
+</p>
+<pre><code>dm - l1 - l2 = (dm^2 - (l1+l2)^2) / (dm + l1 + l2) = -2*l1*l2*(1 - cosd) / (dm + l1 + l2)</code></pre>
+<h4 id="ch34-11-4">34.11.4 係数kは1(導出値)</h4>
+<p>
+採用値<code>k = 1.0</code>は<a href="#ch34-11-2">34.11.2</a>の立体角の一致から
+<strong>そのまま出てくる導出値</strong>であって調整値ではない。両側へ振ると次のように壊れる。
+</p>
+<h4>34.11.5 UIの3値切替</h4>
+<p>
+<code>OcclusionParams.y</code>(<code>Kurenai::SpecularOcclusionMode</code>)は
+0=Frostbite近似 / 1=球冠交差 / 2=球面ガウスの3値で、<strong>既定は2(球面ガウス)</strong>。
+反射プローブの再ベイク署名にも<code>SpecularOcclusionMode</code>を<strong>値として</strong>混ぜる
+(<code>mixBool</code>ではなく<code>mixFloat</code>) &mdash;&mdash; ProbeCaptureが同じ分岐を持つため、
+含め忘れるとつまみを動かしてもプローブの中身だけ古いままになる。
+</p>
+<p>
+このモードは<code>.kmodel</code>の形式にもベイク結果にも触れないため、<strong>再パックは不要</strong>である。
+</p>
+<h4>34.11.6 残る近似</h4>
+<p>
+<strong>純黒は「ほぼ」解消であって完全ではない。</strong>残るのは
+<code>aoB</code>がほぼ0のテクセル &mdash;&mdash; つまり<em>本当にほぼ完全に遮蔽されている</em>場所で、
+そこが暗いこと自体は正しい。加えて<code>&lambda;</code>が大きい領域では
+<code>exp()</code>の引数が-87を下回ってfp32でアンダーフローし、厳密に0になる場合もある
+(実データのテクセル分布では、roughnessが低い側で0.5%程度)。
+</p>
+<p>
+SGモデルも「<code>SO</code>は立体角比であってBRDF重み付き積分ではない」という34.4節と同じ近似を
+引き継いでいる。また<code>k</code>の選定(34.11.4)が示すとおり、<code>(axis, aoB)</code>という
+単一コーンへの還元そのものが複雑な凹形状の情報を失っており、SGはそれを「潰さない」方向へ
+緩和する正則化であって真の可視性分布の再現ではない。
+残りを埋めるには跳ね返り光の加算(<a href="#ch34-10-3">34.10.3</a>)が要る(未実装)。
 </p>
 </section>
 
@@ -5644,8 +6146,8 @@ z=fBmのUVを異方的に伸ばす倍率、w=未使用)を持つ。
 C++側の宣言と1フィールドずつ突き合わせること</strong>(ずれると全シェーダーが静かに壊れる)。
 風のスクロール(<code>m_CirrusScrollOffset</code>)は
 <code>m_CloudScrollOffset</code>とまったく同じ形(<code>kCloudNoisePeriod</code>で
-<code>std::fmod</code>)でCPU側が進める。風向・凍結トグル(<code>m_CloudTimeFrozen</code>)は
-積雲と共有し、速度(<code>m_CirrusWindSpeed</code>)とUVスケール(<code>m_CirrusUvScale</code>)だけ
+<code>std::fmod</code>)でCPU側が進める。風向・凍結トグル(<code>m_CloudSettings.TimeFrozen</code>)は
+積雲と共有し、速度(<code>m_CloudSettings.CirrusWindSpeed</code>)とUVスケール(<code>m_CloudSettings.CirrusUvScale</code>)だけ
 巻雲固有の値を持つ。凍結トグルを共有しているのは、片方の層にしか効かないとA/B比較で
 スクロールが揺れる側だけ残ってしまい対照が取れなくなるため。前方散乱の強さ
 (<code>kCirrusForwardG</code>)と自己影ステップ数(<code>kCirrusShadowSteps</code>)はUIつまみを
@@ -5723,6 +6225,12 @@ R = 低周波のPerlin-Worley、G/B/A = 周波数を上げたWorley</li>
 <p>
 UVスケールの決め方(画角に何セル入るか)、被覆率の目盛りが線形でないこと、
 3Dノイズのタイル可能性の検証手順は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 35章。
+</p>
+<h3>35.12 オクターブ数と自己影段数を実行時のつまみにしない</h3>
+<p>
+オクターブ数と自己影段数はfBmの値そのものを変える。実行時に片方の経路だけへ反映すると、
+背景の雲を描くボリューム経路と、水面反射・大気遠近で使う平面経路の形が食い違う。
+このため、どちらも実行時のつまみにはせず、同じ定数で両経路を揃える。
 </p>
 </section>
 
@@ -5828,7 +6336,7 @@ GBufferパスとは異なり、<strong><code>instance.IsMirrored</code>の否定
 <p>
 パスの<code>.Reads</code>にシャドウマップ・IBL・DDGIのアトラスを挙げることで、これらを書く
 パスより後ろへ順序付ける。<code>SSR.hlsl</code>側の<code>.Reads</code>に
-<code>m_PlanarReflectionColor</code>を追加することで、SSRパスより前に順序付く。
+<code>RenderTargets::PlanarReflectionColor</code>を追加することで、SSRパスより前に順序付く。
 <code>SSR.hlsl</code>は<code>Texture2D PlanarReflectionTexture : register(t11)</code>
 (t0〜t10は既存の宣言ですべて埋まっている)として受け取り、36.1節のとおり
 <code>input.UV + N.xz * Params1.y</code>でそのままサンプルする(<code>Params1.y</code>は
@@ -5844,7 +6352,7 @@ GBufferパスとは異なり、<strong><code>instance.IsMirrored</code>の否定
 <code>[0,1]</code>の外に出た場合は平面反射を使わず解析空のみになる。
 </p>
 <p>
-平面反射が無効(<code>m_PlanarReflectionEnabled=false</code>、または水面インスタンスが
+平面反射が無効(<code>m_ReflectionSettings.PlanarEnabled=false</code>、または水面インスタンスが
 存在しない)なフレームでは、<code>ApplyPlanarReflection</code>は<code>Params1.x</code>が0の
 時点で解析空をそのまま返すため、<code>SSR.hlsl</code>は平面反射が無いときと厳密に同じ
 コードパスを通る。
@@ -6033,7 +6541,7 @@ float  transmittance = exp(-max(tau, 0.0f));</code></pre>
 </p>
 <h3>37.6 平面反射の鏡像にも同じフォグを掛ける</h3>
 <p>
-<a href="#planarreflection">36章</a>の平面反射パスの出力(<code>m_PlanarReflectionColor</code>)は
+<a href="#planarreflection">36章</a>の平面反射パスの出力(<code>RenderTargets::PlanarReflectionColor</code>)は
 <code>AerialPerspective.hlsl</code>の対象範囲(反射パスの出力)には含まれない――
 平面反射の結果はSSR側が<code>input.UV</code>でそのままサンプルして<code>SceneColor</code>へ
 合成されるため、SSRパスの出力(=大気遠近パスの入力)には既に「鏡像込みの水面反射色」が
@@ -6094,310 +6602,6 @@ UIの設定に関わらず<code>FogParams0.w</code>(有効フラグ)を0にす�
 雲を混ぜたときの破綻の測り方、雲へフォグを掛けないと何が起きるか、閉形式の妥当性、
 鏡像のin-scatter方向の導出、既定値の根拠は
 <a href="ImplementationDetail.md">ImplementationDetail.md</a> 37章。
-</p>
-</section>
-
-<section id="bent-normal">
-<h2>34. Bent Normalによる遮蔽(ディフューズ / スペキュラ)</h2>
-<p>
-22章の遮蔽マップは<strong>スカラーの遮蔽率しか持っていない</strong>。「どれだけ隠れているか」は
-分かるが「<strong>どの方向が開いているか</strong>」を捨てている。そのためスペキュラ遮蔽は
-Frostbiteの近似(<code>pow(NdotV + ao, exp2(-16r-1)) - 1 + ao</code>)に頼るしかなく、
-これは反射ベクトルRがどちらを向いていても同じ値を返す &mdash;&mdash;
-壁際で壁を向いた反射も、壁と反対を向いた反射も、同じだけ暗くなる。
-</p>
-<p>
-そこで<strong>正規化しないbent normalベクトル</strong><code>bRaw</code>をベイクし、消費側で3つへ分解する。
-</p>
-<table>
-<tr><th>量</th><th>式</th><th>用途</th></tr>
-<tr><td>軸 <code>axis</code></td><td><code>normalize(bRaw)</code></td><td>遮蔽コーンの向き</td></tr>
-<tr><td><code>aoB</code></td><td><code>length(bRaw)</code> = sin&sup2;&alpha;v</td><td>スペキュラ遮蔽の錐体の広がり</td></tr>
-<tr><td><code>aoN</code></td><td><code>dot(N, bRaw)</code></td><td>ディフューズAO(<strong>定義そのもの</strong>、厳密)</td></tr>
-</table>
-<p>
-定義は次のとおり。<code>V(&omega;)</code>は可視関数(遮られていなければ1)。
-</p>
-<pre><code>bRaw = (1/&pi;) &int; V(&omega;) &omega; d&omega;</code></pre>
-<p>
-遮蔽が無ければ<code>&int;&omega;d&omega; = &pi;N</code>なので<code>bRaw = N</code>となり、長さがちょうど1になる。
-また<code>dot(N, bRaw) = (1/&pi;)&int;V(&omega;)cos&theta;d&omega;</code>はコサイン重み付きAOの定義そのもので、
-22章のベイク済みAOと<strong>同じ量の別推定量</strong>になる。この一致がそのまま実装の検証になる。
-</p>
-<p>
-<strong>従来の「AOスカラー + 正規化済みbent normal」構成では不十分</strong>である点に注意。
-正規化するとコーンの広がり(<code>aoB</code>)の情報が失われ、スペキュラ遮蔽の錐体交差を
-構成できなくなる。だから正規化せずに焼く。
-</p>
-<h3>34.1 ベイク &mdash;&mdash; なぜコサイン重点サンプリングを使えないのか</h3>
-<p>
-レイ本数の既定は<strong>256</strong>(AO側の128より多い)。スカラーの平均よりベクトル和のほうが
-収束が遅いため。<code>--bent-rays</code>で変更でき、0で生成を無効にできる。
-</p>
-<h3 id="ch34-2">34.2 ダイレーションとミップは「ベクトルのまま」行う</h3>
-<p>
-そのため<code>length()</code>を取るのは<strong>消費側(シェーダー)だけ</strong>に限る。
-ダイレーション(<code>DilateBentNormal</code>)はベクトルを平均し、ミップ生成のボックスフィルタも
-fp32のベクトルのまま行ってから一括でfp16へ落とす。サンプリング時のバイリニア補間も
-ベクトルを補間してから消費側で長さを取るので、順序は自動的に正しくなる。
-</p>
-<h3 id="ch34-3">34.3 なぜ「有効フラグ」が要るのか</h3>
-<p>
-そこで<code>.a</code>を明示的な有効フラグにして曖昧さを消した。bent normalを持たないマテリアルには
-<strong>黒1x1</strong>(他のテクスチャの白1x1とは違う)をバインドし、消費側の
-<code>DecodeBentOcclusion</code>が<code>axis = N</code>・<code>aoB = 1</code>・<code>aoN = 1</code>(遮蔽なし)へ落とす。
-</p>
-<p>
-<strong>フラグをフィルタ対象に残してはいけない。</strong>チャート外のテクセルを
-<code>(0,0,0,0)</code>のままにすると、ミップ生成のボックスフィルタが有効テクセルとの間で
-<code>.a</code>を中間値へ均してしまい、<code>a &lt; 0.5</code>というしきい値がテクセル単位で反転する
-(「遮蔽なし」と「ほぼ完全遮蔽」の間で跳ねるため細かい点になる)。
-接空間格納(<a href="#ch34-9">34.9</a>)なら遮蔽なしを定数<code>(0,0,1)</code>で表せるので、
-ダイレーションで届かなかったテクセルもこれで埋めて<code>.a = 1</code>にする
-&mdash;&mdash; 遮蔽マップ(R8)が余りを255で埋めるのと同じ扱い。
-結果、実マップ内の<code>.a</code>は全テクセル1になり、しきい値は
-<strong>1x1のフォールバックと本物のマップを区別するためだけ</strong>に使われる。
-</p>
-<h3>34.4 スペキュラ遮蔽 &mdash;&mdash; 錐体交差とratio estimator</h3>
-<p>
-可視コーン(軸<code>axis</code>・半頂角&alpha;v)と鏡面反射ローブ(軸<code>R</code>・ラフネス由来の半頂角&alpha;s)の
-<strong>球冠どうしの交差</strong>を解き、その面積比を遮蔽率とする(Oat &amp; Sander,
-"Ambient Aperture Lighting", 2007)。<code>aoB = sin&sup2;&alpha;v</code>の定義から
-&alpha;v = <code>asin(sqrt(aoB))</code>。
-</p>
-<pre><code>const float inter = SphericalCapIntersectionArea(av,      as, acos(dot(axis, R)));
-const float ref   = SphericalCapIntersectionArea(kHalfPi, as, acos(dot(N,    R)));
-return ref &gt; 1e-6f ? saturate(inter / ref) : 0.0f;</code></pre>
-<p>
-この球冠交差モデルには<a href="#ch34-10">34.10</a>で見つかった構造的な穴がある
-(<code>d &ge; &alpha;v + &alpha;s</code>で交差面積が厳密に0になり、金属の凹部が純黒へ潰れる)。
-<a href="#ch34-11">34.11</a>で球面ガウスへ置き換えたものを既定にしたが、この球冠交差モデル自体は
-UIの3値切替(Frostbite近似 / 球冠交差 / 球面ガウス)に残してあり、比較用に選択できる。
-</p>
-<h4>34.4.1 スクリーンスペース由来の遮蔽との合成</h4>
-<p>
-ベイクしたbent normalは方向を持つが、SSAO/SSILは持たない。両者は由来が独立なので積を取る。
-どちらも「遮蔽なし」で厳密に1を返すため、片方しか持たないパス(半透明・プローブ焼き込み)へ
-無条件に掛けてよい。
-</p>
-<pre><code>SO = SpecularOcclusionBand(axis, N, R, aoB, roughness)  // ベイク由来(方向あり)
-   * SpecularOcclusion(NdotV, roughness, ssao);          // スクリーンスペース由来(方向なし)</code></pre>
-<p>
-<strong>bent normal経路ではmaterialAO(遮蔽マップのスカラー)を掛けない。</strong>
-同じベイクの方向付きの表現であるbent normalへ役割ごと置き換わるため、両方掛けると
-同じ遮蔽を二重に数えることになる。
-</p>
-<p>
-トグルを切った従来経路は<code>SpecularOcclusion(NdotV, roughness, materialAO * ssao)</code>と、
-<strong>以前とまったく同じ式</strong>にしてある。<code>pow()</code>は非線形なので
-「それぞれ通してから掛ける」に変えると結果が変わり、回帰確認にならないため。
-</p>
-<h3>34.5 ディフューズ側 &mdash;&mdash; 方向バイアスの解消</h3>
-<p>
-拡散側は<code>aoN</code>を使い、さらに<strong>イラディアンスを<code>N</code>ではなく<code>axis</code>方向で評価する</strong>。
-遮蔽されている方向からはどのみち光が来ないので、開いている方向の環境を引くほうが正しい。
-壁際・窓際で「壁の側の空の色まで平均してしまう」方向バイアスがこれで解消される。
-鏡面の<code>R</code>は変えない &mdash;&mdash; あちらは反射方向そのものが物理的に決まっているため。
-</p>
-<p>
-あわせて<strong>multi-bounce AO</strong>(Jimenez et al., SIGGRAPH 2016)も入れた。アルベドが明るいほど
-AOを弱める補正で、物理的にはより正しいが<strong>見た目を大きく変える</strong>。
-bent normal自体の検証を汚さないよう独立したトグルにし、<strong>既定は無効</strong>にしてある。
-</p>
-<h3>34.6 スロット割り当てとRHIの上限引き上げ</h3>
-<p>
-bent normalはライトマップUV空間のテクスチャなので、ライティング時にはUV1が無く直接引けない。
-そのため<strong>G-Bufferを1枚増やす</strong>(<code>SV_TARGET5</code>、<code>R16G16B16A16_Float</code>)。
-<code>R11G11B10_Float</code>は<strong>使えない</strong> &mdash;&mdash; 符号なしのため負の成分が落ち、半球の半分の方向を失う。
-</p>
-<table>
-<tr><th>パス</th><th>スロット</th><th>備考</th></tr>
-<tr><td>GBuffer / ProbeCapture</td><td>t6</td><td>t4=シャドウ配列、t5=遮蔽マップ</td></tr>
-<tr><td>Transparent</td><td>t14</td><td>DDGIはt15/t16へ回した(下記)</td></tr>
-<tr><td>SSR</td><td>t11</td><td></td></tr>
-<tr><td>DeferredLighting</td><td><strong>t15</strong></td><td>t0〜t14が満杯 &rarr; 上限引き上げが必要</td></tr>
-</table>
-<p>
-<strong>DDGI(19.15節)とのスロットの割り当て</strong>: bent normalは半透明パスで<code>t14</code>を取り、
-DDGIは不透明・半透明とも<code>t15</code>/<code>t16</code>を取る。<strong>両パスで番号を揃えること</strong> &mdash;&mdash;
-同じ番号を別々の用途へ割り当てても<strong>コンパイル時には衝突が出ない</strong>。C++側の
-<code>SetTexture(14, ...)</code>がパス冒頭でDDGIアトラスを張り、その後メッシュごとのループが
-同じ14番をbent normalで<strong>黙って上書きする</strong>、という形で絵にだけ出る。
-</p>
-<p>
-DeferredLightingがt14まで使い切っていたため、<code>kTextureSlotCount</code>を<strong>15 &rarr; 16</strong>へ上げた。
-定数は3か所にあり、すべて揃える必要がある:
-<code>DX12CommandList.h</code>(追跡配列)、<code>DX12Device.cpp</code>(ルートシグネチャのSRVレンジ幅)、
-<code>DX11CommandList.h</code>(UAV衝突回避の追跡配列)。
-</p>
-<p>
-<strong>cbufferの落とし穴</strong>: <code>FrameConstants</code>末尾へ<code>OcclusionParams</code>を足したが、
-cbufferは宣言順レイアウトなので、途中のフィールドを宣言していないシェーダーでは
-オフセットがずれる。SSR/Transparent/ProbeCaptureは<code>PrevViewProj</code>・<code>TAAParams</code>を
-使わないが、<strong>宣言だけは必要</strong>である。
-</p>
-<h3 id="ch34-7">34.7 検証</h3>
-<h3>34.8 既知の制約</h3>
-<ul>
-<li><strong>容量が大きい</strong>。符号付きベクトルのためBC4/BC7で圧縮できず無圧縮のfp16で書き出す。
-512&sup2;でミップ込み1メッシュあたり約2.7MB、数百メッシュのモデルでは合計がGB級になる。
-圧縮(BC6H_SF16)とオクタヘドラル化は第2段階へ回した</li>
-<li><strong>非一様スケールでコーンの方位がわずかにずれる</strong>。シェーダーのGram-Schmidt
-再直交化はワールド空間で行われるが、ベイカーはモデル空間で行うため、非一様スケールが
-入ると両者の基底が法線まわりにわずかに回る。<code>aoN</code>(=z成分)と<code>aoB</code>(=長さ)は
-基底の回転で不変なので影響を受けず、ずれるのはコーンの方位だけ</li>
-<li><strong>&gamma; + &alpha;v &gt; 90&deg; で過大評価</strong>になる。球冠交差の近似が
-2つの境界をsmoothstepで繋ぐ形のため、厳密な球面二角形の面積とはずれる</li>
-<li><strong>非対称な遮蔽では軸が正しくない</strong>。複数の方向から別々に遮られている場合、
-それらの平均方向は「開いている方向」を代表しない</li>
-<li><strong><code>SO</code>は立体角の比であってBRDF重み付き積分ではない</strong>。
-コーン内でのBRDFの分布は考慮していない</li>
-<li><strong>生成はオフラインベイカーのみ</strong>。スクリーンスペース(SSIL)側は未対応。
-将来やる場合、このエンジンは2本の地平線角ではなく32セクタのビットマスク
-(<code>SSIL_VisibilityBitmask.hlsl</code>)なので、可視セクタごとに積算する形へ読み替える必要がある。
-さらにSSILの現在のAO出力は<code>1 - countbits(mask)/32</code>(角度に一様なセクタ比)であって
-コサイン重み付きではないため、<code>dot(N, bRaw)</code>とは一致しない</li>
-</ul>
-<h3 id="ch34-9">34.9 モデル空間では格納しない &mdash;&mdash; ミップで長さが崩壊する</h3>
-<h4>34.9.1 接空間で格納する</h4>
-<p>
-<code>bRaw</code>を頂点接線基底へ射影して格納する。
-</p>
-<pre><code>bTS = (dot(bRaw, T), dot(bRaw, B), dot(bRaw, N))</code></pre>
-<p>
-こうすると<strong>遮蔽なしは曲率によらず常に<code>(0,0,1)</code></strong>になる。曲面をまたいで平均しても
-長さは1のまま保たれ、縮むのは<em>本当に遮蔽の量が違うとき</em>だけになる &mdash;&mdash;
-<a href="#ch34-2">34.2</a>で意図していた挙動がここで初めて成立する。
-基底は正規直交なので<code>aoB</code>(長さ)も<code>aoN</code>(<code>N</code>成分 = <code>bTS.z</code>)も
-変換で厳密に保たれる(既存AOとの誤差RMSは格納空間を変えても変わらない)。
-</p>
-<p>
-おまけに「遮蔽なし」が定数で書けるようになったので、ダイレーションで届かなかったテクセルも
-<code>(0,0,1)</code>で埋めて<code>.a = 1</code>にできる。これで<code>.a</code>がフィルタ対象から外れ、
-上の副次的な不具合も消える。遮蔽マップ(R8)が余りを255で埋めるのとまったく同じ扱い。
-</p>
-<p>
-基底は<code>GBuffer.hlsl</code>の<code>ComputeTangentFrame</code>と<strong>まったく同じ手順</strong>で組む必要がある。
-頂点接線はパッカー自身(<code>ModelSource.cpp</code>)が計算していてエンジンと同一なので、
-ベイカー側で同じGram-Schmidt再直交化を行えば一致する。消費側は
-<code>mul(bentSample.xyz, tbn)</code>でワールドへ戻すだけでよい。
-</p>
-<p>
-ミラーされたインスタンスも正しく動く。<code>TangentSignFlip</code>(ワールド行列の行列式が負なら-1)が
-<code>B = cross(N,T) * tangent.w</code>へ効くため、ワールド空間の基底はモデル空間の基底の
-正しい像になる &mdash;&mdash; 法線マップがミラーで破綻しないのとまったく同じ理屈。
-</p>
-<p>
-レイアウトは変わらなくても<strong>テクスチャの中身の意味が変わる</strong>ときは
-<code>.kmodel</code>の<code>Version</code>を上げる(接空間化では v7 &rarr; v8)。構造体サイズが
-同じだとVersionでしか判別できず、上げないと古いアセットを黙って誤って解釈することになる。
-</p>
-<h4>34.9.2 ミップ耐性の検証</h4>
-<h3 id="ch34-10">34.10 求積バイアス &mdash;&mdash; 正規化係数に理論値を使わない</h3>
-<p>
-<code>bRaw</code>の正規化係数の理論値は次のとおりだが、<strong>これを使ってはいけない</strong>。
-</p>
-<pre><code>(1/&pi;) &divide; pdf(=1/2&pi;) &divide; 本数 = 2/本数</code></pre>
-<p>
-そのため理論値ではなく<strong>同じ列で求めた「全方向の和」の長さ</strong>で割る。
-</p>
-<pre><code>bAll += dirB;                      // 遮蔽判定に関わらず必ず積算
-if (!Occluded(...)) bRaw += dirB;
-...
-bRaw /= length(bAll);</code></pre>
-<h4 id="ch34-10-2">34.10.2 凹部が純黒へ潰れる &mdash;&mdash; <code>aoB</code>を下限に置くのは誤り</h4>
-<h4 id="ch34-10-3">34.10.3 方向性を保ったまま純黒を避ける</h4>
-<p>
-1つめの筋(柔らかい分布 &mdash; 球面ガウス)を採用している(<a href="#ch34-11">34.11</a>)。
-2つめ(跳ね返り光の加算)は見た目への影響がより広範囲(遮蔽の弱い場所にも常時足される項になる)
-かつ別途バウンス量の推定が要るため未実装である。
-</p>
-<h3 id="ch34-11">34.11 可視性を球面ガウスへ &mdash;&mdash; 純黒の解消</h3>
-<h4>34.11.1 球冠を球面ガウス(SG)に置き換える</h4>
-<p>
-振幅1・軸<code>p</code>・鋭さ&lambda;の
-SGを<code>G(&omega;) = exp(&lambda;(&omega;&middot;p - 1))</code>とすると、2つのSGの球面内積は
-閉形式で書ける(Wang et al., "All-Frequency Rendering of Dynamic, Spatially-Varying Reflectance", 2009):
-</p>
-<pre><code>integral(G1 * G2) domega = 4*pi * exp(-l1-l2) * sinh(dm) / dm ,   dm = |l1*p1 + l2*p2|</code></pre>
-<p>
-<code>sinh</code>は0でしか0にならないため、<strong>この量は常に正</strong>になる。
-球冠交差の<code>SphericalCapIntersectionArea</code>が<code>d &ge; a1+a2</code>で厳密に0を
-返していたのに対し、SGは遮蔽側にも<code>d</code>に応じた小さな残りを持つ。これが純黒が消える理由。
-</p>
-<h4 id="ch34-11-2">34.11.2 球冠の半頂角とSGの鋭さの対応づけ</h4>
-<p>
-半頂角&alpha;の球冠の立体角は<code>2&pi;(1 - cos&alpha;)</code>、鋭さ&lambda;のSGの立体角は
-おおむね<code>2&pi;/&lambda;</code>。両者を揃えると<code>&lambda; = 1 / (1 - cos&alpha;)</code>。
-一般化して<code>&lambda; = k / (1 - cos&alpha;)</code>と書くと、<code>k</code>は
-「球冠をどれだけ柔らかくするか」の係数になり、大きいほど硬い球冠に近づく。
-<strong>採用値は立体角の一致からそのまま出てくる<code>k = 1</code></strong>
-(<a href="#ch34-11-4">34.11.4</a>)。この対応づけにより三角関数がすべて消える:
-</p>
-<table>
-<tr><th>量</th><th>球冠交差(34.4節)</th><th>SG</th></tr>
-<tr><td>可視コーン</td><td><code>&alpha;v = asin(sqrt(aoB))</code></td><td><code>1 - cos&alpha;v = 1 - sqrt(1 - aoB)</code></td></tr>
-<tr><td>鏡面ローブ</td><td><code>&alpha;s = acos(1 - r&sup2;)</code></td><td><code>1 - cos&alpha;s = r&sup2;</code></td></tr>
-<tr><td>交差の角度</td><td><code>d = acos(dot(axis, R))</code></td><td><code>dot(axis, R)</code>をそのまま使う</td></tr>
-</table>
-<h4>34.11.3 白炉テストが厳密に保たれる理由</h4>
-<p>
-基準値<code>ref</code>は「遮蔽なし = &alpha;v 90&deg;」のSG。<code>1 - cos90&deg; = 1</code>なので
-<code>&lambda;_ref = k</code>。<code>aoB = 1</code>のとき<code>1 - sqrt(1-1) = 1</code>より
-<code>&lambda;v = k = &lambda;_ref</code>、かつ<code>axis = N</code>なので
-<code>dot(axis,R) = dot(N,R)</code> &mdash;&mdash; <code>inter</code>と<code>ref</code>が同一の式になり
-<strong><code>SO = 1</code>が厳密</strong>になる。<code>.a</code>フラグが0(bent normalを持たない
-マテリアル)の経路も<code>axis = N, aoB = 1</code>へ落ちるため同様に厳密に1で、
-<strong>bent normalを持たないモデルの見た目は一切変わらない</strong>。
-</p>
-<p>
-桁落ち対策: roughnessの下限0.045で<code>&lambda;s</code>は数万のオーダーまで大きくなる。
-<code>dm - &lambda;1 - &lambda;2</code>をそのまま引くとfp32で桁落ちするため、次の形へ
-変形して常に0以下の指数だけを扱う:
-</p>
-<pre><code>dm - l1 - l2 = (dm^2 - (l1+l2)^2) / (dm + l1 + l2) = -2*l1*l2*(1 - cosd) / (dm + l1 + l2)</code></pre>
-<h4 id="ch34-11-4">34.11.4 係数kは1(導出値)</h4>
-<p>
-採用値<code>k = 1.0</code>は<a href="#ch34-11-2">34.11.2</a>の立体角の一致から
-<strong>そのまま出てくる導出値</strong>であって調整値ではない。両側へ振ると次のように壊れる。
-</p>
-<h4>34.11.5 UIの3値切替</h4>
-<p>
-<code>OcclusionParams.y</code>(<code>KurenaiEngine3D::SpecularOcclusionMode</code>)は
-0=Frostbite近似 / 1=球冠交差 / 2=球面ガウスの3値で、<strong>既定は2(球面ガウス)</strong>。
-反射プローブの再ベイク署名にも<code>SpecularOcclusionMode</code>を<strong>値として</strong>混ぜる
-(<code>mixBool</code>ではなく<code>mixFloat</code>) &mdash;&mdash; ProbeCaptureが同じ分岐を持つため、
-含め忘れるとつまみを動かしてもプローブの中身だけ古いままになる。
-</p>
-<p>
-このモードは<code>.kmodel</code>の形式にもベイク結果にも触れないため、<strong>再パックは不要</strong>である。
-</p>
-<h4>34.11.6 残る近似</h4>
-<p>
-<strong>純黒は「ほぼ」解消であって完全ではない。</strong>残るのは
-<code>aoB</code>がほぼ0のテクセル &mdash;&mdash; つまり<em>本当にほぼ完全に遮蔽されている</em>場所で、
-そこが暗いこと自体は正しい。加えて<code>&lambda;</code>が大きい領域では
-<code>exp()</code>の引数が-87を下回ってfp32でアンダーフローし、厳密に0になる場合もある
-(実データのテクセル分布では、roughnessが低い側で0.5%程度)。
-</p>
-<p>
-SGモデルも「<code>SO</code>は立体角比であってBRDF重み付き積分ではない」という34.4節と同じ近似を
-引き継いでいる。また<code>k</code>の選定(34.11.4)が示すとおり、<code>(axis, aoB)</code>という
-単一コーンへの還元そのものが複雑な凹形状の情報を失っており、SGはそれを「潰さない」方向へ
-緩和する正則化であって真の可視性分布の再現ではない。
-残りを埋めるには跳ね返り光の加算(<a href="#ch34-10-3">34.10.3</a>)が要る(未実装)。
-</p>
-<h3>34.7 検証</h3>
-<p>
-ベイカー内のfloat32(量子化前)で<code>max|bRaw| &le; 1</code>・<code>aoN &le; aoB</code>・
-22章のAOとの一致を測り、実機ではWhite Furnace Testの球が背景へ溶けることを見ます。
-<strong>この表はすべてmip 0しか見ていない</strong>ため、ミップ耐性(34.9)を併せて測ること。
-数値と手順は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 34.7節。
-</p>
-<p>
-求積バイアスの大きさ、錐体モデルが地平線の遮蔽を過大に見積もること、<code>aoB</code>を下限に
-置くのが誤りである理由、係数kを当てはまりで決めてはいけない理由は
-<a href="ImplementationDetail.md">ImplementationDetail.md</a> 34章。
 </p>
 </section>
 
@@ -6471,7 +6675,7 @@ SGモデルも「<code>SO</code>は立体角比であってBRDF重み付き積�
 <li><strong>大気遠近より後</strong> &mdash;&mdash; 機体は深度を書かないため、先に描くと
 <code>AerialPerspective</code>が「背後の空の距離」で霞を掛けてしまい、光点がwashoutする</li>
 <li><strong>TAAより前</strong> &mdash;&mdash; RenderGraphが<code>taaInputColor</code>の
-Read-after-Write依存で自動的に順序付ける。TAAの後(=<code>m_TAAHistory</code>へ直接加算)にすると
+Read-after-Write依存で自動的に順序付ける。TAAの後(=<code>RenderTargets::TAAHistory</code>へ直接加算)にすると
 履歴を汚し、次フレーム以降に尾を引く</li>
 </ul>
 
@@ -6656,7 +6860,7 @@ PSOは<code>BlendMode::PremultipliedAlpha</code>(<code>SrcBlend = ONE / DestBlen
 
 <p>
 平面反射パスの実行条件は
-<code>m_PlanarReflectionEnabled &amp;&amp; hasWaterInstance &amp;&amp; m_ReflectionMode == ReflectionMode::ScreenSpace</code>
+<code>m_ReflectionSettings.PlanarEnabled &amp;&amp; hasWaterInstance &amp;&amp; m_ReflectionSettings.Mode == ReflectionMode::ScreenSpace</code>
 であり、DXR対応環境では<code>DefaultReflectionMode</code> / <code>ReflectionModeForCapability</code>が
 <code>Raytraced</code>を返すため、<strong>DX12では平面反射パスが走らない</strong>。DX12の水面に映っているのは
 TLASへレイを撃った結果であり、ドローンは手続き的に展開するビルボードでTLASに入っていないので
@@ -6781,7 +6985,7 @@ GPUバッファへの転送は従来どおりレンダーグラフ構築の直�
 残り2つの前提にもなる。よって<strong>bindless → メッシュレット生成 → 描画 → RTとの統合</strong>の順で積んだ。
 </p>
 
-<h3>38.1 bindless: ヒープの末尾に恒久区画を切る</h3>
+<h3>39.1 bindless: ヒープの末尾に恒久区画を切る</h3>
 <p>
 <code>ResourceDescriptorHeap[i]</code>は「そのとき束ねられているシェーダ可視ヒープの
 先頭からi番目」を指す。つまりbindlessで引けるようにするとは、
@@ -6807,7 +7011,7 @@ GPUバッファへの転送は従来どおりレンダーグラフ構築の直�
 分割できない。登録はリソース生成時にしか起きず頻度が低いので、素直に<code>std::mutex</code>で守っている。
 </p>
 
-<h3>38.2 bindlessが使えるかの判定は3つ見る</h3>
+<h3>39.2 bindlessが使えるかの判定は3つ見る</h3>
 <p>
 <code>DetectBindlessSupport</code>が確認するのは次の3つで、1つでも欠けると無効になる。
 </p>
@@ -6831,7 +7035,7 @@ SM 6.6のプロファイル(<code>vs_6_6</code>等)を知らない。GPUが6.6�
 古いD3D12ランタイムは未知のフラグとしてシリアライズを失敗させるため。
 </p>
 
-<h3>38.3 レイトレーシングのヒット面をテクスチャ化する</h3>
+<h3>39.3 レイトレーシングのヒット面をテクスチャ化する</h3>
 <p>
 <code>RaytracingMaterial</code>へ4つのbindless番号(ベースカラー・法線・メタリック/ラフネス・自発光)を
 足し、<code>FetchHitSurface</code>が<strong>サンプル結果を係数へ畳み込んで返す</strong>方式にした。
@@ -6856,7 +7060,7 @@ metallic/roughnessだけは「テクスチャがあるときだけ」畳み込�
 破綻が少ない。
 </p>
 
-<h3>38.4 メッシュレットの生成はオフラインで</h3>
+<h3>39.4 メッシュレットの生成はオフラインで</h3>
 <p>
 分割はmeshoptimizer(<code>meshopt_buildMeshlets</code>)に任せ、
 <strong>KurenaiPackerが焼く</strong>。分割は入力ジオメトリだけで決まり実行時に変化しない一方、
@@ -6876,7 +7080,7 @@ RHI・DX11/DX12の両実装・ディスクリプタ周りに新しい種類の�
 20万三角形のモデルで増えるのは0.2MBに過ぎず、割に合わない。
 </p>
 
-<h3>38.5 インデックスをメッシュレット順に並べ替える</h3>
+<h3>39.5 インデックスをメッシュレット順に並べ替える</h3>
 <p>
 <code>.kgeom</code> v3から、インデックスバッファの三角形は<strong>メッシュレットの並び順そのもの</strong>に
 なっている。これはラスタライズのためではなく、<strong>レイトレーシング側のため</strong>の変更である。
@@ -6895,7 +7099,7 @@ RHI・DX11/DX12の両実装・ディスクリプタ周りに新しい種類の�
 キャッシュ効率が落ちることはない(むしろ改善方向)。
 </p>
 
-<h3>38.6 描画パス: 専用ルートシグネチャが要る理由</h3>
+<h3>39.6 描画パス: 専用ルートシグネチャが要る理由</h3>
 <p>
 メッシュシェーダーPSOは既存のグラフィックス用ルートシグネチャでは作れない。2点が噛み合わないため。
 </p>
@@ -6941,7 +7145,7 @@ meshoptimizerは<code>cone_cutoff = 1</code>・<code>cone_axis = (0,0,0)</code>�
 カリングの利得がほとんど無いため。
 </p>
 
-<h3>38.7 レイトレーシングへ送るのはTriangleOffsetだけ</h3>
+<h3>39.7 レイトレーシングへ送るのはTriangleOffsetだけ</h3>
 <p>
 RT側の<code>RTMeshInfo</code>へ<code>MeshletOffset</code>/<code>MeshletCount</code>を足し、
 シーン全体で連結した<strong><code>uint</code>1本の表</strong>を別に持たせた。
@@ -6964,7 +7168,7 @@ RT側に載る頂点属性・インデックスはすべて<code>.kgeom</code>�
 写して2つに増やすと、片方だけ直したときに<strong>確認そのものが成立しなくなる</strong>ため。
 </p>
 
-<h3>38.8 実測(確認用シーンのドラゴン)</h3>
+<h3>39.8 実測(確認用シーンのドラゴン)</h3>
 <p>
 <code>Tools/generate_dragon.py</code>が生成する代替メッシュ(トーラスノット、19.7万三角形)での
 オフライン計測。
@@ -6982,7 +7186,7 @@ RT側に載る頂点属性・インデックスはすべて<code>.kgeom</code>�
 </tbody>
 </table>
 
-<h3>38.9 1モデル1ドロー: マテリアルをテーブルにする</h3>
+<h3>39.9 1モデル1ドロー: マテリアルをテーブルにする</h3>
 <p>
 メッシュレットで三角形を間引けても、<strong>ドローの発行回数はメッシュの数のまま</strong>だった。
 マテリアルを描画直前の<code>SetTexture(t0..t6)</code>と定数バッファで渡している限り、
@@ -7070,7 +7274,7 @@ BLENDのメッシュは実体のまま影を落とす。
 <strong>両パスが同じ判断関数(<code>ShouldUseModelMeshletPath</code>)で経路を選ぶ</strong>ことが要点である。
 </p>
 
-<h3>38.10 残した制約</h3>
+<h3>39.10 残した制約</h3>
 <ul>
 <li><strong>レイトレーシングのヒット面に法線マップを適用していない。</strong>
 接空間の基底が要るが、<code>RTVertexAttribute</code>は16バイトに抑えるため法線とUVしか持っていない
@@ -7180,7 +7384,7 @@ SM 6.6には対応しているがメッシュシェーダーを持たないGPU(N
 </p>
 
 <p>
-エンジン側が毎フレーム組み直すのは<strong>メッシュ1件=1レコードの表だけ</strong>
+<code>Passes::GeometryPasses</code>が毎フレーム組み直すのは<strong>メッシュ1件=1レコードの表だけ</strong>
 (<code>SWRasterMeshInfo</code>、160バイト)。ワールド行列・法線行列・頂点/インデックスの
 bindless番号・シーン全体での通し三角形番号の先頭と本数・表裏の符号を持つ。
 数百件のオーダーなので毎フレーム走査で構わない。
@@ -7905,7 +8109,7 @@ KurenaiPackerがメッシュごとに<code>meshopt_simplify</code>で段を焼�
 (41.5の表)。性能の基準機であるIntel UHD Graphics 620では一度も実行されません。
 </p>
 
-<h3>43.1 段はモデル単位で1つに決まる</h3>
+<h3>44.1 段はモデル単位で1つに決まる</h3>
 
 <p>
 混ざらないことは<strong>2つ</strong>で担保しています。片方だけでは足りません。
@@ -7932,7 +8136,7 @@ KurenaiPackerがメッシュごとに<code>meshopt_simplify</code>で段を焼�
 その代償として粒度は粗くなります(43.5)。
 </p>
 
-<h3>43.2 選び方</h3>
+<h3>44.2 選び方</h3>
 
 <pre><code>投影直径[画素] = 2 × r × pixelScale / sqrt(d² - r²)      (d ≦ r なら画面いっぱい扱い)
 しきい値[画素] = MeshletLODQuality × sqrt(4 × モデルのLOD0三角形数 / π)
@@ -7951,7 +8155,7 @@ KurenaiPackerがメッシュごとに<code>meshopt_simplify</code>で段を焼�
 影を落とす形と本体の形が違う段になるため、<strong>主カメラの位置と拡大率を全パスへ配ります</strong>。
 </p>
 
-<h3>43.3 表には全段が載っている</h3>
+<h3>44.3 表には全段が載っている</h3>
 
 <p>
 ランタイムのメッシュレット表(<code>Model::MeshletBuffer</code>)はLOD0だけでなく<strong>全段</strong>を連結して持ちます。
@@ -7966,7 +8170,7 @@ KurenaiPackerがメッシュごとに<code>meshopt_simplify</code>で段を焼�
 全段の合計は <code>Mesh::MeshletTotalCount</code> が持ちます。
 </p>
 
-<h3>43.4 段の解決は1箇所に集約する</h3>
+<h3>44.4 段の解決は1箇所に集約する</h3>
 
 <p>
 段を決めるのは <code>Meshlet.hlsli</code> の <code>MeshletResolveLODLevel</code> だけで、
@@ -7982,7 +8186,7 @@ G-Buffer・シャドウ・深度プリパスがすべてこの関数を通りま
 塊自身の段は <code>GpuMeshlet::Flags</code> の上位ビットに詰めてあります(64バイト固定を保つため)。
 </p>
 
-<h3>43.5 効く範囲と効かない範囲</h3>
+<h3>44.5 効く範囲と効かない範囲</h3>
 
 <table>
 <tr><th>対象</th><th>効くか</th><th>理由</th></tr>
@@ -8112,4 +8316,4 @@ KTXD v2の1フレーム分です。ヘッダの<code>FrameIndex</code>は撮っ�
 
 </div>
 </body>
-</html>
+</html>

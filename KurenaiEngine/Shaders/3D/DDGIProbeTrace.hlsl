@@ -33,48 +33,9 @@
 #include "Samplers.hlsli"
 #include "CubeFace.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
-// ProbeCapture.hlsl と同じ並びで宣言する。cbufferのレイアウトは宣言順で決まり、
-// 途中のフィールドを飛ばせないため、読まないフィールドもオフセット合わせのために並べる
-// (C++側 KurenaiEngine3D.cpp の FrameConstants と一致させること)
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    float4 ShadowParams;
-    // x=t7のライトリストの有効数
-    float4 ActiveLightCount;
-    float4 IBLParams;
-    float4 ProbeParams;
-    float4 ProbeParams2;
-    float4x4 PrevViewProj;
-    float4 TAAParams;
-    // DDGI(22章)。多重バウンスのために前フレームのイラディアンスを引くのに使う
-    float4 DDGIParams0;
-    float4 DDGIParams1;
-    float4 DDGIParams2;
-    float4 DDGIParams3;
-    // x=このフレームの実効プリ露出(アトラスは露出非依存で持つため読み出し時に掛け戻す)
-    float4 DDGIParams4;
-    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
-    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
-    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
-    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
-    float4 DDGILODOrigin[4];
-    float4 DDGILODBase[4];
-    // bent normalによる遮蔽(34章)
-    float4 OcclusionParams;
-    // これ以降はこのシェーダーでは読まないため宣言しない
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 // C++側 KurenaiEngine3D.cpp の DDGITraceConstants と一致させること
 cbuffer DDGITraceConstants : register(b1)

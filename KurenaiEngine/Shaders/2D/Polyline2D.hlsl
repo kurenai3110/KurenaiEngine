@@ -12,19 +12,9 @@
 // 定数バッファはSprite2D.hlslと同じレイアウト(b0=フレーム共通、b1=描画単位)。
 // C++側のFrameConstants/ObjectConstantsと一致させること
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-};
-
-cbuffer ObjectConstants : register(b1)
-{
-    float4x4 World; // DrawPolylineでは未使用(頂点は既にワールド座標)
-    float4 Color;
-    float4 UVOffsetScale; // 未使用
-    float4 ShapeParams;   // 未使用
-    float4 BorderColor;   // 未使用
-};
+// 定数バッファの並びは Constants2D.hlsli に1本だけ置いてある。
+// DrawPolyline が実際に読むのは ViewProj と Color だけで、残りは未使用
+#include "Constants2D.hlsli"
 
 // CPU側で接合(マイター/ベベル)まで済ませた三角形リストの1頂点。
 // C++側のKurenaiEngine2D::PolylineVertexとバイト単位で一致させること(8バイト)

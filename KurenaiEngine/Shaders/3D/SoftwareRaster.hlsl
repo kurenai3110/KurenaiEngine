@@ -26,9 +26,18 @@
 
 #include "SoftwareRasterCommon.hlsli"
 
-// C++側のディスパッチ数計算(KurenaiEngine3D.cpp)と一致させること
+// C++側 Passes/GeometryConstants.h の kSWRasterGroupSize と一致させること
+// (GeometryPasses.cpp のディスパッチ数計算がこの値で割る)。
+// 下の KURENAI_SWRASTER_LARGE_GROUP_SIZE(256)にはC++側の相方が無く、このファイル内で完結する
 #define KURENAI_SWRASTER_GROUP_SIZE 64
 #define KURENAI_SWRASTER_LARGE_GROUP_SIZE 256
+
+// --- C++側(ShaderInterop/GroupSizes.h)との突き合わせ。パッカー経由のときだけ有効になる ---
+// 【#define を GroupSizes.hlsli へ移さない理由】下の numthreads の値が別ファイルの
+// #define に依存する形になり、このファイルだけを読んで起動構成が分からなくなるため
+#if defined(KURENAI_EXPECT_SWRASTER_GROUP_SIZE) && (KURENAI_SWRASTER_GROUP_SIZE != KURENAI_EXPECT_SWRASTER_GROUP_SIZE)
+#error "KURENAI_SWRASTER_GROUP_SIZE が Source/Engine/ShaderInterop/GroupSizes.h と食い違っている"
+#endif
 
 StructuredBuffer<SWRasterMeshInfo> MeshInfos : register(t0);
 // CSRasterLargeのみ: CSRasterが登録した巨大三角形の通し番号

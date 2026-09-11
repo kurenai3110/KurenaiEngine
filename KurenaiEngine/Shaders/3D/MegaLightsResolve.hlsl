@@ -50,44 +50,11 @@
 #include "NormalEncoding.hlsli"
 #include "SpecularEnergy.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    // w にスペキュラのエネルギー補正のモードが入っている
-    float4 ShadowParams;
-    // 【宣言はここで止めている】読むのは ShadowParams まで。途中を飛ばして末尾だけを
-    // 宣言すると誤ったオフセットを読み、コンパイルは通り絵も「それらしく」出るため気付けない
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
-cbuffer MegaLightsStochasticConstants : register(b1)
-{
-    // x=出力幅, y=出力高, z=初期候補数M(このパスでは未使用), w=影レイを撃つか
-    uint4 Params0;
-    // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
-    // (このパスでは未使用。b1 を複数パスで共有しているため並びは合わせてある)
-    uint4 Params1;
-    // xyz=空間再利用用(このパスでは未使用)、w=初期可視レイの有無
-    uint4 Params2;
-    // 空間再利用と時間再利用用(このパスでは未使用)
-    float4 Params3;
-    // x=履歴が有効か, y=空間再利用の反復番号(このパスでは未使用),
-    // z=クアッド共有を行うか(0なら自分の標本だけを使う。陽性対照で切る),
-    // w=クアッド層化(Initial が読む。このパスでは未使用)
-    uint4 Params4;
-    // x=1画素あたりの標本数(リザーバの本数)。Initial が同じ数だけ書いている
-    uint4 Params5;
-};
+#include "ShaderInterop/MegaLightsStochasticConstants.hlsli"
 
 Texture2D NormalTexture : register(t1);
 Texture2D DepthTexture : register(t2);
@@ -124,12 +91,7 @@ float Luminance(float3 c)
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
 }
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 [numthreads(8, 8, 1)]
 void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)

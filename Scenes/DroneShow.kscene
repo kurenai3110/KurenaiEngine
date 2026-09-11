@@ -17,7 +17,7 @@
 [Scene]
 Name = Drone Show
 # 水面に編隊を映すために必須。エンジンの既定はSSR無効で、有効にしないと水面が
-# 何も映さない真っ平らな面になる。平面反射(m_PlanarReflectionColor)はSSRパスの中で
+# 何も映さない真っ平らな面になる。平面反射(m_RenderTargets.PlanarReflectionColor)はSSRパスの中で
 # 水面へ合成されるため、このフラグは平面反射の映り込みごと止めてしまう
 ScreenSpaceReflection = true
 # 夜景で光源が点在する構図なのでACES。エンジン既定のAgXはハイライトを白へ脱色するため、

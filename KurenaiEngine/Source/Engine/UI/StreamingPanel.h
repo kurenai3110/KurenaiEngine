@@ -1,11 +1,7 @@
 #pragma once
 
 #include "UI/IPanel.h"
-
-namespace Kurenai
-{
-    class KurenaiEngine3D;
-}
+#include "EngineUIHost.h"
 
 namespace Kurenai::UI
 {
@@ -27,7 +23,7 @@ namespace Kurenai::UI
     class StreamingPanel final : public IPanel
     {
     public:
-        explicit StreamingPanel(KurenaiEngine3D& engine) : m_Engine(engine) {}
+        explicit StreamingPanel(IEngineUIHost& engine) : m_Engine(engine) {}
 
         // ###以降がウィンドウIDになる。imgui.iniとドックレイアウトのキーになるため
         // ###以降は変更しないこと(表示名だけなら変更してよい)
@@ -36,7 +32,7 @@ namespace Kurenai::UI
         void Draw(const PanelDrawContext& context) override;
 
     private:
-        KurenaiEngine3D& m_Engine;
+        IEngineUIHost& m_Engine;
 
         // 地図の表示倍率。1.0でシーン全体がちょうど収まる。上げると拡大する
         float m_MapZoom = 1.0f;

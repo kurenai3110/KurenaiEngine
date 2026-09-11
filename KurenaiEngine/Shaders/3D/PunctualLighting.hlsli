@@ -20,9 +20,9 @@
 //       - Texture2D BRDFLUTTexture         (EvaluateDirectBRDF が Kulla-Conty の加算ローブで引く)
 //       - ColorSampler                     (SpecularEnergy.hlsli が Samplers.hlsli 経由で持ってくる)
 //
-// 【ProbeShading.hlsli と同時にインクルードしてはいけない】あちらも同じ struct GPULight を
-// 宣言しているため、両方を読むと再定義になる。プローブ側は自前のレジスタマクロを持つ別経路で、
-// 統合するなら片方へ寄せること(現状どのシェーダーも両方は読まない)。
+// 【ProbeShading.hlsli と同時に読めるようになった】以前は双方が同じ struct GPULight を
+// 宣言しており再定義になったが、宣言を ShaderInterop/GPULight.hlsli の1本へ寄せたので
+// その制約は無い。残る違いはライトリストを置くレジスタのマクロだけ。
 
 #ifndef KURENAI_PUNCTUAL_LIGHTING_HLSLI
 #define KURENAI_PUNCTUAL_LIGHTING_HLSLI
@@ -31,21 +31,8 @@
 #error "PunctualLighting.hlsli をインクルードする前に KURENAI_PUNCTUAL_LIGHT_REGISTER を定義すること"
 #endif
 
-// ポイント/スポットライト1灯ぶんのデータ。C++側 KurenaiEngine3D.cpp の GPULight と
-// 並び・ストライド(64バイト)を一致させる必要がある。既存の SSAOConstants/SSILConstants と同様、
-// パッキング規則の解釈揺れを避けるためメンバはすべて float4 単位で宣言する
-struct GPULight
-{
-    float4 PositionType;   // xyz=ワールド座標, w=LightType(0=Directional, 1=Point, 2=Spot)
-    // rgb = Color * Intensity[cd] * exposure(EV100)。カンデラ→露出済みの最終放射輝度で、
-    // CPU側(MakeGPULight)で計算してあるためシェーダ側はそのまま乗算するだけでよい
-    float4 ColorRange;     // rgb=露出済み放射輝度, w=Range
-    float4 DirectionAngle; // xyz=向き(正規化済み), w=spotAngleScale
-    // x=spotAngleOffset, y=CastShadow(1でスクリーンスペースシャドウを撃つ / 0で撃たない),
-    // z=光源そのものの半径[m](0なら点光源。MegaLightsのレイトレース経路でだけ効く),
-    // w=未使用(エリアライト用に予約)
-    float4 Params;
-};
+// ライト1灯ぶんのデータ(宣言は ShaderInterop/GPULight.hlsli が持つ)
+#include "ShaderInterop/GPULight.hlsli"
 StructuredBuffer<GPULight> Lights : register(KURENAI_PUNCTUAL_LIGHT_REGISTER);
 
 // 距離減衰(Karis 2013 / Frostbite の windowed inverse-square)。

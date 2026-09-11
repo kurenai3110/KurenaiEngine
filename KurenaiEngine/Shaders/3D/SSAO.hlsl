@@ -6,28 +6,12 @@
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 // 定数バッファに確保するカーネルの最大数。実際に回す段数はParams.wで実行時に渡す
 // (品質プリセットから振れるようにするため。C++側のkSSAOKernelSizeMaxと一致させること)
 static const int kSSAOKernelSizeMax = 16;
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    // カスケードシャドウマップ用(このシェーダでは未使用。オフセット合わせのためだけに宣言する)
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    // 【宣言はここで止めている】このシェーダーが読むのはProjまでで、それより後ろは使わない。
-    // C++側のFrameConstantsはこの後ろにTimeParams・Sky*・Cloud*・PlanarReflectionPlane・
-    // Fog*・WaterBodyColorを持つが、cbufferは宣言順レイアウトなので、途中を飛ばして末尾だけを
-    // 宣言すると誤ったオフセットを読む。しかもコンパイルは通り絵も「それらしく」出るため気付けない。
-    // これらが必要になったら、C++の並びどおりに間のフィールドをすべて宣言すること
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 cbuffer SSAOConstants : register(b1)
 {
@@ -39,28 +23,9 @@ cbuffer SSAOConstants : register(b1)
 Texture2D Texture0 : register(t0);
 Texture2D Texture1 : register(t1);
 
-struct PSInput
-{
-    float4 Position : SV_POSITION;
-    float2 UV : TEXCOORD0;
-};
+#include "ShaderInterop/FullscreenTriangle.hlsli"
 
-// 頂点バッファなしで画面全体を覆う三角形を1枚だけ生成する定番のテクニック
-PSInput VSMain(uint vertexID : SV_VertexID)
-{
-    PSInput output;
-    output.UV = float2((vertexID << 1) & 2, vertexID & 2);
-    output.Position = float4(output.UV.x * 2.0f - 1.0f, 1.0f - output.UV.y * 2.0f, 0.0f, 1.0f);
-    return output;
-}
-
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    float4 clipPos = float4(ndc, depth, 1.0f);
-    float4 worldPos = mul(clipPos, InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 // 深度バッファの値(NDCのz)から、ビュー空間のz(カメラからの距離)だけを直接求める。
 //
@@ -169,10 +134,9 @@ float4 PSMain(PSInput input) : SV_TARGET
 
 // AO/GIバッファ(rgb=間接拡散光, a=遮蔽率)を4チャンネルまとめて均す汎用ブラー。
 //
-// 【このパスは完全にサンプラー律速である】Intel UHD Graphics 620 / 1280x720 / DX11 / Release の
-// 実測で2.21ms。1280x720の全画素×16タップ=14.7Mタップを、Gen9がRGBA16F(64bpp)のバイリニアを
-// 半レート(約6.6 Gtexel/s)で回すと2.23msになり、実測とほぼ一致する。演算でも帯域でもなく
-// 「タップ数×フォーマットのフィルタレート」だけで決まっているので、削るならタップ数を減らす。
+// 【このパスは完全にサンプラー律速である】演算でも帯域でもなく「タップ数×フォーマットの
+// フィルタレート」だけで決まっているので、削るならタップ数を減らす
+// (実測とフィルタレートからの検算は docs/ImplementationHistory.md 41.18)。
 //
 // 【元の16タップが実際に作っていたカーネル】オフセットが{-1.5,-0.5,0.5,1.5}テクセル、つまり
 // すべて半テクセルずれた位置=テクセルの角に落ちる。バイリニアはそこで周囲2テクセル(1軸あたり)を

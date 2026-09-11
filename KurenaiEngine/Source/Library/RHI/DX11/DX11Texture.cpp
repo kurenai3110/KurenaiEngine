@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "Core/Logger.h"
+#include "RHI/ReadbackUtil.h"
 
 namespace Kurenai::RHI
 {
@@ -144,7 +145,7 @@ namespace Kurenai::RHI
         {
             QueryTextureSize(m_SliceDsvs[0].Get(), m_Width, m_Height, m_MipLevels, m_Format, m_ArraySize);
         }
-        // ミップごとのUAVしか持たないテクスチャ(CreateHiZTexture等)も同様にミップ0から引く
+        // ミップごとのUAVしか持たないテクスチャ(CreateMippedUAVTexture等)も同様にミップ0から引く
         if (m_Width == 0 && !m_MipUavs.empty())
         {
             QueryTextureSize(m_MipUavs[0].Get(), m_Width, m_Height, m_MipLevels, m_Format, m_ArraySize);
@@ -222,31 +223,17 @@ namespace Kurenai::RHI
 
     bool DX11Texture::ReadbackData(void* outData, uint32_t sizeInBytes)
     {
-        if (!m_StagingTexture)
+        uint32_t tightRowPitch = 0;
+        if (!ValidateTextureReadbackRequest(
+                "DX11", m_StagingTexture != nullptr, outData, sizeInBytes, m_ReadbackDesc, tightRowPitch))
         {
-            Core::Logger::Error("DX11", "ReadbackData: リードバック用ではないテクスチャから読もうとしました");
             return false;
         }
-        if (outData == nullptr || sizeInBytes == 0)
-        {
-            Core::Logger::Error("DX11", "ReadbackData: 出力先がnullptrかサイズが0です");
-            return false;
-        }
+        // 【DX11だけの前提】Mapにデバイスコンテキストが要る。DX12はREADBACKヒープを
+        // 作成時から永続マップしてあるため、この確認自体が存在しない
         if (!m_Context)
         {
             Core::Logger::Error("DX11", "ReadbackData: デバイスコンテキストがありません");
-            return false;
-        }
-
-        // パディングを剥がしたあとの必要バイト数。呼び出し側にはこれを要求する
-        const uint32_t tightRowPitch = m_ReadbackDesc.Width * m_ReadbackDesc.BytesPerTexel;
-        const uint64_t tightTotal = static_cast<uint64_t>(tightRowPitch) * m_ReadbackDesc.Height;
-        if (sizeInBytes < tightTotal)
-        {
-            Core::Logger::Error(
-                "DX11",
-                "ReadbackData: 出力先のサイズ(" + std::to_string(sizeInBytes) + ")が必要量(" +
-                    std::to_string(tightTotal) + ")に足りません");
             return false;
         }
 
@@ -269,15 +256,7 @@ namespace Kurenai::RHI
 
         // 【行のパディングをここで剥がす】MapのRowPitchはドライバが決めた値で、
         // 幅×テクセルバイト数より大きいことがある。行ごとにコピーしてタイトに詰め直す
-        const auto* src = static_cast<const uint8_t*>(mapped.pData);
-        auto* dst = static_cast<uint8_t*>(outData);
-        for (uint32_t y = 0; y < m_ReadbackDesc.Height; ++y)
-        {
-            std::memcpy(
-                dst + static_cast<size_t>(y) * tightRowPitch,
-                src + static_cast<size_t>(y) * mapped.RowPitch,
-                tightRowPitch);
-        }
+        CopyReadbackRowsTightly(outData, mapped.pData, tightRowPitch, mapped.RowPitch, m_ReadbackDesc.Height);
 
         m_Context->Unmap(m_StagingTexture.Get(), 0);
         return true;

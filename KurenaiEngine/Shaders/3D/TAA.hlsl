@@ -55,19 +55,7 @@ Texture2D HistoryColor : register(t1);    // 前フレームのTAA結果
 Texture2D VelocityTexture : register(t2); // G-Bufferパスが書いたモーションベクター(UV単位)
 Texture2D DepthTexture : register(t3);    // G-Buffer深度(Reverse-Z: 近=1.0、遠=0.0)
 
-struct PSInput
-{
-    float4 Position : SV_POSITION;
-    float2 UV : TEXCOORD0;
-};
-
-PSInput VSMain(uint vertexID : SV_VertexID)
-{
-    PSInput output;
-    output.UV = float2((vertexID << 1) & 2, vertexID & 2);
-    output.Position = float4(output.UV.x * 2.0f - 1.0f, 1.0f - output.UV.y * 2.0f, 0.0f, 1.0f);
-    return output;
-}
+#include "ShaderInterop/FullscreenTriangle.hlsli"
 
 // 近傍クリップはRGBのまま行うと色相ごと動いてしまうため、輝度(Y)と色差(Co/Cg)へ分けて行う。
 // 輝度と色を別軸として扱えるので、AABBが「明るさの範囲」と「色味の範囲」を素直に表せる

@@ -14,7 +14,6 @@
 
 #include "Core/Camera.h"
 #include "Core/Logger.h"
-#include "KurenaiEngine3D.h"
 #include "UI/UIWidgets.h"
 
 namespace Kurenai::UI
@@ -114,7 +113,7 @@ namespace Kurenai::UI
             return;
         }
 
-        const std::vector<Assets::ModelInstance>& instances = m_Engine.m_Scene.Instances;
+        const std::vector<Assets::ModelInstance>& instances = m_Engine.GetScene().Instances;
 
         // --- 常駐状態ごとの件数 ---
         //
@@ -149,7 +148,7 @@ namespace Kurenai::UI
         // 【モデルの常駐と並べて出す】どちらも「いま何がVRAMに載っているか」の話で、
         // 片方だけ見ても足りない。モデルが常駐していてもテクスチャが全ミップのままなら
         // 削減は効いていないし、逆にモデルが未読み込みなら常駐ミップの数字は0で当然
-        const Assets::TextureStreamingManager::Stats textureStats = m_Engine.m_TextureStreaming.GetStats();
+        const Assets::TextureStreamingManager::Stats textureStats = m_Engine.GetTextureStreaming().GetStats();
         if (!textureStats.Enabled)
         {
             ImGui::TextDisabled("テクスチャの常駐ミップ制御: 無効(このシーンは全ミップ常駐)");
@@ -232,14 +231,14 @@ namespace Kurenai::UI
 
         // シーンAABBのXZから、正方形の表示範囲を作る。長辺に合わせることで縦横比を保つ
         // (合わせないと東西に長いシーンが縦に引き伸ばされて、タイルの並びが読めなくなる)
-        const float sceneSizeX = m_Engine.m_Scene.BoundsMax[0] - m_Engine.m_Scene.BoundsMin[0];
-        const float sceneSizeZ = m_Engine.m_Scene.BoundsMax[2] - m_Engine.m_Scene.BoundsMin[2];
+        const float sceneSizeX = m_Engine.GetScene().BoundsMax[0] - m_Engine.GetScene().BoundsMin[0];
+        const float sceneSizeZ = m_Engine.GetScene().BoundsMax[2] - m_Engine.GetScene().BoundsMin[2];
         // 1点しか無いシーン(サイズ0)でもゼロ除算しないよう下限を置く
         const float sceneExtent = (std::max)({ sceneSizeX, sceneSizeZ, 0.001f });
         const float viewExtent = sceneExtent / (std::max)(m_MapZoom, 0.001f);
 
-        float centerX = (m_Engine.m_Scene.BoundsMin[0] + m_Engine.m_Scene.BoundsMax[0]) * 0.5f;
-        float centerZ = (m_Engine.m_Scene.BoundsMin[2] + m_Engine.m_Scene.BoundsMax[2]) * 0.5f;
+        float centerX = (m_Engine.GetScene().BoundsMin[0] + m_Engine.GetScene().BoundsMax[0]) * 0.5f;
+        float centerZ = (m_Engine.GetScene().BoundsMin[2] + m_Engine.GetScene().BoundsMax[2]) * 0.5f;
         if (m_FollowCamera && context.Camera != nullptr)
         {
             centerX = context.Camera->GetPosition().x;
@@ -263,8 +262,8 @@ namespace Kurenai::UI
 
         // シーン全体のAABBの枠。拡大したときに「いまシーンのどのあたりを見ているか」の手がかりになる
         drawList->AddRect(
-            toScreen(m_Engine.m_Scene.BoundsMin[0], m_Engine.m_Scene.BoundsMax[2]),
-            toScreen(m_Engine.m_Scene.BoundsMax[0], m_Engine.m_Scene.BoundsMin[2]),
+            toScreen(m_Engine.GetScene().BoundsMin[0], m_Engine.GetScene().BoundsMax[2]),
+            toScreen(m_Engine.GetScene().BoundsMax[0], m_Engine.GetScene().BoundsMin[2]),
             IM_COL32(70, 75, 85, 255));
 
         for (size_t index = 0; index < instances.size(); ++index)
@@ -285,7 +284,7 @@ namespace Kurenai::UI
                 // テクスチャを読むのは選ばれている段だけ。別の段の常駐状況を出すと
                 // 「近いのに削れている」ように見えて判断を誤る
                 Assets::TextureStreamingManager::ModelResidency residency;
-                color = m_Engine.m_TextureStreaming.GetModelResidency(m_Engine.GetCurrentLOD(index), residency)
+                color = m_Engine.GetTextureStreaming().GetModelResidency(m_Engine.GetCurrentLOD(index), residency)
                     ? MipResidencyColor(residency.MeanDroppedMips)
                     : kColorMipOff;
             }

@@ -35,49 +35,11 @@
 #include "NormalEncoding.hlsli"
 #include "SpecularEnergy.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    // w にスペキュラのエネルギー補正のモードが入っている
-    float4 ShadowParams;
-    // 【宣言はここで止めている】読むのは ShadowParams まで。途中を飛ばして末尾だけを
-    // 宣言すると誤ったオフセットを読み、コンパイルは通り絵も「それらしく」出るため気付けない
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
-cbuffer MegaLightsStochasticConstants : register(b1)
-{
-    // x=出力幅, y=出力高, z=1ピクセルあたりの初期候補数M, w=影レイを撃つか
-    uint4 Params0;
-    // x=候補プールの有効タイル数X(格子ジッター有効時だけ+1)、
-    // y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
-    uint4 Params1;
-    // xyz=空間再利用用(このパスでは未使用)、w=初期可視レイでリザーバを殺すか。
-    // 【途中のフィールドを飛ばしてはいけない】wだけ欲しくてもxyzごと宣言する
-    // (飛ばすと誤ったオフセットを読み、コンパイルは通り絵もそれらしく出るため気付けない)
-    uint4 Params2;
-    // x=射影(0,0), y=射影(1,1), z=未使用, w=履歴Mの上限(このパスでは未使用)
-    float4 Params3;
-    // x=時間再利用の履歴が有効か(殺しのヒントを読んでよいか)、y=空間再利用の反復番号(未使用)、
-    // z=クアッド共有(Resolveが読む。このパスでは未使用)、
-    // w=クアッドで候補スロットを分けて引くか(手法3の層化)
-    uint4 Params4;
-    // x=1画素あたりの標本数(リザーバの本数)。手法3だけが1より大きくなる。
-    // 【末尾へ足すこと】途中へ挿すと Shade / Temporal / Spatial のオフセットがずれる
-    uint4 Params5;
-    // xy=候補プールのタイル格子オフセット(画素、各0〜15)、zw=未使用
-    uint4 Params6;
-};
+#include "ShaderInterop/MegaLightsStochasticConstants.hlsli"
 
 RaytracingAccelerationStructure SceneTLAS : register(t0);
 
@@ -106,12 +68,7 @@ RWStructuredBuffer<MegaLightsReservoir> Reservoirs : register(u0);
 // 履歴が無効なフレーム(解像度変更直後など)は読まずに上書きだけする
 RWStructuredBuffer<uint> BlockedLights : register(u1);
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 uint HashUint(uint x)
 {

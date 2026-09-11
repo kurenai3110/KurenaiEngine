@@ -37,8 +37,8 @@ namespace Kurenai
     static_assert(sizeof(GPUDrone) == 32, "GPUDroneはDroneShow.hlslのstruct Droneと同じ32バイトであること");
 
     // 機体を光源として送るときの1灯ぶん。GPULightではなくここで止めているのは、
-    // GPULightがKurenaiEngine3D.cppの無名名前空間にあり(DirectLighting.hlsl側との
-    // バイト一致を1か所で守るため)、Engine層のここからは見えないからである。
+    // DroneShow を「描画資源に依存しない層」に保つため(GPULight は
+    // Rendering/GPULight.h にあり、ここから見えないわけではない)。
     // 露出を掛けるのも呼び出し側の仕事(理由はBuildLightSamplesのコメント)。
     struct DroneLightSample
     {
@@ -64,7 +64,7 @@ namespace Kurenai
         // Evaluateが作った機体から、シーンを照らすための光源をsampleCount灯ぶん作る。
         //
         // 【なぜ全機を灯にしないか】1500灯はkMaxLights(1024)を超えるうえ、編隊は空の一点に
-        // 密集するので16pxタイルの容量(kLightTileCapacity=64)を確実に超え、超過分は
+        // 密集するので16pxタイルの容量(Passes::kLightTileCapacity=64)を確実に超え、超過分は
         // DirectLighting.hlslのmin()で**静かに欠落する**。さらにTransparent/PlanarReflection/
         // ProbeShading/DDGIProbeTraceの4本はタイルカリングを通らない全灯ループである。
         //

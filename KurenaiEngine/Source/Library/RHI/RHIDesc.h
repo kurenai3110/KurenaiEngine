@@ -45,8 +45,8 @@ namespace Kurenai::RHI
         // 定数バッファも上のStructuredReadOnlyと同じ理由でリングになっている。
         // メッシュごと・パスごとに書き換えるバッファ(ObjectConstants)は、シーンの
         // メッシュ数とパス数の積だけ書かれるため、既定では足りないことがある
-        // ―― BistroInteriorLit(不透明59メッシュ)はプローブのキャプチャだけで
-        // 1フレーム6000回を超え、実際にリングを一周して描画が壊れていた。
+        // ―― プローブのキャプチャだけでリングを一周して描画が壊れた実例が
+        // docs/ImplementationHistory.md 45.1 にある。
         //
         // DX12はこの値 × kFrameCount ぶんのスロットをUPLOADヒープに常時確保するので、
         // (1スロットは256バイト境界へ切り上げられる)大きな値は必要なバッファにだけ与えること。
@@ -120,13 +120,18 @@ namespace Kurenai::RHI
         std::vector<ASInstanceDesc> Instances;
     };
 
-    struct PipelineStateDesc
+    // 頂点シェーダー版(PipelineStateDesc)とメッシュシェーダー版(MeshPipelineStateDesc)で
+    // まったく同じ意味を持つ設定。**ラスタライザ・深度・ブレンド・レンダーターゲットの
+    // 扱いは、どちらのパイプラインでも1文字も変わらない。**
+    //
+    // 【なぜ基底に括るのか】同じG-Bufferへ書くパスを頂点シェーダー版とメッシュシェーダー版で
+    // 切り替えられることが前提になっている(GeometryPasses)。両者の設定が1つでもずれると
+    // 切り替えで見た目が変わり、「切り替えても一致するはず」という検証そのものが成立しなくなる。
+    // 以前は2つの構造体へ同じ8フィールドを書き写し、「名前も既定値も揃えてある」という
+    // コメントで手で同期させていた。片方へ足して他方へ足し忘れても、
+    // **コンパイルは通り、実行時にも何も言わない。**
+    struct GraphicsPipelineCommonDesc
     {
-        std::vector<InputElementDesc> InputLayout;
-        IRHIShader* VertexShader = nullptr;
-        IRHIShader* PixelShader = nullptr;
-        PrimitiveTopology Topology = PrimitiveTopology::TriangleList;
-
         // DX12のパイプラインステートオブジェクト作成時にレンダーターゲット/深度のフォーマットを
         // 事前に確定させる必要があるため保持する。DX11実装では参照しない
         std::vector<Format> RenderTargetFormats;
@@ -177,6 +182,16 @@ namespace Kurenai::RHI
         bool FrontCounterClockwise = false;
     };
 
+    // 頂点シェーダー + ピクセルシェーダーによる描画のパイプラインステート。
+    // 共通部分は GraphicsPipelineCommonDesc にあり、ここには入力アセンブラ側のものだけを置く
+    struct PipelineStateDesc : GraphicsPipelineCommonDesc
+    {
+        std::vector<InputElementDesc> InputLayout;
+        IRHIShader* VertexShader = nullptr;
+        IRHIShader* PixelShader = nullptr;
+        PrimitiveTopology Topology = PrimitiveTopology::TriangleList;
+    };
+
     struct ComputePipelineStateDesc
     {
         IRHIShader* ComputeShader = nullptr;
@@ -184,11 +199,10 @@ namespace Kurenai::RHI
 
     // 増幅シェーダー(任意)+ メッシュシェーダー + ピクセルシェーダーによる描画のパイプラインステート。
     //
-    // PipelineStateDescとの違いはInputLayout / VertexShaderを持たないことだけで、
-    // ラスタライザ・深度・ブレンド・レンダーターゲットフォーマットの扱いはすべて同じ。
-    // 同じG-Bufferへ書くパスを頂点シェーダー版とメッシュシェーダー版で切り替えられるよう、
-    // 対応するフィールドは名前も既定値もPipelineStateDescと揃えてある
-    struct MeshPipelineStateDesc
+    // PipelineStateDescとの違いはInputLayout / VertexShaderを持たないことだけ。
+    // 共通部分は GraphicsPipelineCommonDesc が持つので、
+    // 「対応するフィールドを名前も既定値も揃える」という手作業はもう要らない
+    struct MeshPipelineStateDesc : GraphicsPipelineCommonDesc
     {
         // nullptrでもよい(その場合カリングを行わず、DispatchMeshで指定した数だけ
         // メッシュシェーダーが直接起動される)
@@ -197,15 +211,6 @@ namespace Kurenai::RHI
         // nullptrでもよい(深度だけを書くパスではピクセルシェーダーの段ごと省ける)。
         // PipelineStateDesc::PixelShaderと同じ扱い
         IRHIShader* PixelShader = nullptr;
-
-        std::vector<Format> RenderTargetFormats;
-        bool HasDepthStencil = false;
-        bool DepthTargetAttached = false;
-        bool DepthWriteEnabled = true;
-        bool ReverseZ = false;
-        bool DepthAllowEqual = false;
-        BlendMode BlendMode = BlendMode::Opaque;
-        bool FrontCounterClockwise = false;
     };
 
     // サンプラーの記述子。既定値は異方性16x + Wrapで、これまでの固定MIN_MAG_MIP_LINEARより

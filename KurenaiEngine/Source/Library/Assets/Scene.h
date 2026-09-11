@@ -254,7 +254,7 @@ namespace Kurenai::Assets
         float Direction[3] = { 0.0f, 1.0f, 0.0f };
         // 面が出している放射輝度。EmissiveFactor × エミッシブテクスチャの平均色。
         //
-        // 【シーン全体の倍率(m_EmissiveIntensity)も露出も掛けない】倍率は毎フレームの
+        // 【シーン全体の倍率(m_Settings.EmissiveLight.Intensity)も露出も掛けない】倍率は毎フレームの
         // ライトリスト構築で掛ける ―― そうしないとImGuiのスライダーが効かなくなる。
         // 露出はそもそも掛けてはいけない(G-Bufferのエミッシブが露出を通らないため。62章)
         float RadianceBase[3] = { 0.0f, 0.0f, 0.0f };
@@ -281,12 +281,6 @@ namespace Kurenai::Assets
         // 【ModelCache/Instancesより後ろに置いてはいけない】メンバはここでの宣言順に構築され、
         // 逆順に破棄される。Modelが持つMeshはここのテクスチャを生ポインタで指しているため、
         // 先に破棄されると解放済みを指す。Modelを持つ2つより前に宣言してこの順序を保証する。
-        //
-        // 【以前はここがInstancesより後ろにあった】コメントは「Instancesより前に宣言する」と
-        // 書いてあるのに、実際の宣言はInstancesの後ろにあった(=破棄はInstancesより先)。
-        // Modelのデストラクタがこの生ポインタを読まないため実害は出ていなかったが、
-        // ModelCacheがModelの実体を所有するようになって順序の重みが増したので、
-        // コメントが元から要求していた並びへ直した
         SharedTexturePool SharedTextures;
 
         // .kmodelのパス(assetRootDirectoryを含む絶対パス)から読み込み済みModelを引くキャッシュ。
@@ -356,12 +350,7 @@ namespace Kurenai::Assets
 
         // カスケードシャドウを打ち切る距離[m]。未指定(HasShadowDistance == false)なら
         // 従来どおりカメラの遠クリップ面までを4カスケードで分割する。
-        //
-        // 【なぜ必要か】遠クリップ面はシーンAABBの対角から自動決定される
-        // (farZ = max(100, 対角×4)、KurenaiEngine3D::ComputeInitialCamera)。数十km規模のシーンでは
-        // farZが100km級になり、カスケードの分割範囲がそのまま伸びるため、第1カスケードが
-        // 数kmを2048x2048の1枚で覆うことになって近景の影が事実上消える。
-        // シャドウだけを手前で打ち切れば、遠景の描画距離を保ったまま近景の影の密度を戻せる。
+        // 数十km規模のシーンで近景の影が消える理由は docs/ImplementationDetail.md 44.6。
         //
         // 【既定値を持たせない理由】「指定しなければ従来の挙動」を保証するためにフラグで分ける。
         // 何らかの既定値を入れると、これまで正しく影が出ていたシーンの見え方が黙って変わる
@@ -399,19 +388,9 @@ namespace Kurenai::Assets
         // シーンだけがonにする。仕組みはAssets::TextureStreamingManager参照
         bool TextureStreamingEnabled = false;
         // 必要ミップの推定に足すバイアス[段]。負なら安全側(より詳細なミップを常駐させる)。
-        //
-        // 【既定 -2 は実測で決めた】Bistro Exteriorで、常駐ミップ制御をoff/onした画を
-        // 同一起動・同一カメラで撮り、32pxタイルごとにラプラシアン分散を比べた結果:
-        //
-        //   UV密度の代表値  バイアス  常駐率   比<0.80のタイル   最悪タイル
-        //   (ノイズ下限)       ―        ―          0枚           0.918
-        //   p90              -2      13.8%       14枚           0.175
-        //   中央値            -3      28.6%        0枚           0.852
-        //   p10              -1      12.4%        3枚           0.745
-        //   p10              -2      21.1%        1枚           0.768  ← 既定
-        //
-        // 残る1枚は暗部のアルファテスト葉で、並べても区別が付かない(絶対値が小さいため
-        // 相対指標だけが大きく動く)。根拠と経緯は docs/ImplementationDetail.md 48章
+        // 【既定 -2 は実測で決めた】UV密度の代表値とバイアスの組み合わせを、常駐率と
+        // タイルごとのラプラシアン分散で比べて選んである。
+        // 根拠と経緯は docs/ImplementationDetail.md 48章
         float TextureStreamingBias = -2.0f;
 
         // AO/間接光(SSAO・SSIL)を有効にするか。Furnace Testでは球の縁がAOで暗くなると
@@ -451,7 +430,7 @@ namespace Kurenai::Assets
         uint32_t RenderHeight = 0;
 
         // トーンマップのカーブ。Source/LibraryはSource/Engineに依存できないため、
-        // KurenaiEngine3D::TonemapCurveと同じ並びの独立した列挙をここに持つ
+        // TonemapCurveと同じ並びの独立した列挙をここに持つ
         // (KurenaiEngine3D::ApplyLoadedSceneが1対1で対応付ける。並びを変えたら両方直すこと)。
         // 既定のAgXはハイライトが色相を保ったまま白へ脱色するので赤い内観に強い一方、
         // 空のような広い面では彩度を落とす(実測: 空の最も青い画素でB/R 1.53→1.34)。
@@ -533,11 +512,7 @@ namespace Kurenai::Assets
         // 指定されたキーだけエンジンの設定を上書きする。
         //
         // 【なぜシーンごとに要るのか】消散係数は遠景の霞の濃さだけでなく、**雲がどれだけ空から
-        // 浮き上がって見えるか**を一手に決める。雲底1,500mの層は仰角20度の方向で4.4km先にあり、
-        // エンジンの既定値0.0004(視程9.8km相当)ではそこまでの透過率が0.40しかない——
-        // 雲のコントラストの6割が目に届く前に空の色へ溶ける。実測でも、雲の受光を削っている
-        // 要因はこれがほぼ単独で、自己影(+1.2)や縦方向の勾配(+3.6)に対してこの項だけが
-        // +24.6(雲の90%点と空の中央値の差、255段階)を占めていた。
+        // 浮き上がって見えるか**を一手に決める(要因の分解は docs/ImplementationDetail.md 35.40)。
         // 既定値はEngineDefaults.hの複製で、両方を同時に直すこと ---
         bool HasFogEnabled = false;
         bool FogEnabled = true;
@@ -619,8 +594,8 @@ namespace Kurenai::Assets
         // 波の見た目に関する3つの既定値。SunTimeOfDay等と同じ方針で、EngineDefaults.h
         // ([--- 水面 ---]セクション)の値をリテラルとして複製している(Source/Libraryは
         // Source/Engineに依存できないため、Defaults::を直接参照できない)。
-        // シーン読み込み時にKurenaiEngine3D::m_WaterWaveScale等へコピーされ、以降はUIで
-        // 実行時上書きできる(m_ReflectionModeがScene.SSREnabledから初期化されるのと同じ設計)
+        // シーン読み込み時にKurenaiEngine3D::m_Settings.Water.WaveScale等へコピーされ、以降はUIで
+        // 実行時上書きできる(m_Settings.Reflection.ModeがScene.SSREnabledから初期化されるのと同じ設計)
         float WaterWaveScale = 12.0f;
         float WaterWaveSpeed = 0.03f;
         float WaterWaveStrength = 0.25f;

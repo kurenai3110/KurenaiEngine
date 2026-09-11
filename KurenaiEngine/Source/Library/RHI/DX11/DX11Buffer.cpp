@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "Core/Logger.h"
+#include "RHI/ReadbackUtil.h"
 
 namespace Kurenai::RHI
 {
@@ -60,24 +61,12 @@ namespace Kurenai::RHI
 
     bool DX11Buffer::ReadbackData(void* outData, uint32_t sizeInBytes)
     {
-        if (!m_IsReadback)
+        if (!ValidateBufferReadbackRequest("DX11", m_IsReadback, outData, sizeInBytes, m_SizeInBytes))
         {
-            Core::Logger::Error("DX11", "ReadbackData: BufferUsage::Readback以外のバッファから読もうとしました");
             return false;
         }
-        if (outData == nullptr || sizeInBytes == 0)
-        {
-            Core::Logger::Error("DX11", "ReadbackData: 出力先がnullptrかサイズが0です");
-            return false;
-        }
-        if (sizeInBytes > m_SizeInBytes)
-        {
-            Core::Logger::Error(
-                "DX11",
-                "ReadbackData: 要求サイズ(" + std::to_string(sizeInBytes) + ")がバッファサイズ(" +
-                    std::to_string(m_SizeInBytes) + ")を超えています");
-            return false;
-        }
+        // 【DX11だけの前提】Mapにデバイスコンテキストが要る。DX12はREADBACKヒープを
+        // 作成時から永続マップしてあるため、この確認自体が存在しない
         if (!m_Context)
         {
             Core::Logger::Error("DX11", "ReadbackData: デバイスコンテキストがありません");

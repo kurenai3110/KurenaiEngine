@@ -27,10 +27,8 @@
 // SSRが自分の足した覚えのない値を引き算することになる)。
 //
 // このヘッダーはFrameConstants(b0)の ProbeParams / ProbeParams2 / ShadowParams / AmbientColor /
-// IBLParams を参照する(IBLParams.xは拡散側のマクロを定義した場合のみ。.zは常に参照する)。
-// インクルードする側はこれらを含む形でFrameConstantsを宣言しておく必要がある。
-// cbufferのレイアウトは宣言順で決まるため、
-// 途中のフィールドを飛ばさずC++側 KurenaiEngine3D.cpp の FrameConstants と並びを一致させること。
+// IBLParams を参照する(IBLParams.xは拡散側のマクロを定義した場合のみ。.zは常に参照する)ので、
+// インクルードする側は ShaderInterop/FrameConstants.hlsli も取り込んでおくこと。
 #ifndef KURENAI_REFLECTION_PROBE_HLSLI
 #define KURENAI_REFLECTION_PROBE_HLSLI
 

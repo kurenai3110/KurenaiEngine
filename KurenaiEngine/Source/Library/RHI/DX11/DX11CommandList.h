@@ -4,6 +4,7 @@
 #include <wrl/client.h>
 
 #include "RHI/IRHICommandList.h"
+#include "RHI/RHIBindingLimits.h"
 
 namespace Kurenai::RHI
 {
@@ -17,9 +18,6 @@ namespace Kurenai::RHI
             IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture, uint32_t depthArraySlice = 0) override;
         void ClearRenderTarget(const ClearColor& color) override;
         void ClearDepth(float depth) override;
-        void SetViewport(const Viewport& viewport) override;
-        void SetScissorRect(const ScissorRect& rect) override;
-        void ResetScissorRect() override;
         void SetPipelineState(IRHIPipelineState* pipelineState) override;
         void SetVertexBuffer(IRHIBuffer* buffer) override;
         void SetIndexBuffer(IRHIBuffer* buffer) override;
@@ -47,52 +45,43 @@ namespace Kurenai::RHI
         void SetComputeUnorderedAccessBuffer(uint32_t slot, IRHIBuffer* buffer) override;
         void SetComputeAccelerationStructure(uint32_t slot, IRHIAccelerationStructure* accelerationStructure) override;
         void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
-        void DispatchIndirect(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) override;
         void DispatchMeshIndirect(
             IRHIBuffer* argsBuffer, uint32_t argsOffsetInBytes, uint32_t maxCommandCount,
             uint32_t countOffsetInBytes) override;
-        void ClearUnorderedAccessBufferUint(IRHIBuffer* buffer, uint32_t value) override;
-        void CopyBufferToReadback(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) override;
-        void CopyTextureToReadback(
-            IRHITexture* dst, IRHITexture* src, uint32_t mipLevel = 0, uint32_t arraySlice = 0) override;
+
+    protected:
+        // 具象型でしか答えられない問い。「何を断るか」の判断は IRHICommandList が持つ
+        bool IsIndirectArgsBuffer(const IRHIBuffer* buffer) const override;
+        bool IsReadbackBuffer(const IRHIBuffer* buffer) const override;
+        bool IsReadbackTexture(const IRHITexture* texture) const override;
+        bool HasUnorderedAccessView(const IRHIBuffer* buffer) const override;
+
+        // 検証済みの引数を受けて、実際にD3D11のコマンドを発行する
+        void ApplyViewport(const Viewport& viewport) override;
+        void ApplyScissorRect(const ScissorRect& rect) override;
+        void DispatchIndirectImpl(IRHIBuffer* argsBuffer, uint32_t offsetInBytes) override;
+        void ClearUnorderedAccessBufferUintImpl(IRHIBuffer* buffer, uint32_t value) override;
+        void CopyBufferToReadbackImpl(IRHIBuffer* dst, IRHIBuffer* src, uint32_t sizeInBytes) override;
+        void CopyTextureToReadbackImpl(
+            IRHITexture* dst, IRHITexture* src, uint32_t mipLevel, uint32_t arraySlice) override;
 
     private:
         // Dispatch/DispatchIndirectの後始末。バインドしたUAVを全解除する
         void ReleaseComputeUavBindingsAfterDispatch();
 
         static constexpr uint32_t kMaxRenderTargets = 8;
+        // 【スロット数の定義は RHI/RHIBindingLimits.h が唯一の出所】ここに並ぶ3本はその別名で、
+        // 値を持たない。以前はDX11・DX12のコマンドリストとDX12のルートシグネチャの3か所へ
+        // 生の数値を書き写し、「必ず一致させること」というコメントで手で同期させていた
+        // (H3でt21を足したときに実際に踏んだ。DX11だけで確認していると気付けない)。
+        // 各スロットの意味と内訳もあちらにある
+
         // SetComputeUnorderedAccessTexture/Bufferで使えるUAVスロット数(u0〜u3)
-        static constexpr uint32_t kComputeUavSlotCount = 4;
-        // SetVertexShaderResourceBufferで使える頂点シェーダのSRVスロット数。
-        // DX11自体は128本持っているが、DX12側はルートSRVを1本しか割り当てていない
-        // (DX12CommandList::kVertexShaderSrvSlotCount)。ここを合わせておかないと
-        // 「DX11では通るがDX12では黙って描画が消える」非対称なバグが書けてしまうため、
-        // DX11側でも同じ上限で弾く。増やすときはDX12のルートシグネチャと同時に直すこと
-        static constexpr uint32_t kVertexShaderSrvSlotCount = 1;
-        // SetTexture/SetShaderResourceBufferで使えるピクセルシェーダのSRVスロット数(t0〜t17)。
-        // DX12側のDX12CommandList::kTextureSlotCountおよびDX12Device.cppの
-        // ルートシグネチャのSRVレンジと同じ値にしておくこと(3か所)。
-        //
-        // この値が足りないと、反射プローブ(19章)が張るキューブマップ配列・影響範囲バッファ・
-        // 距離キューブや、DDGI(22章)のアトラス2枚が下のm_BoundPixelSrvsの追跡から漏れる。
-        // そうなるとUnbindPixelSrvForResourceがこれらを外せず、ベイクがUAVで書き込む際の
-        // SRVアンバインドがドライバ任せ(警告付きの自動アンバインド)になってしまう。
-        // **SetTextureは範囲外スロットも素通しするため、漏れていても描画結果には現れない。**
-        //
-        // 【現在の23の内訳】最も多く使うDeferredLighting.hlslがt0〜t22をちょうど使い切る:
-        //   t0〜t7   G-Buffer一式(アルベド/直接光/マテリアル/深度/スカイボックス/AO/自発光/法線)
-        //   t8,t9    グローバルIBL(放射照度・プリフィルタ済み鏡面)
-        //   t10      BRDF LUT
-        //   t11      空パラメータ(GPUSkyParameters、SkyIntegrate.hlslが書く構造化バッファ)
-        //   t12〜t14 反射プローブ(鏡面専任。拡散はDDGIへ一本化した)
-        //   t15,t16  DDGIのオクタヘドラルアトラス2枚
-        //   t17      bent normalのG-Buffer(34章)
-        //   t18      低解像度の雲パス(SkyCloud.hlsl)の出力。rgb=事前乗算済みの散乱光 / a=透過率
-        //   t19      DDGIResolveが書いた低解像度のイラディアンス
-        //   t20      大気散乱のSkyView LUT
-        //   t21      DDGIResolveが書いた低解像度の深度(41.24節)
-        //   t22      低解像度の雲パスが書いたfogInFront(雲の手前の霞。P18bの補正に使う)
-        static constexpr uint32_t kTextureSlotCount = 23;
+        static constexpr uint32_t kComputeUavSlotCount = RHIBindingLimits::kComputeUavSlotCount;
+        // SetVertexShaderResourceBufferで使える頂点シェーダのSRVスロット数
+        static constexpr uint32_t kVertexShaderSrvSlotCount = RHIBindingLimits::kVertexShaderSrvSlotCount;
+        // SetTexture/SetShaderResourceBufferで使えるピクセルシェーダのSRVスロット数(t0〜t22)
+        static constexpr uint32_t kTextureSlotCount = RHIBindingLimits::kTextureSlotCount;
 
         // ピクセルシェーダのSRVスロットに現在バインドされているビュー。
         // UAVバインド時に同一リソースのSRVを外すため(UnbindPixelSrvForResource)に持つ。
@@ -106,12 +95,6 @@ namespace Kurenai::RHI
         // CopySubresourceRegionを呼ぶとデバッグレイヤーが警告を出してコピーが無効になる。
         // UnbindPixelSrvForResourceの出力版で、リードバックのコピー直前に使う
         void UnbindRenderTargetsForResource(ID3D11Resource* resource);
-
-        // シザー矩形をD3D11へ設定する(SetViewport/SetScissorRect/ResetScissorRectの共通処理)
-        void ApplyScissorRect(const ScissorRect& rect);
-        // SetScissorRect/ResetScissorRectがクランプ先として使う、直近のSetViewportの値
-        Viewport m_CurrentViewport{};
-        bool m_HasViewport = false;
 
         Microsoft::WRL::ComPtr<ID3D11DeviceContext> m_Context;
         ID3D11RenderTargetView* m_CurrentRenderTargetViews[kMaxRenderTargets] = {};

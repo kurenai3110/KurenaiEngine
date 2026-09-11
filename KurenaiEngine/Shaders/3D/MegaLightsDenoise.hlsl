@@ -25,23 +25,9 @@
 // 履歴の妥当性判定に使う。リソースは宣言していないヘッダなので取り込んでも束縛は増えない
 #include "MegaLightsCommon.hlsli"
 
-static const float PI = 3.14159265359f;
+#include "MathConstants.hlsli"
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    float4 AmbientColor;
-    float4 CascadeSplits;
-    float4 ShadowParams;
-    // 【宣言はここで止めている】読むのは ShadowParams まで
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 cbuffer MegaLightsDenoiseConstants : register(b1)
 {
@@ -100,12 +86,7 @@ float Luminance(float3 c)
     return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
 }
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    const float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    const float4 worldPos = mul(float4(ndc, depth, 1.0f), InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
+#include "ShaderInterop/Common.hlsli"
 
 // その画素の「反射率」。フィルタの前にこれで割り、後で掛け戻す。
 // **時間累積側とà-trous側で必ず同じ式を使うこと** ―― ずれると掛け戻したときに色が変わる
@@ -158,16 +139,15 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     // --- ファイアフライの抑制(近傍クランプ) ---
     // 【何を切っているのか】RISの 1/p の重みは裾の重い分布を作る。たまたま小さい確率で
-    // 引かれた灯は大きな W で割り戻され、桁違いに明るい1画素になる。実測(履歴が無い
-    // 状態 = カメラを動かした直後に相当)で**画素の3.0%が期待値の3倍以上、2,353画素が
-    // 10倍以上**で、これが画面上で最も目につく「白い粒」だった。
+    // 引かれた灯は大きな W で割り戻され、桁違いに明るい1画素になる。これが画面上で
+    // 最も目につく「白い粒」で、履歴が無い状態(カメラを動かした直後)で顕著になる
+    // (実測は docs/ImplementationDetail.md 61.7g.4)。
     // 【上側だけ切る】暗い側は触らない。黒く沈んだ画素は影の縁の黒い斑点の原因になり、
     // そちらは別の仕組み(可視性込みの目標関数とBlockedLightsキャッシュ)で潰してある。
     // 【色相は保つ】輝度の比で全成分を縮める。成分ごとに切ると色が転ぶ。
     // 【平均+k・標準偏差では切れない】一度そう書いて外した。履歴が無い場所では近傍も
     // 同じだけノイジーで、**標準偏差がファイアフライ自身に押し上げられる**ため上限が
-    // 外れ値の上に来る。実測(移動直後に相当する条件)でk=4は10倍超の画素を2,353→2,260と
-    // 4%しか減らせなかった。基準には外れ値に強い量が要る。
+    // 外れ値の上に来る。基準には外れ値に強い量が要る。
     // 【採ったやり方】5x5の平均を取り、その8倍を超えるタップを外してもう一度平均を取る
     // (1回の刈り込み平均)。上限はその k 倍。平均は25画素で薄まるので、3%が外れ値でも
     // 基準はほとんど動かない。

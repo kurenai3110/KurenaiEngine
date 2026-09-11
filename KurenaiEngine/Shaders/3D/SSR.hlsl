@@ -55,103 +55,7 @@ static const float kSSRWaterMaterialID = 1.0f;
 // SSRが「Lightingが使ったのとは違う放射輝度」を引き算することになるため必ず定義する
 #define KURENAI_PROBE_DISTANCE_REGISTER t10
 
-cbuffer FrameConstants : register(b0)
-{
-    float4x4 ViewProj;
-    float4x4 InvViewProj;
-    // カスケードシャドウマップ用(このシェーダでは未使用。オフセット合わせのためだけに宣言する)
-    float4x4 CascadeViewProj[4];
-    float4 CameraPosition;
-    float4 LightDirection;
-    float4 LightColor;
-    float4x4 View;
-    float4x4 Proj;
-    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)。
-    // a=昼度を鏡面IBLの重みに含めてはいけない。手続き空は空自体が暗くなるため(21.4節)
-    float4 AmbientColor;
-    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
-    float4 CascadeSplits;
-    // y: プリフィルタ済み鏡面マップの最大ミップレベル、z: IBL強度倍率、
-    // w: スペキュラのマルチスキャッタリング・エネルギー補正のトグル
-    float4 ShadowParams;
-    // このシェーダでは未使用(オフセット合わせのためだけに宣言する)
-    float4 ActiveLightCount;
-    // 拡散イラディアンスの取得元切り替え。このシェーダは鏡面しか扱わないため未使用だが、
-    // 後続のProbeParamsのオフセットを合わせるために宣言だけしている
-    float4 IBLParams;
-    // 反射プローブ用。ReflectionProbe.hlsliのプローブ選択・ブレンドが読む
-    float4 ProbeParams;
-    // 距離キューブ用(19.12節)。同じくReflectionProbe.hlsliが読む
-    float4 ProbeParams2;
-    // ここから下、TAA(23章)・DDGI(22章)・水面の波用の8本はこのシェーダでは未使用。
-    // cbufferのレイアウトは宣言順で決まり途中のフィールドを飛ばせないため、末尾のSky*
-    // フィールドのオフセットをC++側 KurenaiEngine3D.cpp の FrameConstants と合わせる
-    // 目的だけで宣言している(DeferredLighting.hlslの同名フィールドと同じ扱い)
-    float4x4 PrevViewProj;
-    float4 TAAParams;
-    float4 DDGIParams0;
-    float4 DDGIParams1;
-    float4 DDGIParams2;
-    float4 DDGIParams3;
-    float4 DDGIParams4;
-    // DDGIのクリップマップLOD(31.4.2節)。**要素数はC++側のkDDGIMaxLODCountと一致させること。**
-    // 読むのはDDGI.hlsliだけだが、cbufferは宣言順でオフセットが決まるため、
-    // DDGIParams4の後ろのフィールドを読むシェーダーはすべてここへ同じ宣言が要る
-    // (飛ばすと以降のフィールドが64バイトずれ、コンパイルは通るのに別の値を読む)
-    float4 DDGILODOrigin[4];
-    float4 DDGILODBase[4];
-    // bent normalによる遮蔽(34章)。DeferredLighting.hlslと必ず同じ値を読むこと。
-    //
-    // 【masterではここでDDGIParams0〜4の5本が抜けていた】cbufferは宣言順レイアウトなので、
-    // 5本(80バイト)飛ばした位置を OcclusionParams として読んでいた——実体は DDGIParams0
-    // (GIボリュームの最小コーナーのワールド座標)で、その y をスペキュラ遮蔽の方式番号として
-    // 解釈していた。つまり**GIボリュームの高さでSSRの遮蔽方式が変わっていた**。
-    // landscape-water-skyのマージで、この5本を宣言することで直した
-    float4 OcclusionParams;
-    float4 TimeParams;
-    // 空の解析評価用。水面の解析空フォールバック(下記MakeSkyParameters参照)が
-    // 読む。DeferredLighting.hlslのFrameConstants宣言と同じ意味を持つ値なのでそちらのコメントも
-    // 参照。xyz=太陽が「ある」向き(未正規化のまま渡ってくる。呼び出し側でnormalizeする。
-    // SkyGenerate.hlsl側の慣習に合わせてある)、w=未使用
-    float4 SkySunDirection;
-    // x=未使用(天頂輝度はSkyParametersBufferにある)。y=背景(深度なし画素)を解析評価するか
-    // のフラグだが、このシェーダは背景を描かないため未使用(水面フォールバックの有効/無効は
-    // DeferredLighting.hlslと共有せず、SSRConstants.Params0.wで別途持つ。C++側Render()が
-    // 手続き空の有効/無効を含めて一本化して決める。KurenaiEngine3D.cppのExecute内コメント参照)。
-    // z=太陽照度/空照度比(SunToSkyIlluminanceRatio。MakeSkyParametersが読み、
-    // Sky.hlsliのEvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う)、w=未使用
-    float4 SkyParams;
-    // 雲(さらに末尾に追加)。DeferredLighting.hlslの同名フィールドと完全に同じ順・同じ型
-    // であること(C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams0/1 と揃える。
-    // ずれると背景に見える雲と水面に映る雲が食い違う)。
-    // CloudParams0: x=被覆率(0で雲なし。Sky.hlsliのSkyColorが早期脱出する)、
-    //               y=雲底の高度[m](カメラ基準)、z=UVスケール[ノイズ空間/m]、w=消散係数
-    float4 CloudParams0;
-    // CloudParams1: xy=風によるノイズ空間の移動量(CPU側でSky.hlsliのkCloudNoisePeriodと
-    //               同じ周期でwrap済み)、z=Henyey-Greensteinの非対称パラメータ、w=未使用
-    float4 CloudParams1;
-    // 巻雲(さらに末尾に追加)。DeferredLighting.hlsl/PlanarReflection.hlslの同名フィールドと
-    // 完全に同じ順・同じ型であること(C++側 KurenaiEngine3D.cpp の FrameConstants::CloudParams2/3 と揃える)。
-    // CloudParams2: x=巻雲の被覆率(0で巻雲なし)、y=雲底の高度[m](カメラ基準)、
-    //               z=UVスケール[ノイズ空間/m]、w=消散係数
-    float4 CloudParams2;
-    // CloudParams3: xy=風によるノイズ空間の移動量(積雲と同じくkCloudNoisePeriodでwrap済み)、
-    //               z=fBmのUV(U方向)を伸ばす異方性スケール、w=未使用
-    float4 CloudParams3;
-    // 平面反射。このシェーダでは未使用(オフセット合わせのためだけに宣言する)。
-    // 実際の値はSSRConstants.Params1として別途受け取っている(下記cbuffer SSRConstants参照)
-    float4 PlanarReflectionPlane;
-    // 大気遠近(末尾に追加)。このシェーダでは未使用だが、C++側 KurenaiEngine3D.cpp の
-    // FrameConstantsと並びを一致させる目的だけで宣言する
-    // (AerialPerspective.hlsl/PlanarReflection.hlslが読む)
-    float4 FogParams0;
-    float4 FogParams1;
-    // 水中項。このシェーダでは未使用(オフセット合わせのためだけに宣言する)。Water.hlslが読む
-    float4 WaterBodyColor;
-    // 星空(末尾に追加)。水面に映る空にも星を出すために読む。
-    // C++側 KurenaiEngine3D.cpp の FrameConstants::StarsParams と揃えること
-    float4 StarsParams;
-};
+#include "ShaderInterop/FrameConstants.hlsli"
 
 cbuffer SSRConstants : register(b1)
 {
@@ -186,85 +90,18 @@ Texture2D BentNormalTexture : register(t16);
 #include "ReflectionProbe.hlsli"
 
 // 平面反射。KurenaiEngine3D::Renderが鏡映カメラで描いたPlanarReflection.hlslの結果
-// (m_PlanarReflectionColor)。t0〜t10は上ですべて埋まっているためt11を使う
+// (m_RenderTargets.PlanarReflectionColor)。t0〜t10は上ですべて埋まっているためt11を使う
 Texture2D PlanarReflectionTexture : register(t11);
 // SkyIntegrate.hlslが書いた空パラメータ。ティント4本と正規化済みの天頂輝度が入る。
 // t0〜t11が既に使用済みのためt12を使う
 StructuredBuffer<GPUSkyParameters> SkyParametersBuffer : register(t12);
 
-struct PSInput
-{
-    float4 Position : SV_POSITION;
-    float2 UV : TEXCOORD0;
-};
+#include "ShaderInterop/FullscreenTriangle.hlsli"
 
-// 頂点バッファなしで画面全体を覆う三角形を1枚だけ生成する定番のテクニック
-PSInput VSMain(uint vertexID : SV_VertexID)
-{
-    PSInput output;
-    output.UV = float2((vertexID << 1) & 2, vertexID & 2);
-    output.Position = float4(output.UV.x * 2.0f - 1.0f, 1.0f - output.UV.y * 2.0f, 0.0f, 1.0f);
-    return output;
-}
+#include "ShaderInterop/Common.hlsli"
 
-float3 ReconstructWorldPos(float2 uv, float depth)
-{
-    float2 ndc = float2(uv.x * 2.0f - 1.0f, 1.0f - uv.y * 2.0f);
-    float4 clipPos = float4(ndc, depth, 1.0f);
-    float4 worldPos = mul(clipPos, InvViewProj);
-    return worldPos.xyz / worldPos.w;
-}
-
-// FrameConstantsのSky*フィールドからSky.hlsliのSkyParametersを組み立てる。
-// DeferredLighting.hlsl/AerialPerspective.hlsl/PlanarReflection.hlslのMakeSkyParametersと
-// 完全に同一の内容であること(正規化の扱いを含む)。4つのシェーダーはcbufferをそれぞれ別に
-// 宣言しているため関数そのものは共有できず複製しているが、中身がずれると「背景の空」
-// 「水面に映る空」「フォグの合成先の色」が互いに食い違ってしまうため、
-// 中身を変える場合は必ず4つとも同時に直すこと
-SkyParameters MakeSkyParameters(float2 pixelPosition)
-{
-    SkyParameters params;
-    params.SunDirection = normalize(SkySunDirection.xyz);
-    // ティント4本と天頂輝度はSkyParametersBuffer(t12)にある(SkyIntegrate.hlslが書く)
-    params = ApplySkyParametersFromBuffer(params, SkyParametersBuffer[0]);
-    // 太陽照度/空照度比(SkyParams.zに詰めてある。KurenaiEngine3D.cppのSkyParams.zコメント参照)。
-    // EvaluateCloudLayerが雲の明るさを太陽照度基準にするために使う
-    params.SunToSkyIlluminanceRatio = SkyParams.z;
-    // 雲。DeferredLighting.hlslのMakeSkyParametersと完全に同一の内容であること
-    // (このファイル冒頭のコメントと同じ理由。背景に見える雲と水面に映る雲が食い違ってはいけない)
-    params.CloudCoverage = CloudParams0.x;
-    params.CloudAltitude = CloudParams0.y;
-    params.CloudUvScale = CloudParams0.z;
-    params.CloudDensity = CloudParams0.w;
-    params.CloudScrollOffset = CloudParams1.xy;
-    params.CloudForwardG = CloudParams1.z;
-    // 積雲の厚み[m](CloudParams1.wの枠に詰めてある)。
-    // 0ならレイマーチせず平面として扱う
-    params.CloudThickness = CloudParams1.w;
-    // 巻雲。DeferredLighting.hlslのMakeSkyParametersと完全に同一の内容であること
-    params.CirrusCoverage = CloudParams2.x;
-    params.CirrusAltitude = CloudParams2.y;
-    params.CirrusUvScale = CloudParams2.z;
-    params.CirrusDensity = CloudParams2.w;
-    params.CirrusScrollOffset = CloudParams3.xy;
-    params.CirrusAnisotropy = CloudParams3.z;
-    // 雲の種類の偏り(C4)。CloudParams3.wはこれまで未使用だった枠なので、FrameConstantsは1バイトも増えない
-    params.CloudTypeBias = CloudParams3.w;
-    // 雲層へ掛ける大気遠近(P12。Sky.hlsliのEvaluateCloudLayer (f)節)。
-    // 雲はAerialPerspective.hlslの早期脱出でフォグを受けないため、雲側で自前に掛ける
-    params = ApplyCloudFogParameters(params, FogParams0, CameraPosition.xyz);
-    // レイマーチの開始位置を画素ごとにずらす量(C2)。スライスの縞をディザへ変える
-    params.RaymarchJitter = CloudRaymarchDither(pixelPosition);
-    // 星空。水面に映る空にも背景と同じ星を出す(ApplyCloudFogParametersが0で潰した後に上書きする)。
-    // 背景側(DeferredLighting.hlsl)と同じ値を入れること——食い違うと
-    // 「空には出ているのに水面には映らない星」ができる
-    params.StarsIntensity = StarsParams.x;
-    params.StarsDensity = StarsParams.y;
-    params.StarsTwinkle = StarsParams.z;
-    params.StarsPixelAngle = StarsParams.w;
-    params.StarsTime = TimeParams.x;
-    return params;
-}
+#define KURENAI_SKY_WITH_STARS
+#include "ShaderInterop/SkyFrameParameters.hlsli"
 
 // ワールド座標を画面UVとView空間Z(カメラからの距離。値が大きいほど遠い)へ投影する。
 // カメラ背後、または画面外に出た場合はfalseを返す
@@ -288,7 +125,7 @@ bool ProjectToScreen(float3 worldPos, out float2 uv, out float viewZ)
 // が立っている水面画素)からのみ呼ばれる想定。
 //
 // 平面反射はSSRのレイマーチとは完全に別経路――鏡映カメラで景色を描き直したPlanarReflection.hlsl
-// の結果(m_PlanarReflectionColor)を、反射ベクトルを再投影せず同じ画面UV(input.UV)でそのまま
+// の結果(m_RenderTargets.PlanarReflectionColor)を、反射ベクトルを再投影せず同じ画面UV(input.UV)でそのまま
 // サンプルするだけでよい(平面鏡の反射は鏡映カメラで撮り直すことと数学的に等価なため。
 // 詳細はPlanarReflection.hlsl冒頭のコメント参照)。波の法線でその画面UVを少しだけずらすことで、
 // 波打つ水面らしい歪みを付ける。

@@ -211,10 +211,10 @@ namespace KurenaiPacker
     // 自動ではなく呼び出し側が明示する形にしている
     // 解析(LoadSourceModel)のフェーズ別の累計秒。メッシュをまたいで積算する。
     //
-    // 【なぜ解析側にも計装が要るのか】「パックが遅い」の律速は入力によって正反対になる。
-    // 埋め込みテクスチャ1714枚のPLATEAU LOD2は書き出しが98%だが、テクスチャ0枚の
-    // LOD1タイルは**解析が63%**で書き出しは37%しかない(実測)。どちらの経路を触るべきかは
-    // 測らないと決められないので、OcclusionBakerのBakeTimingsと同じ形で分けて出す
+    // 【なぜ解析側にも計装が要るのか】「パックが遅い」の律速は入力によって正反対になる
+    // (テクスチャの多いモデルは書き出し、テクスチャ0枚のタイルは解析。実測は
+    // docs/ImplementationDetail.md 51.3)。どちらの経路を触るべきかは測らないと決められないので、
+    // OcclusionBaker の BakeTimings と同じ形で分けて出す
     struct ParseTimings
     {
         double ReadSeconds = 0.0;      // assimpのImporter::ReadFile(外部ライブラリ)
