@@ -9,7 +9,12 @@
 
 float2 OctEncode(float3 n)
 {
-    n /= (abs(n.x) + abs(n.y) + abs(n.z));
+    // 【0除算を塞ぐ】nは単位ベクトルの前提なのでL1ノルムは1〜√3に収まり、この下限は
+    // 正しい入力では一度も効かない(効かせないための下限であって、丸めるための下限ではない)。
+    // 効くのは呼び出し側が長さ0やNaNを渡したときで、そこで 0/0 のNaNを新しく作らずに済む。
+    // **NaNをここで止められるわけではない** ―― 入ってきたNaNはそのまま出る。
+    // 入口でNaNを作らないようにするのはTangentFrame.hlsliのComputeTangentFrame側の仕事
+    n /= max(abs(n.x) + abs(n.y) + abs(n.z), 1e-8f);
     if (n.z < 0.0f)
     {
         float2 signNotZero = float2(n.x >= 0.0f ? 1.0f : -1.0f, n.y >= 0.0f ? 1.0f : -1.0f);
