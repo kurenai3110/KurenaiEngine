@@ -729,8 +729,17 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-autoexposure <0\|1>` | 自動露出の有無を指定する。 |
 | `-renderres <幅>x<高さ>` | 内部レンダー解像度を指定する。 |
 | `-occlusioncull <0\|1>` | Hi-Zオクルージョンカリングの有無を指定する。根拠は docs/ImplementationDetail.md 64.4節。 |
-| `-taa <0\|1>` | TAAの有無を指定する。根拠は docs/ImplementationDetail.md 64.3節。 |
 | `-meshlet <0\|1>` | メッシュレット描画の有無を指定する。根拠は docs/ImplementationDetail.md 64.4節。 |
+| `-swraster <0\|1>` | 自前ソフトウェアラスタライザの有無を指定する。 |
+| `-aotechnique <番号>` | AOの手法を選ぶ(`0` = SSAO、`1` = SSIL(Visibility Bitmask)、`2` = レイトレーシングAO)。範囲外はエラーにして既定のまま続行する。 |
+| `-probeupdate <番号>` | 反射プローブの更新方式を選ぶ(`0` = Baked、`1` = OnDemand、`2` = Realtime)。 |
+| `-ddgihalfres <0\|1>` | DDGIの解決を半解像度で行うかを指定する。 |
+| `-ddgilod <段数>` | DDGIのクリップマップLODの段数を`.kscene`の指定より優先して上書きする。正の整数でなければ警告を出して`.kscene`の指定のままにする。 |
+| `-ddgifollow` | DDGIの各LODの原点をカメラへ追従させる(`.kscene`の`FollowCamera`と同じ)。 |
+| `-upscale <0\|1>` | 超解像の有無を指定する。 |
+| `-fixedstep <秒>` | 1フレームの時間を固定する。実時間に依らず同じフレームで同じ状態を作るためのもので、`-dumpframe`と組で使う。0以下や非有限値はエラーにして既定のまま続行する。 |
+| `-passmanifest <パス>` | RenderGraphの登録順と実行順をテキストへ書き出す。パスの構成が変わっていないことを比較するための物差し。根拠は docs/ImplementationDetail.md 64.7節。 |
+| `-passmanifestframes <N>` | `-passmanifest`を何フレームぶん書き出すか(既定 `1`、1未満は1へ丸める)。 |
 
 ### エミッシブ光源(自発光メッシュを光源として扱う)
 
