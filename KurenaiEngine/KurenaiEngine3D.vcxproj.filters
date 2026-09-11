@@ -306,6 +306,9 @@
     <None Include="Shaders\3D\NormalEncoding.hlsli">
       <Filter>Shaders\3D</Filter>
     </None>
+    <None Include="Shaders\3D\TangentFrame.hlsli">
+      <Filter>Shaders\3D</Filter>
+    </None>
     <None Include="Shaders\3D\Bindless.hlsli">
       <Filter>Shaders\3D</Filter>
     </None>

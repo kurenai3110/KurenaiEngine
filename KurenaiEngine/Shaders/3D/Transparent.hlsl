@@ -112,13 +112,7 @@ PSInput VSMain(VSInput input)
     return output;
 }
 
-// GBuffer.hlslのComputeTangentFrameと同じ(ピクセル単位でGram-Schmidt再直交化する)
-float3x3 ComputeTangentFrame(float3 N, float4 tangent)
-{
-    float3 T = normalize(tangent.xyz - N * dot(N, tangent.xyz));
-    float3 B = cross(N, T) * tangent.w;
-    return float3x3(T, B, N);
-}
+#include "TangentFrame.hlsli"
 
 float DistributionGGX(float NdotH, float roughness)
 {
