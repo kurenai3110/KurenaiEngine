@@ -5670,6 +5670,310 @@ DX11 → DX12 → DX11 と切り替えたときに<code>Logger::SetFileSuffix</c
 </p>
 </section>
 
+<section id="bent-normal">
+<h2>34. Bent Normalによる遮蔽(ディフューズ / スペキュラ)</h2>
+<p>
+22章の遮蔽マップは<strong>スカラーの遮蔽率しか持っていない</strong>。「どれだけ隠れているか」は
+分かるが「<strong>どの方向が開いているか</strong>」を捨てている。そのためスペキュラ遮蔽は
+Frostbiteの近似(<code>pow(NdotV + ao, exp2(-16r-1)) - 1 + ao</code>)に頼るしかなく、
+これは反射ベクトルRがどちらを向いていても同じ値を返す &mdash;&mdash;
+壁際で壁を向いた反射も、壁と反対を向いた反射も、同じだけ暗くなる。
+</p>
+<p>
+そこで<strong>正規化しないbent normalベクトル</strong><code>bRaw</code>をベイクし、消費側で3つへ分解する。
+</p>
+<table>
+<tr><th>量</th><th>式</th><th>用途</th></tr>
+<tr><td>軸 <code>axis</code></td><td><code>normalize(bRaw)</code></td><td>遮蔽コーンの向き</td></tr>
+<tr><td><code>aoB</code></td><td><code>length(bRaw)</code> = sin&sup2;&alpha;v</td><td>スペキュラ遮蔽の錐体の広がり</td></tr>
+<tr><td><code>aoN</code></td><td><code>dot(N, bRaw)</code></td><td>ディフューズAO(<strong>定義そのもの</strong>、厳密)</td></tr>
+</table>
+<p>
+定義は次のとおり。<code>V(&omega;)</code>は可視関数(遮られていなければ1)。
+</p>
+<pre><code>bRaw = (1/&pi;) &int; V(&omega;) &omega; d&omega;</code></pre>
+<p>
+遮蔽が無ければ<code>&int;&omega;d&omega; = &pi;N</code>なので<code>bRaw = N</code>となり、長さがちょうど1になる。
+また<code>dot(N, bRaw) = (1/&pi;)&int;V(&omega;)cos&theta;d&omega;</code>はコサイン重み付きAOの定義そのもので、
+22章のベイク済みAOと<strong>同じ量の別推定量</strong>になる。この一致がそのまま実装の検証になる。
+</p>
+<p>
+<strong>従来の「AOスカラー + 正規化済みbent normal」構成では不十分</strong>である点に注意。
+正規化するとコーンの広がり(<code>aoB</code>)の情報が失われ、スペキュラ遮蔽の錐体交差を
+構成できなくなる。だから正規化せずに焼く。
+</p>
+<h3>34.1 ベイク &mdash;&mdash; なぜコサイン重点サンプリングを使えないのか</h3>
+<p>
+レイ本数の既定は<strong>256</strong>(AO側の128より多い)。スカラーの平均よりベクトル和のほうが
+収束が遅いため。<code>--bent-rays</code>で変更でき、0で生成を無効にできる。
+</p>
+<h3 id="ch34-2">34.2 ダイレーションとミップは「ベクトルのまま」行う</h3>
+<p>
+そのため<code>length()</code>を取るのは<strong>消費側(シェーダー)だけ</strong>に限る。
+ダイレーション(<code>DilateBentNormal</code>)はベクトルを平均し、ミップ生成のボックスフィルタも
+fp32のベクトルのまま行ってから一括でfp16へ落とす。サンプリング時のバイリニア補間も
+ベクトルを補間してから消費側で長さを取るので、順序は自動的に正しくなる。
+</p>
+<h3 id="ch34-3">34.3 なぜ「有効フラグ」が要るのか</h3>
+<p>
+そこで<code>.a</code>を明示的な有効フラグにして曖昧さを消した。bent normalを持たないマテリアルには
+<strong>黒1x1</strong>(他のテクスチャの白1x1とは違う)をバインドし、消費側の
+<code>DecodeBentOcclusion</code>が<code>axis = N</code>・<code>aoB = 1</code>・<code>aoN = 1</code>(遮蔽なし)へ落とす。
+</p>
+<p>
+<strong>フラグをフィルタ対象に残してはいけない。</strong>チャート外のテクセルを
+<code>(0,0,0,0)</code>のままにすると、ミップ生成のボックスフィルタが有効テクセルとの間で
+<code>.a</code>を中間値へ均してしまい、<code>a &lt; 0.5</code>というしきい値がテクセル単位で反転する
+(「遮蔽なし」と「ほぼ完全遮蔽」の間で跳ねるため細かい点になる)。
+接空間格納(<a href="#ch34-9">34.9</a>)なら遮蔽なしを定数<code>(0,0,1)</code>で表せるので、
+ダイレーションで届かなかったテクセルもこれで埋めて<code>.a = 1</code>にする
+&mdash;&mdash; 遮蔽マップ(R8)が余りを255で埋めるのと同じ扱い。
+結果、実マップ内の<code>.a</code>は全テクセル1になり、しきい値は
+<strong>1x1のフォールバックと本物のマップを区別するためだけ</strong>に使われる。
+</p>
+<h3>34.4 スペキュラ遮蔽 &mdash;&mdash; 錐体交差とratio estimator</h3>
+<p>
+可視コーン(軸<code>axis</code>・半頂角&alpha;v)と鏡面反射ローブ(軸<code>R</code>・ラフネス由来の半頂角&alpha;s)の
+<strong>球冠どうしの交差</strong>を解き、その面積比を遮蔽率とする(Oat &amp; Sander,
+"Ambient Aperture Lighting", 2007)。<code>aoB = sin&sup2;&alpha;v</code>の定義から
+&alpha;v = <code>asin(sqrt(aoB))</code>。
+</p>
+<pre><code>const float inter = SphericalCapIntersectionArea(av,      as, acos(dot(axis, R)));
+const float ref   = SphericalCapIntersectionArea(kHalfPi, as, acos(dot(N,    R)));
+return ref &gt; 1e-6f ? saturate(inter / ref) : 0.0f;</code></pre>
+<p>
+この球冠交差モデルには<a href="#ch34-10">34.10</a>で見つかった構造的な穴がある
+(<code>d &ge; &alpha;v + &alpha;s</code>で交差面積が厳密に0になり、金属の凹部が純黒へ潰れる)。
+<a href="#ch34-11">34.11</a>で球面ガウスへ置き換えたものを既定にしたが、この球冠交差モデル自体は
+UIの3値切替(Frostbite近似 / 球冠交差 / 球面ガウス)に残してあり、比較用に選択できる。
+</p>
+<h4>34.4.1 スクリーンスペース由来の遮蔽との合成</h4>
+<p>
+ベイクしたbent normalは方向を持つが、SSAO/SSILは持たない。両者は由来が独立なので積を取る。
+どちらも「遮蔽なし」で厳密に1を返すため、片方しか持たないパス(半透明・プローブ焼き込み)へ
+無条件に掛けてよい。
+</p>
+<pre><code>SO = SpecularOcclusionBand(axis, N, R, aoB, roughness)  // ベイク由来(方向あり)
+   * SpecularOcclusion(NdotV, roughness, ssao);          // スクリーンスペース由来(方向なし)</code></pre>
+<p>
+<strong>bent normal経路ではmaterialAO(遮蔽マップのスカラー)を掛けない。</strong>
+同じベイクの方向付きの表現であるbent normalへ役割ごと置き換わるため、両方掛けると
+同じ遮蔽を二重に数えることになる。
+</p>
+<p>
+トグルを切った従来経路は<code>SpecularOcclusion(NdotV, roughness, materialAO * ssao)</code>と、
+<strong>以前とまったく同じ式</strong>にしてある。<code>pow()</code>は非線形なので
+「それぞれ通してから掛ける」に変えると結果が変わり、回帰確認にならないため。
+</p>
+<h3>34.5 ディフューズ側 &mdash;&mdash; 方向バイアスの解消</h3>
+<p>
+拡散側は<code>aoN</code>を使い、さらに<strong>イラディアンスを<code>N</code>ではなく<code>axis</code>方向で評価する</strong>。
+遮蔽されている方向からはどのみち光が来ないので、開いている方向の環境を引くほうが正しい。
+壁際・窓際で「壁の側の空の色まで平均してしまう」方向バイアスがこれで解消される。
+鏡面の<code>R</code>は変えない &mdash;&mdash; あちらは反射方向そのものが物理的に決まっているため。
+</p>
+<p>
+あわせて<strong>multi-bounce AO</strong>(Jimenez et al., SIGGRAPH 2016)も入れた。アルベドが明るいほど
+AOを弱める補正で、物理的にはより正しいが<strong>見た目を大きく変える</strong>。
+bent normal自体の検証を汚さないよう独立したトグルにし、<strong>既定は無効</strong>にしてある。
+</p>
+<h3>34.6 スロット割り当てとRHIの上限引き上げ</h3>
+<p>
+bent normalはライトマップUV空間のテクスチャなので、ライティング時にはUV1が無く直接引けない。
+そのため<strong>G-Bufferを1枚増やす</strong>(<code>SV_TARGET5</code>、<code>R16G16B16A16_Float</code>)。
+<code>R11G11B10_Float</code>は<strong>使えない</strong> &mdash;&mdash; 符号なしのため負の成分が落ち、半球の半分の方向を失う。
+</p>
+<table>
+<tr><th>パス</th><th>スロット</th><th>備考</th></tr>
+<tr><td>GBuffer / ProbeCapture</td><td>t6</td><td>t4=シャドウ配列、t5=遮蔽マップ</td></tr>
+<tr><td>Transparent</td><td>t14</td><td>DDGIはt15/t16へ回した(下記)</td></tr>
+<tr><td>SSR</td><td>t11</td><td></td></tr>
+<tr><td>DeferredLighting</td><td><strong>t15</strong></td><td>t0〜t14が満杯 &rarr; 上限引き上げが必要</td></tr>
+</table>
+<p>
+<strong>DDGI(19.15節)とのスロットの割り当て</strong>: bent normalは半透明パスで<code>t14</code>を取り、
+DDGIは不透明・半透明とも<code>t15</code>/<code>t16</code>を取る。<strong>両パスで番号を揃えること</strong> &mdash;&mdash;
+同じ番号を別々の用途へ割り当てても<strong>コンパイル時には衝突が出ない</strong>。C++側の
+<code>SetTexture(14, ...)</code>がパス冒頭でDDGIアトラスを張り、その後メッシュごとのループが
+同じ14番をbent normalで<strong>黙って上書きする</strong>、という形で絵にだけ出る。
+</p>
+<p>
+DeferredLightingがt14まで使い切っていたため、<code>kTextureSlotCount</code>を<strong>15 &rarr; 16</strong>へ上げた。
+定数は3か所にあり、すべて揃える必要がある:
+<code>DX12CommandList.h</code>(追跡配列)、<code>DX12Device.cpp</code>(ルートシグネチャのSRVレンジ幅)、
+<code>DX11CommandList.h</code>(UAV衝突回避の追跡配列)。
+</p>
+<p>
+<strong>cbufferの落とし穴</strong>: <code>FrameConstants</code>末尾へ<code>OcclusionParams</code>を足したが、
+cbufferは宣言順レイアウトなので、途中のフィールドを宣言していないシェーダーでは
+オフセットがずれる。SSR/Transparent/ProbeCaptureは<code>PrevViewProj</code>・<code>TAAParams</code>を
+使わないが、<strong>宣言だけは必要</strong>である。
+</p>
+<h3 id="ch34-7">34.7 検証</h3>
+<h3>34.8 既知の制約</h3>
+<ul>
+<li><strong>容量が大きい</strong>。符号付きベクトルのためBC4/BC7で圧縮できず無圧縮のfp16で書き出す。
+512&sup2;でミップ込み1メッシュあたり約2.7MB、数百メッシュのモデルでは合計がGB級になる。
+圧縮(BC6H_SF16)とオクタヘドラル化は第2段階へ回した</li>
+<li><strong>非一様スケールでコーンの方位がわずかにずれる</strong>。シェーダーのGram-Schmidt
+再直交化はワールド空間で行われるが、ベイカーはモデル空間で行うため、非一様スケールが
+入ると両者の基底が法線まわりにわずかに回る。<code>aoN</code>(=z成分)と<code>aoB</code>(=長さ)は
+基底の回転で不変なので影響を受けず、ずれるのはコーンの方位だけ</li>
+<li><strong>&gamma; + &alpha;v &gt; 90&deg; で過大評価</strong>になる。球冠交差の近似が
+2つの境界をsmoothstepで繋ぐ形のため、厳密な球面二角形の面積とはずれる</li>
+<li><strong>非対称な遮蔽では軸が正しくない</strong>。複数の方向から別々に遮られている場合、
+それらの平均方向は「開いている方向」を代表しない</li>
+<li><strong><code>SO</code>は立体角の比であってBRDF重み付き積分ではない</strong>。
+コーン内でのBRDFの分布は考慮していない</li>
+<li><strong>生成はオフラインベイカーのみ</strong>。スクリーンスペース(SSIL)側は未対応。
+将来やる場合、このエンジンは2本の地平線角ではなく32セクタのビットマスク
+(<code>SSIL_VisibilityBitmask.hlsl</code>)なので、可視セクタごとに積算する形へ読み替える必要がある。
+さらにSSILの現在のAO出力は<code>1 - countbits(mask)/32</code>(角度に一様なセクタ比)であって
+コサイン重み付きではないため、<code>dot(N, bRaw)</code>とは一致しない</li>
+</ul>
+<h3 id="ch34-9">34.9 モデル空間では格納しない &mdash;&mdash; ミップで長さが崩壊する</h3>
+<h4>34.9.1 接空間で格納する</h4>
+<p>
+<code>bRaw</code>を頂点接線基底へ射影して格納する。
+</p>
+<pre><code>bTS = (dot(bRaw, T), dot(bRaw, B), dot(bRaw, N))</code></pre>
+<p>
+こうすると<strong>遮蔽なしは曲率によらず常に<code>(0,0,1)</code></strong>になる。曲面をまたいで平均しても
+長さは1のまま保たれ、縮むのは<em>本当に遮蔽の量が違うとき</em>だけになる &mdash;&mdash;
+<a href="#ch34-2">34.2</a>で意図していた挙動がここで初めて成立する。
+基底は正規直交なので<code>aoB</code>(長さ)も<code>aoN</code>(<code>N</code>成分 = <code>bTS.z</code>)も
+変換で厳密に保たれる(既存AOとの誤差RMSは格納空間を変えても変わらない)。
+</p>
+<p>
+おまけに「遮蔽なし」が定数で書けるようになったので、ダイレーションで届かなかったテクセルも
+<code>(0,0,1)</code>で埋めて<code>.a = 1</code>にできる。これで<code>.a</code>がフィルタ対象から外れ、
+上の副次的な不具合も消える。遮蔽マップ(R8)が余りを255で埋めるのとまったく同じ扱い。
+</p>
+<p>
+基底は<code>GBuffer.hlsl</code>の<code>ComputeTangentFrame</code>と<strong>まったく同じ手順</strong>で組む必要がある。
+頂点接線はパッカー自身(<code>ModelSource.cpp</code>)が計算していてエンジンと同一なので、
+ベイカー側で同じGram-Schmidt再直交化を行えば一致する。消費側は
+<code>mul(bentSample.xyz, tbn)</code>でワールドへ戻すだけでよい。
+</p>
+<p>
+ミラーされたインスタンスも正しく動く。<code>TangentSignFlip</code>(ワールド行列の行列式が負なら-1)が
+<code>B = cross(N,T) * tangent.w</code>へ効くため、ワールド空間の基底はモデル空間の基底の
+正しい像になる &mdash;&mdash; 法線マップがミラーで破綻しないのとまったく同じ理屈。
+</p>
+<p>
+レイアウトは変わらなくても<strong>テクスチャの中身の意味が変わる</strong>ときは
+<code>.kmodel</code>の<code>Version</code>を上げる(接空間化では v7 &rarr; v8)。構造体サイズが
+同じだとVersionでしか判別できず、上げないと古いアセットを黙って誤って解釈することになる。
+</p>
+<h4>34.9.2 ミップ耐性の検証</h4>
+<h3 id="ch34-10">34.10 求積バイアス &mdash;&mdash; 正規化係数に理論値を使わない</h3>
+<p>
+<code>bRaw</code>の正規化係数の理論値は次のとおりだが、<strong>これを使ってはいけない</strong>。
+</p>
+<pre><code>(1/&pi;) &divide; pdf(=1/2&pi;) &divide; 本数 = 2/本数</code></pre>
+<p>
+そのため理論値ではなく<strong>同じ列で求めた「全方向の和」の長さ</strong>で割る。
+</p>
+<pre><code>bAll += dirB;                      // 遮蔽判定に関わらず必ず積算
+if (!Occluded(...)) bRaw += dirB;
+...
+bRaw /= length(bAll);</code></pre>
+<h4 id="ch34-10-2">34.10.2 凹部が純黒へ潰れる &mdash;&mdash; <code>aoB</code>を下限に置くのは誤り</h4>
+<h4 id="ch34-10-3">34.10.3 方向性を保ったまま純黒を避ける</h4>
+<p>
+1つめの筋(柔らかい分布 &mdash; 球面ガウス)を採用している(<a href="#ch34-11">34.11</a>)。
+2つめ(跳ね返り光の加算)は見た目への影響がより広範囲(遮蔽の弱い場所にも常時足される項になる)
+かつ別途バウンス量の推定が要るため未実装である。
+</p>
+<h3 id="ch34-11">34.11 可視性を球面ガウスへ &mdash;&mdash; 純黒の解消</h3>
+<h4>34.11.1 球冠を球面ガウス(SG)に置き換える</h4>
+<p>
+振幅1・軸<code>p</code>・鋭さ&lambda;の
+SGを<code>G(&omega;) = exp(&lambda;(&omega;&middot;p - 1))</code>とすると、2つのSGの球面内積は
+閉形式で書ける(Wang et al., "All-Frequency Rendering of Dynamic, Spatially-Varying Reflectance", 2009):
+</p>
+<pre><code>integral(G1 * G2) domega = 4*pi * exp(-l1-l2) * sinh(dm) / dm ,   dm = |l1*p1 + l2*p2|</code></pre>
+<p>
+<code>sinh</code>は0でしか0にならないため、<strong>この量は常に正</strong>になる。
+球冠交差の<code>SphericalCapIntersectionArea</code>が<code>d &ge; a1+a2</code>で厳密に0を
+返していたのに対し、SGは遮蔽側にも<code>d</code>に応じた小さな残りを持つ。これが純黒が消える理由。
+</p>
+<h4 id="ch34-11-2">34.11.2 球冠の半頂角とSGの鋭さの対応づけ</h4>
+<p>
+半頂角&alpha;の球冠の立体角は<code>2&pi;(1 - cos&alpha;)</code>、鋭さ&lambda;のSGの立体角は
+おおむね<code>2&pi;/&lambda;</code>。両者を揃えると<code>&lambda; = 1 / (1 - cos&alpha;)</code>。
+一般化して<code>&lambda; = k / (1 - cos&alpha;)</code>と書くと、<code>k</code>は
+「球冠をどれだけ柔らかくするか」の係数になり、大きいほど硬い球冠に近づく。
+<strong>採用値は立体角の一致からそのまま出てくる<code>k = 1</code></strong>
+(<a href="#ch34-11-4">34.11.4</a>)。この対応づけにより三角関数がすべて消える:
+</p>
+<table>
+<tr><th>量</th><th>球冠交差(34.4節)</th><th>SG</th></tr>
+<tr><td>可視コーン</td><td><code>&alpha;v = asin(sqrt(aoB))</code></td><td><code>1 - cos&alpha;v = 1 - sqrt(1 - aoB)</code></td></tr>
+<tr><td>鏡面ローブ</td><td><code>&alpha;s = acos(1 - r&sup2;)</code></td><td><code>1 - cos&alpha;s = r&sup2;</code></td></tr>
+<tr><td>交差の角度</td><td><code>d = acos(dot(axis, R))</code></td><td><code>dot(axis, R)</code>をそのまま使う</td></tr>
+</table>
+<h4>34.11.3 白炉テストが厳密に保たれる理由</h4>
+<p>
+基準値<code>ref</code>は「遮蔽なし = &alpha;v 90&deg;」のSG。<code>1 - cos90&deg; = 1</code>なので
+<code>&lambda;_ref = k</code>。<code>aoB = 1</code>のとき<code>1 - sqrt(1-1) = 1</code>より
+<code>&lambda;v = k = &lambda;_ref</code>、かつ<code>axis = N</code>なので
+<code>dot(axis,R) = dot(N,R)</code> &mdash;&mdash; <code>inter</code>と<code>ref</code>が同一の式になり
+<strong><code>SO = 1</code>が厳密</strong>になる。<code>.a</code>フラグが0(bent normalを持たない
+マテリアル)の経路も<code>axis = N, aoB = 1</code>へ落ちるため同様に厳密に1で、
+<strong>bent normalを持たないモデルの見た目は一切変わらない</strong>。
+</p>
+<p>
+桁落ち対策: roughnessの下限0.045で<code>&lambda;s</code>は数万のオーダーまで大きくなる。
+<code>dm - &lambda;1 - &lambda;2</code>をそのまま引くとfp32で桁落ちするため、次の形へ
+変形して常に0以下の指数だけを扱う:
+</p>
+<pre><code>dm - l1 - l2 = (dm^2 - (l1+l2)^2) / (dm + l1 + l2) = -2*l1*l2*(1 - cosd) / (dm + l1 + l2)</code></pre>
+<h4 id="ch34-11-4">34.11.4 係数kは1(導出値)</h4>
+<p>
+採用値<code>k = 1.0</code>は<a href="#ch34-11-2">34.11.2</a>の立体角の一致から
+<strong>そのまま出てくる導出値</strong>であって調整値ではない。両側へ振ると次のように壊れる。
+</p>
+<h4>34.11.5 UIの3値切替</h4>
+<p>
+<code>OcclusionParams.y</code>(<code>Kurenai::SpecularOcclusionMode</code>)は
+0=Frostbite近似 / 1=球冠交差 / 2=球面ガウスの3値で、<strong>既定は2(球面ガウス)</strong>。
+反射プローブの再ベイク署名にも<code>SpecularOcclusionMode</code>を<strong>値として</strong>混ぜる
+(<code>mixBool</code>ではなく<code>mixFloat</code>) &mdash;&mdash; ProbeCaptureが同じ分岐を持つため、
+含め忘れるとつまみを動かしてもプローブの中身だけ古いままになる。
+</p>
+<p>
+このモードは<code>.kmodel</code>の形式にもベイク結果にも触れないため、<strong>再パックは不要</strong>である。
+</p>
+<h4>34.11.6 残る近似</h4>
+<p>
+<strong>純黒は「ほぼ」解消であって完全ではない。</strong>残るのは
+<code>aoB</code>がほぼ0のテクセル &mdash;&mdash; つまり<em>本当にほぼ完全に遮蔽されている</em>場所で、
+そこが暗いこと自体は正しい。加えて<code>&lambda;</code>が大きい領域では
+<code>exp()</code>の引数が-87を下回ってfp32でアンダーフローし、厳密に0になる場合もある
+(実データのテクセル分布では、roughnessが低い側で0.5%程度)。
+</p>
+<p>
+SGモデルも「<code>SO</code>は立体角比であってBRDF重み付き積分ではない」という34.4節と同じ近似を
+引き継いでいる。また<code>k</code>の選定(34.11.4)が示すとおり、<code>(axis, aoB)</code>という
+単一コーンへの還元そのものが複雑な凹形状の情報を失っており、SGはそれを「潰さない」方向へ
+緩和する正則化であって真の可視性分布の再現ではない。
+残りを埋めるには跳ね返り光の加算(<a href="#ch34-10-3">34.10.3</a>)が要る(未実装)。
+</p>
+<h3>34.7 検証</h3>
+<p>
+ベイカー内のfloat32(量子化前)で<code>max|bRaw| &le; 1</code>・<code>aoN &le; aoB</code>・
+22章のAOとの一致を測り、実機ではWhite Furnace Testの球が背景へ溶けることを見ます。
+<strong>この表はすべてmip 0しか見ていない</strong>ため、ミップ耐性(34.9)を併せて測ること。
+数値と手順は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 34.7節。
+</p>
+<p>
+求積バイアスの大きさ、錐体モデルが地平線の遮蔽を過大に見積もること、<code>aoB</code>を下限に
+置くのが誤りである理由、係数kを当てはまりで決めてはいけない理由は
+<a href="ImplementationDetail.md">ImplementationDetail.md</a> 34章。
+</p>
+</section>
+
 <section id="clouds">
 <h2>35. 雲(レイヤーモデル)</h2>
 <p>
@@ -6293,310 +6597,6 @@ UIの設定に関わらず<code>FogParams0.w</code>(有効フラグ)を0にす�
 雲を混ぜたときの破綻の測り方、雲へフォグを掛けないと何が起きるか、閉形式の妥当性、
 鏡像のin-scatter方向の導出、既定値の根拠は
 <a href="ImplementationDetail.md">ImplementationDetail.md</a> 37章。
-</p>
-</section>
-
-<section id="bent-normal">
-<h2>34. Bent Normalによる遮蔽(ディフューズ / スペキュラ)</h2>
-<p>
-22章の遮蔽マップは<strong>スカラーの遮蔽率しか持っていない</strong>。「どれだけ隠れているか」は
-分かるが「<strong>どの方向が開いているか</strong>」を捨てている。そのためスペキュラ遮蔽は
-Frostbiteの近似(<code>pow(NdotV + ao, exp2(-16r-1)) - 1 + ao</code>)に頼るしかなく、
-これは反射ベクトルRがどちらを向いていても同じ値を返す &mdash;&mdash;
-壁際で壁を向いた反射も、壁と反対を向いた反射も、同じだけ暗くなる。
-</p>
-<p>
-そこで<strong>正規化しないbent normalベクトル</strong><code>bRaw</code>をベイクし、消費側で3つへ分解する。
-</p>
-<table>
-<tr><th>量</th><th>式</th><th>用途</th></tr>
-<tr><td>軸 <code>axis</code></td><td><code>normalize(bRaw)</code></td><td>遮蔽コーンの向き</td></tr>
-<tr><td><code>aoB</code></td><td><code>length(bRaw)</code> = sin&sup2;&alpha;v</td><td>スペキュラ遮蔽の錐体の広がり</td></tr>
-<tr><td><code>aoN</code></td><td><code>dot(N, bRaw)</code></td><td>ディフューズAO(<strong>定義そのもの</strong>、厳密)</td></tr>
-</table>
-<p>
-定義は次のとおり。<code>V(&omega;)</code>は可視関数(遮られていなければ1)。
-</p>
-<pre><code>bRaw = (1/&pi;) &int; V(&omega;) &omega; d&omega;</code></pre>
-<p>
-遮蔽が無ければ<code>&int;&omega;d&omega; = &pi;N</code>なので<code>bRaw = N</code>となり、長さがちょうど1になる。
-また<code>dot(N, bRaw) = (1/&pi;)&int;V(&omega;)cos&theta;d&omega;</code>はコサイン重み付きAOの定義そのもので、
-22章のベイク済みAOと<strong>同じ量の別推定量</strong>になる。この一致がそのまま実装の検証になる。
-</p>
-<p>
-<strong>従来の「AOスカラー + 正規化済みbent normal」構成では不十分</strong>である点に注意。
-正規化するとコーンの広がり(<code>aoB</code>)の情報が失われ、スペキュラ遮蔽の錐体交差を
-構成できなくなる。だから正規化せずに焼く。
-</p>
-<h3>34.1 ベイク &mdash;&mdash; なぜコサイン重点サンプリングを使えないのか</h3>
-<p>
-レイ本数の既定は<strong>256</strong>(AO側の128より多い)。スカラーの平均よりベクトル和のほうが
-収束が遅いため。<code>--bent-rays</code>で変更でき、0で生成を無効にできる。
-</p>
-<h3 id="ch34-2">34.2 ダイレーションとミップは「ベクトルのまま」行う</h3>
-<p>
-そのため<code>length()</code>を取るのは<strong>消費側(シェーダー)だけ</strong>に限る。
-ダイレーション(<code>DilateBentNormal</code>)はベクトルを平均し、ミップ生成のボックスフィルタも
-fp32のベクトルのまま行ってから一括でfp16へ落とす。サンプリング時のバイリニア補間も
-ベクトルを補間してから消費側で長さを取るので、順序は自動的に正しくなる。
-</p>
-<h3 id="ch34-3">34.3 なぜ「有効フラグ」が要るのか</h3>
-<p>
-そこで<code>.a</code>を明示的な有効フラグにして曖昧さを消した。bent normalを持たないマテリアルには
-<strong>黒1x1</strong>(他のテクスチャの白1x1とは違う)をバインドし、消費側の
-<code>DecodeBentOcclusion</code>が<code>axis = N</code>・<code>aoB = 1</code>・<code>aoN = 1</code>(遮蔽なし)へ落とす。
-</p>
-<p>
-<strong>フラグをフィルタ対象に残してはいけない。</strong>チャート外のテクセルを
-<code>(0,0,0,0)</code>のままにすると、ミップ生成のボックスフィルタが有効テクセルとの間で
-<code>.a</code>を中間値へ均してしまい、<code>a &lt; 0.5</code>というしきい値がテクセル単位で反転する
-(「遮蔽なし」と「ほぼ完全遮蔽」の間で跳ねるため細かい点になる)。
-接空間格納(<a href="#ch34-9">34.9</a>)なら遮蔽なしを定数<code>(0,0,1)</code>で表せるので、
-ダイレーションで届かなかったテクセルもこれで埋めて<code>.a = 1</code>にする
-&mdash;&mdash; 遮蔽マップ(R8)が余りを255で埋めるのと同じ扱い。
-結果、実マップ内の<code>.a</code>は全テクセル1になり、しきい値は
-<strong>1x1のフォールバックと本物のマップを区別するためだけ</strong>に使われる。
-</p>
-<h3>34.4 スペキュラ遮蔽 &mdash;&mdash; 錐体交差とratio estimator</h3>
-<p>
-可視コーン(軸<code>axis</code>・半頂角&alpha;v)と鏡面反射ローブ(軸<code>R</code>・ラフネス由来の半頂角&alpha;s)の
-<strong>球冠どうしの交差</strong>を解き、その面積比を遮蔽率とする(Oat &amp; Sander,
-"Ambient Aperture Lighting", 2007)。<code>aoB = sin&sup2;&alpha;v</code>の定義から
-&alpha;v = <code>asin(sqrt(aoB))</code>。
-</p>
-<pre><code>const float inter = SphericalCapIntersectionArea(av,      as, acos(dot(axis, R)));
-const float ref   = SphericalCapIntersectionArea(kHalfPi, as, acos(dot(N,    R)));
-return ref &gt; 1e-6f ? saturate(inter / ref) : 0.0f;</code></pre>
-<p>
-この球冠交差モデルには<a href="#ch34-10">34.10</a>で見つかった構造的な穴がある
-(<code>d &ge; &alpha;v + &alpha;s</code>で交差面積が厳密に0になり、金属の凹部が純黒へ潰れる)。
-<a href="#ch34-11">34.11</a>で球面ガウスへ置き換えたものを既定にしたが、この球冠交差モデル自体は
-UIの3値切替(Frostbite近似 / 球冠交差 / 球面ガウス)に残してあり、比較用に選択できる。
-</p>
-<h4>34.4.1 スクリーンスペース由来の遮蔽との合成</h4>
-<p>
-ベイクしたbent normalは方向を持つが、SSAO/SSILは持たない。両者は由来が独立なので積を取る。
-どちらも「遮蔽なし」で厳密に1を返すため、片方しか持たないパス(半透明・プローブ焼き込み)へ
-無条件に掛けてよい。
-</p>
-<pre><code>SO = SpecularOcclusionBand(axis, N, R, aoB, roughness)  // ベイク由来(方向あり)
-   * SpecularOcclusion(NdotV, roughness, ssao);          // スクリーンスペース由来(方向なし)</code></pre>
-<p>
-<strong>bent normal経路ではmaterialAO(遮蔽マップのスカラー)を掛けない。</strong>
-同じベイクの方向付きの表現であるbent normalへ役割ごと置き換わるため、両方掛けると
-同じ遮蔽を二重に数えることになる。
-</p>
-<p>
-トグルを切った従来経路は<code>SpecularOcclusion(NdotV, roughness, materialAO * ssao)</code>と、
-<strong>以前とまったく同じ式</strong>にしてある。<code>pow()</code>は非線形なので
-「それぞれ通してから掛ける」に変えると結果が変わり、回帰確認にならないため。
-</p>
-<h3>34.5 ディフューズ側 &mdash;&mdash; 方向バイアスの解消</h3>
-<p>
-拡散側は<code>aoN</code>を使い、さらに<strong>イラディアンスを<code>N</code>ではなく<code>axis</code>方向で評価する</strong>。
-遮蔽されている方向からはどのみち光が来ないので、開いている方向の環境を引くほうが正しい。
-壁際・窓際で「壁の側の空の色まで平均してしまう」方向バイアスがこれで解消される。
-鏡面の<code>R</code>は変えない &mdash;&mdash; あちらは反射方向そのものが物理的に決まっているため。
-</p>
-<p>
-あわせて<strong>multi-bounce AO</strong>(Jimenez et al., SIGGRAPH 2016)も入れた。アルベドが明るいほど
-AOを弱める補正で、物理的にはより正しいが<strong>見た目を大きく変える</strong>。
-bent normal自体の検証を汚さないよう独立したトグルにし、<strong>既定は無効</strong>にしてある。
-</p>
-<h3>34.6 スロット割り当てとRHIの上限引き上げ</h3>
-<p>
-bent normalはライトマップUV空間のテクスチャなので、ライティング時にはUV1が無く直接引けない。
-そのため<strong>G-Bufferを1枚増やす</strong>(<code>SV_TARGET5</code>、<code>R16G16B16A16_Float</code>)。
-<code>R11G11B10_Float</code>は<strong>使えない</strong> &mdash;&mdash; 符号なしのため負の成分が落ち、半球の半分の方向を失う。
-</p>
-<table>
-<tr><th>パス</th><th>スロット</th><th>備考</th></tr>
-<tr><td>GBuffer / ProbeCapture</td><td>t6</td><td>t4=シャドウ配列、t5=遮蔽マップ</td></tr>
-<tr><td>Transparent</td><td>t14</td><td>DDGIはt15/t16へ回した(下記)</td></tr>
-<tr><td>SSR</td><td>t11</td><td></td></tr>
-<tr><td>DeferredLighting</td><td><strong>t15</strong></td><td>t0〜t14が満杯 &rarr; 上限引き上げが必要</td></tr>
-</table>
-<p>
-<strong>DDGI(19.15節)とのスロットの割り当て</strong>: bent normalは半透明パスで<code>t14</code>を取り、
-DDGIは不透明・半透明とも<code>t15</code>/<code>t16</code>を取る。<strong>両パスで番号を揃えること</strong> &mdash;&mdash;
-同じ番号を別々の用途へ割り当てても<strong>コンパイル時には衝突が出ない</strong>。C++側の
-<code>SetTexture(14, ...)</code>がパス冒頭でDDGIアトラスを張り、その後メッシュごとのループが
-同じ14番をbent normalで<strong>黙って上書きする</strong>、という形で絵にだけ出る。
-</p>
-<p>
-DeferredLightingがt14まで使い切っていたため、<code>kTextureSlotCount</code>を<strong>15 &rarr; 16</strong>へ上げた。
-定数は3か所にあり、すべて揃える必要がある:
-<code>DX12CommandList.h</code>(追跡配列)、<code>DX12Device.cpp</code>(ルートシグネチャのSRVレンジ幅)、
-<code>DX11CommandList.h</code>(UAV衝突回避の追跡配列)。
-</p>
-<p>
-<strong>cbufferの落とし穴</strong>: <code>FrameConstants</code>末尾へ<code>OcclusionParams</code>を足したが、
-cbufferは宣言順レイアウトなので、途中のフィールドを宣言していないシェーダーでは
-オフセットがずれる。SSR/Transparent/ProbeCaptureは<code>PrevViewProj</code>・<code>TAAParams</code>を
-使わないが、<strong>宣言だけは必要</strong>である。
-</p>
-<h3 id="ch34-7">34.7 検証</h3>
-<h3>34.8 既知の制約</h3>
-<ul>
-<li><strong>容量が大きい</strong>。符号付きベクトルのためBC4/BC7で圧縮できず無圧縮のfp16で書き出す。
-512&sup2;でミップ込み1メッシュあたり約2.7MB、数百メッシュのモデルでは合計がGB級になる。
-圧縮(BC6H_SF16)とオクタヘドラル化は第2段階へ回した</li>
-<li><strong>非一様スケールでコーンの方位がわずかにずれる</strong>。シェーダーのGram-Schmidt
-再直交化はワールド空間で行われるが、ベイカーはモデル空間で行うため、非一様スケールが
-入ると両者の基底が法線まわりにわずかに回る。<code>aoN</code>(=z成分)と<code>aoB</code>(=長さ)は
-基底の回転で不変なので影響を受けず、ずれるのはコーンの方位だけ</li>
-<li><strong>&gamma; + &alpha;v &gt; 90&deg; で過大評価</strong>になる。球冠交差の近似が
-2つの境界をsmoothstepで繋ぐ形のため、厳密な球面二角形の面積とはずれる</li>
-<li><strong>非対称な遮蔽では軸が正しくない</strong>。複数の方向から別々に遮られている場合、
-それらの平均方向は「開いている方向」を代表しない</li>
-<li><strong><code>SO</code>は立体角の比であってBRDF重み付き積分ではない</strong>。
-コーン内でのBRDFの分布は考慮していない</li>
-<li><strong>生成はオフラインベイカーのみ</strong>。スクリーンスペース(SSIL)側は未対応。
-将来やる場合、このエンジンは2本の地平線角ではなく32セクタのビットマスク
-(<code>SSIL_VisibilityBitmask.hlsl</code>)なので、可視セクタごとに積算する形へ読み替える必要がある。
-さらにSSILの現在のAO出力は<code>1 - countbits(mask)/32</code>(角度に一様なセクタ比)であって
-コサイン重み付きではないため、<code>dot(N, bRaw)</code>とは一致しない</li>
-</ul>
-<h3 id="ch34-9">34.9 モデル空間では格納しない &mdash;&mdash; ミップで長さが崩壊する</h3>
-<h4>34.9.1 接空間で格納する</h4>
-<p>
-<code>bRaw</code>を頂点接線基底へ射影して格納する。
-</p>
-<pre><code>bTS = (dot(bRaw, T), dot(bRaw, B), dot(bRaw, N))</code></pre>
-<p>
-こうすると<strong>遮蔽なしは曲率によらず常に<code>(0,0,1)</code></strong>になる。曲面をまたいで平均しても
-長さは1のまま保たれ、縮むのは<em>本当に遮蔽の量が違うとき</em>だけになる &mdash;&mdash;
-<a href="#ch34-2">34.2</a>で意図していた挙動がここで初めて成立する。
-基底は正規直交なので<code>aoB</code>(長さ)も<code>aoN</code>(<code>N</code>成分 = <code>bTS.z</code>)も
-変換で厳密に保たれる(既存AOとの誤差RMSは格納空間を変えても変わらない)。
-</p>
-<p>
-おまけに「遮蔽なし」が定数で書けるようになったので、ダイレーションで届かなかったテクセルも
-<code>(0,0,1)</code>で埋めて<code>.a = 1</code>にできる。これで<code>.a</code>がフィルタ対象から外れ、
-上の副次的な不具合も消える。遮蔽マップ(R8)が余りを255で埋めるのとまったく同じ扱い。
-</p>
-<p>
-基底は<code>GBuffer.hlsl</code>の<code>ComputeTangentFrame</code>と<strong>まったく同じ手順</strong>で組む必要がある。
-頂点接線はパッカー自身(<code>ModelSource.cpp</code>)が計算していてエンジンと同一なので、
-ベイカー側で同じGram-Schmidt再直交化を行えば一致する。消費側は
-<code>mul(bentSample.xyz, tbn)</code>でワールドへ戻すだけでよい。
-</p>
-<p>
-ミラーされたインスタンスも正しく動く。<code>TangentSignFlip</code>(ワールド行列の行列式が負なら-1)が
-<code>B = cross(N,T) * tangent.w</code>へ効くため、ワールド空間の基底はモデル空間の基底の
-正しい像になる &mdash;&mdash; 法線マップがミラーで破綻しないのとまったく同じ理屈。
-</p>
-<p>
-レイアウトは変わらなくても<strong>テクスチャの中身の意味が変わる</strong>ときは
-<code>.kmodel</code>の<code>Version</code>を上げる(接空間化では v7 &rarr; v8)。構造体サイズが
-同じだとVersionでしか判別できず、上げないと古いアセットを黙って誤って解釈することになる。
-</p>
-<h4>34.9.2 ミップ耐性の検証</h4>
-<h3 id="ch34-10">34.10 求積バイアス &mdash;&mdash; 正規化係数に理論値を使わない</h3>
-<p>
-<code>bRaw</code>の正規化係数の理論値は次のとおりだが、<strong>これを使ってはいけない</strong>。
-</p>
-<pre><code>(1/&pi;) &divide; pdf(=1/2&pi;) &divide; 本数 = 2/本数</code></pre>
-<p>
-そのため理論値ではなく<strong>同じ列で求めた「全方向の和」の長さ</strong>で割る。
-</p>
-<pre><code>bAll += dirB;                      // 遮蔽判定に関わらず必ず積算
-if (!Occluded(...)) bRaw += dirB;
-...
-bRaw /= length(bAll);</code></pre>
-<h4 id="ch34-10-2">34.10.2 凹部が純黒へ潰れる &mdash;&mdash; <code>aoB</code>を下限に置くのは誤り</h4>
-<h4 id="ch34-10-3">34.10.3 方向性を保ったまま純黒を避ける</h4>
-<p>
-1つめの筋(柔らかい分布 &mdash; 球面ガウス)を採用している(<a href="#ch34-11">34.11</a>)。
-2つめ(跳ね返り光の加算)は見た目への影響がより広範囲(遮蔽の弱い場所にも常時足される項になる)
-かつ別途バウンス量の推定が要るため未実装である。
-</p>
-<h3 id="ch34-11">34.11 可視性を球面ガウスへ &mdash;&mdash; 純黒の解消</h3>
-<h4>34.11.1 球冠を球面ガウス(SG)に置き換える</h4>
-<p>
-振幅1・軸<code>p</code>・鋭さ&lambda;の
-SGを<code>G(&omega;) = exp(&lambda;(&omega;&middot;p - 1))</code>とすると、2つのSGの球面内積は
-閉形式で書ける(Wang et al., "All-Frequency Rendering of Dynamic, Spatially-Varying Reflectance", 2009):
-</p>
-<pre><code>integral(G1 * G2) domega = 4*pi * exp(-l1-l2) * sinh(dm) / dm ,   dm = |l1*p1 + l2*p2|</code></pre>
-<p>
-<code>sinh</code>は0でしか0にならないため、<strong>この量は常に正</strong>になる。
-球冠交差の<code>SphericalCapIntersectionArea</code>が<code>d &ge; a1+a2</code>で厳密に0を
-返していたのに対し、SGは遮蔽側にも<code>d</code>に応じた小さな残りを持つ。これが純黒が消える理由。
-</p>
-<h4 id="ch34-11-2">34.11.2 球冠の半頂角とSGの鋭さの対応づけ</h4>
-<p>
-半頂角&alpha;の球冠の立体角は<code>2&pi;(1 - cos&alpha;)</code>、鋭さ&lambda;のSGの立体角は
-おおむね<code>2&pi;/&lambda;</code>。両者を揃えると<code>&lambda; = 1 / (1 - cos&alpha;)</code>。
-一般化して<code>&lambda; = k / (1 - cos&alpha;)</code>と書くと、<code>k</code>は
-「球冠をどれだけ柔らかくするか」の係数になり、大きいほど硬い球冠に近づく。
-<strong>採用値は立体角の一致からそのまま出てくる<code>k = 1</code></strong>
-(<a href="#ch34-11-4">34.11.4</a>)。この対応づけにより三角関数がすべて消える:
-</p>
-<table>
-<tr><th>量</th><th>球冠交差(34.4節)</th><th>SG</th></tr>
-<tr><td>可視コーン</td><td><code>&alpha;v = asin(sqrt(aoB))</code></td><td><code>1 - cos&alpha;v = 1 - sqrt(1 - aoB)</code></td></tr>
-<tr><td>鏡面ローブ</td><td><code>&alpha;s = acos(1 - r&sup2;)</code></td><td><code>1 - cos&alpha;s = r&sup2;</code></td></tr>
-<tr><td>交差の角度</td><td><code>d = acos(dot(axis, R))</code></td><td><code>dot(axis, R)</code>をそのまま使う</td></tr>
-</table>
-<h4>34.11.3 白炉テストが厳密に保たれる理由</h4>
-<p>
-基準値<code>ref</code>は「遮蔽なし = &alpha;v 90&deg;」のSG。<code>1 - cos90&deg; = 1</code>なので
-<code>&lambda;_ref = k</code>。<code>aoB = 1</code>のとき<code>1 - sqrt(1-1) = 1</code>より
-<code>&lambda;v = k = &lambda;_ref</code>、かつ<code>axis = N</code>なので
-<code>dot(axis,R) = dot(N,R)</code> &mdash;&mdash; <code>inter</code>と<code>ref</code>が同一の式になり
-<strong><code>SO = 1</code>が厳密</strong>になる。<code>.a</code>フラグが0(bent normalを持たない
-マテリアル)の経路も<code>axis = N, aoB = 1</code>へ落ちるため同様に厳密に1で、
-<strong>bent normalを持たないモデルの見た目は一切変わらない</strong>。
-</p>
-<p>
-桁落ち対策: roughnessの下限0.045で<code>&lambda;s</code>は数万のオーダーまで大きくなる。
-<code>dm - &lambda;1 - &lambda;2</code>をそのまま引くとfp32で桁落ちするため、次の形へ
-変形して常に0以下の指数だけを扱う:
-</p>
-<pre><code>dm - l1 - l2 = (dm^2 - (l1+l2)^2) / (dm + l1 + l2) = -2*l1*l2*(1 - cosd) / (dm + l1 + l2)</code></pre>
-<h4 id="ch34-11-4">34.11.4 係数kは1(導出値)</h4>
-<p>
-採用値<code>k = 1.0</code>は<a href="#ch34-11-2">34.11.2</a>の立体角の一致から
-<strong>そのまま出てくる導出値</strong>であって調整値ではない。両側へ振ると次のように壊れる。
-</p>
-<h4>34.11.5 UIの3値切替</h4>
-<p>
-<code>OcclusionParams.y</code>(<code>Kurenai::SpecularOcclusionMode</code>)は
-0=Frostbite近似 / 1=球冠交差 / 2=球面ガウスの3値で、<strong>既定は2(球面ガウス)</strong>。
-反射プローブの再ベイク署名にも<code>SpecularOcclusionMode</code>を<strong>値として</strong>混ぜる
-(<code>mixBool</code>ではなく<code>mixFloat</code>) &mdash;&mdash; ProbeCaptureが同じ分岐を持つため、
-含め忘れるとつまみを動かしてもプローブの中身だけ古いままになる。
-</p>
-<p>
-このモードは<code>.kmodel</code>の形式にもベイク結果にも触れないため、<strong>再パックは不要</strong>である。
-</p>
-<h4>34.11.6 残る近似</h4>
-<p>
-<strong>純黒は「ほぼ」解消であって完全ではない。</strong>残るのは
-<code>aoB</code>がほぼ0のテクセル &mdash;&mdash; つまり<em>本当にほぼ完全に遮蔽されている</em>場所で、
-そこが暗いこと自体は正しい。加えて<code>&lambda;</code>が大きい領域では
-<code>exp()</code>の引数が-87を下回ってfp32でアンダーフローし、厳密に0になる場合もある
-(実データのテクセル分布では、roughnessが低い側で0.5%程度)。
-</p>
-<p>
-SGモデルも「<code>SO</code>は立体角比であってBRDF重み付き積分ではない」という34.4節と同じ近似を
-引き継いでいる。また<code>k</code>の選定(34.11.4)が示すとおり、<code>(axis, aoB)</code>という
-単一コーンへの還元そのものが複雑な凹形状の情報を失っており、SGはそれを「潰さない」方向へ
-緩和する正則化であって真の可視性分布の再現ではない。
-残りを埋めるには跳ね返り光の加算(<a href="#ch34-10-3">34.10.3</a>)が要る(未実装)。
-</p>
-<h3>34.7 検証</h3>
-<p>
-ベイカー内のfloat32(量子化前)で<code>max|bRaw| &le; 1</code>・<code>aoN &le; aoB</code>・
-22章のAOとの一致を測り、実機ではWhite Furnace Testの球が背景へ溶けることを見ます。
-<strong>この表はすべてmip 0しか見ていない</strong>ため、ミップ耐性(34.9)を併せて測ること。
-数値と手順は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 34.7節。
-</p>
-<p>
-求積バイアスの大きさ、錐体モデルが地平線の遮蔽を過大に見積もること、<code>aoB</code>を下限に
-置くのが誤りである理由、係数kを当てはまりで決めてはいけない理由は
-<a href="ImplementationDetail.md">ImplementationDetail.md</a> 34章。
 </p>
 </section>
 
