@@ -73,13 +73,22 @@ namespace Kurenai::RHI
         }
 
         // 圧縮するときは、構築と同じコマンドリストで「圧縮後に必要なサイズ」を書き出させる。
-        // 読み出しはCPUからなのでREADBACKヒープへ受ける
+        // 【書き出し先はREADBACKヒープにできない】ポストビルド情報の書き出し先は
+        // D3D12_RESOURCE_STATE_UNORDERED_ACCESS のバッファでなければならず、
+        // READBACKヒープのリソースはこの状態を取れない(デバッグレイヤーが ID 1158 / 538 で指摘する)。
+        // DEFAULTヒープのUAVへ書かせ、そのあとREADBACKヒープへコピーしてCPUから読む
+        Microsoft::WRL::ComPtr<ID3D12Resource> compactedSizeBuffer;
         Microsoft::WRL::ComPtr<ID3D12Resource> compactedSizeReadback;
         if (compact)
         {
+            const CD3DX12_RESOURCE_DESC sizeDesc =
+                CD3DX12_RESOURCE_DESC::Buffer(sizeof(uint64_t), D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
             const CD3DX12_HEAP_PROPERTIES readbackProps(D3D12_HEAP_TYPE_READBACK);
             const CD3DX12_RESOURCE_DESC readbackDesc = CD3DX12_RESOURCE_DESC::Buffer(sizeof(uint64_t));
             if (FAILED(m_Device->CreateCommittedResource(
+                    &defaultHeapProps, D3D12_HEAP_FLAG_NONE, &sizeDesc,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&compactedSizeBuffer))) ||
+                FAILED(m_Device->CreateCommittedResource(
                     &readbackProps, D3D12_HEAP_FLAG_NONE, &readbackDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                     IID_PPV_ARGS(&compactedSizeReadback))))
             {
@@ -108,7 +117,7 @@ namespace Kurenai::RHI
                 D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC postbuildDesc{};
                 postbuildDesc.InfoType =
                     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE;
-                postbuildDesc.DestBuffer = compactedSizeReadback->GetGPUVirtualAddress();
+                postbuildDesc.DestBuffer = compactedSizeBuffer->GetGPUVirtualAddress();
                 m_UploadCommandList4->BuildRaytracingAccelerationStructure(&buildDesc, 1, &postbuildDesc);
             }
             else
@@ -121,6 +130,21 @@ namespace Kurenai::RHI
             // 将来まとめて構築するよう変えたときに落とし穴にならないよう入れておく
             const D3D12_RESOURCE_BARRIER uavBarrier = CD3DX12_RESOURCE_BARRIER::UAV(result.Get());
             m_UploadCommandList4->ResourceBarrier(1, &uavBarrier);
+
+            if (compact)
+            {
+                // ポストビルド情報の書き込み完了を待ってから、CPUが読めるREADBACKヒープへ写す。
+                // UAVバリアを省くとコピーが書き込み前に走りうる(値が0のまま読める)
+                const D3D12_RESOURCE_BARRIER sizeBarriers[] = {
+                    CD3DX12_RESOURCE_BARRIER::UAV(compactedSizeBuffer.Get()),
+                    CD3DX12_RESOURCE_BARRIER::Transition(
+                        compactedSizeBuffer.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        D3D12_RESOURCE_STATE_COPY_SOURCE),
+                };
+                m_UploadCommandList4->ResourceBarrier(_countof(sizeBarriers), sizeBarriers);
+                m_UploadCommandList4->CopyBufferRegion(
+                    compactedSizeReadback.Get(), 0, compactedSizeBuffer.Get(), 0, sizeof(uint64_t));
+            }
 
             // スクラッチバッファ(ローカル変数)がこの関数を抜けるまでに解放されないよう、
             // 構築の完了をここで同期的に待つ。CreateBufferの初期データアップロードと同じ扱い
