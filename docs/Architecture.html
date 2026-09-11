@@ -6226,6 +6226,12 @@ R = 低周波のPerlin-Worley、G/B/A = 周波数を上げたWorley</li>
 UVスケールの決め方(画角に何セル入るか)、被覆率の目盛りが線形でないこと、
 3Dノイズのタイル可能性の検証手順は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 35章。
 </p>
+<h3>35.12 オクターブ数と自己影段数を実行時のつまみにしない</h3>
+<p>
+オクターブ数と自己影段数はfBmの値そのものを変える。実行時に片方の経路だけへ反映すると、
+背景の雲を描くボリューム経路と、水面反射・大気遠近で使う平面経路の形が食い違う。
+このため、どちらも実行時のつまみにはせず、同じ定数で両経路を揃える。
+</p>
 </section>
 
 <section id="planarreflection">
@@ -8310,4 +8316,4 @@ KTXD v2の1フレーム分です。ヘッダの<code>FrameIndex</code>は撮っ�
 
 </div>
 </body>
-</html>
+</html>
