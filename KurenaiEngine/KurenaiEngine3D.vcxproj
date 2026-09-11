@@ -245,6 +245,7 @@
     <None Include="Shaders\3D\HiZ.hlsl" />
     <None Include="Shaders\3D\LightCulling.hlsl" />
     <None Include="Shaders\3D\NormalEncoding.hlsli" />
+    <None Include="Shaders\3D\TangentFrame.hlsli" />
     <None Include="Shaders\3D\Bindless.hlsli" />
     <None Include="Shaders\3D\Meshlet.hlsli" />
     <None Include="Shaders\3D\SpecularEnergy.hlsli" />
