@@ -958,6 +958,11 @@ namespace Kurenai::Passes
                     0.02f, megaLightsSettings.DenoiseFireflyClamp, denoiseGuideValid ? 1.0f : 0.0f,
                     megaLightsSettings.DenoiseHistoryCatmullRom ? 1.0f : 0.0f
                 };
+                // x は履歴の妥当性判定のタップ数。色は2x2を混ぜているのに妥当性は
+                // 1点でしか見ていなかった(根拠は MegaLightsConstants.h の Params3)
+                denoiseConstants.Params3 = {
+                    megaLightsSettings.DenoiseHistory4Tap ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f
+                };
                 cmd->UpdateBuffer(
                     m_MegaLightsDenoiseConstantBuffer.get(), &denoiseConstants, sizeof(denoiseConstants));
             };

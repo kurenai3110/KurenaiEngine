@@ -40,6 +40,8 @@ cbuffer MegaLightsDenoiseConstants : register(b1)
     // z=前フレームの幾何(履歴ガイド)が使えるか(0なら現フレームのG-Bufferで代用),
     // w=履歴の色の再サンプリング(0=バイリニア / 1=Catmull-Rom)
     float4 Params2;
+    // x=履歴の妥当性の判定タップ数(0=最近傍1タップ(従来) / 1=バイリニア2x2の4タップ), yzw=未使用
+    float4 Params3;
 };
 
 // 前フレームの幾何。時間再利用(MegaLightsTemporal)が毎フレーム全画素へ書いている。
@@ -181,6 +183,47 @@ float3 SampleHistoryColorCatmullRom(float2 uv, uint2 outputSize)
     return max(clamp(result, lo, hi), 0.0f);
 }
 
+// 履歴の1タップが「今の画素と同じ面か」を判定する。しきい値は従来と同一
+// (kMaxRelativeDepthDiff / kMinNormalDot / kMaxMaterialDiff)。**緩める方向へは一切動かさない。**
+bool HistoryTapValid(int2 tapPixel, uint2 outputSize, float viewZ, float3 N, float2 material)
+{
+    float hViewZ;
+    float3 hN;
+    float2 hMaterial;
+    bool hValid;
+
+    const int2 clamped = clamp(tapPixel, int2(0, 0), int2(outputSize) - 1);
+    if (Params2.z != 0.0f)
+    {
+        const MegaLightsHistoryGuide guide = HistoryGuide[clamped.y * outputSize.x + clamped.x];
+        hViewZ = guide.ViewZ;
+        hN = OctDecode(MegaLightsUnpackNormalOct(guide.NormalOct));
+        MegaLightsUnpackMaterial(guide.Material, hMaterial.x, hMaterial.y);
+        hValid = (guide.ViewZ != 0.0f);
+    }
+    else
+    {
+        // ガイドが無いときは従来どおり現フレームのG-Bufferで代用する。
+        // 【ここも4タップに揃える】片方だけ1タップのままにすると、
+        // 「ガイドの有無で挙動が変わる」条件がもう1つ増えて切り分けが利かなくなる
+        const float2 tapUv = (float2(clamped) + 0.5f) / float2(outputSize);
+        const float hDepth = DepthTexture.SampleLevel(DataSampler, tapUv, 0).r;
+        hViewZ = (hDepth > 0.0f) ? TileViewZ(tapUv, hDepth) : 0.0f;
+        hN = OctDecode(NormalTexture.SampleLevel(DataSampler, tapUv, 0).xy);
+        hMaterial = MaterialTexture.SampleLevel(DataSampler, tapUv, 0).rg;
+        hValid = (hDepth > 0.0f);
+    }
+
+    if (!hValid)
+    {
+        return false;
+    }
+    return abs(hViewZ - viewZ) <= kMaxRelativeDepthDiff * max(abs(viewZ), 1e-3f) &&
+           dot(N, hN) >= kMinNormalDot &&
+           abs(hMaterial.r - material.r) <= kMaxMaterialDiff &&
+           abs(hMaterial.g - material.g) <= kMaxMaterialDiff;
+}
+
 [numthreads(8, 8, 1)]
 void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
@@ -283,7 +326,69 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
     float historyLength = 0.0f;
     bool historyValid = false;
 
-    if (Params0.z != 0u && all(historyUv >= 0.0f) && all(historyUv <= 1.0f))
+    if (Params0.z != 0u && all(historyUv >= 0.0f) && all(historyUv <= 1.0f) && Params3.x != 0.0f)
+    {
+        // --- 4タップ判定 ---
+        // 履歴の**色**はバイリニアで2x2を混ぜているのに、その4タップが妥当かどうかを
+        // 最近傍1点でしか見ていなかった。帰結は2つとも実害で、
+        //   (1) 1点だけがシルエットの向こう側だと履歴全体を棄却する(本当は妥当なのに捨てる)
+        //   (2) 1点が通れば残り3タップが別の面でも 3/4 の重みで色が入る
+        // ここでは4点それぞれを同じしきい値で判定し、**通ったタップだけを
+        // バイリニア重みで加重平均する**。時間再利用(MegaLightsTemporal)は
+        // 元から2x2を走査しており、デノイザだけが片肺だった。
+        //
+        // 【Catmull-Rom とは併用しない】部分採用があるとハードウェアの補間に載せられない。
+        // この経路では Params2.w は見ない(採るなら4タップのほうが先、という判断)
+        const float2 historyPixelF = historyUv * float2(outputSize) - 0.5f;
+        const float2 baseF = floor(historyPixelF);
+        const float2 frac2 = historyPixelF - baseF;
+        const int2 baseI = int2(baseF);
+
+        const float tapWeights[4] = {
+            (1.0f - frac2.x) * (1.0f - frac2.y),
+            frac2.x * (1.0f - frac2.y),
+            (1.0f - frac2.x) * frac2.y,
+            frac2.x * frac2.y,
+        };
+        const int2 tapOffsets[4] = { int2(0, 0), int2(1, 0), int2(0, 1), int2(1, 1) };
+
+        float weightSum = 0.0f;
+        float3 colorSum = float3(0.0f, 0.0f, 0.0f);
+        float2 momentSum = float2(0.0f, 0.0f);
+        // 【履歴長は加重平均ではなく通ったタップの最小値を採る】平均だと、片方だけ長い履歴を
+        // 持つタップに引きずられて α が過小になり、別の面の色が長く残る。保守側へ倒す
+        float minLength = 1e30f;
+
+        [unroll]
+        for (uint tap = 0u; tap < 4u; ++tap)
+        {
+            const int2 tapPixel = baseI + tapOffsets[tap];
+            if (tapWeights[tap] <= 0.0f)
+            {
+                continue;
+            }
+            if (!HistoryTapValid(tapPixel, outputSize, viewZ, N, material))
+            {
+                continue;
+            }
+            const int2 clamped = clamp(tapPixel, int2(0, 0), int2(outputSize) - 1);
+            const float4 h = HistoryTexture.Load(int3(clamped, 0));
+            const float4 hm = HistoryMomentsTexture.Load(int3(clamped, 0));
+            colorSum += h.rgb * tapWeights[tap];
+            momentSum += hm.xy * tapWeights[tap];
+            minLength = min(minLength, hm.z);
+            weightSum += tapWeights[tap];
+        }
+
+        if (weightSum > 1e-5f)
+        {
+            historyColor = colorSum / weightSum;
+            historyMoments = momentSum / weightSum;
+            historyLength = minLength;
+            historyValid = true;
+        }
+    }
+    else if (Params0.z != 0u && all(historyUv >= 0.0f) && all(historyUv <= 1.0f))
     {
         // --- 再投影先の幾何を引く ---
         // 【前フレームの幾何そのものを見る】以前は現フレームのG-Bufferを再投影先で

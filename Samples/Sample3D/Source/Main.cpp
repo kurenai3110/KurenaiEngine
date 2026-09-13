@@ -903,6 +903,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // 再サンプリング。0=バイリニア(従来) / 1=Catmull-Rom。
         // バイリニアだと毎フレーム補間が重なって移動中の鮮鋭さが累積的に失われる
         const int megaLightsDenoiseCatmull = ParseIntOption(L"-megalightsdenoisecatmull", -1);
+        // -megalightsdenoise4tap <0|1>。履歴の妥当性を2x2の4タップで判定するか。
+        // 従来は最近傍1点だけで見ており、1点がシルエットの向こう側だと履歴全体を棄却していた
+        const int megaLightsDenoise4Tap = ParseIntOption(L"-megalightsdenoise4tap", -1);
         // -perfdump <パス> / -perfdumpframes <枚数>。GPUの区間計測を平均してCSVへ書き出す。
         // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
         const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
@@ -1159,6 +1162,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (megaLightsDenoiseCatmull >= 0)
             {
                 engine.SetMegaLightsDenoiseHistoryCatmullRom(megaLightsDenoiseCatmull != 0);
+            }
+            if (megaLightsDenoise4Tap >= 0)
+            {
+                engine.SetMegaLightsDenoiseHistory4Tap(megaLightsDenoise4Tap != 0);
             }
             if (megaLightsSpatialIterations > 0)
             {

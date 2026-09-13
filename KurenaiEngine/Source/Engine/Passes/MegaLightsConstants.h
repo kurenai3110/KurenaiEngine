@@ -106,6 +106,14 @@ namespace Kurenai::Passes
             // HLSL側の宣言だけが正しかった。コメントを契約として使うコードベースなので、
             // ここがずれていると次の改修が空き枠だと思って y や z を潰す
             DirectX::XMFLOAT4 Params2;
+            // x=履歴の妥当性を何タップで判定するか(0=最近傍1タップ(従来) / 1=バイリニア2x2の4タップ),
+            // yzw=未使用
+            //
+            // 【なぜ足したか】履歴の**色**はバイリニアで4タップ混ぜるのに、その4タップが
+            // 妥当かどうかは最近傍1点でしか見ていなかった。帰結は2つとも実害で、
+            // (1)1点だけがシルエットの向こう側だと履歴全体を棄却する(本当は妥当なのに捨てる)
+            // (2)1点が通れば残り3タップが別の面でも 3/4 の重みで色が入る
+            DirectX::XMFLOAT4 Params3;
         };
         // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
         // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
@@ -117,7 +125,10 @@ namespace Kurenai::Passes
         static_assert(offsetof(MegaLightsDenoiseConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
         static_assert(offsetof(MegaLightsDenoiseConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
         static_assert(offsetof(MegaLightsDenoiseConstants, Params2) == 32, "Params2 のレイアウトが変わっている");
-        static_assert(sizeof(MegaLightsDenoiseConstants) == 48, "MegaLightsDenoiseConstants の総サイズが変わっている");
+        // Params3 は履歴の妥当性判定のタップ数を載せるために**意図して足した**。
+        // 通すために期待値を書き換えたのではなく、動かしたことの記録としてここを更新している
+        static_assert(offsetof(MegaLightsDenoiseConstants, Params3) == 48, "Params3 のレイアウトが変わっている");
+        static_assert(sizeof(MegaLightsDenoiseConstants) == 64, "MegaLightsDenoiseConstants の総サイズが変わっている");
 
         // MegaLightsReference.hlsl側のcbuffer MegaLightsConstantsと一致させる必要がある
         struct alignas(16) MegaLightsConstants

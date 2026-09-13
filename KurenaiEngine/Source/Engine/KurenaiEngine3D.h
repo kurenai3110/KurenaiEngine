@@ -347,6 +347,9 @@ namespace Kurenai
         // バイリニアだと毎フレーム補間が重なり、移動中の鮮鋭さが累積的に失われる
         // (根拠と実測は EngineDefaults.h の MegaLightsDenoiseHistoryCatmullRom)
         void SetMegaLightsDenoiseHistoryCatmullRom(bool enabled);
+        // 履歴の妥当性を2x2の4タップで判定するか(既定は最近傍1タップ)。
+        // 根拠は EngineDefaults.h の MegaLightsDenoiseHistory4Tap
+        void SetMegaLightsDenoiseHistory4Tap(bool enabled);
         // 空間再利用の反復回数(負なら既定のまま)
         void SetMegaLightsSpatialIterations(int iterations);
         // 時間再利用の有無と、履歴のMの上限。負/0は既定のまま

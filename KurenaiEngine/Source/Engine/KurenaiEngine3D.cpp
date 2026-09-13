@@ -1713,6 +1713,15 @@ namespace Kurenai
                 (enabled ? "Catmull-Rom" : "バイリニア(従来)"));
     }
 
+    void KurenaiEngine3D::SetMegaLightsDenoiseHistory4Tap(bool enabled)
+    {
+        m_Settings.MegaLights.DenoiseHistory4Tap = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("MegaLightsのデノイザの履歴の妥当性判定を設定しました: ") +
+                (enabled ? "バイリニア2x2の4タップ" : "最近傍1タップ(従来)"));
+    }
+
     void KurenaiEngine3D::SetMegaLightsDenoiseSigmaLuminance(float sigma)
     {
         if (!(sigma > 0.0f))
