@@ -37,7 +37,8 @@ cbuffer MegaLightsDenoiseConstants : register(b1)
     // z=輝度のエッジ停止の強さ, w=法線のエッジ停止の指数
     float4 Params1;
     // x=深度のエッジ停止の強さ, y=ファイアフライのクランプ強さ(0で無効),
-    // z=前フレームの幾何(履歴ガイド)が使えるか(0なら現フレームのG-Bufferで代用), w=未使用
+    // z=前フレームの幾何(履歴ガイド)が使えるか(0なら現フレームのG-Bufferで代用),
+    // w=履歴の色の再サンプリング(0=バイリニア / 1=Catmull-Rom)
     float4 Params2;
 };
 
@@ -109,6 +110,77 @@ float TileViewZ(float2 uv, float depth)
 // ---------------------------------------------------------------------------
 // 段1: 時間累積。速度ベクトルで再投影し、指数移動平均で混ぜる
 // ---------------------------------------------------------------------------
+// 履歴の色を引く。**ここのフィルタが、移動中の鮮鋭さを決めている。**
+//
+// 【なぜ Catmull-Rom を選べるようにしたか】バイリニアで引くと、毎フレーム
+// 「補間した結果をまた補間する」ことになり、ぼけが累積する。TAA はまさにこの理由で
+// Catmull-Rom を使っており、TAA.hlsl の SampleHistoryCatmullRom にそう書いてある。
+// ところがこのデノイザは SampleLevel(バイリニア)のままで、**同じリポジトリの中で
+// 非対称になっていた**。
+//
+// 実測(BistroExteriorNight / Strafe経路 / 2560x1440 / 分母は参照実装 rays=64)。
+// S = 候補自身の高周波エネルギー ÷ 真値のそれ。1未満はなまっていることを意味する:
+//     累積上限 2フレーム  S=0.987     16フレーム S=0.553
+//     累積上限 4フレーム  S=0.744     64フレーム S=0.516
+// **累積を伸ばすほど単調に鮮鋭さが失われる。** a-trous の段数ではほとんど動かない
+// (0段でも 0.516)ので、なまりを作っているのは空間フィルタではなくこの再サンプリング。
+//
+// 【モーメントには使わない】Catmull-Rom は負のローブを持つ。モーメントの z 成分は
+// 履歴長、xy は輝度の1次・2次モーメントで、負へ振れると分散が負になったり
+// 履歴長が壊れたりする。モーメントはバイリニアのままにすること
+float3 SampleHistoryColorCatmullRom(float2 uv, uint2 outputSize)
+{
+    const float2 texelSize = 1.0f / float2(outputSize);
+    const float2 samplePos = uv * float2(outputSize);
+    const float2 texPos1 = floor(samplePos - 0.5f) + 0.5f;
+    const float2 f = samplePos - texPos1;
+
+    // Catmull-Rom(B=0, C=0.5)の重み。TAA.hlsl と同じ式にしてあること
+    const float2 w0 = f * (-0.5f + f * (1.0f - 0.5f * f));
+    const float2 w1 = 1.0f + f * f * (-2.5f + 1.5f * f);
+    const float2 w2 = f * (0.5f + f * (2.0f - 1.5f * f));
+    const float2 w3 = f * f * (-0.5f + 0.5f * f);
+
+    // w1とw2を1タップのバイリニアへまとめ、16タップを5タップへ削る定番の形
+    const float2 w12 = w1 + w2;
+    const float2 offset12 = w2 / max(w12, 1e-5f);
+
+    const float2 texPos0 = (texPos1 - 1.0f) * texelSize;
+    const float2 texPos3 = (texPos1 + 2.0f) * texelSize;
+    const float2 texPos12 = (texPos1 + offset12) * texelSize;
+
+    float3 result = float3(0.0f, 0.0f, 0.0f);
+    result += HistoryTexture.SampleLevel(ColorSampler, float2(texPos12.x, texPos0.y), 0).rgb * w12.x * w0.y;
+    result += HistoryTexture.SampleLevel(ColorSampler, float2(texPos0.x, texPos12.y), 0).rgb * w0.x * w12.y;
+    result += HistoryTexture.SampleLevel(ColorSampler, float2(texPos12.x, texPos12.y), 0).rgb * w12.x * w12.y;
+    result += HistoryTexture.SampleLevel(ColorSampler, float2(texPos3.x, texPos12.y), 0).rgb * w3.x * w12.y;
+    result += HistoryTexture.SampleLevel(ColorSampler, float2(texPos12.x, texPos3.y), 0).rgb * w12.x * w3.y;
+
+    // 【負を潰すだけでは足りない ―― 実測で分かったこと】
+    // TAA は max(result, 0) だけで済ませているが、あちらの実効累積は約10フレームである。
+    // このデノイザは上限64フレーム(α=1/64)なので、**ほぼ同じ内容へ64回続けて
+    // 鋭化フィルタを掛ける帰還ループ**になり、リンギングが増幅される。
+    // 実測(既定構成 / Strafe / 2560x1440、分母は参照実装 rays=64):
+    //   守りを入れないと S は 0.480 -> 0.573 と上がるが、
+    //   **総和比が 0.927 -> 0.896 へ落ち、誤差が正の画素が 48.6% -> 28.9% へ偏る**
+    //   (= 7割の画素が暗くなる)。B1 中央値も 7.42 -> 13.44 と倍近い。
+    // 鮮鋭さと引き換えに系統的な暗化を買っており、これは割に合わない。
+    //
+    // そこで **バイリニアの2x2近傍の min/max へクランプする**。リンギングは近傍の外へ
+    // 飛び出す成分なのでここで止まり、飛び出していない鋭さはそのまま残る
+    // (RELAX/NRD が同じ位置で同じことをしている)
+    const float2 texelSize2 = texelSize;
+    const float3 c00 = HistoryTexture.SampleLevel(ColorSampler, (texPos1 + float2(-0.0f, -0.0f)) * texelSize2, 0).rgb;
+    const float3 c10 = HistoryTexture.SampleLevel(ColorSampler, (texPos1 + float2(1.0f, 0.0f)) * texelSize2, 0).rgb;
+    const float3 c01 = HistoryTexture.SampleLevel(ColorSampler, (texPos1 + float2(0.0f, 1.0f)) * texelSize2, 0).rgb;
+    const float3 c11 = HistoryTexture.SampleLevel(ColorSampler, (texPos1 + float2(1.0f, 1.0f)) * texelSize2, 0).rgb;
+    const float3 lo = min(min(c00, c10), min(c01, c11));
+    const float3 hi = max(max(c00, c10), max(c01, c11));
+
+    // 負の色を履歴へ入れると次フレーム以降も残り続けるので、最後に0で止める
+    return max(clamp(result, lo, hi), 0.0f);
+}
+
 [numthreads(8, 8, 1)]
 void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
@@ -202,6 +274,7 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float2 material = MaterialTexture.SampleLevel(DataSampler, uv, 0).rg;
 
     // --- 再投影。TAAとまったく同じ引き方(historyUv = uv - velocity) ---
+    // 【引き方は同じでも、引くフィルタが違っていた】下の SampleHistoryColor を参照
     const float2 velocity = VelocityTexture.SampleLevel(DataSampler, uv, 0).rg;
     const float2 historyUv = uv - velocity;
 
@@ -253,9 +326,12 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
                 abs(hMaterial.r - material.r) <= kMaxMaterialDiff &&
                 abs(hMaterial.g - material.g) <= kMaxMaterialDiff)
             {
-                const float4 h = HistoryTexture.SampleLevel(ColorSampler, historyUv, 0);
+                // 色だけ再サンプリングのフィルタを選べる。モーメントは必ずバイリニア
+                // (負のローブで履歴長と分散が壊れるため。SampleHistoryColorCatmullRom を参照)
+                historyColor = (Params2.w != 0.0f)
+                                   ? SampleHistoryColorCatmullRom(historyUv, outputSize)
+                                   : HistoryTexture.SampleLevel(ColorSampler, historyUv, 0).rgb;
                 const float4 hm = HistoryMomentsTexture.SampleLevel(ColorSampler, historyUv, 0);
-                historyColor = h.rgb;
                 historyMoments = hm.xy;
                 historyLength = hm.z;
                 historyValid = true;

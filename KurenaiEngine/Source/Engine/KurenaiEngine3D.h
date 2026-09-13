@@ -343,6 +343,10 @@ namespace Kurenai
         void SetMegaLightsDenoiseSigmaLuminance(float sigma);
         // ファイアフライの近傍クランプの強さ(0で無効。負なら既定のまま)
         void SetMegaLightsDenoiseFireflyClamp(float k);
+        // デノイザの時間累積が履歴の色を引くときの再サンプリングを Catmull-Rom にするか。
+        // バイリニアだと毎フレーム補間が重なり、移動中の鮮鋭さが累積的に失われる
+        // (根拠と実測は EngineDefaults.h の MegaLightsDenoiseHistoryCatmullRom)
+        void SetMegaLightsDenoiseHistoryCatmullRom(bool enabled);
         // 空間再利用の反復回数(負なら既定のまま)
         void SetMegaLightsSpatialIterations(int iterations);
         // 時間再利用の有無と、履歴のMの上限。負/0は既定のまま

@@ -899,6 +899,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const float megaLightsDenoiseSigma = ParseFloatOption(L"-megalightsdenoisesigma", -1.0f);
         // -megalightsfirefly <k>。ファイアフライの近傍クランプの強さ(0で無効)
         const float megaLightsFireflyClamp = ParseFloatOption(L"-megalightsfirefly", -1.0f);
+        // -megalightsdenoisecatmull <0|1>。デノイザの時間累積が履歴の色を引くときの
+        // 再サンプリング。0=バイリニア(従来) / 1=Catmull-Rom。
+        // バイリニアだと毎フレーム補間が重なって移動中の鮮鋭さが累積的に失われる
+        const int megaLightsDenoiseCatmull = ParseIntOption(L"-megalightsdenoisecatmull", -1);
         // -perfdump <パス> / -perfdumpframes <枚数>。GPUの区間計測を平均してCSVへ書き出す。
         // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
         const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
@@ -1151,6 +1155,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (megaLightsFireflyClamp >= 0.0f)
             {
                 engine.SetMegaLightsDenoiseFireflyClamp(megaLightsFireflyClamp);
+            }
+            if (megaLightsDenoiseCatmull >= 0)
+            {
+                engine.SetMegaLightsDenoiseHistoryCatmullRom(megaLightsDenoiseCatmull != 0);
             }
             if (megaLightsSpatialIterations > 0)
             {

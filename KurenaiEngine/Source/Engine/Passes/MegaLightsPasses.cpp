@@ -951,8 +951,12 @@ namespace Kurenai::Passes
                 };
                 // 深度のエッジ停止(View空間Zに対する相対差なので無次元)と、
                 // ファイアフライの近傍クランプの強さ(近傍平均 + k・標準偏差で頭打ちにする)
+                // w は履歴の色の再サンプリング。バイリニアだと毎フレーム「補間した結果を
+                // また補間する」ことになり、移動中の鮮鋭さが累積的に失われる(実測は
+                // MegaLightsDenoise.hlsl の SampleHistoryColorCatmullRom のコメント)
                 denoiseConstants.Params2 = {
-                    0.02f, megaLightsSettings.DenoiseFireflyClamp, denoiseGuideValid ? 1.0f : 0.0f, 0.0f
+                    0.02f, megaLightsSettings.DenoiseFireflyClamp, denoiseGuideValid ? 1.0f : 0.0f,
+                    megaLightsSettings.DenoiseHistoryCatmullRom ? 1.0f : 0.0f
                 };
                 cmd->UpdateBuffer(
                     m_MegaLightsDenoiseConstantBuffer.get(), &denoiseConstants, sizeof(denoiseConstants));

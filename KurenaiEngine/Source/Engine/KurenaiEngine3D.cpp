@@ -1704,6 +1704,14 @@ namespace Kurenai
             "MegaLightsのファイアフライのクランプを設定しました: " + std::to_string(k));
     }
 
+    void KurenaiEngine3D::SetMegaLightsDenoiseHistoryCatmullRom(bool enabled)
+    {
+        m_Settings.MegaLights.DenoiseHistoryCatmullRom = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("MegaLightsのデノイザの履歴の再サンプリングを設定しました: ") +
+                (enabled ? "Catmull-Rom" : "バイリニア(従来)"));
+    }
 
     void KurenaiEngine3D::SetMegaLightsDenoiseSigmaLuminance(float sigma)
     {
