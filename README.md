@@ -747,6 +747,8 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-megalightsquadstratify <0\|1>` | クアッド内の候補割り当てを層化するか指定する。 |
 | `-megalightsblockedcache <0\|1>` | 遮蔽済みライトのキャッシュを使うか指定する。 |
 | `-megalightstilejitter <0\|1\|2>` | 候補プールのタイル格子ジッターを指定する。根拠は docs/ImplementationDetail.md 61.7n節。 |
+| `-megalightsdenoise4tap <0\|1>` | デノイザの時間累積が履歴の妥当性を何タップで判定するかを指定する(`0` = 最近傍1タップ、`1` = バイリニア2x2の4タップ)。**既定は0** ―― 指標はすべて改善するが、動かして見比べても差が分からなかったため既定にしていない。根拠は docs/ImplementationDetail.md 61.7o.9節。 |
+| `-megalightsdenoisecatmull <0\|1>` | デノイザの時間累積が履歴の色を引くときの再サンプリングを指定する(`0` = バイリニア、`1` = Catmull-Rom)。**既定は0** ―― 鮮鋭さは戻るが総和が暗い側へ偏るため採っていない。根拠は docs/ImplementationDetail.md 61.7o.8節。 |
 | `-megalightsperturb <0\|1\|2>` | 蓄積開始時に検証用のシーン摂動を加える。 |
 | `-megalightsspatial <0\|1>` | 空間再利用の有無を指定する。根拠は docs/ImplementationDetail.md 61.7f節。 |
 | `-megalightsspatialmis <0\|1>` | 空間再利用の結合方式を指定する。 |
@@ -768,6 +770,9 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-ddgifollow` | DDGIの各LODの原点をカメラへ追従させる(`.kscene`の`FollowCamera`と同じ)。 |
 | `-upscale <0\|1>` | 超解像の有無を指定する。 |
 | `-fixedstep <秒>` | 1フレームの時間を固定する。実時間に依らず同じフレームで同じ状態を作るためのもので、`-dumpframe`と組で使う。0以下や非有限値はエラーにして既定のまま続行する。 |
+| `-camerapath <名前>` | `.kscene`の`[CameraPath]`を1本選んで再生する。フレーム番号だけから姿勢が決まり、**再生中は視点の入力操作を受け付けない**。カメラを動かしたときの品質を測るには同じ軌跡を再現する必要があるが、通常の操作は移動量がΔtに比例し視点回転はPostMessageから駆動できないため、この口が要る。`-fixedstep`の指定が無ければ 1/60 を警告つきで自動設定する。根拠は docs/ImplementationDetail.md 61.7o節。 |
+| `-camerapathstart <N>` | 経路の再生を始めるフレーム。それまでは先頭キーの姿勢で静止して整定を待つ。既定は`-dumpframe`の既定と同じ 180。根拠は docs/ImplementationDetail.md 61.7o.2節。 |
+| `-camerapathvalidate` | シーンが持つ`[CameraPath]`すべてについて、1フレームあたりの移動量・視線角差・見かけ速度をログへ出す。ほぼ動かないフレームがあれば警告する。根拠は docs/ImplementationDetail.md 61.7o.3節。 |
 | `-passmanifest <パス>` | RenderGraphの登録順と実行順をテキストへ書き出す。パスの構成が変わっていないことを比較するための物差し。根拠は docs/ImplementationDetail.md 64.7節。 |
 | `-passmanifestframes <N>` | `-passmanifest`を何フレームぶん書き出すか(既定 `1`、1未満は1へ丸める)。 |
 
