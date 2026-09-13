@@ -8,6 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "CameraPath.h"
 #include "Model.h"
 #include "ModelLoader.h"
 #include "ShowLoader.h"
@@ -325,6 +326,13 @@ namespace Kurenai::Assets
         float CameraPosition[3] = { 0.0f, 0.0f, 0.0f };
         float CameraYaw = 0.0f;
         float CameraPitch = 0.0f;
+
+        // [CameraPath]セクションで定義された決定的なカメラ経路。
+        //
+        // 【既定では1本も再生しない】シーンが経路を持っているだけでは何も変わらず、
+        // 起動オプション -camerapath で名前を指定して初めて再生される。
+        // 測定のためにあるもので、通常の操作を邪魔してはいけない
+        std::vector<CameraPath> CameraPaths;
 
         // [Sun]セクションが無い場合は既定値(従来のKurenaiEngine3Dの初期値と同じ)のまま
         float SunTimeOfDay = 12.0f;

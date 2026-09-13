@@ -95,6 +95,7 @@
     <ClInclude Include="Source\Library\Assets\Model.h" />
     <ClInclude Include="Source\Library\Assets\ModelLoader.h" />
     <ClInclude Include="Source\Library\Assets\ModelPackage.h" />
+    <ClInclude Include="Source\Library\Assets\CameraPath.h" />
     <ClInclude Include="Source\Library\Assets\Scene.h" />
     <ClInclude Include="Source\Library\Assets\SceneLoader.h" />
     <ClInclude Include="Source\Library\Assets\TextureStreaming.h" />
@@ -216,6 +217,7 @@
     <ClCompile Include="Source\Library\Assets\ModelLoader.cpp" />
     <ClCompile Include="Source\Library\Assets\MeshLightScene.cpp" />
     <ClCompile Include="Source\Library\Assets\RaytracingScene.cpp" />
+    <ClCompile Include="Source\Library\Assets\CameraPath.cpp" />
     <ClCompile Include="Source\Library\Assets\SceneLoader.cpp" />
     <ClCompile Include="Source\Library\Assets\TextureStreaming.cpp" />
     <ClCompile Include="Source\Library\Assets\ShowLoader.cpp" />

@@ -942,6 +942,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const float fixedTimeStep = ParseFloatOption(L"-fixedstep", kMissingFixedTimeStep);
         // -taa 0|1。TAAは時間方向に蓄積するため、画素単位の一致を測るときは切る
         const int taa = ParseIntOption(L"-taa", -1);
+        // -camerapath <名前>。.ksceneの[CameraPath]を1本選んで再生する。
+        // 【計測専用】カメラを動かしたときのノイズと遅れを測るには同じ軌跡を再現する必要があるが、
+        // 通常の操作は移動量がΔtに比例し、視点回転はPostMessageから駆動できない。
+        // 再生中は視点の入力操作を受け付けず、フレーム番号だけから姿勢が決まる。
+        // -fixedstep の指定が無ければ 1/60 が自動で入る(警告を出したうえで)
+        const std::wstring cameraPathName = ParseStringOption(L"-camerapath");
+        // -camerapathstart <N>。経路の再生を始めるフレーム。既定は整定待ちの180
+        // (-dumpframe の既定と同じ定数を共有する)
+        const int cameraPathStart = ParseIntOption(L"-camerapathstart", -1);
+        // -camerapathvalidate。経路が本当に画面を動かすかの検算ログだけを出す
+        const bool cameraPathValidate = HasFlagOption(L"-camerapathvalidate");
         // -meshlet 0|1。メッシュレット描画の有無。切ると従来の頂点シェーダー経路へ落ち、
         // メッシュレット単位のカリングが一切かからない。**両経路の絵は一致するのが正しい**
         // ので、これが「増幅シェーダーが何か落としていないか」を見るときの基準になる
@@ -1035,6 +1046,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (taa >= 0)
             {
                 engine.SetTAAEnabled(taa != 0);
+            }
+            // 【開始フレームを先に設定すること】SelectCameraPath が「開始フレーム」を
+            // ログへ出すので、後に回すと出る値と実際に効く値が食い違う
+            if (cameraPathStart >= 0)
+            {
+                engine.SetCameraPathStartFrame(cameraPathStart);
+            }
+            if (cameraPathValidate)
+            {
+                engine.SetCameraPathValidate(true);
+            }
+            if (!cameraPathName.empty())
+            {
+                engine.SelectCameraPath(cameraPathName.c_str());
             }
             if (meshlet >= 0)
             {

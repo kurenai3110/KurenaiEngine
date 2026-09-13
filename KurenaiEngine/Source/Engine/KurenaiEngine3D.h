@@ -279,6 +279,26 @@ namespace Kurenai
         void SetUpscaleEnabled(bool enabled);
         void SetFixedTimeStep(float seconds);
 
+        // 【計測専用】.ksceneの[CameraPath]を名前で1本選んで再生する。
+        //
+        // 【何のためにあるか】「カメラを動かしたときのノイズと遅れ」を測るには同じ軌跡を
+        // 何度でも再現できる必要があるが、通常の操作経路は移動量がΔtに比例し、視点回転は
+        // GetAsyncKeyState(VK_RBUTTON)を見るのでPostMessageからは駆動できない
+        // (UpdateMouseLookのコメント参照。これは実カーソルを守るための意図した設計)。
+        // 再生中は視点の入力操作を一切受け付けず、フレーム番号だけから姿勢が決まる。
+        //
+        // 名前が見つからない場合はErrorログを出し、**従来の入力操作のまま続行する**
+        // (黙って落とさず、黙って再生もしない)。nullptrや空文字列を渡すと再生を止める
+        void SelectCameraPath(const wchar_t* name);
+        // 経路の再生を開始するフレーム番号。それまでは先頭キーの姿勢で静止し、
+        // 履歴・リザーバ・ストリーミング・内部解像度が整定するのを待つ。
+        // 負を渡すと既定(Passes::kMegaLightsAccumWarmup = -dumpframe の既定と同じ定数)になる
+        void SetCameraPathStartFrame(int frame);
+        // シーンが持つ[CameraPath]すべてについて「本当に画面が動くか」の検算ログを出す。
+        // 【シーンの適用を待ってから出す】起動オプションの適用時点ではまだシーンが
+        // 読み終わっていないことがあるので、ここでは要求を立てるだけにする
+        void SetCameraPathValidate(bool enabled);
+
         // 【計測専用】GPUの区間計測をウォームアップ後に指定枚数ぶん集計し、
         // パス名ごとの平均[ms]をCSVへ書き出して終了する。
         // Perfログでは足りない理由は docs/ImplementationDetail.md 61.7e.1
@@ -608,6 +628,11 @@ namespace Kurenai
         {
             Core::Camera Camera;
             bool ImGuiVisible = true;
+            // Updateスレッド側のフレーム番号。Renderスレッドの m_History.FrameIndex と
+            // 一致するはず ―― という**推測**を、DecideFrameJitterAndCamera で実際に比べて潰す。
+            // 一致しないと「経路のフレーム番号」と「乱数の種・ジッターのフレーム番号」が
+            // ずれ、測定そのものが成立しない
+            uint32_t PathFrameIndex = 0;
         };
 
         void CreateSceneResources();
@@ -775,6 +800,17 @@ namespace Kurenai
         void UpdateMouseLook(bool imguiWantsMouse);
         void UpdateMovement(float deltaTime);
         void UpdateImGuiToggle();
+        // 決定的カメラ経路。**UpdateAppliedSceneHandoffより後に呼ぶこと** ――
+        // 先に呼ぶと、シーンが切り替わったフレームだけ経路が.ksceneの[Camera]に上書きされる
+        void UpdateCameraPath();
+        // -camerapath で指定された名前を、いま適用されているシーンの[CameraPath]から解決する。
+        // シーンの適用とオプションの指定はどちらが先でも起きうるので、両方の契機から呼ぶ
+        void ResolveCameraPath();
+        // 経路の開始フレーム。負が入っていれば既定(kMegaLightsAccumWarmup)へ落とす
+        uint32_t GetCameraPathStartFrame() const;
+        // 検算結果をログへ1本ぶん書き出す
+        static void LogCameraPathMotionStats(
+            const Assets::CameraPath& path, const Assets::CameraPathMotionStats& stats);
         // ApplyLoadedScene(Renderスレッド)が公開した初期カメラ・ウィンドウタイトルを、
         // まだ適用していなければ適用する。m_Cameraの書き込み手をUpdateスレッド1つに保ち、
         // ウィンドウタイトルの変更もウィンドウを所有するこのスレッドから行うためのハンドオフ
@@ -1506,6 +1542,10 @@ namespace Kurenai
         bool m_AppliedSceneApplyCamera = true;
         Core::Camera m_AppliedSceneCamera;
         std::wstring m_AppliedSceneTitle;
+        // そのシーンが持つ[CameraPath]の一覧。**consumeせずに持ち続ける**のがポイントで、
+        // -camerapath がシーンの適用より後に呼ばれても名前を解決できるようにするため
+        // (起動オプションの適用順に依存させない)
+        std::vector<Assets::CameraPath> m_AppliedSceneCameraPaths;
 
         // Loaderスレッド専有。「今どのスカイボックスを読み込み済みか」の真実。
         // スカイボックスを読むのがこのスレッドだけなので、ここで持つのが最も素直になる
@@ -1560,6 +1600,28 @@ namespace Kurenai
         // (m_Settings.Sky.TimeOfDayと同じ扱い)
         float m_RenderDeltaTime = 0.0f;
         float m_FixedTimeStep = 0.0f;
+
+        // --- 決定的カメラ経路(計測専用) -------------------------------------------------
+        //
+        // 【スレッドの持ち分】m_CameraPath / m_CameraPathActive / m_UpdateFrameIndex は
+        // **Updateスレッド専有**(m_Cameraと同じ)。m_RequestedCameraPathName と
+        // m_CameraPathStartFrame は Run() より前に起動オプションから設定される想定で、
+        // 再解決の要求だけを atomic で受け渡す
+        std::wstring m_RequestedCameraPathName;
+        // 次のUpdateで名前を解決し直す。シーンが適用されたときと、名前が指定されたときに立つ
+        std::atomic<bool> m_CameraPathNeedsResolve{ false };
+        Assets::CameraPath m_CameraPath;
+        bool m_CameraPathActive = false;
+        // 負なら Passes::kMegaLightsAccumWarmup を使う(-dumpframe の既定と同じ定数を共有する。
+        // 値が2つに割れると片方だけ直す事故が起きるので、新しい定数は作らない)
+        int m_CameraPathStartFrame = -1;
+        // -camerapathvalidate。シーンが適用された時点で全経路の検算ログを出す
+        bool m_CameraPathValidateRequested = false;
+        // Updateスレッド側のフレーム番号。TickFrameの冒頭で前進させ、Renderの
+        // m_History.FrameIndex と一致することを DecideFrameJitterAndCamera で検算する
+        uint32_t m_UpdateFrameIndex = 0;
+        // フレーム番号の食い違いは1回だけログに出す(毎フレーム出すとログが埋まる)
+        bool m_PathFrameMismatchLogged = false;
 
         // 集計状態はすべてRenderスレッドのみが読み書きするため追加の排他制御は不要
         Diagnostics::FrameStatsLogger m_FrameStats;

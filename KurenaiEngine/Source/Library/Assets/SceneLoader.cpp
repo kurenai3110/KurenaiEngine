@@ -270,6 +270,23 @@ namespace Kurenai::Assets
             bool CastShadow = true;
         };
 
+        // [CameraPath]セクション1つぶん。角度はここでは**度**のまま持ち、
+        // ApplySceneSettingsでラジアンへ変換する([Camera]のYaw/Pitchと同じ扱い)
+        struct ParsedCameraPathEntry
+        {
+            std::wstring Name;
+            CameraPathInterp Interp = CameraPathInterp::CatmullRom;
+            CameraPathEnd End = CameraPathEnd::Hold;
+            struct Key
+            {
+                uint32_t Frame = 0;
+                float Position[3] = { 0.0f, 0.0f, 0.0f };
+                float YawDegrees = 0.0f;
+                float PitchDegrees = 0.0f;
+            };
+            std::vector<Key> Keys;
+        };
+
         struct ParsedReflectionProbeEntry
         {
             bool HasPosition = false;
@@ -394,6 +411,7 @@ namespace Kurenai::Assets
             bool HasDroneShowCastLightScale = false; float DroneShowCastLightScale = 1.0f;
 
             std::vector<ParsedLightEntry> Lights;
+            std::vector<ParsedCameraPathEntry> CameraPaths;
             std::vector<ParsedReflectionProbeEntry> ReflectionProbes;
             std::vector<ParsedGIVolumeEntry> GIVolumes;
         };
@@ -404,6 +422,7 @@ namespace Kurenai::Assets
             Scene,
             Model,
             Camera,
+            CameraPath,
             Sun,
             Light,
             ReflectionProbe,
@@ -422,6 +441,8 @@ namespace Kurenai::Assets
             if (CaseInsensitiveEquals(name, L"Scene")) return Section::Scene;
             if (CaseInsensitiveEquals(name, L"Model")) return Section::Model;
             if (CaseInsensitiveEquals(name, L"Camera")) return Section::Camera;
+            // 完全一致で比べているので[Camera]との前後関係は問わない
+            if (CaseInsensitiveEquals(name, L"CameraPath")) return Section::CameraPath;
             if (CaseInsensitiveEquals(name, L"Sun")) return Section::Sun;
             if (CaseInsensitiveEquals(name, L"Light")) return Section::Light;
             if (CaseInsensitiveEquals(name, L"ReflectionProbe")) return Section::ReflectionProbe;
@@ -751,6 +772,82 @@ namespace Kurenai::Assets
         else if (CaseInsensitiveEquals(sceneLine.Key, L"Pitch"))
         {
             if (!ParseFloatToken(sceneLine.Value, result.CameraPitch)) ErrorAt(sceneLine, "Pitchの値が不正です");
+        }
+        else
+        {
+            WarnUnknownKey(sceneLine);
+        }
+        }
+
+        // "0, -3.0, 1.6, 2.0, 90.0, -5.0" のようなカンマ区切りをn個のfloatとして読む。
+        // ParseFloat3 / ParseUint2 と同じ分割の作法だが、要素数を呼び出し側が決められる
+        bool ParseFloatList(const std::wstring& value, size_t expectedCount, std::vector<float>& out)
+        {
+            out.clear();
+            size_t start = 0;
+            while (start <= value.size())
+            {
+                const size_t comma = value.find(L',', start);
+                const size_t end = comma == std::wstring::npos ? value.size() : comma;
+                const std::wstring token = TrimHalfWidth(value.substr(start, end - start));
+                float parsed = 0.0f;
+                if (!ParseFloatToken(token, parsed))
+                {
+                    return false;
+                }
+                out.push_back(parsed);
+                if (comma == std::wstring::npos)
+                {
+                    break;
+                }
+                start = comma + 1;
+            }
+            return out.size() == expectedCount;
+        }
+
+        // [CameraPath] セクションの1行を解析する。
+        //
+        // 【Frameを整数で要求する理由】経路は「同じフレーム番号なら必ず同じ姿勢」でなければ
+        // 測定に使えない。キーの位置が小数だと、区間の割り算が実装の細部に依存してしまう
+        void ParseCameraPathKey(const SceneLine& sceneLine, ParsedScene& result)
+        {
+        ParsedCameraPathEntry& entry = result.CameraPaths.back();
+
+        if (CaseInsensitiveEquals(sceneLine.Key, L"Name"))
+        {
+            entry.Name = sceneLine.Value;
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Interp"))
+        {
+            if (CaseInsensitiveEquals(sceneLine.Value, L"Linear")) entry.Interp = CameraPathInterp::Linear;
+            else if (CaseInsensitiveEquals(sceneLine.Value, L"CatmullRom")) entry.Interp = CameraPathInterp::CatmullRom;
+            else ErrorAt(sceneLine, "Interpの値が不正です(LinearかCatmullRom)");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"End"))
+        {
+            if (CaseInsensitiveEquals(sceneLine.Value, L"Hold")) entry.End = CameraPathEnd::Hold;
+            else if (CaseInsensitiveEquals(sceneLine.Value, L"Loop")) entry.End = CameraPathEnd::Loop;
+            else ErrorAt(sceneLine, "Endの値が不正です(HoldかLoop)");
+        }
+        else if (CaseInsensitiveEquals(sceneLine.Key, L"Key"))
+        {
+            std::vector<float> values;
+            if (!ParseFloatList(sceneLine.Value, 6, values))
+            {
+                ErrorAt(sceneLine, "Keyの値が不正です(Frame, X, Y, Z, Yaw, Pitchの6要素が必要)");
+            }
+            if (!(values[0] >= 0.0f) || std::floor(values[0]) != values[0])
+            {
+                ErrorAt(sceneLine, "KeyのFrameは0以上の整数で指定してください");
+            }
+            ParsedCameraPathEntry::Key key;
+            key.Frame = static_cast<uint32_t>(values[0]);
+            key.Position[0] = values[1];
+            key.Position[1] = values[2];
+            key.Position[2] = values[3];
+            key.YawDegrees = values[4];
+            key.PitchDegrees = values[5];
+            entry.Keys.push_back(key);
         }
         else
         {
@@ -1278,6 +1375,10 @@ namespace Kurenai::Assets
                     {
                         result.Lights.emplace_back();
                     }
+                    else if (currentSection == Section::CameraPath)
+                    {
+                        result.CameraPaths.emplace_back();
+                    }
                     else if (currentSection == Section::ReflectionProbe)
                     {
                         result.ReflectionProbes.emplace_back();
@@ -1332,6 +1433,9 @@ namespace Kurenai::Assets
                     break;
                 case Section::Camera:
                     ParseCameraKey(sceneLine, result);
+                    break;
+                case Section::CameraPath:
+                    ParseCameraPathKey(sceneLine, result);
                     break;
                 case Section::Sun:
                     ParseSunKey(sceneLine, result);
@@ -1467,6 +1571,61 @@ namespace Kurenai::Assets
             //  度とラジアンで同じ値になるため表面化していなかった)
             scene.CameraYaw = DirectX::XMConvertToRadians(parsed.CameraYaw);
             scene.CameraPitch = DirectX::XMConvertToRadians(parsed.CameraPitch);
+
+            // [CameraPath]。Yaw/Pitchの度→ラジアン変換は[Camera]と同じくここで行う。
+            // 【壊れた経路は捨てて読み込みは続ける】経路は測定のための付加機能なので、
+            // 1本が不正でもシーン自体は開けるべきである。ただし黙って落とすと
+            // 「-camerapathを指定したのに再生されない」が理由不明になるので、必ずErrorへ出す
+            for (size_t i = 0; i < parsed.CameraPaths.size(); ++i)
+            {
+                const ParsedCameraPathEntry& parsedPath = parsed.CameraPaths[i];
+                const std::wstring pathName =
+                    parsedPath.Name.empty() ? (L"CameraPath" + std::to_wstring(i)) : parsedPath.Name;
+
+                std::vector<CameraPathKey> keys;
+                keys.reserve(parsedPath.Keys.size());
+                for (const ParsedCameraPathEntry::Key& parsedKey : parsedPath.Keys)
+                {
+                    CameraPathKey key;
+                    key.Frame = parsedKey.Frame;
+                    key.Position[0] = parsedKey.Position[0];
+                    key.Position[1] = parsedKey.Position[1];
+                    key.Position[2] = parsedKey.Position[2];
+                    key.YawRadians = DirectX::XMConvertToRadians(parsedKey.YawDegrees);
+                    key.PitchRadians = DirectX::XMConvertToRadians(parsedKey.PitchDegrees);
+                    keys.push_back(key);
+                }
+
+                CameraPath path;
+                std::string setError;
+                if (!path.SetKeys(pathName, parsedPath.Interp, parsedPath.End, std::move(keys), setError))
+                {
+                    Core::Logger::Error(
+                        "SceneLoader",
+                        "[CameraPath] \"" + WideToUtf8(pathName) + "\" を読み込めませんでした: " + setError
+                        + " (" + WideToUtf8(sceneFilePath) + ")");
+                    continue;
+                }
+
+                // 同名の経路は-camerapathでどちらが選ばれるか決まらないので拒否する
+                const auto duplicate = std::find_if(
+                    scene.CameraPaths.begin(), scene.CameraPaths.end(),
+                    [&pathName](const CameraPath& existing) { return existing.GetName() == pathName; });
+                if (duplicate != scene.CameraPaths.end())
+                {
+                    Core::Logger::Error(
+                        "SceneLoader",
+                        "[CameraPath] の名前が重複しています。後から現れたほうを無視します: \""
+                        + WideToUtf8(pathName) + "\" (" + WideToUtf8(sceneFilePath) + ")");
+                    continue;
+                }
+
+                Core::Logger::Info(
+                    "SceneLoader",
+                    "[CameraPath] \"" + WideToUtf8(pathName) + "\" キー" + std::to_string(path.GetKeyCount())
+                    + "個 / " + std::to_string(path.FrameCount()) + "フレーム");
+                scene.CameraPaths.push_back(std::move(path));
+            }
             scene.SunTimeOfDay = parsed.SunTimeOfDay;
             scene.SunAzimuthDegrees = parsed.SunAzimuthDegrees;
             scene.ShadowEnabled = parsed.SunShadow;
