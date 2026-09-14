@@ -615,8 +615,9 @@ namespace Kurenai
         // Kの下限。これを下回るとタイルに届く灯を代表できない。
         static constexpr int32_t kMegaLightsTilePoolMinCapacity = Passes::kMegaLightsTilePoolMinCapacity;
 
-        // 1画素あたりの標本数の上限。リザーババッファはこの倍数まで太る
-        //(16バイト x 画素数 x 標本数。2560x1440・4本で236MB)ので、際限なく上げさせない。
+        // 1画素あたりの標本数の上限。リザーバ1本は16バイト x 画素数 x 標本数で、2560x1440では
+        // 1標本あたり約59MB、上限16標本では約944MBになる。同サイズのリザーバは初期・空間再利用の
+        // ping-pong・時間履歴の計5本を確保するため、実際の確保量はさらに大きい。
         // クアッド層化は4層なので、4を超えると層の割り当てが一巡して効きが鈍る
         static constexpr int32_t kMegaLightsMaxSamplesPerPixel = Passes::kMegaLightsMaxSamplesPerPixel;
 

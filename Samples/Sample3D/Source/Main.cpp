@@ -862,13 +862,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsQuadShare = ParseIntOption(L"-megalightsquadshare", -1);
         const int megaLightsQuadStratify = ParseIntOption(L"-megalightsquadstratify", -1);
         const int megaLightsBlockedCache = ParseIntOption(L"-megalightsblockedcache", -1);
-        // -megalightsquadsamples <1〜4>。クアッド共有が1画素あたりに引く標本の数。
+        // -megalightsquadsamples <1〜16>。クアッド共有が1画素あたりに引く標本の数。
         // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
         const int megaLightsQuadSamples = ParseIntOption(L"-megalightsquadsamples", -1);
         // ブースト標本数Bと対象モード(1=予測棄却、2=短い履歴も対象、3=全画素・検算専用)
         const int megaLightsQuadBoost = ParseIntOption(L"-megalightsquadboost", -1);
         const int megaLightsQuadBoostMode = ParseIntOption(L"-megalightsquadboostmode", -1);
-        // -megalightspool <8〜128>。候補プールが1タイルあたりに抽出する灯の数(K)。
+        // -megalightspool <8〜512>。候補プールが1タイルあたりに抽出する灯の数(K)。
         // 1画素あたりの標本数では減らない「タイル間」のノイズがここで決まる
         const int megaLightsPoolCapacity = ParseIntOption(L"-megalightspool", -1);
         // -megalightstilejitter <0|1|2>。1=Halton(2,3)で格子をずらす、2=有効だがオフセット0固定
