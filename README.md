@@ -748,7 +748,7 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-megalightsblockedcache <0\|1>` | 遮蔽済みライトのキャッシュを使うか指定する。 |
 | `-megalightstilejitter <0\|1\|2>` | 候補プールのタイル格子ジッターを指定する。根拠は docs/ImplementationDetail.md 61.7n節。 |
 | `-megalightsdenoise4tap <0\|1>` | デノイザの時間累積が履歴の妥当性を何タップで判定するかを指定する(`0` = 最近傍1タップ、`1` = バイリニア2x2の4タップ)。**既定は0** ―― 指標はすべて改善するが、動かして見比べても差が分からなかったため既定にしていない。根拠は docs/ImplementationDetail.md 61.7o.9節。 |
-| `-megalightsdenoisecatmull <0\|1>` | デノイザの時間累積が履歴の色を引くときの再サンプリングを指定する(`0` = バイリニア、`1` = Catmull-Rom)。**既定は0** ―― 鮮鋭さは戻るが総和が暗い側へ偏るため採っていない。根拠は docs/ImplementationDetail.md 61.7o.8節。 |
+| `-megalightsdenoisecatmull <0\|1>` | デノイザの時間累積が履歴の色を引くときの再サンプリングを指定する(`0` = バイリニア、`1` = Catmull-Rom)。**既定は0** ―― 重みの正規化を直したあとは移動中の鮮鋭さ・誤差・総和比のすべてでバイリニアを上回るが、既定は目視のあとに決める。4タップ判定とは併用できない。根拠は docs/ImplementationDetail.md 61.7q節。 |
 | `-megalightsdenoiseantilag <0\|1>` | デノイザの時間累積に残差駆動のアンチラグを掛けるか指定する(灯や影が変わった画素だけ累積上限を4へ落とし、残光を短くする)。**既定は0** ―― 目視で既定を決めるまでは無効。根拠は docs/ImplementationDetail.md 61.7p節。 |
 | `-megalightsdenoiseantilagt0 <0..1>` / `-megalightsdenoiseantilagt1 <0..1>` | アンチラグが発火する相対変化のしきい値(smoothstep の両端。既定 0.35 / 0.6)。 |
 | `-megalightsdenoiseantilagfast <フレーム数>` | アンチラグが現フレームの 7x7 平均をならす短い EMA の長さ(既定 4)。長いほど誤発火は減り、検出は遅れる。 |
