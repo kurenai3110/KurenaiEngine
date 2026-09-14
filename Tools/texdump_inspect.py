@@ -21,7 +21,12 @@
     python Tools/texdump_inspect.py lag       --truth <連番*.bin> --candidate <連番*.bin>
                                               [--nmax 24] [--lit-threshold 1e-4]
     python Tools/texdump_inspect.py pathnoise --truth <連番*.bin> --candidate <連番*.bin>
-                                              [--lit-threshold 1e-4]
+                                              [--lit-threshold 1e-4] [--mask <連番*.bin>]
+                                              [--mask-max 1.5] [--mask-invert]
+    python Tools/texdump_inspect.py outliers --truth <連番*.bin> --candidate <連番*.bin>
+                                              [--ratio 10] [--abs-mult K] [--mask <連番*.bin>]
+    python Tools/texdump_inspect.py gateagree --boost <連番*.bin> --moments <連番*.bin>
+                                               [--mask-max 1.5]
     python Tools/texdump_inspect.py seqcheck  --left <連番*.bin> --right <連番*.bin>
     python Tools/texdump_inspect.py png    <dump.bin> -o out.png [--exposure F]
                                            [--channel rgb|r|g|b|a|len]
@@ -1569,6 +1574,48 @@ def build_masks(truth, lit_threshold):
     return [value > lit_threshold for value in truth]
 
 
+def load_dump_series(patterns, label):
+    """連番をDumpのまま読み、寸法とFrameIndexの対応を呼び出し側で検査できる形で返す。"""
+    paths = expand_dump_inputs(patterns, label)
+    if len(paths) < 2:
+        raise SystemExit("{} には2枚以上の連番が要ります (実際 {} 枚)".format(label, len(paths)))
+    dumps = sorted((load(path) for path in paths), key=lambda dump: dump.frame_index)
+    first = dumps[0]
+    for dump in dumps[1:]:
+        if (dump.width, dump.height) != (first.width, first.height):
+            raise SystemExit("{} の連番で寸法が違います: {}".format(label, dump.path))
+    return dumps, [dump.frame_index for dump in dumps], first
+
+
+def history_masks(mask_dumps, mask_max, invert):
+    """Moments.z の履歴長から対象画素を作る。チャンネル不足は黙って0扱いにしない。"""
+    result = []
+    for dump in mask_dumps:
+        values = dump.as_float()
+        if values.shape[2] < 3:
+            raise SystemExit("--mask は Moments.z を持つ3チャンネル以上のダンプが必要です: {}".format(dump.path))
+        selected = values[:, :, 2] <= mask_max
+        result.append(~selected if invert else selected)
+    return result
+
+
+def require_matching_series(reference_indices, reference_first, other_indices, other_first, label):
+    """連番を画素単位で重ねる前に、別フレームを比較していないことを止める。"""
+    if reference_indices != other_indices:
+        raise SystemExit("{} のFrameIndexが違います:\n  左 {}\n  右 {}".format(label, reference_indices, other_indices))
+    if (reference_first.width, reference_first.height) != (other_first.width, other_first.height):
+        raise SystemExit("{} の寸法が違います: {}x{} 対 {}x{}".format(
+            label, reference_first.width, reference_first.height, other_first.width, other_first.height))
+
+
+def rgb_luminance(dump):
+    """RGBをRec.709輝度へ変換する。存在しない色成分を補わない。"""
+    values = dump.as_float()
+    if values.shape[2] < 3:
+        raise SystemExit("RGB輝度には3チャンネル以上のダンプが必要です: {}".format(dump.path))
+    return np.tensordot(values[:, :, :3], np.array([0.2126, 0.7152, 0.0722]), axes=([2], [0]))
+
+
 def print_series_header(label, frames, indices, first):
     print("{:<6}: {}  {}枚  {}x{}  frame {}..{}".format(
         label, first.name or "(名前なし)", frames, first.width, first.height,
@@ -1631,6 +1678,16 @@ def cmd_pathnoise(args):
         raise SystemExit("真値と候補のフレーム番号が違います")
 
     masks = build_masks(truth, args.lit_threshold)
+    if args.mask:
+        mask_dumps, midx, mfirst = load_dump_series(args.mask, "--mask")
+        require_matching_series(tidx, tfirst, midx, mfirst, "真値と--mask")
+        history = history_masks(mask_dumps, args.mask_max, args.mask_invert)
+        masks = [lit & selected for lit, selected in zip(masks, history)]
+        masked_count = sum(int(selected.sum()) for selected in history)
+        masked_total = sum(selected.size for selected in history)
+        direction = ">" if args.mask_invert else "<="
+        print("履歴マスク: Moments.z {} {:g}: {}".format(
+            direction, args.mask_max, count_line(masked_count, masked_total)))
     kept = float(np.mean([mask.mean() for mask in masks]))
     print("点灯マスク: 輝度 > {:g} の画素が平均 {:.2%}".format(args.lit_threshold, kept))
     print("単位     : 線形の生値（階調・8bit値ではない）")
@@ -1655,6 +1712,100 @@ def cmd_pathnoise(args):
     print("**S を必ず添えること。** N1 だけでは「ノイズが減った」と「ぼかした」が区別できない ――")
     print("61.7j.7 が参照実装を最悪と判定して潰れたのは、その軸を持っていなかったため。")
     print("p99 は使わない ―― 点灯しきい値を 0.4% の画素ぶん動かすだけで 34% 動く実測がある。")
+    return 0
+
+
+def cmd_outliers(args):
+    truth_dumps, tidx, tfirst = load_dump_series(args.truth, "--truth")
+    cand_dumps, cidx, cfirst = load_dump_series(args.candidate, "--candidate")
+    require_matching_series(tidx, tfirst, cidx, cfirst, "真値と候補")
+    if args.ratio <= 0.0:
+        raise SystemExit("--ratio は0より大きくしてください: {}".format(args.ratio))
+    if args.abs_mult is not None and args.abs_mult < 0.0:
+        raise SystemExit("--abs-mult は0以上にしてください: {}".format(args.abs_mult))
+
+    history = None
+    if args.mask:
+        mask_dumps, midx, mfirst = load_dump_series(args.mask, "--mask")
+        require_matching_series(tidx, tfirst, midx, mfirst, "真値と--mask")
+        history = history_masks(mask_dumps, args.mask_max, False)
+
+    print("=== outliers ===")
+    print_series_header("真値", len(truth_dumps), tidx, tfirst)
+    print_series_header("候補", len(cand_dumps), cidx, cfirst)
+    print("条件     : 候補 > {:g} x 真値、点灯は真値輝度 > {:g}".format(args.ratio, args.lit_threshold))
+    if args.abs_mult is not None:
+        print("絶対条件 : 候補 - 真値 > {:g} x 点灯画素の真値中央値".format(args.abs_mult))
+
+    total_lit = total_ratio = total_abs = total_outlier = 0
+    buckets = {"履歴<=": [0, 0], "履歴>": [0, 0]} if history is not None else None
+    worst = []
+    for frame, (truth_dump, cand_dump) in enumerate(zip(truth_dumps, cand_dumps)):
+        truth = rgb_luminance(truth_dump)
+        cand = rgb_luminance(cand_dump)
+        lit = np.isfinite(truth) & (truth > args.lit_threshold)
+        ratio_hit = lit & (cand > args.ratio * truth)
+        abs_hit = np.zeros_like(lit)
+        if args.abs_mult is not None:
+            median = float(np.median(truth[lit])) if lit.any() else float("nan")
+            abs_hit = lit & (cand - truth > args.abs_mult * median)
+        outlier = ratio_hit | abs_hit
+        total_lit += int(lit.sum())
+        total_ratio += int(ratio_hit.sum())
+        total_abs += int(abs_hit.sum())
+        total_outlier += int(outlier.sum())
+        print("frame {:<6d} 外れ値 {}  比率条件 {}{}".format(
+            tidx[frame], count_line(outlier.sum(), lit.sum()), count_line(ratio_hit.sum(), lit.sum()),
+            "  絶対条件 {}".format(count_line(abs_hit.sum(), lit.sum())) if args.abs_mult is not None else ""))
+        if buckets is not None:
+            for label, selected in (("履歴<=", history[frame]), ("履歴>", ~history[frame])):
+                population = lit & selected
+                hits = outlier & selected
+                buckets[label][0] += int(hits.sum())
+                buckets[label][1] += int(population.sum())
+                print("  {}: {}".format(label, count_line(hits.sum(), population.sum())))
+        ys, xs = np.nonzero(outlier)
+        for y, x in zip(ys, xs):
+            worst.append((float(cand[y, x] / truth[y, x]), tidx[frame], int(x), int(y), float(cand[y, x]), float(truth[y, x])))
+
+    print("合計      : 外れ値 {}  比率条件 {}{}".format(
+        count_line(total_outlier, total_lit), count_line(total_ratio, total_lit),
+        "  絶対条件 {}".format(count_line(total_abs, total_lit)) if args.abs_mult is not None else ""))
+    if buckets is not None:
+        print("母集団別  : {} / {}".format(
+            "履歴<= " + count_line(*buckets["履歴<="]), "履歴> " + count_line(*buckets["履歴>"])))
+    print("最悪画素 (候補/真値の降順、最大10件):")
+    for rank, (ratio, frame_index, x, y, cand_value, truth_value) in enumerate(sorted(worst, reverse=True)[:10], 1):
+        print("  {:2d}. frame={} x={} y={}  候補={:.6g} 真値={:.6g} 比={:.6g}".format(
+            rank, frame_index, x, y, cand_value, truth_value, ratio))
+    return 0
+
+
+def cmd_gateagree(args):
+    boost_dumps, bidx, bfirst = load_dump_series(args.boost, "--boost")
+    moments_dumps, midx, mfirst = load_dump_series(args.moments, "--moments")
+    require_matching_series(bidx, bfirst, midx, mfirst, "--boostと--moments")
+    print("=== gateagree ===")
+    print_series_header("boost", len(boost_dumps), bidx, bfirst)
+    print_series_header("moments", len(moments_dumps), midx, mfirst)
+    print("条件     : boost.a > 0 と moments.z <= {:g}".format(args.mask_max))
+    for frame, (boost, moments) in enumerate(zip(boost_dumps, moments_dumps)):
+        boost_values = boost.as_float()
+        moments_values = moments.as_float()
+        if boost_values.shape[2] < 4:
+            raise SystemExit("--boost は alpha を持つ4チャンネルのダンプが必要です: {}".format(boost.path))
+        if moments_values.shape[2] < 3:
+            raise SystemExit("--moments は Moments.z を持つ3チャンネル以上のダンプが必要です: {}".format(moments.path))
+        left = boost_values[:, :, 3] > 0.0
+        right = moments_values[:, :, 2] <= args.mask_max
+        both_true = int((left & right).sum())
+        left_only = int((left & ~right).sum())
+        right_only = int((~left & right).sum())
+        both_false = int((~left & ~right).sum())
+        total = left.size
+        print("frame {:<6d} 両方真 {:,}  boostのみ {:,}  momentsのみ {:,}  両方偽 {:,}  一致率 {:.2f}%".format(
+            bidx[frame], both_true, left_only, right_only, both_false,
+            100.0 * (both_true + both_false) / total if total else 0.0))
     return 0
 
 
@@ -1740,6 +1891,84 @@ def cmd_selftest(args):
               np.allclose([values.min(), np.median(values), values.mean(), values.max()], 0.25),
               "実際 {}".format([values.min(), np.median(values), values.mean(), values.max()]))
         check("非有限は0件", int(np.count_nonzero(~np.isfinite(values))) == 0)
+
+        # --- 1b. 新しい3物差し: synthと同じwrite_dumpで既知の連番を作り、通る例と止まる例を通す ---
+        print("1b. 履歴マスク / outliers / gateagree")
+        import contextlib
+        import io
+
+        truth_paths = []
+        candidate_paths = []
+        moments_paths = []
+        boost_paths = []
+        history_values = np.array([[1.0, 2.0], [1.0, 2.0]], dtype=np.float32)
+        for frame in range(2):
+            truth_rgba = np.ones((2, 2, 4), dtype=np.float32)
+            candidate_rgba = truth_rgba.copy()
+            if frame == 0:
+                candidate_rgba[0, 0, :3] = 11.0  # ratio=10を確実に超える既知の外れ値
+            moments_rgba = np.zeros((2, 2, 4), dtype=np.float32)
+            moments_rgba[:, :, 2] = history_values
+            boost_rgba = np.zeros((2, 2, 4), dtype=np.float32)
+            boost_rgba[:, :, 3] = (history_values <= 1.5).astype(np.float32)
+            for paths, array, name in (
+                (truth_paths, truth_rgba, "SelfTestTruth"),
+                (candidate_paths, candidate_rgba, "SelfTestCandidate"),
+                (moments_paths, moments_rgba, "MegaLightsDenoiseMoments"),
+                (boost_paths, boost_rgba, "SelfTestBoost"),
+            ):
+                path = os.path.join(workdir, "{}_{}.bin".format(name, frame))
+                write_dump(path, array, name, 3, frame_index=frame)
+                paths.append(path)
+
+        pathnoise_out = io.StringIO()
+        with contextlib.redirect_stdout(pathnoise_out):
+            cmd_pathnoise(argparse.Namespace(truth=truth_paths, candidate=candidate_paths,
+                                              lit_threshold=1e-4, mask=moments_paths,
+                                              mask_max=1.5, mask_invert=False))
+        check("pathnoiseの履歴マスクは対象画素数を出す",
+              "履歴マスク: Moments.z <= 1.5: 4 / 8 (50.00%)" in pathnoise_out.getvalue())
+        pathnoise_invert_out = io.StringIO()
+        with contextlib.redirect_stdout(pathnoise_invert_out):
+            cmd_pathnoise(argparse.Namespace(truth=truth_paths, candidate=candidate_paths,
+                                              lit_threshold=1e-4, mask=moments_paths,
+                                              mask_max=1.5, mask_invert=True))
+        check("pathnoiseの反転マスクは落ちる側の画素へ切り替わる",
+              "履歴マスク: Moments.z > 1.5: 4 / 8 (50.00%)" in pathnoise_invert_out.getvalue())
+
+        outlier_out = io.StringIO()
+        with contextlib.redirect_stdout(outlier_out):
+            cmd_outliers(argparse.Namespace(truth=truth_paths, candidate=candidate_paths,
+                                             ratio=10.0, abs_mult=None, lit_threshold=1e-4,
+                                             mask=moments_paths, mask_max=1.5))
+        check("outliersは既知の比率外れ値1件を数える",
+              "合計      : 外れ値 1 / 8 (12.50%)" in outlier_out.getvalue(), outlier_out.getvalue())
+        check("outliersは母集団別に履歴<=側の1件を数える",
+              "履歴<= 1 / 4 (25.00%)" in outlier_out.getvalue(), outlier_out.getvalue())
+        clean_outlier_out = io.StringIO()
+        with contextlib.redirect_stdout(clean_outlier_out):
+            cmd_outliers(argparse.Namespace(truth=truth_paths, candidate=truth_paths,
+                                             ratio=10.0, abs_mult=None, lit_threshold=1e-4,
+                                             mask=None, mask_max=1.5))
+        check("outliersは外れ値がない落ちる例を0件と数える",
+              "合計      : 外れ値 0 / 8 (0.00%)" in clean_outlier_out.getvalue(), clean_outlier_out.getvalue())
+
+        gate_out = io.StringIO()
+        with contextlib.redirect_stdout(gate_out):
+            cmd_gateagree(argparse.Namespace(boost=boost_paths, moments=moments_paths, mask_max=1.5))
+        check("gateagreeは一致する既知のゲートを100%と数える",
+              gate_out.getvalue().count("一致率 100.00%") == 2, gate_out.getvalue())
+
+        bad_moments = os.path.join(workdir, "bad_moments.bin")
+        write_dump(bad_moments, moments_rgba, "MegaLightsDenoiseMoments", 3, frame_index=99)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_gateagree(argparse.Namespace(boost=boost_paths, moments=[moments_paths[0], bad_moments], mask_max=1.5))
+        except SystemExit:
+            mismatch_stopped = True
+        else:
+            mismatch_stopped = False
+        check("gateagreeはFrameIndex不一致の落ちる例を停止する", mismatch_stopped)
 
         # --- 2. nan: where が件数と座標を返す ---
         print("2. nan:10")
@@ -2246,7 +2475,26 @@ def main(argv):
     p.add_argument("--truth", nargs="+", required=True, help="真値の連番")
     p.add_argument("--candidate", nargs="+", required=True, help="比較する側の連番")
     p.add_argument("--lit-threshold", type=float, default=1e-4, help="真値の輝度の下限")
+    p.add_argument("--mask", nargs="+", help="MegaLightsDenoiseMoments の連番")
+    p.add_argument("--mask-max", type=float, default=1.5, help="Moments.z の上限（既定1.5）")
+    p.add_argument("--mask-invert", action="store_true", help="Moments.z が上限より大きい画素を使う")
     p.set_defaults(func=cmd_pathnoise)
+
+    p = sub.add_parser("outliers", help="真値より極端に明るい候補画素を数える")
+    p.add_argument("--truth", nargs="+", required=True, help="真値の連番")
+    p.add_argument("--candidate", nargs="+", required=True, help="比較する側の連番")
+    p.add_argument("--ratio", type=float, default=10.0, help="候補/真値の外れ値しきい値（既定10）")
+    p.add_argument("--abs-mult", type=float, help="真値中央値を基準にする絶対差の倍率")
+    p.add_argument("--lit-threshold", type=float, default=1e-4, help="真値の輝度の下限")
+    p.add_argument("--mask", nargs="+", help="MegaLightsDenoiseMoments の連番")
+    p.add_argument("--mask-max", type=float, default=1.5, help="Moments.z の上限（既定1.5）")
+    p.set_defaults(func=cmd_outliers)
+
+    p = sub.add_parser("gateagree", help="boost alpha と Moments.z のゲート一致率を数える")
+    p.add_argument("--boost", nargs="+", required=True, help="boost の連番")
+    p.add_argument("--moments", nargs="+", required=True, help="MegaLightsDenoiseMoments の連番")
+    p.add_argument("--mask-max", type=float, default=1.5, help="Moments.z の上限（既定1.5）")
+    p.set_defaults(func=cmd_gateagree)
 
     p = sub.add_parser("seqcheck", help="2組の連番がペイロードでビット同一かを確かめる")
     p.add_argument("--left", nargs="+", required=True)
