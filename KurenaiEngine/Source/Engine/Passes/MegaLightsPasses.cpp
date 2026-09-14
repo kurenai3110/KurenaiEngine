@@ -960,8 +960,12 @@ namespace Kurenai::Passes
                 };
                 // x は履歴の妥当性判定のタップ数。色は2x2を混ぜているのに妥当性は
                 // 1点でしか見ていなかった(根拠は MegaLightsConstants.h の Params3)
+                // yzw はアンチラグ。w(短い EMA の長さ)が 0 ならシェーダ側は無効と見なす
                 denoiseConstants.Params3 = {
-                    megaLightsSettings.DenoiseHistory4Tap ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f
+                    megaLightsSettings.DenoiseHistory4Tap ? 1.0f : 0.0f,
+                    megaLightsSettings.DenoiseAntiLag ? megaLightsSettings.DenoiseAntiLagT0 : 0.0f,
+                    megaLightsSettings.DenoiseAntiLag ? megaLightsSettings.DenoiseAntiLagT1 : 0.0f,
+                    megaLightsSettings.DenoiseAntiLag ? static_cast<float>(megaLightsSettings.DenoiseAntiLagFastFrames) : 0.0f
                 };
                 cmd->UpdateBuffer(
                     m_MegaLightsDenoiseConstantBuffer.get(), &denoiseConstants, sizeof(denoiseConstants));

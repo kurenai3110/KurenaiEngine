@@ -906,6 +906,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -megalightsdenoise4tap <0|1>。履歴の妥当性を2x2の4タップで判定するか。
         // 従来は最近傍1点だけで見ており、1点がシルエットの向こう側だと履歴全体を棄却していた
         const int megaLightsDenoise4Tap = ParseIntOption(L"-megalightsdenoise4tap", -1);
+        // -megalightsdenoiseantilag <0|1> と、そのしきい値 t0 / t1(相対変化の両端)/
+        // fast(短い EMA の長さ[フレーム])。変化した画素だけ時間累積の上限を短く落とし、
+        // 灯を消したあとの残光を縮める。値は 0 以下なら既定のまま
+        // (根拠は EngineDefaults.h の MegaLightsDenoiseAntiLag)
+        const int megaLightsAntiLag = ParseIntOption(L"-megalightsdenoiseantilag", -1);
+        const float megaLightsAntiLagT0 = ParseFloatOption(L"-megalightsdenoiseantilagt0", -1.0f);
+        const float megaLightsAntiLagT1 = ParseFloatOption(L"-megalightsdenoiseantilagt1", -1.0f);
+        const int megaLightsAntiLagFast = ParseIntOption(L"-megalightsdenoiseantilagfast", -1);
         // -perfdump <パス> / -perfdumpframes <枚数>。GPUの区間計測を平均してCSVへ書き出す。
         // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
         const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
@@ -1166,6 +1174,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (megaLightsDenoise4Tap >= 0)
             {
                 engine.SetMegaLightsDenoiseHistory4Tap(megaLightsDenoise4Tap != 0);
+            }
+            if (megaLightsAntiLag >= 0 || megaLightsAntiLagT0 > 0.0f || megaLightsAntiLagT1 > 0.0f ||
+                megaLightsAntiLagFast > 0)
+            {
+                engine.SetMegaLightsDenoiseAntiLag(
+                    megaLightsAntiLag, megaLightsAntiLagT0, megaLightsAntiLagT1, megaLightsAntiLagFast);
             }
             if (megaLightsSpatialIterations > 0)
             {

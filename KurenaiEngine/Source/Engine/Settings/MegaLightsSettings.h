@@ -55,6 +55,11 @@ namespace Kurenai
         float DenoiseFireflyClamp = Defaults::MegaLightsDenoiseFireflyClamp;
         bool DenoiseHistoryCatmullRom = Defaults::MegaLightsDenoiseHistoryCatmullRom;
         bool DenoiseHistory4Tap = Defaults::MegaLightsDenoiseHistory4Tap;
+        // 残差駆動のアンチラグ。変化した画素だけ時間累積の上限を短く落とす(根拠は EngineDefaults.h)
+        bool DenoiseAntiLag = Defaults::MegaLightsDenoiseAntiLag;
+        float DenoiseAntiLagT0 = Defaults::MegaLightsDenoiseAntiLagT0;
+        float DenoiseAntiLagT1 = Defaults::MegaLightsDenoiseAntiLagT1;
+        int32_t DenoiseAntiLagFastFrames = Defaults::MegaLightsDenoiseAntiLagFastFrames;
 
         bool TemporalEnabled = Defaults::MegaLightsTemporalEnabled;
         // 履歴のM(何個の候補から絞ったか)の上限。大きいほど収束は速いが、

@@ -1722,6 +1722,35 @@ namespace Kurenai
                 (enabled ? "バイリニア2x2の4タップ" : "最近傍1タップ(従来)"));
     }
 
+    void KurenaiEngine3D::SetMegaLightsDenoiseAntiLag(int enabled, float t0, float t1, int fastFrames)
+    {
+        auto& settings = m_Settings.MegaLights;
+        if (enabled >= 0)
+        {
+            settings.DenoiseAntiLag = (enabled != 0);
+        }
+        // 0以下は「既定のまま」。負や0を通すと smoothstep の両端が潰れて全画素が発火する
+        if (t0 > 0.0f && std::isfinite(t0)) settings.DenoiseAntiLagT0 = t0;
+        if (t1 > 0.0f && std::isfinite(t1)) settings.DenoiseAntiLagT1 = t1;
+        if (fastFrames > 0) settings.DenoiseAntiLagFastFrames = std::min(fastFrames, 64);
+        // 相対変化は [0,1] の量なので、両端もその範囲に収める
+        settings.DenoiseAntiLagT0 = std::clamp(settings.DenoiseAntiLagT0, 0.0f, 1.0f);
+        settings.DenoiseAntiLagT1 = std::clamp(settings.DenoiseAntiLagT1, 0.0f, 1.0f);
+        if (settings.DenoiseAntiLagT1 <= settings.DenoiseAntiLagT0)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのアンチラグは t1 > t0 でなければなりません(t0=" + std::to_string(settings.DenoiseAntiLagT0)
+                + ", t1=" + std::to_string(settings.DenoiseAntiLagT1) + ")。t1 を min(t0+0.1, 1) へ丸めます");
+            settings.DenoiseAntiLagT1 = std::min(settings.DenoiseAntiLagT0 + 0.1f, 1.0f);
+        }
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("MegaLightsのデノイザのアンチラグを設定しました: ") + (settings.DenoiseAntiLag ? "有効" : "無効")
+            + " (t0=" + std::to_string(settings.DenoiseAntiLagT0) + ", t1=" + std::to_string(settings.DenoiseAntiLagT1)
+            + ", fastFrames=" + std::to_string(settings.DenoiseAntiLagFastFrames) + ")");
+    }
+
     void KurenaiEngine3D::SetMegaLightsDenoiseSigmaLuminance(float sigma)
     {
         if (!(sigma > 0.0f))

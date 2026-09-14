@@ -337,6 +337,34 @@ namespace Kurenai::UI
                     "4タップ判定を有効にしているときは、こちらは効かない(部分採用と両立しない)");
 
                 CheckboxEx(
+                    "アンチラグ(変化した画素だけ累積を短く)###MegaLightsDenoiseAntiLag",
+                    &m_Engine.GetSettings().MegaLights.DenoiseAntiLag,
+                    Defaults::MegaLightsDenoiseAntiLag,
+                    "従来の累積は「その画素の信号が変化したか」を見ていない。だから灯を消したあとの"
+                    "残光は上限が一律に決め、上限64なら10%まで2.5秒尾を引く。\n\n"
+                    "「現フレームの7x7平均を数フレームならした値」と「履歴の7x7平均」の相対変化で"
+                    "変化を検出して、変化した画素だけ上限を4まで落とす。静穏な画素は長く累積したまま。"
+                    "**上限を伸ばしてノイズを下げても遅れが増えない**形にするための仕組みで、"
+                    "上限の引き上げと対で使う。\n\n"
+                    "【効かないもの】カメラ移動中のなまりには効かない(再投影が効いている面では残差が出ない)。\n"
+                    "【見るなら】灯を数秒つけて履歴を育ててから消す。デバッグ表示20(直接光単体)、TAAは切る");
+                if (m_Engine.GetSettings().MegaLights.DenoiseAntiLag)
+                {
+                    SliderFloatEx(
+                        "  相対変化 下端 t0###MegaLightsAntiLagT0", &m_Engine.GetSettings().MegaLights.DenoiseAntiLagT0,
+                        0.0f, 1.0f, Defaults::MegaLightsDenoiseAntiLagT0, "%.2f", 0,
+                        "|ならした現在 - 履歴| / max(現在, 履歴) がこれ未満なら発火しない。"
+                        "消灯なら 1.0 へ向かう。下げると敏感になる(静止時の誤発火が増える)");
+                    SliderFloatEx(
+                        "  相対変化 上端 t1###MegaLightsAntiLagT1", &m_Engine.GetSettings().MegaLights.DenoiseAntiLagT1,
+                        0.0f, 1.0f, Defaults::MegaLightsDenoiseAntiLagT1, "%.2f", 0,
+                        "これ以上なら完全に発火(上限4へ)。t0 との間はなだらかに移る");
+                    SliderIntEx(
+                        "  ならす長さ[フレーム]###MegaLightsAntiLagFast", &m_Engine.GetSettings().MegaLights.DenoiseAntiLagFastFrames,
+                        1, 16, Defaults::MegaLightsDenoiseAntiLagFastFrames,
+                        "現フレームの7x7平均をこの長さの EMA でならしてから比べる。ファイアフライ1個で動く"
+                        "単フレームの平均をならす。長いほど誤発火は減り、検出はその分だけ遅れる");
+                }
             }
 
             if (megaLightsQuadUI)

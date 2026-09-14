@@ -350,6 +350,10 @@ namespace Kurenai
         // 履歴の妥当性を2x2の4タップで判定するか(既定は最近傍1タップ)。
         // 根拠は EngineDefaults.h の MegaLightsDenoiseHistory4Tap
         void SetMegaLightsDenoiseHistory4Tap(bool enabled);
+        // 残差駆動のアンチラグ。enabled は 0=無効 / 正=有効 / 負なら既定のまま。
+        // t0 / t1(相対変化の両端)/ fastFrames(短い EMA の長さ)は 0 以下なら既定のまま
+        // (OverrideMegaLights と同じ約束)。根拠は EngineDefaults.h の MegaLightsDenoiseAntiLag
+        void SetMegaLightsDenoiseAntiLag(int enabled, float t0, float t1, int fastFrames);
         // 空間再利用の反復回数(負なら既定のまま)
         void SetMegaLightsSpatialIterations(int iterations);
         // 時間再利用の有無と、履歴のMの上限。負/0は既定のまま
