@@ -78,12 +78,6 @@ RWTexture2D<float4> OutputMomentsTexture : register(u1);
 RWTexture2D<float4> HistoryOutTexture : register(u2);
 RWTexture2D<float4> HistoryMomentsOutTexture : register(u3);
 
-// 履歴を採用する条件。時空間再利用(MegaLightsTemporal/Spatial)と同じ3つを同じしきい値で。
-// **深度はView空間の線形値で比べること**(Reverse-Zの生値で比べてはいけない)
-static const float kMaxRelativeDepthDiff = 0.05f;
-static const float kMinNormalDot = 0.9f;
-static const float kMaxMaterialDiff = 0.1f;
-
 // 復調に使う反射率の下限。0で割ると黒い面で発散する
 static const float kMinDemodulation = 0.05f;
 
@@ -324,10 +318,7 @@ bool HistoryTapValid(int2 tapPixel, uint2 outputSize, float viewZ, float3 N, flo
     {
         return false;
     }
-    return abs(hViewZ - viewZ) <= kMaxRelativeDepthDiff * max(abs(viewZ), 1e-3f) &&
-           dot(N, hN) >= kMinNormalDot &&
-           abs(hMaterial.r - material.r) <= kMaxMaterialDiff &&
-           abs(hMaterial.g - material.g) <= kMaxMaterialDiff;
+    return MegaLightsGuideMatchesSurface(hViewZ, hN, hMaterial, viewZ, N, material);
 }
 
 [numthreads(8, 8, 1)]
@@ -541,10 +532,7 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         if (hValid)
         {
-            if (abs(hViewZ - viewZ) <= kMaxRelativeDepthDiff * max(abs(viewZ), 1e-3f) &&
-                dot(N, hN) >= kMinNormalDot &&
-                abs(hMaterial.r - material.r) <= kMaxMaterialDiff &&
-                abs(hMaterial.g - material.g) <= kMaxMaterialDiff)
+            if (MegaLightsGuideMatchesSurface(hViewZ, hN, hMaterial, viewZ, N, material))
             {
                 // 色だけ再サンプリングのフィルタを選べる。モーメントは必ずバイリニア
                 // (負のローブで履歴長と分散が壊れるため。SampleHistoryColorCatmullRom を参照)

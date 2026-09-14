@@ -79,6 +79,8 @@ namespace Kurenai
             // MegaLights
             { "MegaLightsTexture", m_RenderTargets.MegaLightsTexture.get() },
             { "MegaLightsDenoisedTexture", m_RenderTargets.MegaLightsDenoisedTexture.get() },
+            // 将来は .a > 0 がブーストの予測ゲートのマスクになる。
+            { "MegaLightsBoost", m_RenderTargets.MegaLightsBoostTexture.get() },
             // デノイザの履歴とモーメント。TAAHistory / TAAHistoryPrev とまったく同じ扱いで、
             // 添字は**今フレームの書き込み先**(MegaLightsPasses::GetDenoiseHistoryIndex のコメント)。
             //

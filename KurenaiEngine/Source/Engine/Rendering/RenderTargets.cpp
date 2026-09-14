@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "Core/Logger.h"
+
 namespace Kurenai::Rendering
 {
     void RenderTargets::CreateGBufferCore(
@@ -217,6 +219,19 @@ namespace Kurenai::Rendering
         blockedBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * width * height;
         blockedBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
         MegaLightsBlockedLightBuffer = device.CreateBuffer(blockedBufferDesc);
+
+        // ブースト項は解像度に追従して作り直す。Initial は予測棄却画素以外にゼロを書く。
+        MegaLightsBoostTexture = device.CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+        RHI::BufferDesc boostCountBufferDesc;
+        boostCountBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+        boostCountBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * width * height;
+        boostCountBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+        MegaLightsBoostCountBuffer = device.CreateBuffer(boostCountBufferDesc);
+        if (!MegaLightsBoostTexture || !MegaLightsBoostCountBuffer)
+        {
+            Core::Logger::Error(
+                "RenderTargets", "MegaLightsのブースト用テクスチャまたはカウントバッファの確保に失敗しました");
+        }
         // 空間再利用の出力先。近傍を読むので入力と同じバッファへは書けない。
         // 2回以上回すときは2本を ping-pong する
         MegaLightsReservoirSpatialBuffer = device.CreateBuffer(reservoirBufferDesc);

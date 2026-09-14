@@ -532,6 +532,18 @@ namespace Kurenai::Defaults
     // カメラが動いている間はデノイザの時間累積が効かず、生の推定量がそのまま見える。
     // 1/2/4の掃引と、4を超えても効きが鈍る理由は docs/ImplementationDetail.md 61.7l
     inline constexpr int MegaLightsQuadSamplesPerPixel = 4;
+    // デノイザに棄却される画素へ追加するブースト標本数と、その対象を選ぶモード。
+    // 1=デノイザの予測棄却画素、2=それに加えて前フレームの履歴長がしきい値未満、
+    // 3=全画素(検算専用)。
+    // 【既定は無効。効き代の実測は docs 61.7q.1(棄却画素は最悪画素の 7%)】
+    // 実測(61.7q.5、BistroExteriorNight / Strafe / 2560x1440、分母は参照実装):
+    //   棄却画素の N1 中央値  B=0 14.98 / B=4 13.68 / B=8 13.32 (4タップ判定 ON: 11.20 / 10.08)
+    //   全画素の N1 中央値    B=0 4.46  / B=4 4.42  / B=8 4.40
+    //   Initial パス          B=0 2.88〜2.91 / B=4 3.28〜3.43 / B=8 3.82 [ms]
+    //   不偏性: mode 3 の静止 900 フレーム総和比 1.0004、Strafe の生出力の総和比 0.9997
+    //   予測ゲートとデノイザの実際の棄却の一致率 100.00%(16 フレーム、食い違い ≤ 6 画素/フレーム)
+    inline constexpr int MegaLightsQuadBoostSamples = 0;
+    inline constexpr int MegaLightsQuadBoostMode = 1;
     // 候補プールが1タイル(16x16画素)あたりに抽出する灯の数(K)。
     //
     // 【1画素あたりの標本数では消えないノイズがここで決まる】プールはタイルに1つで、

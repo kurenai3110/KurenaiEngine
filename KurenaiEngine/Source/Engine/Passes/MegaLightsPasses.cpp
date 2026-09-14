@@ -269,6 +269,20 @@ namespace Kurenai::Passes
         // 候補プールと確率的サンプリングの種。登録から実行までの間に進むことはないので値で持つ
         const uint32_t frameIndex = frame.FrameIndex;
 
+        const bool megaLightsDenoiseRuns = megaLightsRuns &&
+                                           (megaLightsSettings.Mode == MegaLightsMode::Stochastic ||
+                                            megaLightsSettings.Mode == MegaLightsMode::QuadShared) &&
+                                           megaLightsSettings.DenoiseEnabled && m_MegaLightsDenoiseTemporalPSO &&
+                                           targets->MegaLightsDenoisedTexture != nullptr;
+        const bool denoiseGuideWritten =
+            (megaLightsSettings.Mode == MegaLightsMode::QuadShared)
+                ? (m_MegaLightsResolvePipelineState != nullptr)
+                : (megaLightsSettings.TemporalEnabled && m_MegaLightsTemporalPipelineState != nullptr);
+        // Initial の予測とデノイザ本体へ同じ条件を渡す。別々に組み立てると判定が食い違う。
+        const bool denoiseGuideValid =
+            denoiseGuideWritten && targets->MegaLightsHistoryGuide[0] && m_MegaLightsHistoryValid;
+        const bool denoiseHistoryValid = m_MegaLightsDenoiseHistoryValid;
+
         // --- タイルライトカリングパス: 画面を16x16のタイルに分け、タイルごとに「そのタイルに届くライト」の
         //     インデックスリストをコンピュートシェーダーで作る。直接光パスはそのリストだけをループする。
         //     BufferReads/BufferWritesを宣言しているのは、このパスと直接光パスがどちらもtargets->GBufferDepthを
@@ -496,6 +510,15 @@ namespace Kurenai::Passes
         // 手法2から再利用を外した構成と画素単位で一致するはず
         const bool megaLightsQuadShared =
             megaLightsRuns && frame.Settings.MegaLights.Mode == MegaLightsMode::QuadShared;
+        const uint32_t quadBoostSamples =
+            (megaLightsQuadShared && megaLightsDenoiseRuns)
+                ? static_cast<uint32_t>(std::max(0, megaLightsSettings.QuadBoostSamples))
+                : 0u;
+        const uint32_t quadBoostMode = static_cast<uint32_t>(std::clamp(megaLightsSettings.QuadBoostMode, 1, 3));
+        const uint32_t quadBoostPredicateFlags =
+            (denoiseHistoryValid ? 1u : 0u) |
+            (denoiseGuideValid ? 2u : 0u) |
+            (megaLightsSettings.DenoiseHistory4Tap ? 4u : 0u);
         if (megaLightsRuns &&
             (frame.Settings.MegaLights.Mode == MegaLightsMode::Stochastic || megaLightsQuadShared))
         {
@@ -503,7 +526,8 @@ namespace Kurenai::Passes
             // Initial側のExecuteで1回だけ更新すればよい
             const auto buildStochasticConstants =
                 [this, megaLightsSamplesPerPixel, megaLightsSettings, jitteredProj, megaLightsQuadShared, megaLightsEffectiveTilesX,
-                 megaLightsTileOffset, frameIndex, renderWidth, renderHeight](uint32_t spatialIteration)
+                 megaLightsTileOffset, quadBoostSamples, quadBoostMode, quadBoostPredicateFlags,
+                 frameIndex, renderWidth, renderHeight](uint32_t spatialIteration)
             {
                 MegaLightsStochasticConstants stochasticConstants{};
                 stochasticConstants.Params0 =
@@ -581,7 +605,8 @@ namespace Kurenai::Passes
                 // ずれると Initial が確保外へ書くか、Resolve が別画素の標本を読む
                 // (どちらも例外にならず、絵が「それらしく」出るので気付けない)
                 stochasticConstants.Params5 = {
-                    static_cast<uint32_t>(megaLightsSamplesPerPixel), 0u, 0u, 0u
+                    static_cast<uint32_t>(megaLightsSamplesPerPixel), quadBoostSamples,
+                    quadBoostMode, quadBoostPredicateFlags
                 };
                 // 候補プールを書いたときと同じ格子オフセット。末尾へ足して、途中までしか
                 // 宣言しない Shade / Temporal / Resolve の既存レイアウトを変えない
@@ -659,11 +684,13 @@ namespace Kurenai::Passes
                 .Reads =
                 {
                     targets->GBufferAlbedo.get(), targets->GBufferNormal.get(), targets->GBufferMaterial.get(), targets->GBufferDepth.get(),
-                    brdfLUTTexture,
+                    targets->GBufferVelocity.get(), brdfLUTTexture,
                 },
-                .BufferReads = { lightBuffer, tilePoolBufferForBinding },
-                .BufferWrites = { targets->MegaLightsReservoirBuffer.get(), targets->MegaLightsBlockedLightBuffer.get() },
-                .Execute = [this, targets, lightBuffer, raytracingScene, brdfLUTTexture, tilePoolBufferForBinding, updateStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Writes = { targets->MegaLightsBoostTexture.get() },
+                .BufferReads = { lightBuffer, tilePoolBufferForBinding, targets->MegaLightsHistoryGuide[historyReadIndex].get() },
+                .BufferWrites = { targets->MegaLightsReservoirBuffer.get(), targets->MegaLightsBlockedLightBuffer.get(),
+                                  targets->MegaLightsBoostCountBuffer.get() },
+                .Execute = [this, targets, lightBuffer, raytracingScene, brdfLUTTexture, tilePoolBufferForBinding, updateStochasticConstants, historyReadIndex, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     updateStochasticConstants(cmd);
 
@@ -682,9 +709,13 @@ namespace Kurenai::Passes
                     cmd->SetComputeTexture(5, brdfLUTTexture);
                     cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
                     cmd->SetComputeShaderResourceBuffer(7, tilePoolBufferForBinding);
+                    cmd->SetComputeTexture(8, targets->GBufferVelocity.get());
+                    cmd->SetComputeShaderResourceBuffer(9, targets->MegaLightsHistoryGuide[historyReadIndex].get());
 
                     cmd->SetComputeUnorderedAccessBuffer(0, targets->MegaLightsReservoirBuffer.get());
                     cmd->SetComputeUnorderedAccessBuffer(1, targets->MegaLightsBlockedLightBuffer.get());
+                    cmd->SetComputeUnorderedAccessTexture(2, targets->MegaLightsBoostTexture.get());
+                    cmd->SetComputeUnorderedAccessBuffer(3, targets->MegaLightsBoostCountBuffer.get());
                     cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
@@ -827,10 +858,11 @@ namespace Kurenai::Passes
                     .Reads =
                     {
                         targets->GBufferAlbedo.get(), targets->GBufferNormal.get(), targets->GBufferMaterial.get(),
-                        targets->GBufferDepth.get(), brdfLUTTexture,
+                        targets->GBufferDepth.get(), brdfLUTTexture, targets->MegaLightsBoostTexture.get(),
                     },
                     .Writes = { targets->MegaLightsTexture.get() },
-                    .BufferReads = { lightBuffer, targets->MegaLightsReservoirBuffer.get() },
+                    .BufferReads = { lightBuffer, targets->MegaLightsReservoirBuffer.get(),
+                                     targets->MegaLightsBoostCountBuffer.get() },
                     .BufferWrites = { guideWriteBuffer },
                     .Execute = [this, targets, lightBuffer, brdfLUTTexture, guideWriteBuffer, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
@@ -850,6 +882,8 @@ namespace Kurenai::Passes
                         cmd->SetComputeTexture(5, brdfLUTTexture);
                         cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
                         cmd->SetComputeShaderResourceBuffer(7, targets->MegaLightsReservoirBuffer.get());
+                        cmd->SetComputeTexture(8, targets->MegaLightsBoostTexture.get());
+                        cmd->SetComputeShaderResourceBuffer(9, targets->MegaLightsBoostCountBuffer.get());
 
                         cmd->SetComputeUnorderedAccessTexture(0, targets->MegaLightsTexture.get());
                         cmd->SetComputeUnorderedAccessBuffer(1, guideWriteBuffer);
@@ -900,11 +934,6 @@ namespace Kurenai::Passes
         // 【TAAより前に落とす】ノイズを残したまま渡すとTAAが履歴を毎フレーム棄却し、
         // ノイズもAAも両方失う(MegaLightsDenoise.hlsl 冒頭)
         // 手法2と手法3は同じデノイザを共有する(入力は「確率的に作られた1枚の絵」で同じもの)
-        const bool megaLightsDenoiseRuns = megaLightsRuns &&
-                                           (frame.Settings.MegaLights.Mode == MegaLightsMode::Stochastic ||
-                                            frame.Settings.MegaLights.Mode == MegaLightsMode::QuadShared) &&
-                                           frame.Settings.MegaLights.DenoiseEnabled && m_MegaLightsDenoiseTemporalPSO &&
-                                           targets->MegaLightsDenoisedTexture != nullptr;
         bb.MegaLightsDenoiseRuns = megaLightsDenoiseRuns;
         if (megaLightsDenoiseRuns)
         {
@@ -913,12 +942,6 @@ namespace Kurenai::Passes
             // 履歴の妥当性判定に「前フレームの幾何」を使えるか。ガイドを毎フレーム全画素へ
             // 書いているのは、手法2では時間再利用、手法3では Resolve。
             // どちらも走っていなければ更新されないので使えない
-            const bool denoiseGuideWritten =
-                (frame.Settings.MegaLights.Mode == MegaLightsMode::QuadShared)
-                    ? (m_MegaLightsResolvePipelineState != nullptr)
-                    : (frame.Settings.MegaLights.TemporalEnabled && m_MegaLightsTemporalPipelineState != nullptr);
-            const bool denoiseGuideValid =
-                denoiseGuideWritten && targets->MegaLightsHistoryGuide[0] && m_MegaLightsHistoryValid;
             // 【読むのは前フレームが書いた側】今フレームの時間再利用はもう片方へ書いている
             RHI::IRHIBuffer* const denoiseGuideBuffer =
                 targets->MegaLightsHistoryGuide[m_MegaLightsHistoryIndex ^ 1u]
@@ -930,11 +953,11 @@ namespace Kurenai::Passes
             const int atrousPasses = std::clamp(frame.Settings.MegaLights.DenoiseAtrousPasses, 0, 5);
 
             const auto updateDenoiseConstants =
-                [this, megaLightsSettings, denoiseGuideValid, renderWidth, renderHeight](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
+                [this, megaLightsSettings, denoiseGuideValid, denoiseHistoryValid, renderWidth, renderHeight](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
             {
                 Passes::MegaLightsDenoiseConstants denoiseConstants{};
                 denoiseConstants.Params0 = {
-                    renderWidth, renderHeight, m_MegaLightsDenoiseHistoryValid ? 1u : 0u, pass
+                    renderWidth, renderHeight, denoiseHistoryValid ? 1u : 0u, pass
                 };
                 // 時間累積の上限は手法ごとに別の変数を持つ。手法3にはリザーバの履歴が
                 // 無く、デノイザだけが時間方向の記憶なので長くしてある(EngineDefaults.h)

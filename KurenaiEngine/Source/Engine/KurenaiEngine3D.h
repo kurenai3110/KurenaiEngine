@@ -367,6 +367,9 @@ namespace Kurenai
         // クアッド共有(手法3)の1画素あたりの標本数。1〜kMegaLightsMaxSamplesPerPixel。
         // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
         void SetMegaLightsQuadSamples(int samples);
+        // クアッド共有のブースト標本数と対象モード。負の値はその項目を既定のままにする。
+        // mode: 1=予測棄却、2=予測棄却または短い履歴、3=全画素(検算専用)
+        void SetMegaLightsQuadBoost(int samples, int mode);
         // 候補プールが1タイルあたりに抽出する灯の数(K)。
         // kMegaLightsTilePoolMinCapacity 〜 kMegaLightsTilePoolCapacity
         void SetMegaLightsTilePoolCapacity(int capacity);

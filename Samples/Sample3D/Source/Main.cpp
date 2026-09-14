@@ -865,6 +865,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -megalightsquadsamples <1〜4>。クアッド共有が1画素あたりに引く標本の数。
         // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
         const int megaLightsQuadSamples = ParseIntOption(L"-megalightsquadsamples", -1);
+        // ブースト標本数Bと対象モード(1=予測棄却、2=短い履歴も対象、3=全画素・検算専用)
+        const int megaLightsQuadBoost = ParseIntOption(L"-megalightsquadboost", -1);
+        const int megaLightsQuadBoostMode = ParseIntOption(L"-megalightsquadboostmode", -1);
         // -megalightspool <8〜128>。候補プールが1タイルあたりに抽出する灯の数(K)。
         // 1画素あたりの標本数では減らない「タイル間」のノイズがここで決まる
         const int megaLightsPoolCapacity = ParseIntOption(L"-megalightspool", -1);
@@ -1125,6 +1128,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (megaLightsQuadSamples >= 0)
             {
                 engine.SetMegaLightsQuadSamples(megaLightsQuadSamples);
+            }
+            if (megaLightsQuadBoost >= 0 || megaLightsQuadBoostMode >= 0)
+            {
+                engine.SetMegaLightsQuadBoost(megaLightsQuadBoost, megaLightsQuadBoostMode);
             }
             if (megaLightsPoolCapacity >= 0)
             {

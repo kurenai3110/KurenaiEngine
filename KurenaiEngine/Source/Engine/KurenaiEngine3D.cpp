@@ -1097,7 +1097,11 @@ namespace Kurenai
         {
             return m_MegaLightsPasses->HasCommonPipelineStates() && m_MegaLightsPasses->HasShadePipelineState() &&
                    m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
-                   m_RenderTargets.MegaLightsReservoirBuffer != nullptr;
+                   m_RenderTargets.MegaLightsReservoirBuffer != nullptr &&
+                   m_RenderTargets.MegaLightsBoostTexture != nullptr &&
+                   m_RenderTargets.MegaLightsBoostCountBuffer != nullptr &&
+                   m_RenderTargets.MegaLightsHistoryGuide[0] != nullptr &&
+                   m_RenderTargets.GBufferVelocity != nullptr;
         }
         if (m_Settings.MegaLights.Mode == MegaLightsMode::QuadShared)
         {
@@ -1106,6 +1110,9 @@ namespace Kurenai
             return m_MegaLightsPasses->HasCommonPipelineStates() && m_MegaLightsPasses->HasResolvePipelineState() &&
                    m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
                    m_RenderTargets.MegaLightsReservoirBuffer != nullptr &&
+                   m_RenderTargets.MegaLightsBoostTexture != nullptr &&
+                   m_RenderTargets.MegaLightsBoostCountBuffer != nullptr &&
+                   m_RenderTargets.GBufferVelocity != nullptr &&
                    m_RenderTargets.MegaLightsHistoryGuide[0] != nullptr;
         }
         return m_MegaLightsPasses->HasReferencePipelineState();
@@ -1906,6 +1913,34 @@ namespace Kurenai
             "KurenaiEngine3D",
             "MegaLightsのクアッド標本数を " + std::to_string(m_Settings.MegaLights.QuadSamplesPerPixel) +
                 " にしました(影レイの本数も同じ数になります)");
+    }
+
+    void KurenaiEngine3D::SetMegaLightsQuadBoost(int samples, int mode)
+    {
+        // 負の値は「既定のまま」。CLIで片方だけ指定できるよう項目ごとに扱う。
+        if (samples >= 0)
+        {
+            m_Settings.MegaLights.QuadBoostSamples = samples;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsのクアッドブースト標本数を " + std::to_string(samples) + " にしました");
+        }
+
+        if (mode >= 0)
+        {
+            if (mode < 1 || mode > 3)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "MegaLightsのクアッドブーストモードが範囲外のため無視します: " +
+                        std::to_string(mode) + " (1〜3)");
+                return;
+            }
+            m_Settings.MegaLights.QuadBoostMode = mode;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsのクアッドブーストモードを " + std::to_string(mode) + " にしました");
+        }
     }
 
     void KurenaiEngine3D::SetMegaLightsTilePoolCapacity(int capacity)

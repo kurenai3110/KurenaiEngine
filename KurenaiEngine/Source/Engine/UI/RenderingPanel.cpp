@@ -390,6 +390,28 @@ namespace Kurenai::UI
                     m_Engine.SetMegaLightsQuadSamples(quadSamples);
                 }
 
+                // ブースト項は定数バッファだけで効く(確保し直しは無い)ので設定へ直接書く
+                SliderIntEx(
+                    "棄却画素へのブースト標本数###MegaLightsQuadBoost",
+                    &m_Engine.GetSettings().MegaLights.QuadBoostSamples, 0, 8,
+                    Defaults::MegaLightsQuadBoostSamples,
+                    "デノイザに履歴を棄却されると**予測した画素にだけ**、この本数の標本(影レイ)を"
+                    "自分の画素で追加して引く。棄却画素は生の1標本がそのまま出るので、そこだけ"
+                    "標本を増やす。予測は Initial の時点でデノイザと同じ判定式を使い、ビット一致する。\n\n"
+                    "【既定は 0】棄却画素のノイズ(N1)は B=4 で -9%、B=8 で -11% 減るが、"
+                    "最悪画素の 7% にしか届かない(残りは明るい縁のにじみ)。"
+                    "コストは B=4 で Initial +0.4〜0.5ms、B=8 で +0.9ms(2560x1440)。\n"
+                    "違いが出るのはカメラを動かしている最中だけ(止めると棄却が起きない)");
+                if (m_Engine.GetSettings().MegaLights.QuadBoostSamples > 0)
+                {
+                    SliderIntEx(
+                        "  ブーストの対象###MegaLightsQuadBoostMode",
+                        &m_Engine.GetSettings().MegaLights.QuadBoostMode, 1, 3,
+                        Defaults::MegaLightsQuadBoostMode,
+                        "1 = 予測棄却画素だけ / 2 = 今は 1 と同じ(履歴長の条件は未実装) / "
+                        "3 = 全画素(検算専用。不偏性の確認に使う)");
+                }
+
                 CheckboxEx(
                     "クアッド共有###MegaLightsQuadShare", &m_Engine.GetSettings().MegaLights.QuadShareEnabled,
                     Defaults::MegaLightsQuadShareEnabled,

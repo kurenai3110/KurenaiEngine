@@ -182,6 +182,9 @@ namespace Kurenai::Rendering
         // 画素ごとの「遮蔽が確定した灯」のキャッシュ(uint。0xFFFFFFFFで無し)。
         // 殺しの持ち回りより寿命が長く、影の縁の暗いフリンジを消すのに要る
         std::unique_ptr<RHI::IRHIBuffer> MegaLightsBlockedLightBuffer;
+        // クアッドブーストの項(rgb=和、a=項数)と、画素ごとの項数。
+        std::unique_ptr<RHI::IRHITexture> MegaLightsBoostTexture;
+        std::unique_ptr<RHI::IRHIBuffer> MegaLightsBoostCountBuffer;
         // 時間再利用の履歴。**2本のping-pongにするのは、RenderGraphがWARの辺を
         // 張らないため**。1本で済ませると「今フレームのTemporalが読んだ直後に
         // 同じバッファへ書く」形になり、条件分岐でパスが1つ消えた瞬間に静かに壊れる
