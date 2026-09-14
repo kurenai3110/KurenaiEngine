@@ -443,8 +443,11 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
         // バイリニア重みで加重平均する**。時間再利用(MegaLightsTemporal)は
         // 元から2x2を走査しており、デノイザだけが片肺だった。
         //
-        // 【Catmull-Rom とは併用しない】部分採用があるとハードウェアの補間に載せられない。
-        // この経路では Params2.w は見ない(採るなら4タップのほうが先、という判断)
+        // 【Catmull-Rom は「4タップ全部が通ったときだけ」併用する】部分採用があるとハードウェアの
+        // 補間に載せられないので、1つでも棄却されたタップがあれば通ったタップの加重平均(下)を使う。
+        // 全部通ったなら 2x2 の芯は同じ面なので Catmull-Rom(近傍クランプ付き)で引く ――
+        // 4タップ判定の「別の面を混ぜない」と Catmull-Rom の「なまりを累積させない」を両取りする。
+        // 4タップ判定が無効のときの Catmull-Rom は下の else 側(従来どおり)
         const float2 historyPixelF = historyUv * float2(outputSize) - 0.5f;
         const float2 baseF = floor(historyPixelF);
         const float2 frac2 = historyPixelF - baseF;
@@ -464,6 +467,8 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 【履歴長は加重平均ではなく通ったタップの最小値を採る】平均だと、片方だけ長い履歴を
         // 持つタップに引きずられて α が過小になり、別の面の色が長く残る。保守側へ倒す
         float minLength = 1e30f;
+        // 妥当性で落としたタップが1つでもあるか(Catmull-Rom へ切り替えてよいかの判定)
+        bool anyRejected = false;
 
         [unroll]
         for (uint tap = 0u; tap < 4u; ++tap)
@@ -475,6 +480,7 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
             }
             if (!HistoryTapValid(tapPixel, outputSize, viewZ, N, material))
             {
+                anyRejected = true;
                 continue;
             }
             const int2 clamped = clamp(tapPixel, int2(0, 0), int2(outputSize) - 1);
@@ -488,7 +494,10 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         if (weightSum > 1e-5f)
         {
-            historyColor = colorSum / weightSum;
+            // 全タップが通ったときだけ Catmull-Rom(色のみ。モーメントは負のローブを避けてバイリニア)
+            historyColor = (Params2.w != 0.0f && !anyRejected)
+                               ? SampleHistoryColorCatmullRom(historyUv, outputSize)
+                               : colorSum / weightSum;
             historyMoments = momentSum / weightSum;
             historyLength = minLength;
             historyValid = true;
