@@ -744,6 +744,11 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-megalightsquadshare <0\|1>` | クアッド共有の有無を指定する。根拠は docs/ImplementationDetail.md 61.7j.3節。 |
 | `-megalightsquadsamples <1〜16>` | クアッド共有の画素あたり標本数を指定する。根拠は docs/ImplementationDetail.md 61.7l節。 |
 | `-megalightspool <8〜512>` | 候補プールのライト数を指定する。根拠は docs/ImplementationDetail.md 61.7m節。 |
+| `-megalightsquadsamples <1〜4>` | クアッド共有の画素あたり標本数を指定する。根拠は docs/ImplementationDetail.md 61.7l節。 |
+| `-megalightspool <8〜128>` | 候補プールのライト数を指定する。根拠は docs/ImplementationDetail.md 61.7m節。 |
+| `-megalightsvisiblelist <0\|1>` | 可視灯リストを候補プールの提案分布へ混ぜるか指定する。既定は `0`。根拠は docs/ImplementationDetail.md 61.7u節。 |
+| `-megalightsvisiblelistmix <0.0〜1.0>` | 可視灯リストを混ぜる割合 `c` を指定する。根拠は docs/ImplementationDetail.md 61.7u節。 |
+| `-megalightsvisiblelistcapacity <1〜16>` | タイルごとに保持する可視灯リストの容量を指定する。根拠は docs/ImplementationDetail.md 61.7u節。 |
 | `-megalightsquadstratify <0\|1>` | クアッド内の候補割り当てを層化するか指定する。 |
 | `-megalightsblockedcache <0\|1>` | 遮蔽済みライトのキャッシュを使うか指定する。 |
 | `-megalightstilejitter <0\|1\|2>` | 候補プールのタイル格子ジッターを指定する。根拠は docs/ImplementationDetail.md 61.7n節。 |

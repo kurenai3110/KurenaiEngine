@@ -22,6 +22,8 @@ cbuffer MegaLightsStochasticConstants : register(b1)
     // w=述語フラグ(bit0=デノイズ履歴有効、bit1=幾何ガイド有効、bit2=4タップ判定)
     uint4 Params5;
     uint4 Params6;
+    // x=asuint(可視灯リストを提案分布へ混ぜた割合 c)、yzw=未使用
+    uint4 Params7;
 };
 
 #endif // KURENAI_SHADERINTEROP_MEGALIGHTSSTOCHASTICCONSTANTS_HLSLI

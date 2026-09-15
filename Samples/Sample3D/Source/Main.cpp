@@ -497,6 +497,39 @@ namespace
         return dumps;
     }
 
+    struct BufferDumpArg
+    {
+        std::wstring Name;
+        std::wstring Path;
+    };
+
+    // -dumpbuf は -dumptex と同じく名前と出力パスを対で受け取り、複数回指定できる。
+    std::vector<BufferDumpArg> ParseBufferDumps()
+    {
+        std::vector<BufferDumpArg> dumps;
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            Kurenai::Core::Logger::Error("Main", "-dumpbuf のコマンドラインを取得できませんでした");
+            return dumps;
+        }
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-dumpbuf") != 0) continue;
+            if (i + 2 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main", "-dumpbuf は「-dumpbuf <バッファ名> <出力パス>」の形で指定します。無視します");
+                break;
+            }
+            dumps.push_back(BufferDumpArg{ argv[i + 1], argv[i + 2] });
+            i += 2;
+        }
+        LocalFree(argv);
+        return dumps;
+    }
+
     // -recreate <フレーム> <指示> を全部拾う。ベースライン採取だけでは通らない解像度・精度・
     // シーン切り替え時のGPUリソース作り直し経路を、無人の採取スクリプトから検証するために使う。
     std::vector<Kurenai::ScheduledRecreation> ParseScheduledRecreations()
@@ -876,6 +909,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -megalightspoolbilinear <0|1|2>。候補プールの確率的バイリニア参照。
         // 0=自分のタイル固定(従来)、1=2x2クアッドごとに1タイル、2=画素ごとに1タイル
         const int megaLightsPoolBilinear = ParseIntOption(L"-megalightspoolbilinear", -1);
+        // -megalightsvisiblelist <0|1> / -megalightsvisiblelistcapacity <1〜16> /
+        // -megalightsvisiblelistmix <0.0〜1.0>。前フレームの可視灯リストを提案分布へ混ぜる。
+        // mix は「一様枝(0.25)を除いた残りのうち、リスト枝へ回す割合 c」。
+        // **c をいくつにしても不偏**(一様枝を削らないので、届くどの灯にも正の下限確率が残る)
+        const int megaLightsVisibleList = ParseIntOption(L"-megalightsvisiblelist", -1);
+        const int megaLightsVisibleListCapacity =
+            ParseIntOption(L"-megalightsvisiblelistcapacity", -1);
+        const float megaLightsVisibleListMix = ParseFloatOption(L"-megalightsvisiblelistmix", -1.0f);
         // -megalightstemporal <0|1> / -megalightstemporalmclamp <上限>。時間再利用
         const int megaLightsTemporal = ParseIntOption(L"-megalightstemporal", -1);
         const int megaLightsTemporalMClamp = ParseIntOption(L"-megalightstemporalmclamp", -1);
@@ -936,6 +977,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -dumpframe <N> / -exitafterdump。中間レンダーターゲットを線形の生値で書き出す。
         // 「コンパイルは通るが絵が違う」を、8bitのスクリーンショットではなく数値で切り分けるための経路
         const std::vector<TextureDumpArg> textureDumps = ParseTextureDumps();
+        const std::vector<BufferDumpArg> bufferDumps = ParseBufferDumps();
         // -recreate <フレーム> <renderres=<幅>x<高さ>|upscale=<幅>x<高さ>|precision=hdr|precision=legacy8bit|scene=<名前>>
         // (繰り返し可)。GPUリソースの作り直し経路を指定フレームで無人検証する。
         const std::vector<Kurenai::ScheduledRecreation> scheduledRecreations = ParseScheduledRecreations();
@@ -1143,6 +1185,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             // 未指定時も呼び、既定の無効状態を起動ログへ1行残す
             engine.SetMegaLightsTileJitter(megaLightsTileJitter);
             engine.SetMegaLightsTilePoolBilinear(megaLightsPoolBilinear);
+            if (megaLightsVisibleList >= 0 || megaLightsVisibleListCapacity > 0 ||
+                megaLightsVisibleListMix >= 0.0f)
+            {
+                engine.SetMegaLightsVisibleList(
+                    megaLightsVisibleList, megaLightsVisibleListCapacity, megaLightsVisibleListMix);
+            }
             if (megaLightsTemporal >= 0 || megaLightsTemporalMClamp > 0)
             {
                 engine.SetMegaLightsTemporal(megaLightsTemporal, megaLightsTemporalMClamp);
@@ -1211,15 +1259,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 engine.AddTextureDump(
                     dump.Name.c_str(), dump.Path.c_str(), dump.MipLevel, dump.ArraySlice, dump.Frames, dump.Stride);
             }
+            for (const BufferDumpArg& dump : bufferDumps)
+            {
+                engine.AddBufferDump(dump.Name.c_str(), dump.Path.c_str());
+            }
             for (const Kurenai::ScheduledRecreation& recreation : scheduledRecreations)
             {
                 engine.AddScheduledRecreation(recreation);
             }
-            if (!textureDumps.empty() || (!passManifestPath.empty() && passManifestFrames == 1))
+            if (!textureDumps.empty() || !bufferDumps.empty() || (!passManifestPath.empty() && passManifestFrames == 1))
             {
                 engine.SetTextureDumpFrame(textureDumpFrame);
             }
-            if (!textureDumps.empty())
+            if (!textureDumps.empty() || !bufferDumps.empty())
             {
                 engine.SetExitAfterDump(exitAfterDump);
             }

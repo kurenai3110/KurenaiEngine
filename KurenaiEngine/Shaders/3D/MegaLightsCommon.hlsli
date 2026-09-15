@@ -97,6 +97,77 @@ uint MegaLightsTilePoolBase(uint2 tileCoord, uint tileCountX, uint candidateCoun
     return (tileCoord.y * tileCountX + tileCoord.x) * (kMegaLightsTilePoolHeader + 2u * candidateCount);
 }
 
+// --- 可視灯リスト(MegaLightsVisibleLights.hlsl が書き、TilePool と Initial が読む) ---
+//
+// 【何のためにあるか】候補プールの重みは距離減衰だけで決まり、**可視性を一切見ていない**。
+// 影の縁では目標関数を支配する灯が自分からは遮蔽されていることがあり、RIS は毎フレーム
+// その灯を選んでは殺される(デノイズ前の暗黒点の主因)。前フレームに「実際に可視だった」灯を
+// タイルごとに覚えておき、提案分布の第3成分として混ぜると、標本が届く灯へ寄る。
+//
+//   [base + 0]     = L(実際に格納した灯数。0〜容量)
+//   [base + 1]     = 打ち切る前に観測された相異なる灯の数。
+//                    **提案分布には使わない**(容量を実測で決めるための計測専用)
+//   [base + 2 + n] = n番目のライト番号
+//
+// 【重複を許す ―― 除去は効率の話であって正しさの要件ではない】groupshared への追記は
+// スレッド間で競合しうるので、完全な重複除去は保証できない。読み手が
+// MegaLightsVisibleListCount() で**出現回数を数える**ようにしてあるので、競合がどう転んでも
+// 提案確率 count/L は厳密に正しい。除去できたぶんだけ枠が有効に使われる、というだけ。
+//
+// 【リストには「そのタイルへ届く灯」しか載らない ―― 定義域を広げてはいけない】
+// 書き手(TilePool のリスト枝)は重みが0の灯を無効スロットとして捨てる。空間再利用の
+// MIS 重み(MegaLightsSpatial.hlsl の LightInTileDomain)は**二値の定義域判定**であって
+// 提案密度そのものではないため、定義域さえ変えなければ第3成分を足しても Spatial は
+// 無改造で不偏のままでいられる。ここを広げると Spatial の MIS が静かに近似になる。
+//
+// **C++側 kMegaLightsVisibleListHeader と必ず一致させること。**
+static const uint kMegaLightsVisibleListHeader = 2u;
+
+// リスト容量の上限。実行時の容量はこれ以下で、設定から変えられる。
+// 【上限を定数で持つ理由】読み手(InitialSample)はリストを**レジスタへ載せてから**数える。
+// RIS の M 回の抽選のたびにバッファを L 回読み直すと、1画素あたり M*L 回の読み出しになる。
+// 展開するにはループ上限がコンパイル時定数である必要がある。
+// **C++側 kMegaLightsVisibleListCapacityMax と必ず一致させること。**
+static const uint kMegaLightsVisibleListCapacityMax = 16u;
+
+// 【ストライドは常に容量の*上限*で固定する ―― 実行時の容量では割らない】
+// 容量は設定で途中から変えられる。ストライドを実行時の容量から作ると、
+// **容量を変えた瞬間に「前のフレームが別の配置で書いたバッファ」を新しい配置として読む**。
+// 添字が全部ずれるので、絵は出たまま無関係な灯を可視灯として提案することになる。
+// C++側の確保も上限で取ってある(kMegaLightsVisibleListStride)ので、ここを固定にすれば
+// 容量の変更は「1タイルに何個書くか」だけの話に閉じ、配置は一生変わらない
+uint MegaLightsVisibleListBase(uint2 tileCoord, uint tileCountX)
+{
+    return (tileCoord.y * tileCountX + tileCoord.x) *
+           (kMegaLightsVisibleListHeader + kMegaLightsVisibleListCapacityMax);
+}
+
+// リスト長の読み出し。**書き手と読み手が必ずこれを通すこと。**
+// 実行時の容量でクランプしてはいけない ―― 容量を下げた直後は
+// 「前の容量で書かれた長さ」が入っており、片方だけが切り詰めると
+// 提案確率の分母 L が食い違って静かに偏る。長さの上限は配置の上限だけで決まる
+uint MegaLightsVisibleListLength(StructuredBuffer<uint> list, uint base)
+{
+    return min(list[base + 0u], kMegaLightsVisibleListCapacityMax);
+}
+
+// リスト内での lightIndex の出現回数。提案分布の第3成分 count/L はこれで決まる。
+// **書き手と読み手が必ずこの1つの関数を通ること**(片方が重複を1回と数えると割り戻しが
+// 実際の抽出確率と食い違い、静かにバイアスが乗る)
+uint MegaLightsVisibleListCount(StructuredBuffer<uint> list, uint base, uint listLength, uint lightIndex)
+{
+    uint found = 0u;
+    [loop]
+    for (uint i = 0u; i < listLength; ++i)
+    {
+        if (list[base + kMegaLightsVisibleListHeader + i] == lightIndex)
+        {
+            ++found;
+        }
+    }
+    return found;
+}
+
 // 1画素ぶんのリザーバ。**C++側の確保(16バイト/画素)と一致させること。**
 // GPULightと同じく、パッキング規則の解釈揺れを避けるため要素はすべて32bit単位で持つ
 struct MegaLightsReservoir
