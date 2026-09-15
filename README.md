@@ -753,6 +753,7 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-megalightsdenoiseantilag <0\|1>` | デノイザの時間累積に残差駆動のアンチラグを掛けるか指定する(灯や影が変わった画素だけ累積上限を4へ落とし、残光を短くする)。**既定は0** ―― 目視で既定を決めるまでは無効。根拠は docs/ImplementationDetail.md 61.7p節。 |
 | `-megalightsdenoiseantilagt0 <0..1>` / `-megalightsdenoiseantilagt1 <0..1>` | アンチラグが発火する相対変化のしきい値(smoothstep の両端。既定 0.35 / 0.6)。 |
 | `-megalightsdenoiseantilagfast <フレーム数>` | アンチラグが現フレームの 7x7 平均をならす短い EMA の長さ(既定 4)。長いほど誤発火は減り、検出は遅れる。 |
+| `-megalightspoolbilinear <0\|1\|2>` | 候補プールを自分のタイル固定で引くか(0)、最も近い4タイルから確率的バイリニアで引くかを指定する(1=2x2クアッドごとに1タイル(既定)、2=画素ごとに1タイル)。タイル形のムラを画素ごとの乱数へ溶かす。根拠は docs/ImplementationDetail.md 61.7t節。 |
 | `-megalightsperturb <0\|1\|2>` | 蓄積開始時に検証用のシーン摂動を加える(`-megalightsaccum` が 0 だと効かない)。 |
 | `-megalightsspatial <0\|1>` | 空間再利用の有無を指定する。根拠は docs/ImplementationDetail.md 61.7f節。 |
 | `-megalightsspatialmis <0\|1>` | 空間再利用の結合方式を指定する。 |

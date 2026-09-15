@@ -52,6 +52,9 @@ Texture2D BRDFLUTTexture : register(t5);
 #define KURENAI_PUNCTUAL_LIGHT_REGISTER t6
 #define KURENAI_PUNCTUAL_LIGHTING_BRDF
 #include "PunctualLighting.hlsli"
+// タイル錐台の組み立て・AABB・候補プールの重み w_j(y)。確率的バイリニア参照が
+// 「隣のタイルならその灯をどの確率で提案したか」を再計算するのに使う。GPULightを使うのでこの順
+#include "TileLightCulling.hlsli"
 #include "MegaLightsCommon.hlsli"
 
 // 候補プール。レイアウトは MegaLightsTilePool.hlsl 冒頭を参照
@@ -120,6 +123,91 @@ float TraceLightVisibility(float3 rayOrigin, float3 L, float originBias, float d
     return (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0f : 1.0f;
 }
 
+// --- 候補プールの確率的バイリニア参照(Params6.w) ---
+//
+// 【何を直しているか】候補プールは16x16タイルごとに毎フレームK灯を抽選する。抽選の当たり外れは
+// **そのタイルの256画素すべてに共有される**ので、タイル粒度の乱数がそのままタイル形の
+// 相関ノイズになる。実測ではデノイズ前のタイル誤差の時間相関が0.113(毎フレーム独立)なのに
+// デノイズ後は0.985(凍りつく)で、a-trous 5段のカーネルのうちタイルを跨げるのは
+// 幾何的上限0.859に対して実際には0.020しか生き残らない(98%がエッジ停止で殺される)。
+// **タイル内の256画素が同じ誤差を共有している以上、タイル内をいくら平均しても独立標本は
+// 1つも増えない** ―― 空間フィルタでは原理的に取れない。輝度のエッジ停止に床を入れて
+// 跨ぎを開ける対処は「ぼけただけ」で棄却された。
+//
+// 【どう直すか(UE5 MegaLights と同じ)】画素ごとに、最も近い4タイルの中から
+// バイリニアの確率で1つを選ぶ。タイル境界の硬い割り当てを画素ごとの乱数へ溶かす。
+// 出典: SIGGRAPH 2025 Advances "MegaLights: Stochastic Direct Lighting" p.14
+// (advances.realtimerendering.com/s2025/content/MegaLights_Stochastic_Direct_Lighting_2025.pdf)
+//
+// 【格子ジッターでは直らない ―― 実測済み】ジッターは境界の位置を毎フレーム動かすだけで、
+// 「1画素は1タイルに属する」という割り当ては残る。相関の単位がタイルのままなので効かない。
+//
+// 【不偏性がここの肝 ―― 選んだタイルの q_i(y) で割ってはいけない】q_i(y) = 0 の灯
+// (そのタイルへ届かない灯)が存在するので、選んだタイルで割ると定義域が欠けてバイアスになる。
+// 混合分布 q̄(y) = Σ_j b_j q_j(y) で割ること。q̄ > 0 は「4つのうち1つでも届く」で保証され、
+// **画素自身のタイルは必ず4つに含まれる**(バイリニアの定義から、しかも重み0.25以上)ので、
+// その画素に寄与しうる灯は必ず q̄ > 0 になる。
+struct MegaLightsPoolTile
+{
+    // 候補プールの先頭添字
+    uint Base;
+    // そのタイルに届く全灯の重みの合計
+    float SumW;
+    // 届いた灯の数(混合抽出の一様枝の割り戻しに使う)
+    uint ReachableCount;
+    // 有効な候補数(0 か K)。0 なら背景タイルで、そこからは1灯も引けない
+    uint ValidCandidates;
+    // バイリニア重み b_j。4つの和は1
+    float BilinearWeight;
+    // w_j(y) の再計算に要る。側面はタイル座標から、深度スラブはヘッダから作る
+    TileFrustum Frustum;
+    float3 AabbMin;
+    float3 AabbMax;
+};
+
+// タイル1つぶんの文脈をヘッダから組み立てる。
+// 【錐台は候補プールを書いたときと同じ画素範囲で作ること】格子オフセット(Params6.xy)を
+// 落とすと定義域がずれ、q_j(y) が実際の抽出確率と食い違う
+MegaLightsPoolTile MegaLightsLoadPoolTile(
+    uint2 tileCoord, uint2 outputSize, uint tileSize, uint candidateCount, float bilinearWeight)
+{
+    MegaLightsPoolTile tile;
+    tile.Base = MegaLightsTilePoolBase(tileCoord, Params1.x, candidateCount);
+    tile.SumW = asfloat(TilePool[tile.Base + 0u]);
+    tile.ReachableCount = TilePool[tile.Base + 1u];
+    tile.ValidCandidates = TilePool[tile.Base + 2u];
+    tile.BilinearWeight = bilinearWeight;
+
+    // 深度スラブは候補プールがヘッダへ書いている(そのタイルを走査しないと分からないため)
+    const float nearestViewZ = asfloat(TilePool[tile.Base + 4u]);
+    const float farthestViewZ = asfloat(TilePool[tile.Base + 5u]);
+    const int2 tilePixelOrigin = int2(tileCoord * tileSize) - int2(Params6.xy);
+    tile.Frustum = MakeTileFrustumFromPixelOrigin(
+        tilePixelOrigin, outputSize, Params3.x, Params3.y, nearestViewZ, farthestViewZ);
+    TileViewSpaceAABBFromPixelOrigin(
+        tilePixelOrigin, outputSize, Params3.x, Params3.y, nearestViewZ, farthestViewZ,
+        tile.AabbMin, tile.AabbMax);
+    return tile;
+}
+
+// そのタイルが灯 y を1スロットぶん提案する確率 q_j(y)。届かなければ 0。
+// 【重みは TileLightCulling.hlsli の関数で再計算する】書き手(MegaLightsTilePool.hlsl)と
+// 同じ1本を呼ぶこと。式を写すと、ずれた瞬間に静かにバイアスが乗る
+float MegaLightsTileSourcePdf(MegaLightsPoolTile tile, GPULight light, float3 viewCenter, float radius)
+{
+    if (tile.ValidCandidates == 0u || tile.SumW <= 0.0f)
+    {
+        return 0.0f;
+    }
+    const float w = TileLightCandidateWeight(light, viewCenter, radius, tile.Frustum, tile.AabbMin, tile.AabbMax);
+    if (w <= 0.0f)
+    {
+        return 0.0f;
+    }
+    return kMegaLightsUniformMixFraction / float(max(tile.ReachableCount, 1u)) +
+           (1.0f - kMegaLightsUniformMixFraction) * (w / tile.SumW);
+}
+
 // 1画素ぶんの標本すべてへ同じリザーバを書く(背景・候補なしの早期脱出用)。
 // 【1本だけ書いて帰ってはいけない】RHIにバッファのクリアが無いので、
 // 書かなかったスロットには前フレームの残骸が残り、Resolveがそれを平均に混ぜる
@@ -135,8 +223,9 @@ void WriteAllReservoirs(uint base, uint count, MegaLightsReservoir value)
 // 1スロットぶんの RIS と初期可視レイを実行する。
 // BlockedLights 自体は触らず、基底ループが読んだ値だけを受け取る。
 MegaLightsReservoir DrawSample(
-    uint sampleSlot, uint2 pixel, uint2 outputSize, uint tileBase, uint validCandidates,
-    uint sampleCount, float sumW, uint reachableCount, uint blockedLight,
+    uint sampleSlot, uint2 pixel, uint2 outputSize, MegaLightsPoolTile poolTiles[4],
+    uint poolTileCount, uint ownTileSlot, uint bilinearMode,
+    uint sampleCount, uint blockedLight,
     float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo,
     float metallic, float roughness, float translucency, SpecularEnergyContext energy,
     out uint selectedLightIndex, out bool visible)
@@ -151,21 +240,54 @@ MegaLightsReservoir DrawSample(
     uint rngState = HashUint(pixel.x + pixel.y * outputSize.x + Params1.w * 0x9E3779B9u +
                              sampleSlot * 0xB5297A4Du);
 
+    // --- 参照するタイルを b_j の確率で1つ選ぶ(確率的バイリニア参照) ---
+    // 【白色乱数にしないこと】隣接画素で離れる配り方でないと、タイル境界を溶かした先が
+    // また低周波になる。位相の次元は slotPhase(= sampleSlot)と衝突しないよう離す。
+    // 【粒度】画素ごと(モード2)に選ぶとばらけるが、クアッド層化(Params4.w)は
+    // タイルのスロットを2x2の4画素へ割り振るので、4人が別のプールを引くと層化が壊れる。
+    // クアッドごと(モード1)なら層化は保たれ、相関の単位が16x16から2x2まで落ちる。
+    // **既定はクアッドごと** ―― どちらが良いかは実測で決める
+    // 【標本ごとに引き直す】sampleSlot を次元に渡すので、N本が別のタイルを引いてさらにばらける
+    uint selectedTile = ownTileSlot;
+    if (poolTileCount > 1u)
+    {
+        const uint2 phasePixel = (bilinearMode == 2u) ? pixel : (pixel >> 1u);
+        const float tileRandom = MegaLightsPixelPhase(phasePixel, Params1.w, 64u + sampleSlot);
+        float cdf = 0.0f;
+        bool picked = false;
+        [unroll]
+        for (uint j = 0u; j < 4u; ++j)
+        {
+            cdf += poolTiles[j].BilinearWeight;
+            if (!picked && tileRandom < cdf)
+            {
+                selectedTile = j;
+                picked = true;
+            }
+        }
+        // picked が false のまま(浮動小数の丸めで最後まで超えなかった)なら
+        // ownTileSlot が残る。重みが必ず0.25以上あるので、確率0のタイルへは落ちない
+    }
+    const MegaLightsPoolTile pool = poolTiles[selectedTile];
+
     // --- クアッド層化(手法3。Params4.w) ---
     // 2x2クアッドの4画素へ候補スロットを1/4ずつ割り当て、クアッド全体で列挙させる。
+    // 【層化は「選んだタイル」の有効候補数で行う】自分のタイルの数で割ると、
+    // 背景タイルを選んだときに stratumCount が0になり、スロットの添字が確保外へ飛ぶ
+    const uint poolCandidates = pool.ValidCandidates;
     const bool quadStratify = (Params4.w != 0u);
     uint stratumBase = 0u;
-    uint stratumCount = validCandidates;
-    if (quadStratify && validCandidates >= 4u)
+    uint stratumCount = poolCandidates;
+    if (quadStratify && poolCandidates >= 4u)
     {
         const uint2 quad = pixel >> 1u;
         const uint lane = (pixel.x & 1u) | ((pixel.y & 1u) << 1u);
         const uint rotation = HashUint(quad.x + quad.y * 0x9E3779B9u + Params1.w * 0x85EBCA6Bu) & 3u;
         const uint stratum = (lane + rotation + sampleSlot) & 3u;
-        const uint width = validCandidates >> 2u;
+        const uint width = poolCandidates >> 2u;
         stratumBase = stratum * width;
         // 最後の層は端数を引き受け、候補の定義域を欠けさせない
-        stratumCount = (stratum == 3u) ? (validCandidates - stratumBase) : width;
+        stratumCount = (stratum == 3u) ? (poolCandidates - stratumBase) : width;
     }
 
     float risWeightSum = 0.0f;
@@ -173,14 +295,20 @@ MegaLightsReservoir DrawSample(
     float selectedTargetPdf = 0.0f;
     visible = false;
 
+    // 【空のタイルを選んだときは1本も引かない】バイリニア参照では背景タイルを
+    // 引き当てうる。その標本は「M個の候補を検討して全部外した」のと同じ扱いになり、
+    // 下の棄却の枝が M = sampleCount のリザーバを書く(混合分布 q̄ は
+    // そのタイルの寄与を0として数えているので、期待値は変わらない)
+    const bool poolUsable = (poolCandidates > 0u) && (pool.SumW > 0.0f);
+
     [loop]
-    for (uint m = 0u; m < sampleCount; ++m)
+    for (uint m = 0u; poolUsable && m < sampleCount; ++m)
     {
         const float slotRandom = MegaLightsLowDiscrepancy1D(m, slotPhase);
         const uint slot =
             stratumBase + min((uint)(slotRandom * float(stratumCount)), stratumCount - 1u);
-        const uint lightIndex = TilePool[tileBase + kMegaLightsTilePoolHeader + 2u * slot + 0u];
-        const float candidateWeight = asfloat(TilePool[tileBase + kMegaLightsTilePoolHeader + 2u * slot + 1u]);
+        const uint lightIndex = TilePool[pool.Base + kMegaLightsTilePoolHeader + 2u * slot + 0u];
+        const float candidateWeight = asfloat(TilePool[pool.Base + kMegaLightsTilePoolHeader + 2u * slot + 1u]);
         // 候補の中身にかかわらず採用判定の乱数を引き、画素ごとの列をずらさない
         const float acceptRandom = NextRandom(rngState);
 
@@ -208,8 +336,43 @@ MegaLightsReservoir DrawSample(
             continue;
         }
 
-        const float sourcePdf = kMegaLightsUniformMixFraction / float(max(reachableCount, 1u)) +
-                                (1.0f - kMegaLightsUniformMixFraction) * (candidateWeight / sumW);
+        // 提案分布の確率密度。プールは「一様枝 + 重み枝」の混合で引いている
+        // (MegaLightsTilePool.hlsl)ので、割り戻しも同じ混合式で行う
+        float sourcePdf;
+        if (poolTileCount == 1u)
+        {
+            // 従来経路。自分のタイルの提案確率そのもの。
+            // **重みはプールに書かれている値をそのまま使う**(再計算しない)ので、
+            // バイリニア参照を切ったときの出力は変更前とビット同一になる
+            sourcePdf = kMegaLightsUniformMixFraction / float(max(pool.ReachableCount, 1u)) +
+                        (1.0f - kMegaLightsUniformMixFraction) * (candidateWeight / pool.SumW);
+        }
+        else
+        {
+            // 確率的バイリニア参照。**選んだタイルの q_i(y) で割ってはいけない** ――
+            // q_i(y) = 0 の灯が存在するので定義域が欠けてバイアスになる。
+            // 混合分布 q̄(y) = Σ_j b_j q_j(y) で割ること(理由は MegaLightsPoolTile の説明)。
+            // 境界球はタイルに依らないので、4タイルぶんの前に1回だけ求める
+            float3 viewCenter;
+            float radius;
+            ComputeLightBoundingSphere(light, View, viewCenter, radius);
+            sourcePdf = 0.0f;
+            [unroll]
+            for (uint j = 0u; j < 4u; ++j)
+            {
+                if (poolTiles[j].BilinearWeight > 0.0f)
+                {
+                    sourcePdf += poolTiles[j].BilinearWeight *
+                                 MegaLightsTileSourcePdf(poolTiles[j], light, viewCenter, radius);
+                }
+            }
+            // 【0除算のガード】選んだタイルから引けた灯なので q̄ > 0 のはずだが、
+            // ここでNaNを出すと直接光→SceneColor→TAAの履歴まで壊れて復帰しない
+            if (sourcePdf <= 0.0f)
+            {
+                continue;
+            }
+        }
         const float risWeight = targetPdf / sourcePdf;
 
         risWeightSum += risWeight;
@@ -417,8 +580,6 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     const uint tileBase = MegaLightsTilePoolBase(tileCoord, Params1.x, candidateCount);
 
     const float sumW = asfloat(TilePool[tileBase + 0u]);
-    // 混合抽出(一様枝 + 重み枝)の割り戻しに要る(MegaLightsTilePool.hlsl)
-    const uint reachableCount = TilePool[tileBase + 1u];
     const uint validCandidates = TilePool[tileBase + 2u];
     const uint sampleCount = max(Params0.z, 1u);
     if (sumW <= 0.0f || validCandidates == 0u)
@@ -436,6 +597,59 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             BlockedLights[reservoirIndex] = 0xFFFFFFFFu;
         }
         return;
+    }
+
+    // --- 参照する候補プールを決める(確率的バイリニア参照。既定は従来どおり自分のタイル固定) ---
+    // 0=自分のタイル固定、1=2x2クアッドごとに1タイル、2=画素ごとに1タイル
+    const uint bilinearMode = Params6.w;
+    MegaLightsPoolTile poolTiles[4];
+    uint poolTileCount = 1u;
+    // 丸めで抽選が最後まで超えなかったときに落とす先。自分のタイルは重みが必ず0.25以上ある
+    uint ownTileSlot = 0u;
+    if (bilinearMode == 0u)
+    {
+        poolTiles[0] = MegaLightsLoadPoolTile(tileCoord, outputSize, tileSize, candidateCount, 1.0f);
+        // 【ここを埋めないと未初期化の要素を読むことがある】使うのは [0] だけだが、
+        // HLSL は配列の部分初期化を検出しない
+        poolTiles[1] = poolTiles[0];
+        poolTiles[2] = poolTiles[0];
+        poolTiles[3] = poolTiles[0];
+    }
+    else
+    {
+        // 画素中心を「タイル中心の格子」へ移す。タイル t の中心は画素 t*S - offset + S/2 なので、
+        // g = (pixel + 0.5 + offset)/S - 0.5 とすれば g の整数部が左上タイル、小数部が補間係数になる。
+        // 【格子ジッターと同じオフセット済みの座標で作ること】書き手と読み手で格子がずれる
+        const float2 grid = (float2(pixel) + 0.5f + float2(Params6.xy)) / float(tileSize) - 0.5f;
+        const float2 gridFloor = floor(grid);
+        const float2 frac2 = grid - gridFloor;
+        const int2 baseTile = int2(gridFloor);
+
+        float bilinearWeights[4];
+        bilinearWeights[0] = (1.0f - frac2.x) * (1.0f - frac2.y);
+        bilinearWeights[1] = frac2.x * (1.0f - frac2.y);
+        bilinearWeights[2] = (1.0f - frac2.x) * frac2.y;
+        bilinearWeights[3] = frac2.x * frac2.y;
+
+        // 自分のタイルは、各軸で補間係数が0.5以上なら +1 側にいる(上の格子の作り方から)
+        ownTileSlot = ((frac2.x >= 0.5f) ? 1u : 0u) | (((frac2.y >= 0.5f) ? 1u : 0u) << 1u);
+
+        // タイル数はジッター有効時に +1 されている(Params1.x / Params6.z)
+        const int2 maxTile = int2(int(max(Params1.x, 1u)) - 1, int(max(Params6.z, 1u)) - 1);
+
+        [unroll]
+        for (uint j = 0u; j < 4u; ++j)
+        {
+            // 【画面外へ出た分は端のタイルへ寄せる(クランプ)】切り捨てると Σb ≠ 1 になり
+            // 割り戻しが狂う。クランプなら同じタイルが2回現れるだけで、
+            // q̄ = Σ_j b_j q_j は「そのタイルの重みが合算された混合」として厳密に正しいまま。
+            // しかも画面端では自分のタイル自身が端のタイルなので、寄せ先は自分になる
+            const int2 coord = clamp(
+                baseTile + int2(int(j & 1u), int(j >> 1u)), int2(0, 0), maxTile);
+            poolTiles[j] = MegaLightsLoadPoolTile(
+                uint2(coord), outputSize, tileSize, candidateCount, bilinearWeights[j]);
+        }
+        poolTileCount = 4u;
     }
 
     // --- 遮蔽が確定した灯を目標関数から外す(キャッシュ) ---
@@ -484,7 +698,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         uint selectedLightIndex;
         bool visible;
         const MegaLightsReservoir reservoir = DrawSample(
-            sampleSlot, pixel, outputSize, tileBase, validCandidates, sampleCount, sumW, reachableCount,
+            sampleSlot, pixel, outputSize, poolTiles, poolTileCount, ownTileSlot, bilinearMode,
+            sampleCount,
             blockedLight, worldPos, N, V, NdotV, albedo, metallic, roughness, translucency, energy,
             selectedLightIndex, visible);
 
@@ -537,8 +752,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             bool visible;
             // 基底N本と独立な列を使い、キャッシュは読まず書かず無効値を渡す。
             const MegaLightsReservoir boostReservoir = DrawSample(
-                samplesPerPixel + k, pixel, outputSize, tileBase, validCandidates, sampleCount,
-                sumW, reachableCount, 0xFFFFFFFFu, worldPos, N, V, NdotV, albedo, metallic,
+                samplesPerPixel + k, pixel, outputSize, poolTiles, poolTileCount, ownTileSlot,
+                bilinearMode, sampleCount, 0xFFFFFFFFu, worldPos, N, V, NdotV, albedo, metallic,
                 roughness, translucency, energy, selectedLightIndex, visible);
 
             // 分母は引いた回数で決まり、空・遮蔽・寄与0の標本も必ず数える。

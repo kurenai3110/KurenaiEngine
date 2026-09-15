@@ -526,8 +526,8 @@ namespace Kurenai::Passes
             // Initial側のExecuteで1回だけ更新すればよい
             const auto buildStochasticConstants =
                 [this, megaLightsSamplesPerPixel, megaLightsSettings, jitteredProj, megaLightsQuadShared, megaLightsEffectiveTilesX,
-                 megaLightsTileOffset, quadBoostSamples, quadBoostMode, quadBoostPredicateFlags,
-                 frameIndex, renderWidth, renderHeight](uint32_t spatialIteration)
+                 megaLightsEffectiveTilesY, megaLightsTileOffset, quadBoostSamples, quadBoostMode,
+                 quadBoostPredicateFlags, frameIndex, renderWidth, renderHeight](uint32_t spatialIteration)
             {
                 MegaLightsStochasticConstants stochasticConstants{};
                 stochasticConstants.Params0 =
@@ -609,9 +609,13 @@ namespace Kurenai::Passes
                     quadBoostMode, quadBoostPredicateFlags
                 };
                 // 候補プールを書いたときと同じ格子オフセット。末尾へ足して、途中までしか
-                // 宣言しない Shade / Temporal / Resolve の既存レイアウトを変えない
+                // 宣言しない Shade / Temporal / Resolve の既存レイアウトを変えない。
+                // z は候補プールの有効タイル数Y。**Params1.x と同じ「ジッター込み」の値を
+                // 渡すこと** ―― 確率的バイリニア参照が隣タイルの添字をこれでクランプするので、
+                // 生のタイル数を渡すとジッター有効時に最終行のタイルを読めなくなる
                 stochasticConstants.Params6 = {
-                    megaLightsTileOffset.x, megaLightsTileOffset.y, 0u, 0u
+                    megaLightsTileOffset.x, megaLightsTileOffset.y, megaLightsEffectiveTilesY,
+                    static_cast<uint32_t>(std::max(0, megaLightsSettings.TilePoolBilinearMode))
                 };
                 return stochasticConstants;
             };

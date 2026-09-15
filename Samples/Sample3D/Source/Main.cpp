@@ -873,6 +873,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsPoolCapacity = ParseIntOption(L"-megalightspool", -1);
         // -megalightstilejitter <0|1|2>。1=Halton(2,3)で格子をずらす、2=有効だがオフセット0固定
         const int megaLightsTileJitter = ParseIntOption(L"-megalightstilejitter", -1);
+        // -megalightspoolbilinear <0|1|2>。候補プールの確率的バイリニア参照。
+        // 0=自分のタイル固定(従来)、1=2x2クアッドごとに1タイル、2=画素ごとに1タイル
+        const int megaLightsPoolBilinear = ParseIntOption(L"-megalightspoolbilinear", -1);
         // -megalightstemporal <0|1> / -megalightstemporalmclamp <上限>。時間再利用
         const int megaLightsTemporal = ParseIntOption(L"-megalightstemporal", -1);
         const int megaLightsTemporalMClamp = ParseIntOption(L"-megalightstemporalmclamp", -1);
@@ -1139,6 +1142,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             }
             // 未指定時も呼び、既定の無効状態を起動ログへ1行残す
             engine.SetMegaLightsTileJitter(megaLightsTileJitter);
+            engine.SetMegaLightsTilePoolBilinear(megaLightsPoolBilinear);
             if (megaLightsTemporal >= 0 || megaLightsTemporalMClamp > 0)
             {
                 engine.SetMegaLightsTemporal(megaLightsTemporal, megaLightsTemporalMClamp);
