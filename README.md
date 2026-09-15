@@ -780,7 +780,7 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-ddgifollow` | DDGIの各LODの原点をカメラへ追従させる(`.kscene`の`FollowCamera`と同じ)。 |
 | `-upscale <0\|1>` | 超解像の有無を指定する。 |
 | `-fixedstep <秒>` | 1フレームの時間を固定する。実時間に依らず同じフレームで同じ状態を作るためのもので、`-dumpframe`と組で使う。0以下や非有限値はエラーにして既定のまま続行する。 |
-| `-camerapath <名前>` | `.kscene`の`[CameraPath]`を1本選んで再生する。フレーム番号だけから姿勢が決まり、**再生中は視点の入力操作を受け付けない**。カメラを動かしたときの品質を測るには同じ軌跡を再現する必要があるが、通常の操作は移動量がΔtに比例し視点回転はPostMessageから駆動できないため、この口が要る。`-fixedstep`の指定が無ければ 1/60 を警告つきで自動設定する。根拠は docs/ImplementationDetail.md 61.7o節。 |
+| `-camerapath <名前>` | `.kscene`の`[CameraPath]`を1本選んで再生する。フレーム番号だけから姿勢が決まり、**再生中は視点の入力操作を受け付けない**。カメラを動かしたときの品質を測るには同じ軌跡を再現する必要があるが、通常の操作は移動量がΔtに比例し視点回転はPostMessageから駆動できないため、この口が要る。`-fixedstep`の指定が無ければ 1/60 を警告つきで自動設定する。根拠は docs/ImplementationDetail.md 61.7o節。 経路は検証用シーン`Scenes/MegaLightsMotionCheck.kscene`にあります。 |
 | `-camerapathstart <N>` | 経路の再生を始めるフレーム。それまでは先頭キーの姿勢で静止して整定を待つ。既定は`-dumpframe`の既定と同じ 180。根拠は docs/ImplementationDetail.md 61.7o.2節。 |
 | `-camerapathvalidate` | シーンが持つ`[CameraPath]`すべてについて、1フレームあたりの移動量・視線角差・見かけ速度をログへ出す。ほぼ動かないフレームがあれば警告する。根拠は docs/ImplementationDetail.md 61.7o.3節。 |
 | `-passmanifest <パス>` | RenderGraphの登録順と実行順をテキストへ書き出す。パスの構成が変わっていないことを比較するための物差し。根拠は docs/ImplementationDetail.md 64.7節。 |
@@ -1159,6 +1159,14 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
     影レイは`RAY_FLAG_FORCE_OPAQUE`なので、重心へ置くと器具自身のガラスと笠に遮られて
     1灯も光りません(絵が暗いだけで例外もログも出ないため、MegaLightsの不具合と誤診しやすい)。
     スクリプトは灯ごとに脱出率を測り、しきい値を超える位置まで下ろしてから採用します
+  - `MegaLightsMotionCheck.kscene` — **カメラを動かしたときの品質を測る用**(生成物)。
+    中身は`BistroExteriorNight.kscene`と**照明もモデルも同一**で、違うのは
+    `[CameraPath]`(決定的なカメラ経路)だけです。`-camerapath <名前>`で1本選んで
+    再生します。`python Tools/make_megalights_motion_scene.py`で生成し、
+    `--check`で最新かを判定できます。**元のシーンを直したら再生成してください。**
+    計測専用の経路を`BistroExteriorNight.kscene`側へ書き戻さないこと —
+    絵を見るためのシーンへ検証の仕掛けを混ぜると、使う側が何を見ているのか
+    分からなくなります。根拠は docs/ImplementationHistory.md 102章
   - `MegaLightsNoiseCheck.kscene` — ノイズ測定用(`docs/ImplementationDetail.md` 61.7f/61.7g が
     使っているシーン)。`BistroInteriorLit` から時刻0・GIVolume無し・露出2.0固定にしたもので、
     **測定を決定的にするために `-autoexposure 0` と組で使います**
