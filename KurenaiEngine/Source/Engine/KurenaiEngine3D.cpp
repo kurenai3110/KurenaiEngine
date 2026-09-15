@@ -1426,6 +1426,29 @@ namespace Kurenai
         Core::Logger::Info("KurenaiEngine3D", "固定タイムステップを設定しました: " + std::to_string(seconds) + " 秒");
     }
 
+    void KurenaiEngine3D::SetDeterministicCameraPath(
+        DeterministicCameraPathMode mode, float speed, float fixedStep)
+    {
+        if (!std::isfinite(speed) || speed <= 0.0f || !std::isfinite(fixedStep) || fixedStep <= 0.0f)
+        {
+            Core::Logger::Error("KurenaiEngine3D", "決定的カメラ経路の設定値が不正なため無効にします");
+            m_DeterministicCameraPathEnabled = false;
+            return;
+        }
+
+        m_DeterministicCameraPathEnabled = true;
+        m_DeterministicCameraPathInitialized = false;
+        m_DeterministicCameraPathMode = mode;
+        m_DeterministicCameraPathSpeed = speed;
+        m_DeterministicCameraPathFixedStep = fixedStep;
+        m_DeterministicCameraPathFrame = 0;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("決定的カメラ経路: ") +
+                (mode == DeterministicCameraPathMode::Strafe ? "strafe" : "dolly") +
+                " / " + std::to_string(speed) + " m/s");
+    }
+
     void KurenaiEngine3D::SetPerfDump(const wchar_t* path, int frames)
     {
         if (path == nullptr || path[0] == L'\0' || frames <= 0)
@@ -3066,6 +3089,32 @@ namespace Kurenai
         }
     }
 
+    void KurenaiEngine3D::UpdateDeterministicCameraPath()
+    {
+        if (!m_DeterministicCameraPathEnabled)
+        {
+            return;
+        }
+        if (!m_DeterministicCameraPathInitialized)
+        {
+            m_DeterministicCameraPathInitialPosition = m_Camera.GetPosition();
+            m_DeterministicCameraPathDirection =
+                m_DeterministicCameraPathMode == DeterministicCameraPathMode::Strafe
+                ? m_Camera.GetRight()
+                : m_Camera.GetForward();
+            m_DeterministicCameraPathInitialized = true;
+        }
+
+        const float distance = m_DeterministicCameraPathSpeed * m_DeterministicCameraPathFixedStep *
+            static_cast<float>(m_DeterministicCameraPathFrame);
+        DirectX::XMFLOAT3 position = m_DeterministicCameraPathInitialPosition;
+        position.x += m_DeterministicCameraPathDirection.x * distance;
+        position.y += m_DeterministicCameraPathDirection.y * distance;
+        position.z += m_DeterministicCameraPathDirection.z * distance;
+        m_Camera.SetPosition(position);
+        ++m_DeterministicCameraPathFrame;
+    }
+
     void KurenaiEngine3D::UpdateImGuiToggle()
     {
         // WasKeyPressedはウィンドウメッセージ由来のエッジ検出を内蔵しているため、
@@ -3122,12 +3171,15 @@ namespace Kurenai
         // (m_RenderAspectの宣言のコメント参照)。同じ値なら再設定しても副作用は無いので毎フレーム呼ぶ
         m_Camera.SetAspectRatio(m_RenderAspect.load(std::memory_order_relaxed));
 
-        UpdateMouseLook(imguiWantsMouse);
-
-        // ライト名のInputTextを編集中にWASDがカメラ移動として解釈されるのを防ぐ
-        if (!imguiWantsKeyboard)
+        if (!m_DeterministicCameraPathEnabled)
         {
-            UpdateMovement(deltaTime);
+            UpdateMouseLook(imguiWantsMouse);
+
+            // ライト名のInputTextを編集中にWASDがカメラ移動として解釈されるのを防ぐ
+            if (!imguiWantsKeyboard)
+            {
+                UpdateMovement(deltaTime);
+            }
         }
 
 
@@ -3138,6 +3190,7 @@ namespace Kurenai
         UpdateImGuiToggle();
         // 新しいシーンが反映されていれば、その初期カメラとウィンドウタイトルをここで取り込む
         UpdateAppliedSceneHandoff();
+        UpdateDeterministicCameraPath();
         // 昼夜サイクルの自動進行(m_Settings.Sky.TimeOfDay)はRenderThreadMain側で行う(RenderThreadMain参照)
     }
 

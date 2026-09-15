@@ -384,6 +384,68 @@ namespace
         return value;
     }
 
+    struct CameraPathArg
+    {
+        std::wstring Mode;
+        float Speed = 2.0f;
+        bool Enabled = false;
+    };
+
+    CameraPathArg ParseCameraPath()
+    {
+        CameraPathArg path;
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            Kurenai::Core::Logger::Error("Main", "-camerapath のコマンドラインを取得できませんでした");
+            return path;
+        }
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-camerapath") != 0) continue;
+            if (i + 1 >= argc)
+            {
+                Kurenai::Core::Logger::Warning("Main", "-camerapath の mode が指定されていないため無効にします");
+                break;
+            }
+            path.Mode = argv[i + 1];
+            if (_wcsicmp(path.Mode.c_str(), L"strafe") != 0 && _wcsicmp(path.Mode.c_str(), L"dolly") != 0)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main", "-camerapath の mode が不正なため無効にします: " + Kurenai::Core::WideToUtf8(path.Mode));
+                break;
+            }
+            if (i + 2 < argc)
+            {
+                wchar_t* end = nullptr;
+                const double parsed = wcstod(argv[i + 2], &end);
+                if (end == argv[i + 2] || (end != nullptr && *end != L'\0'))
+                {
+                    if (argv[i + 2][0] == L'-')
+                    {
+                        path.Enabled = true;
+                        break;
+                    }
+                    Kurenai::Core::Logger::Warning(
+                        "Main", "-camerapath の speed が不正なため無効にします: " + Kurenai::Core::WideToUtf8(argv[i + 2]));
+                    break;
+                }
+                if (!std::isfinite(parsed) || parsed <= 0.0)
+                {
+                    Kurenai::Core::Logger::Warning(
+                        "Main", "-camerapath の speed が不正なため無効にします: " + Kurenai::Core::WideToUtf8(argv[i + 2]));
+                    break;
+                }
+                path.Speed = static_cast<float>(parsed);
+            }
+            path.Enabled = true;
+            break;
+        }
+        LocalFree(argv);
+        return path;
+    }
+
     // 「-dumptex <テクスチャ名> <出力パス>」の指定。**繰り返し指定できる**
     struct TextureDumpArg
     {
@@ -974,6 +1036,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int upscale = ParseIntOption(L"-upscale", kMissingValidationOption);
         constexpr float kMissingFixedTimeStep = (std::numeric_limits<float>::lowest)();
         const float fixedTimeStep = ParseFloatOption(L"-fixedstep", kMissingFixedTimeStep);
+        const CameraPathArg cameraPath = ParseCameraPath();
         // -taa 0|1。TAAは時間方向に蓄積するため、画素単位の一致を測るときは切る
         const int taa = ParseIntOption(L"-taa", -1);
         // -meshlet 0|1。メッシュレット描画の有無。切ると従来の頂点シェーダー経路へ落ち、
@@ -1065,6 +1128,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 {
                     engine.SetFixedTimeStep(fixedTimeStep);
                 }
+            }
+            if (cameraPath.Enabled)
+            {
+                // -fixedstep 未指定時も経路を再現可能にするため、壁時計ではなく 1/60 秒を使う。
+                const float cameraPathStep =
+                    (fixedTimeStep != kMissingFixedTimeStep && std::isfinite(fixedTimeStep) && fixedTimeStep > 0.0f)
+                    ? fixedTimeStep
+                    : (1.0f / 60.0f);
+                const auto mode = _wcsicmp(cameraPath.Mode.c_str(), L"strafe") == 0
+                    ? Kurenai::DeterministicCameraPathMode::Strafe
+                    : Kurenai::DeterministicCameraPathMode::Dolly;
+                engine.SetDeterministicCameraPath(mode, cameraPath.Speed, cameraPathStep);
             }
             if (taa >= 0)
             {

@@ -134,6 +134,12 @@ namespace Kurenai
     // シャドウマッピング、SSAO/SSIL(間接光)、SSR(反射)、ImGuiによる各種設定パネル、
     // 複数シーンの切り替えまでを内包した完結型のレンダラー。
     // 構築してRun()を呼ぶだけでウィンドウが開き、終了するまでブロックする
+    enum class DeterministicCameraPathMode
+    {
+        Strafe,
+        Dolly,
+    };
+
     class KURENAI_3D_API KurenaiEngine3D
         : public KurenaiEngineBase, public Diagnostics::IRecreationTarget, public UI::IEngineUIHost,
           public Rendering::ILODSelector, public Passes::IPassHost
@@ -278,6 +284,8 @@ namespace Kurenai
         void SetProbeUpdateMode(int mode);
         void SetUpscaleEnabled(bool enabled);
         void SetFixedTimeStep(float seconds);
+        // Run()より前にだけ設定する。カメラへの反映はUpdateスレッドで行う。
+        void SetDeterministicCameraPath(DeterministicCameraPathMode mode, float speed, float fixedStep);
 
         // 【計測専用】GPUの区間計測をウォームアップ後に指定枚数ぶん集計し、
         // パス名ごとの平均[ms]をCSVへ書き出して終了する。
@@ -778,6 +786,7 @@ namespace Kurenai
         // 視点回転が始まらないようにするために使う
         void UpdateMouseLook(bool imguiWantsMouse);
         void UpdateMovement(float deltaTime);
+        void UpdateDeterministicCameraPath();
         void UpdateImGuiToggle();
         // ApplyLoadedScene(Renderスレッド)が公開した初期カメラ・ウィンドウタイトルを、
         // まだ適用していなければ適用する。m_Cameraの書き込み手をUpdateスレッド1つに保ち、
@@ -1468,6 +1477,15 @@ namespace Kurenai
         // (Renderスレッドではなく)UpdateAppliedSceneHandoff経由でこのスレッドが適用することで、
         // 書き込み手を1スレッドに保っている
         Core::Camera m_Camera;
+        // Updateスレッド専有。経路を有効にしたときだけ初期姿勢を固定し、毎フレーム絶対位置を再計算する。
+        bool m_DeterministicCameraPathEnabled = false;
+        bool m_DeterministicCameraPathInitialized = false;
+        DeterministicCameraPathMode m_DeterministicCameraPathMode = DeterministicCameraPathMode::Strafe;
+        float m_DeterministicCameraPathSpeed = 0.0f;
+        float m_DeterministicCameraPathFixedStep = 0.0f;
+        uint64_t m_DeterministicCameraPathFrame = 0;
+        DirectX::XMFLOAT3 m_DeterministicCameraPathInitialPosition{ 0.0f, 0.0f, 0.0f };
+        DirectX::XMFLOAT3 m_DeterministicCameraPathDirection{ 0.0f, 0.0f, 0.0f };
 
         // --- シーン読み込みのハンドオフ -------------------------------------------------------
 
