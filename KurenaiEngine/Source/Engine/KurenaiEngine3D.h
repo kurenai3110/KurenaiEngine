@@ -347,17 +347,11 @@ namespace Kurenai
         void SetMegaLightsDenoiseSigmaLuminance(float sigma);
         // ファイアフライの近傍クランプの強さ(0で無効。負なら既定のまま)
         void SetMegaLightsDenoiseFireflyClamp(float k);
-        // デノイザの時間累積が履歴の色を引くときの再サンプリングを Catmull-Rom にするか。
-        // バイリニアだと毎フレーム補間が重なり、移動中の鮮鋭さが累積的に失われる
-        // (根拠と実測は EngineDefaults.h の MegaLightsDenoiseHistoryCatmullRom)
-        void SetMegaLightsDenoiseHistoryCatmullRom(bool enabled);
         // 履歴の妥当性を2x2の4タップで判定するか(既定は最近傍1タップ)。
         // 根拠は EngineDefaults.h の MegaLightsDenoiseHistory4Tap
         void SetMegaLightsDenoiseHistory4Tap(bool enabled);
-        // 残差駆動のアンチラグ。enabled は 0=無効 / 正=有効 / 負なら既定のまま。
-        // t0 / t1(相対変化の両端)/ fastFrames(短い EMA の長さ)は 0 以下なら既定のまま
-        // (OverrideMegaLights と同じ約束)。根拠は EngineDefaults.h の MegaLightsDenoiseAntiLag
-        void SetMegaLightsDenoiseAntiLag(int enabled, float t0, float t1, int fastFrames);
+        // カメラ移動を補正した前フレームの期待 ViewZ で履歴の深度を判定するか(0/1のみ)。
+        void SetMegaLightsDenoiseMotionCompensatedDepth(int enabled);
         // 空間再利用の反復回数(負なら既定のまま)
         void SetMegaLightsSpatialIterations(int iterations);
         // 時間再利用の有無と、履歴のMの上限。負/0は既定のまま
@@ -371,19 +365,12 @@ namespace Kurenai
         // クアッド共有(手法3)の1画素あたりの標本数。1〜kMegaLightsMaxSamplesPerPixel。
         // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
         void SetMegaLightsQuadSamples(int samples);
-        // クアッド共有のブースト標本数と対象モード。負の値はその項目を既定のままにする。
-        // mode: 1=予測棄却、2=予測棄却または短い履歴、3=全画素(検算専用)
-        void SetMegaLightsQuadBoost(int samples, int mode);
         // 候補プールが1タイルあたりに抽出する灯の数(K)。
         // kMegaLightsTilePoolMinCapacity 〜 kMegaLightsTilePoolCapacity
         void SetMegaLightsTilePoolCapacity(int capacity);
         // 可視灯リスト(提案分布の第3成分)。enabled<0 / capacity<=0 / mix<0 は「既定のまま」。
         // mix は一様枝(0.25)を除いた残りのうちリスト枝へ回す割合で、**値に依らず不偏**
         void SetMegaLightsVisibleList(int enabled, int capacity, float mix);
-        // 候補プールのタイル格子を画素単位でずらすモード。
-        // 0=無効(従来とビット同一)、1=Halton(2,3)、2=有効だが検証用にオフセット0固定。
-        // 範囲外はログを出して無視し、負の値では既定値の状態をログへ残す
-        void SetMegaLightsTileJitter(int mode);
         // 候補プールの参照を確率的バイリニアにする(0=自分のタイル固定、1=クアッドごと、2=画素ごと)
         void SetMegaLightsTilePoolBilinear(int mode);
 

@@ -210,7 +210,7 @@ float TargetPdfOn(SpatialSurface s, uint lightIndex)
 bool LightInTileDomain(uint lightIndex, uint2 pixelCoord, uint2 outputSize)
 {
     const uint tileSize = max(Params1.y, 1u);
-    const uint2 tileCoord = (pixelCoord + Params6.xy) / tileSize;
+    const uint2 tileCoord = pixelCoord / tileSize;
     const uint candidateCount = Params1.z;
     const uint base = MegaLightsTilePoolBase(tileCoord, Params1.x, candidateCount);
 
@@ -223,7 +223,7 @@ bool LightInTileDomain(uint lightIndex, uint2 pixelCoord, uint2 outputSize)
     const float farthestViewZ = asfloat(TilePool[base + 5u]);
 
     // MISの分母も候補プールを書いたタイルの画素範囲で判定しなければならない
-    const int2 tilePixelOrigin = int2(tileCoord * tileSize) - int2(Params6.xy);
+    const int2 tilePixelOrigin = int2(tileCoord * tileSize);
     const TileFrustum frustum = MakeTileFrustumFromPixelOrigin(
         tilePixelOrigin, outputSize, Params3.x, Params3.y, nearestViewZ, farthestViewZ);
 

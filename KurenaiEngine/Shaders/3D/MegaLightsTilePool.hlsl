@@ -44,15 +44,13 @@ cbuffer MegaLightsTilePoolConstants : register(b0)
 {
     // ワールド座標をView空間へ変換する行列(ライトをタイル錐台と同じ空間へ持ち込むため)
     float4x4 View;
-    // xy=候補プールの有効タイル数(格子ジッター有効時だけ通常のタイル数+1)、
-    // z=有効ライト数, w=1タイルあたりの候補数K
+    // xy=候補プールのタイル数、z=有効ライト数, w=1タイルあたりの候補数K
     uint4 TileParams;
     // x=レンダー解像度の幅, y=同 高さ, zw=未使用
     uint4 RenderSize;
     // x=射影行列の(0,0)成分, y=同(1,1)成分、z=深度リニアライズ定数a, w=同b(viewZ = b / (depth - a))
     float4 ProjParams;
-    // x=フレーム番号(サンプルを毎フレーム変えるための乱数の種)、
-    // yz=タイル格子の画素オフセット(各0〜15)、w=未使用
+    // x=フレーム番号(サンプルを毎フレーム変えるための乱数の種)、yzw=未使用
     uint4 PoolParams;
     // 可視灯リスト(提案分布の第3成分)。
     // x=リストの容量(0なら機能そのものが無効)、y=前フレームのリストが使えるか(0で使わない)、
@@ -139,8 +137,7 @@ void CSMain(
     GroupMemoryBarrierWithGroupSync();
 
     // --- タイル内の深度範囲を求める(LightCulling.hlsl と同じ手順) ---
-    // 格子の規約は [tile*16-offset, tile*16-offset+16)。左上では負になるため符号付きで組み立てる
-    const int2 tilePixelOrigin = int2(groupID.xy * kTileSize) - int2(PoolParams.yz);
+    const int2 tilePixelOrigin = int2(groupID.xy * kTileSize);
     const int2 pixel = tilePixelOrigin + int2(groupThreadID.xy);
     if (all(pixel >= int2(0, 0)) && all(pixel < int2(RenderSize.xy)))
     {
@@ -267,8 +264,7 @@ void CSMain(
         // タイル中心を前フレームへ送る(TAAと同じ引き方: historyUv = uv - velocity)
         const float2 centerPixel = float2(tilePixelOrigin) + float(kTileSize) * 0.5f;
         const float2 historyPixel = centerPixel - gsTileVelocity * float2(RenderSize.xy);
-        const int2 historyTile =
-            int2(floor((historyPixel + float2(PoolParams.yz)) / float(kTileSize)));
+        const int2 historyTile = int2(floor(historyPixel / float(kTileSize)));
         const uint2 clampedTile = uint2(clamp(
             historyTile, int2(0, 0), int2(int(tileCountX) - 1, int(tileCountY) - 1)));
 

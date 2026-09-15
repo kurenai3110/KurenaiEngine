@@ -278,9 +278,8 @@ namespace Kurenai::Passes
         const std::vector<GPULight>& gpuLights = *frame.Lights;
         const DirectX::XMMATRIX viewMatrix = frame.ViewMatrix;
         const DirectX::XMMATRIX jitteredProj = frame.JitteredProj;
-        const uint32_t megaLightsEffectiveTilesX = frame.MegaLightsEffectiveTilesX;
-        const uint32_t megaLightsEffectiveTilesY = frame.MegaLightsEffectiveTilesY;
-        const DirectX::XMUINT2 megaLightsTileOffset = frame.MegaLightsTileOffset;
+        const uint32_t megaLightsTileCountX = targets->LightTileCountX;
+        const uint32_t megaLightsTileCountY = targets->LightTileCountY;
         // 候補プールと確率的サンプリングの種。登録から実行までの間に進むことはないので値で持つ
         const uint32_t frameIndex = frame.FrameIndex;
 
@@ -405,14 +404,14 @@ namespace Kurenai::Passes
                 .Reads = { targets->GBufferDepth.get(), targets->GBufferVelocity.get() },
                 .BufferReads = { lightBuffer, visibleListReadBuffer },
                 .BufferWrites = { targets->MegaLightsTilePoolBuffer.get() },
-                .Execute = [this, targets, lightBuffer, megaLightsSettings, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset, frameIndex, renderWidth, renderHeight, visibleListCapacity, visibleListMixBits, visibleListHistoryUsable, visibleListReadBuffer](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, lightBuffer, megaLightsSettings, &gpuLights, viewMatrix, jitteredProj, megaLightsTileCountX, megaLightsTileCountY, frameIndex, renderWidth, renderHeight, visibleListCapacity, visibleListMixBits, visibleListHistoryUsable, visibleListReadBuffer](RHI::IRHICommandList* cmd)
                 {
                     Passes::MegaLightsTilePoolConstants poolConstants{};
                     DirectX::XMStoreFloat4x4(&poolConstants.View, DirectX::XMMatrixTranspose(viewMatrix));
                     poolConstants.TileParams =
                     {
-                        megaLightsEffectiveTilesX,
-                        megaLightsEffectiveTilesY,
+                        megaLightsTileCountX,
+                        megaLightsTileCountY,
                         static_cast<uint32_t>(gpuLights.size()),
                         // 【書き手と読み手で必ず同じKを使うこと】プールの1タイルぶんの
                         // 要素数はKから決まるので、食い違うと別タイルの領域を読み書きする
@@ -436,8 +435,8 @@ namespace Kurenai::Passes
                     poolConstants.PoolParams =
                     {
                         frameIndex,
-                        megaLightsTileOffset.x,
-                        megaLightsTileOffset.y,
+                        0u,
+                        0u,
                         0u,
                     };
                     // 可視灯リスト(提案分布の第3成分)。
@@ -464,7 +463,7 @@ namespace Kurenai::Passes
                     cmd->SetComputeShaderResourceBuffer(3, visibleListReadBuffer);
                     // UAVはDispatch直後に解除されるため毎回バインドし直す
                     cmd->SetComputeUnorderedAccessBuffer(0, targets->MegaLightsTilePoolBuffer.get());
-                    cmd->Dispatch(megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, 1);
+                    cmd->Dispatch(megaLightsTileCountX, megaLightsTileCountY, 1);
                 },
             });
         }
@@ -582,24 +581,14 @@ namespace Kurenai::Passes
         // 手法2から再利用を外した構成と画素単位で一致するはず
         const bool megaLightsQuadShared =
             megaLightsRuns && frame.Settings.MegaLights.Mode == MegaLightsMode::QuadShared;
-        const uint32_t quadBoostSamples =
-            (megaLightsQuadShared && megaLightsDenoiseRuns)
-                ? static_cast<uint32_t>(std::max(0, megaLightsSettings.QuadBoostSamples))
-                : 0u;
-        const uint32_t quadBoostMode = static_cast<uint32_t>(std::clamp(megaLightsSettings.QuadBoostMode, 1, 3));
-        const uint32_t quadBoostPredicateFlags =
-            (denoiseHistoryValid ? 1u : 0u) |
-            (denoiseGuideValid ? 2u : 0u) |
-            (megaLightsSettings.DenoiseHistory4Tap ? 4u : 0u);
         if (megaLightsRuns &&
             (frame.Settings.MegaLights.Mode == MegaLightsMode::Stochastic || megaLightsQuadShared))
         {
             // 2パスで同じ定数バッファを共有する。中身はグラフ構築のこの時点で確定しているので、
             // Initial側のExecuteで1回だけ更新すればよい
             const auto buildStochasticConstants =
-                [this, megaLightsSamplesPerPixel, megaLightsSettings, jitteredProj, megaLightsQuadShared, megaLightsEffectiveTilesX,
-                 megaLightsEffectiveTilesY, megaLightsTileOffset, quadBoostSamples, quadBoostMode,
-                 quadBoostPredicateFlags, frameIndex, renderWidth, renderHeight,
+                [this, megaLightsSamplesPerPixel, megaLightsSettings, jitteredProj, megaLightsQuadShared, megaLightsTileCountX,
+                 megaLightsTileCountY, frameIndex, renderWidth, renderHeight,
                  visibleListMixBits](uint32_t spatialIteration)
             {
                 MegaLightsStochasticConstants stochasticConstants{};
@@ -614,7 +603,7 @@ namespace Kurenai::Passes
                 };
                 stochasticConstants.Params1 =
                 {
-                    megaLightsEffectiveTilesX,
+                    megaLightsTileCountX,
                     Passes::kLightTileSize,
                     // 候補プールを書いたときと同じKでなければならない(上のTileParams.wと同値)
                     static_cast<uint32_t>(megaLightsSettings.TilePoolCapacity),
@@ -678,16 +667,12 @@ namespace Kurenai::Passes
                 // ずれると Initial が確保外へ書くか、Resolve が別画素の標本を読む
                 // (どちらも例外にならず、絵が「それらしく」出るので気付けない)
                 stochasticConstants.Params5 = {
-                    static_cast<uint32_t>(megaLightsSamplesPerPixel), quadBoostSamples,
-                    quadBoostMode, quadBoostPredicateFlags
+                    static_cast<uint32_t>(megaLightsSamplesPerPixel), 0u, 0u, 0u
                 };
-                // 候補プールを書いたときと同じ格子オフセット。末尾へ足して、途中までしか
-                // 宣言しない Shade / Temporal / Resolve の既存レイアウトを変えない。
-                // z は候補プールの有効タイル数Y。**Params1.x と同じ「ジッター込み」の値を
-                // 渡すこと** ―― 確率的バイリニア参照が隣タイルの添字をこれでクランプするので、
-                // 生のタイル数を渡すとジッター有効時に最終行のタイルを読めなくなる
+                // xy は未使用。z は候補プールのタイル数Yで、確率的バイリニア参照が
+                // 隣タイルの添字を画面内へクランプするのに使う。
                 stochasticConstants.Params6 = {
-                    megaLightsTileOffset.x, megaLightsTileOffset.y, megaLightsEffectiveTilesY,
+                    0u, 0u, megaLightsTileCountY,
                     static_cast<uint32_t>(std::max(0, megaLightsSettings.TilePoolBilinearMode))
                 };
                 // 可視灯リストを提案分布へ混ぜた割合 c。**候補プール側の
@@ -695,7 +680,13 @@ namespace Kurenai::Passes
                 // 割り戻す確率が食い違うと、絵は出たまま静かに偏る。
                 // どのタイルのリストを引いたかはプールがヘッダへ書き残しており、
                 // Initial はそれを読むので再投影の式はこちらには無い
-                stochasticConstants.Params7 = { visibleListMixBits, 0u, 0u, 0u };
+                // y は Temporal の履歴深度のカメラ移動補正を切り替える。
+                stochasticConstants.Params7 = {
+                    visibleListMixBits,
+                    megaLightsSettings.DenoiseMotionCompensatedDepth ? 1u : 0u,
+                    0u,
+                    0u
+                };
                 return stochasticConstants;
             };
             const auto updateStochasticConstants = [this, buildStochasticConstants](RHI::IRHICommandList* cmd)
@@ -767,16 +758,12 @@ namespace Kurenai::Passes
                 .Reads =
                 {
                     targets->GBufferAlbedo.get(), targets->GBufferNormal.get(), targets->GBufferMaterial.get(), targets->GBufferDepth.get(),
-                    targets->GBufferVelocity.get(), brdfLUTTexture,
+                    brdfLUTTexture,
                 },
-                .Writes = { targets->MegaLightsBoostTexture.get() },
-                .BufferReads = { lightBuffer, tilePoolBufferForBinding,
-                                 targets->MegaLightsHistoryGuide[historyReadIndex].get(),
-                                 visibleListReadBuffer },
-                .BufferWrites = { targets->MegaLightsReservoirBuffer.get(), targets->MegaLightsBlockedLightBuffer.get(),
-                                  targets->MegaLightsBoostCountBuffer.get() },
+                .BufferReads = { lightBuffer, tilePoolBufferForBinding, visibleListReadBuffer },
+                .BufferWrites = { targets->MegaLightsReservoirBuffer.get(), targets->MegaLightsBlockedLightBuffer.get() },
                 .Execute = [this, targets, lightBuffer, raytracingScene, brdfLUTTexture, tilePoolBufferForBinding,
-                            visibleListReadBuffer, historyReadIndex, updateStochasticConstants, renderWidth, renderHeight,
+                            visibleListReadBuffer, updateStochasticConstants, renderWidth, renderHeight,
                             frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     updateStochasticConstants(cmd);
@@ -796,15 +783,10 @@ namespace Kurenai::Passes
                     cmd->SetComputeTexture(5, brdfLUTTexture);
                     cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
                     cmd->SetComputeShaderResourceBuffer(7, tilePoolBufferForBinding);
-                    cmd->SetComputeTexture(8, targets->GBufferVelocity.get());
-                    cmd->SetComputeShaderResourceBuffer(9, targets->MegaLightsHistoryGuide[historyReadIndex].get());
-                    // 【t8/t9 はブースト項が使っている】可視灯リストは t10 へ置く
                     cmd->SetComputeShaderResourceBuffer(10, visibleListReadBuffer);
 
                     cmd->SetComputeUnorderedAccessBuffer(0, targets->MegaLightsReservoirBuffer.get());
                     cmd->SetComputeUnorderedAccessBuffer(1, targets->MegaLightsBlockedLightBuffer.get());
-                    cmd->SetComputeUnorderedAccessTexture(2, targets->MegaLightsBoostTexture.get());
-                    cmd->SetComputeUnorderedAccessBuffer(3, targets->MegaLightsBoostCountBuffer.get());
                     cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
@@ -827,14 +809,14 @@ namespace Kurenai::Passes
                     .BufferReads = { targets->MegaLightsReservoirBuffer.get() },
                     .BufferWrites = { visibleListWriteBuffer },
                     .Execute = [this, targets, visibleListWriteBuffer, visibleListCapacity, megaLightsSamplesPerPixel,
-                                megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset,
+                                megaLightsTileCountX, megaLightsTileCountY,
                                 renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                     {
                         Passes::MegaLightsVisibleListConstants listConstants{};
                         listConstants.ListParams =
                         {
-                            megaLightsEffectiveTilesX,
-                            megaLightsEffectiveTilesY,
+                            megaLightsTileCountX,
+                            megaLightsTileCountY,
                             visibleListCapacity,
                             // **リザーババッファの確保と同じ本数でなければならない** ――
                             // ずれると別画素の標本を可視灯として数える
@@ -842,7 +824,7 @@ namespace Kurenai::Passes
                         };
                         listConstants.ListSize =
                         {
-                            renderWidth, renderHeight, megaLightsTileOffset.x, megaLightsTileOffset.y
+                            renderWidth, renderHeight, 0u, 0u
                         };
                         cmd->UpdateBuffer(
                             m_MegaLightsVisibleListConstantBuffer.get(), &listConstants, sizeof(listConstants));
@@ -854,7 +836,7 @@ namespace Kurenai::Passes
                         // UAVはDispatch直後に解除されるため毎回バインドし直す
                         cmd->SetComputeUnorderedAccessBuffer(0, visibleListWriteBuffer);
                         // 1グループ = 1タイル(16x16スレッド)
-                        cmd->Dispatch(megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, 1);
+                        cmd->Dispatch(megaLightsTileCountX, megaLightsTileCountY, 1);
                     },
                 });
             }
@@ -997,11 +979,10 @@ namespace Kurenai::Passes
                     .Reads =
                     {
                         targets->GBufferAlbedo.get(), targets->GBufferNormal.get(), targets->GBufferMaterial.get(),
-                        targets->GBufferDepth.get(), brdfLUTTexture, targets->MegaLightsBoostTexture.get(),
+                        targets->GBufferDepth.get(), brdfLUTTexture,
                     },
                     .Writes = { targets->MegaLightsTexture.get() },
-                    .BufferReads = { lightBuffer, targets->MegaLightsReservoirBuffer.get(),
-                                     targets->MegaLightsBoostCountBuffer.get() },
+                    .BufferReads = { lightBuffer, targets->MegaLightsReservoirBuffer.get() },
                     .BufferWrites = { guideWriteBuffer },
                     .Execute = [this, targets, lightBuffer, brdfLUTTexture, guideWriteBuffer, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                     {
@@ -1021,9 +1002,6 @@ namespace Kurenai::Passes
                         cmd->SetComputeTexture(5, brdfLUTTexture);
                         cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
                         cmd->SetComputeShaderResourceBuffer(7, targets->MegaLightsReservoirBuffer.get());
-                        cmd->SetComputeTexture(8, targets->MegaLightsBoostTexture.get());
-                        cmd->SetComputeShaderResourceBuffer(9, targets->MegaLightsBoostCountBuffer.get());
-
                         cmd->SetComputeUnorderedAccessTexture(0, targets->MegaLightsTexture.get());
                         cmd->SetComputeUnorderedAccessBuffer(1, guideWriteBuffer);
                         cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
@@ -1113,21 +1091,25 @@ namespace Kurenai::Passes
                 };
                 // 深度のエッジ停止(View空間Zに対する相対差なので無次元)と、
                 // ファイアフライの近傍クランプの強さ(近傍平均 + k・標準偏差で頭打ちにする)
-                // w は履歴の色の再サンプリング。バイリニアだと毎フレーム「補間した結果を
-                // また補間する」ことになり、移動中の鮮鋭さが累積的に失われる(実測は
-                // MegaLightsDenoise.hlsl の SampleHistoryColorCatmullRom のコメント)
+                // w は定数バッファのレイアウトを保つための未使用成分。
                 denoiseConstants.Params2 = {
                     0.02f, megaLightsSettings.DenoiseFireflyClamp, denoiseGuideValid ? 1.0f : 0.0f,
-                    megaLightsSettings.DenoiseHistoryCatmullRom ? 1.0f : 0.0f
+                    0.0f
                 };
                 // x は履歴の妥当性判定のタップ数。色は2x2を混ぜているのに妥当性は
                 // 1点でしか見ていなかった(根拠は MegaLightsConstants.h の Params3)
-                // yzw はアンチラグ。w(短い EMA の長さ)が 0 ならシェーダ側は無効と見なす
+                // yzw は定数バッファのレイアウトを保つための未使用成分。
                 denoiseConstants.Params3 = {
                     megaLightsSettings.DenoiseHistory4Tap ? 1.0f : 0.0f,
-                    megaLightsSettings.DenoiseAntiLag ? megaLightsSettings.DenoiseAntiLagT0 : 0.0f,
-                    megaLightsSettings.DenoiseAntiLag ? megaLightsSettings.DenoiseAntiLagT1 : 0.0f,
-                    megaLightsSettings.DenoiseAntiLag ? static_cast<float>(megaLightsSettings.DenoiseAntiLagFastFrames) : 0.0f
+                    0.0f,
+                    0.0f,
+                    0.0f
+                };
+                denoiseConstants.Params4 = {
+                    megaLightsSettings.DenoiseMotionCompensatedDepth ? 1.0f : 0.0f,
+                    0.0f,
+                    0.0f,
+                    0.0f
                 };
                 cmd->UpdateBuffer(
                     m_MegaLightsDenoiseConstantBuffer.get(), &denoiseConstants, sizeof(denoiseConstants));

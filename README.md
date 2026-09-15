@@ -751,13 +751,8 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-megalightsvisiblelistcapacity <1〜16>` | タイルごとに保持する可視灯リストの容量を指定する。根拠は docs/ImplementationDetail.md 61.7u節。 |
 | `-megalightsquadstratify <0\|1>` | クアッド内の候補割り当てを層化するか指定する。 |
 | `-megalightsblockedcache <0\|1>` | 遮蔽済みライトのキャッシュを使うか指定する。 |
-| `-megalightstilejitter <0\|1\|2>` | 候補プールのタイル格子ジッターを指定する。根拠は docs/ImplementationDetail.md 61.7n節。 |
-| `-megalightsdenoise4tap <0\|1>` | デノイザの時間累積が履歴の妥当性を何タップで判定するかを指定する(`0` = 最近傍1タップ、`1` = バイリニア2x2の4タップ)。**既定は0** ―― 指標はすべて改善するが、動かして見比べても差が分からなかったため既定にしていない。根拠は docs/ImplementationDetail.md 61.7o.9節。 |
-| `-megalightsdenoisecatmull <0\|1>` | デノイザの時間累積が履歴の色を引くときの再サンプリングを指定する(`0` = バイリニア、`1` = Catmull-Rom)。**既定は0** ―― 重みの正規化を直したあとは移動中の鮮鋭さ・誤差・総和比のすべてでバイリニアを上回るが、既定は目視のあとに決める。`-megalightsdenoise4tap 1` と両方指定すると4タップが全部通った画素だけ Catmull-Rom で引き、指標はこの組が最良。根拠は docs/ImplementationDetail.md 61.7q節。 |
-| `-megalightsquadboost <B>` / `-megalightsquadboostmode <1\|2\|3>` | クアッド共有(手法3)で、デノイザに棄却されると予測した画素にだけ B 本の標本を足す(`1` = 予測棄却画素、`2` = 今は 1 と同じ、`3` = 全画素・検算専用)。**既定は 0(無効)** ―― 棄却画素のノイズは減るが最悪画素の 7% にしか届かない。根拠は docs/ImplementationDetail.md 61.7q.5節。 |
-| `-megalightsdenoiseantilag <0\|1>` | デノイザの時間累積に残差駆動のアンチラグを掛けるか指定する(灯や影が変わった画素だけ累積上限を4へ落とし、残光を短くする)。**既定は0** ―― 目視で既定を決めるまでは無効。根拠は docs/ImplementationDetail.md 61.7p節。 |
-| `-megalightsdenoiseantilagt0 <0..1>` / `-megalightsdenoiseantilagt1 <0..1>` | アンチラグが発火する相対変化のしきい値(smoothstep の両端。既定 0.35 / 0.6)。 |
-| `-megalightsdenoiseantilagfast <フレーム数>` | アンチラグが現フレームの 7x7 平均をならす短い EMA の長さ(既定 4)。長いほど誤発火は減り、検出は遅れる。 |
+| `-megalightsdenoise4tap <0\|1>` | デノイザの時間累積が履歴の妥当性を何タップで判定するかを指定する(`0` = 最近傍1タップ、`1` = バイリニア2x2の4タップ)。**既定は1**。根拠は docs/ImplementationDetail.md 61.7o.9節。 |
+| `-megalightsdenoisemotiondepth <0\|1>` | デノイザの履歴の妥当性判定で、カメラ自身の移動による深度変化を補正するか指定する(`0` = 従来どおり現在の ViewZ と直接比較、`1` = 現在のワールド位置を前フレームの VP で投影した期待 ViewZ と比較)。**既定は1**。補正しないと、毎秒5mの前進で視距離1.67m以内の画素が遮蔽が変わらなくても履歴を捨てられる。根拠は docs/ImplementationDetail.md 61.7v節。 |
 | `-megalightspoolbilinear <0\|1\|2>` | 候補プールを自分のタイル固定で引くか(0)、最も近い4タイルから確率的バイリニアで引くかを指定する(1=2x2クアッドごとに1タイル(既定)、2=画素ごとに1タイル)。タイル形のムラを画素ごとの乱数へ溶かす。根拠は docs/ImplementationDetail.md 61.7t節。 |
 | `-megalightsperturb <0\|1\|2>` | 蓄積開始時に検証用のシーン摂動を加える(`-megalightsaccum` が 0 だと効かない)。 |
 | `-megalightsspatial <0\|1>` | 空間再利用の有無を指定する。根拠は docs/ImplementationDetail.md 61.7f節。 |
@@ -780,7 +775,7 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-ddgifollow` | DDGIの各LODの原点をカメラへ追従させる(`.kscene`の`FollowCamera`と同じ)。 |
 | `-upscale <0\|1>` | 超解像の有無を指定する。 |
 | `-fixedstep <秒>` | 1フレームの時間を固定する。実時間に依らず同じフレームで同じ状態を作るためのもので、`-dumpframe`と組で使う。0以下や非有限値はエラーにして既定のまま続行する。 |
-| `-camerapath <名前>` | `.kscene`の`[CameraPath]`を1本選んで再生する。フレーム番号だけから姿勢が決まり、**再生中は視点の入力操作を受け付けない**。カメラを動かしたときの品質を測るには同じ軌跡を再現する必要があるが、通常の操作は移動量がΔtに比例し視点回転はPostMessageから駆動できないため、この口が要る。`-fixedstep`の指定が無ければ 1/60 を警告つきで自動設定する。根拠は docs/ImplementationDetail.md 61.7o節。 |
+| `-camerapath <名前>` | `.kscene`の`[CameraPath]`を1本選んで再生する。フレーム番号だけから姿勢が決まり、**再生中は視点の入力操作を受け付けない**。カメラを動かしたときの品質を測るには同じ軌跡を再現する必要があるが、通常の操作は移動量がΔtに比例し視点回転はPostMessageから駆動できないため、この口が要る。`-fixedstep`の指定が無ければ 1/60 を警告つきで自動設定する。根拠は docs/ImplementationDetail.md 61.7o節。 経路は検証用シーン`Scenes/MegaLightsMotionCheck.kscene`にあります。 |
 | `-camerapathstart <N>` | 経路の再生を始めるフレーム。それまでは先頭キーの姿勢で静止して整定を待つ。既定は`-dumpframe`の既定と同じ 180。根拠は docs/ImplementationDetail.md 61.7o.2節。 |
 | `-camerapathvalidate` | シーンが持つ`[CameraPath]`すべてについて、1フレームあたりの移動量・視線角差・見かけ速度をログへ出す。ほぼ動かないフレームがあれば警告する。根拠は docs/ImplementationDetail.md 61.7o.3節。 |
 | `-passmanifest <パス>` | RenderGraphの登録順と実行順をテキストへ書き出す。パスの構成が変わっていないことを比較するための物差し。根拠は docs/ImplementationDetail.md 64.7節。 |
@@ -1159,6 +1154,14 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
     影レイは`RAY_FLAG_FORCE_OPAQUE`なので、重心へ置くと器具自身のガラスと笠に遮られて
     1灯も光りません(絵が暗いだけで例外もログも出ないため、MegaLightsの不具合と誤診しやすい)。
     スクリプトは灯ごとに脱出率を測り、しきい値を超える位置まで下ろしてから採用します
+  - `MegaLightsMotionCheck.kscene` — **カメラを動かしたときの品質を測る用**(生成物)。
+    中身は`BistroExteriorNight.kscene`と**照明もモデルも同一**で、違うのは
+    `[CameraPath]`(決定的なカメラ経路)だけです。`-camerapath <名前>`で1本選んで
+    再生します。`python Tools/make_megalights_motion_scene.py`で生成し、
+    `--check`で最新かを判定できます。**元のシーンを直したら再生成してください。**
+    計測専用の経路を`BistroExteriorNight.kscene`側へ書き戻さないこと —
+    絵を見るためのシーンへ検証の仕掛けを混ぜると、使う側が何を見ているのか
+    分からなくなります。根拠は docs/ImplementationHistory.md 102章
   - `MegaLightsNoiseCheck.kscene` — ノイズ測定用(`docs/ImplementationDetail.md` 61.7f/61.7g が
     使っているシーン)。`BistroInteriorLit` から時刻0・GIVolume無し・露出2.0固定にしたもので、
     **測定を決定的にするために `-autoexposure 0` と組で使います**

@@ -91,7 +91,6 @@ namespace Kurenai::UI
         virtual void RequestUpscaleSettings(bool enabled, UpscaleQualityMode mode, uint32_t outputWidth, uint32_t outputHeight) = 0;
         virtual void ResetSceneDependentParams() = 0;
         virtual void SetMegaLightsQuadSamples(int samples) = 0;
-        virtual void SetMegaLightsTileJitter(int mode) = 0;
         virtual void SetMegaLightsTilePoolBilinear(int mode) = 0;
         virtual void SetMegaLightsTilePoolCapacity(int capacity) = 0;
         // 可視灯リスト(提案分布の第3成分)。enabled<0 / capacity<=0 / mix<0 は「既定のまま」

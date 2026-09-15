@@ -203,6 +203,15 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     if (Params4.x != 0u && all(historyUv >= 0.0f) && all(historyUv <= 1.0f))
     {
+        // 透視射影では clip.w が ViewZ になる。無効時は行列積を実行せず、
+        // 現在の ViewZ と履歴 ViewZ を直接比べる従来経路を保つ。
+        float expectedPrevViewZ = self.ViewZ;
+        [branch]
+        if (Params7.y != 0u)
+        {
+            expectedPrevViewZ = mul(float4(self.WorldPos, 1.0f), PrevViewProj).w;
+        }
+
         // 最近傍で引く(リザーバはライト番号という離散値を持つので補間できない)。
         // 4近傍を見て、幾何が一致する最初のものを採る
         const float2 historyPixelF = historyUv * float2(outputSize) - 0.5f;
@@ -230,7 +239,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
                 continue;
             }
             // 【線形深度で比べる】Reverse-Zの生値ではない
-            if (abs(g.ViewZ - self.ViewZ) > kMaxRelativeDepthDiff * max(abs(self.ViewZ), 1e-3f))
+            if (abs(g.ViewZ - expectedPrevViewZ) >
+                kMaxRelativeDepthDiff * max(abs(self.ViewZ), 1e-3f))
             {
                 continue;
             }

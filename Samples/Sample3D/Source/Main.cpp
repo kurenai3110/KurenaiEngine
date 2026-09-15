@@ -898,14 +898,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -megalightsquadsamples <1〜16>。クアッド共有が1画素あたりに引く標本の数。
         // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
         const int megaLightsQuadSamples = ParseIntOption(L"-megalightsquadsamples", -1);
-        // ブースト標本数Bと対象モード(1=予測棄却、2=短い履歴も対象、3=全画素・検算専用)
-        const int megaLightsQuadBoost = ParseIntOption(L"-megalightsquadboost", -1);
-        const int megaLightsQuadBoostMode = ParseIntOption(L"-megalightsquadboostmode", -1);
         // -megalightspool <8〜512>。候補プールが1タイルあたりに抽出する灯の数(K)。
         // 1画素あたりの標本数では減らない「タイル間」のノイズがここで決まる
         const int megaLightsPoolCapacity = ParseIntOption(L"-megalightspool", -1);
-        // -megalightstilejitter <0|1|2>。1=Halton(2,3)で格子をずらす、2=有効だがオフセット0固定
-        const int megaLightsTileJitter = ParseIntOption(L"-megalightstilejitter", -1);
         // -megalightspoolbilinear <0|1|2>。候補プールの確率的バイリニア参照。
         // 0=自分のタイル固定(従来)、1=2x2クアッドごとに1タイル、2=画素ごとに1タイル
         const int megaLightsPoolBilinear = ParseIntOption(L"-megalightspoolbilinear", -1);
@@ -946,21 +941,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const float megaLightsDenoiseSigma = ParseFloatOption(L"-megalightsdenoisesigma", -1.0f);
         // -megalightsfirefly <k>。ファイアフライの近傍クランプの強さ(0で無効)
         const float megaLightsFireflyClamp = ParseFloatOption(L"-megalightsfirefly", -1.0f);
-        // -megalightsdenoisecatmull <0|1>。デノイザの時間累積が履歴の色を引くときの
-        // 再サンプリング。0=バイリニア(従来) / 1=Catmull-Rom。
-        // バイリニアだと毎フレーム補間が重なって移動中の鮮鋭さが累積的に失われる
-        const int megaLightsDenoiseCatmull = ParseIntOption(L"-megalightsdenoisecatmull", -1);
         // -megalightsdenoise4tap <0|1>。履歴の妥当性を2x2の4タップで判定するか。
         // 従来は最近傍1点だけで見ており、1点がシルエットの向こう側だと履歴全体を棄却していた
         const int megaLightsDenoise4Tap = ParseIntOption(L"-megalightsdenoise4tap", -1);
-        // -megalightsdenoiseantilag <0|1> と、そのしきい値 t0 / t1(相対変化の両端)/
-        // fast(短い EMA の長さ[フレーム])。変化した画素だけ時間累積の上限を短く落とし、
-        // 灯を消したあとの残光を縮める。値は 0 以下なら既定のまま
-        // (根拠は EngineDefaults.h の MegaLightsDenoiseAntiLag)
-        const int megaLightsAntiLag = ParseIntOption(L"-megalightsdenoiseantilag", -1);
-        const float megaLightsAntiLagT0 = ParseFloatOption(L"-megalightsdenoiseantilagt0", -1.0f);
-        const float megaLightsAntiLagT1 = ParseFloatOption(L"-megalightsdenoiseantilagt1", -1.0f);
-        const int megaLightsAntiLagFast = ParseIntOption(L"-megalightsdenoiseantilagfast", -1);
+        // -megalightsdenoisemotiondepth <0|1>。前フレームの期待 ViewZ をカメラ移動込みで求める。
+        const int megaLightsDenoiseMotionDepth =
+            ParseIntOption(L"-megalightsdenoisemotiondepth", -1);
         // -perfdump <パス> / -perfdumpframes <枚数>。GPUの区間計測を平均してCSVへ書き出す。
         // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
         const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
@@ -1174,16 +1160,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetMegaLightsQuadSamples(megaLightsQuadSamples);
             }
-            if (megaLightsQuadBoost >= 0 || megaLightsQuadBoostMode >= 0)
-            {
-                engine.SetMegaLightsQuadBoost(megaLightsQuadBoost, megaLightsQuadBoostMode);
-            }
             if (megaLightsPoolCapacity >= 0)
             {
                 engine.SetMegaLightsTilePoolCapacity(megaLightsPoolCapacity);
             }
-            // 未指定時も呼び、既定の無効状態を起動ログへ1行残す
-            engine.SetMegaLightsTileJitter(megaLightsTileJitter);
             engine.SetMegaLightsTilePoolBilinear(megaLightsPoolBilinear);
             if (megaLightsVisibleList >= 0 || megaLightsVisibleListCapacity > 0 ||
                 megaLightsVisibleListMix >= 0.0f)
@@ -1226,19 +1206,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetMegaLightsDenoiseFireflyClamp(megaLightsFireflyClamp);
             }
-            if (megaLightsDenoiseCatmull >= 0)
-            {
-                engine.SetMegaLightsDenoiseHistoryCatmullRom(megaLightsDenoiseCatmull != 0);
-            }
             if (megaLightsDenoise4Tap >= 0)
             {
                 engine.SetMegaLightsDenoiseHistory4Tap(megaLightsDenoise4Tap != 0);
             }
-            if (megaLightsAntiLag >= 0 || megaLightsAntiLagT0 > 0.0f || megaLightsAntiLagT1 > 0.0f ||
-                megaLightsAntiLagFast > 0)
+            if (megaLightsDenoiseMotionDepth >= 0)
             {
-                engine.SetMegaLightsDenoiseAntiLag(
-                    megaLightsAntiLag, megaLightsAntiLagT0, megaLightsAntiLagT1, megaLightsAntiLagFast);
+                engine.SetMegaLightsDenoiseMotionCompensatedDepth(megaLightsDenoiseMotionDepth);
             }
             if (megaLightsSpatialIterations > 0)
             {

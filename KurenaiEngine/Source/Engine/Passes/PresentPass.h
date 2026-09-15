@@ -56,8 +56,7 @@ namespace Kurenai
             // Mode==11(タイルライトカリングのヒートマップ)専用。
             // x=タイル数X, y=タイルの1辺のピクセル数, z=1タイルあたりの容量, w=ヒートマップの上限ライト数
             DirectX::XMFLOAT4 TileParams;
-            // xy=レンダー解像度。zw=Mode 21の候補プール格子オフセット。
-            // デバッグ表示も書き手と同じ格子を読まないとA/Bの比較結果が嘘になる
+            // xy=レンダー解像度。zw=未使用
             DirectX::XMFLOAT4 TileRenderSize;
             // Mode==22(MegaLightsの蓄積平均)専用。x=これまでに足したフレーム数, yzw=未使用。
             // **末尾に足すこと** ―― cbufferは宣言順レイアウトなので、途中へ挿すと

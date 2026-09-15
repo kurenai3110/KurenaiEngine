@@ -11,7 +11,6 @@
 // ノイズもAAも両方失う。だからノイズはTAAへ渡す前にここで落とす。
 // 逆にここで長く累積しすぎるとTAAのゴーストと重なって二重に尾を引くので、
 // 時間累積の上限は手法ごとに持つ(既定は手法2で32・手法3で64。EngineDefaults.h)。
-// さらに残差が大きい画素だけ上限を短く落とすアンチラグを持つ(AntiLagCap。既定は無効)。
 //
 // 【アルベド復調】フィルタの前に「その画素の反射率」で割り、後で掛け戻す。
 // 割らずにぼかすと、明るい面と暗い面の境界で色が滲む(テクスチャの模様が影へ漏れる)。
@@ -39,12 +38,13 @@ cbuffer MegaLightsDenoiseConstants : register(b1)
     float4 Params1;
     // x=深度のエッジ停止の強さ, y=ファイアフライのクランプ強さ(0で無効),
     // z=前フレームの幾何(履歴ガイド)が使えるか(0なら現フレームのG-Bufferで代用),
-    // w=履歴の色の再サンプリング(0=バイリニア / 1=Catmull-Rom)
+    // w=未使用
     float4 Params2;
     // x=履歴の妥当性の判定タップ数(0=最近傍1タップ(従来) / 1=バイリニア2x2の4タップ),
-    // y=アンチラグの相対変化の smoothstep 下端 t0, z=同 上端 t1,
-    // w=アンチラグの短い EMA の長さ[フレーム](0で無効)
+    // yzw=未使用
     float4 Params3;
+    // x=履歴深度のカメラ移動補正(0=従来 / 1=前フレームの期待ViewZ)、yzw=未使用
+    float4 Params4;
 };
 
 // 前フレームの幾何。時間再利用(MegaLightsTemporal)が毎フレーム全画素へ書いている。
@@ -109,80 +109,6 @@ float TileViewZ(float2 uv, float depth)
 // ---------------------------------------------------------------------------
 // 段1: 時間累積。速度ベクトルで再投影し、指数移動平均で混ぜる
 // ---------------------------------------------------------------------------
-// 履歴の色を引く。**ここのフィルタが、移動中の鮮鋭さを決めている。**
-//
-// 【なぜ Catmull-Rom を選べるようにしたか】バイリニアで引くと、毎フレーム
-// 「補間した結果をまた補間する」ことになり、ぼけが累積する。TAA はまさにこの理由で
-// Catmull-Rom を使っており、TAA.hlsl の SampleHistoryCatmullRom にそう書いてある。
-// ところがこのデノイザは SampleLevel(バイリニア)のままで、**同じリポジトリの中で
-// 非対称になっていた**。
-//
-// 実測(BistroExteriorNight / Strafe経路 / 2560x1440 / 分母は参照実装 rays=64)。
-// S = 候補自身の高周波エネルギー ÷ 真値のそれ。1未満はなまっていることを意味する:
-//     累積上限 2フレーム  S=0.987     16フレーム S=0.553
-//     累積上限 4フレーム  S=0.744     64フレーム S=0.516
-// **累積を伸ばすほど単調に鮮鋭さが失われる。** a-trous の段数ではほとんど動かない
-// (0段でも 0.516)ので、なまりを作っているのは空間フィルタではなくこの再サンプリング。
-//
-// 【モーメントには使わない】Catmull-Rom は負のローブを持つ。モーメントの z 成分は
-// 履歴長、xy は輝度の1次・2次モーメントで、負へ振れると分散が負になったり
-// 履歴長が壊れたりする。モーメントはバイリニアのままにすること
-float3 SampleHistoryColorCatmullRom(float2 uv, uint2 outputSize)
-{
-    const float2 texelSize = 1.0f / float2(outputSize);
-    const float2 samplePos = uv * float2(outputSize);
-    const float2 texPos1 = floor(samplePos - 0.5f) + 0.5f;
-    const float2 f = samplePos - texPos1;
-
-    // Catmull-Rom(B=0, C=0.5)の重み。TAA.hlsl と同じ式にしてあること
-    const float2 w0 = f * (-0.5f + f * (1.0f - 0.5f * f));
-    const float2 w1 = 1.0f + f * f * (-2.5f + 1.5f * f);
-    const float2 w2 = f * (0.5f + f * (2.0f - 1.5f * f));
-    const float2 w3 = f * f * (-0.5f + 0.5f * f);
-
-    // w1とw2を1タップのバイリニアへまとめ、16タップを5タップへ削る定番の形
-    const float2 w12 = w1 + w2;
-    const float2 offset12 = w2 / max(w12, 1e-5f);
-
-    const float2 texPos0 = (texPos1 - 1.0f) * texelSize;
-    const float2 texPos3 = (texPos1 + 2.0f) * texelSize;
-    const float2 texPos12 = (texPos1 + offset12) * texelSize;
-
-    float3 result = float3(0.0f, 0.0f, 0.0f);
-    result += HistoryTexture.SampleLevel(ColorSampler, float2(texPos12.x, texPos0.y), 0).rgb * w12.x * w0.y;
-    result += HistoryTexture.SampleLevel(ColorSampler, float2(texPos0.x, texPos12.y), 0).rgb * w0.x * w12.y;
-    result += HistoryTexture.SampleLevel(ColorSampler, float2(texPos12.x, texPos12.y), 0).rgb * w12.x * w12.y;
-    result += HistoryTexture.SampleLevel(ColorSampler, float2(texPos3.x, texPos12.y), 0).rgb * w3.x * w12.y;
-    result += HistoryTexture.SampleLevel(ColorSampler, float2(texPos12.x, texPos3.y), 0).rgb * w12.x * w3.y;
-
-    // 【重みの和で割る ―― 5タップ化で落とした角4タップのぶんを戻す】
-    // 16タップの重みの和は 1 だが、角(w0*w0, w0*w3, w3*w0, w3*w3)は正の小さい値で、落とすと
-    // 和が 1 − (w0.x + w3.x)(w0.y + w3.y) になる(f=0.5 で 0.984)。1回の損失は最大 1.6% でも、
-    // ここは上限64の帰還ループなので定常値が (1/64) / (1 − (63/64)·g) まで沈む ――
-    // 61.7o.8 で「原因未確認」だった総和比の暗化(0.927 → 0.896)はこの取りこぼしで説明がつく。
-    // TAA.hlsl は実効累積が約10フレームなので同じ取りこぼしが目に見えなかった
-    const float weightSum = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
-    result /= max(weightSum, 1e-5f);
-
-    // 【近傍クランプ】負のローブのリンギングは近傍の外へ飛び出す成分なので、
-    // バイリニアの2x2近傍の min/max へクランプして止める(RELAX/NRD が同じ位置で同じことを
-    // している)。飛び出していない鋭さはそのまま残る。
-    // 以前ここに「クランプしても総和比が 0.901 までしか戻らず暗化はリンギングではない」と
-    // 書いていたが、その暗化の正体は上の重みの取りこぼしだった。正規化したあとの実測は
-    // 総和比 0.9375 / |相対誤差|中央 0.0514 / S 0.579 / 誤差>0 49.3% で、バイリニア
-    // (0.9273 / 0.0600 / 0.480 / 49.2%)をすべての指標で上回る(61.7q)
-    const float2 texelSize2 = texelSize;
-    const float3 c00 = HistoryTexture.SampleLevel(ColorSampler, (texPos1 + float2(-0.0f, -0.0f)) * texelSize2, 0).rgb;
-    const float3 c10 = HistoryTexture.SampleLevel(ColorSampler, (texPos1 + float2(1.0f, 0.0f)) * texelSize2, 0).rgb;
-    const float3 c01 = HistoryTexture.SampleLevel(ColorSampler, (texPos1 + float2(0.0f, 1.0f)) * texelSize2, 0).rgb;
-    const float3 c11 = HistoryTexture.SampleLevel(ColorSampler, (texPos1 + float2(1.0f, 1.0f)) * texelSize2, 0).rgb;
-    const float3 lo = min(min(c00, c10), min(c01, c11));
-    const float3 hi = max(max(c00, c10), max(c01, c11));
-
-    // 負の色を履歴へ入れると次フレーム以降も残り続けるので、最後に0で止める
-    return max(clamp(result, lo, hi), 0.0f);
-}
-
 // 7x7 の輝度の (平均, 二乗平均)。タップの復調は中心の係数で代用する
 // (反射率は7x7の窓では大きく変わらない)。
 // 【計算の順序を変えないこと】短履歴の分散フォールバックはこの結果をそのまま使う。
@@ -211,81 +137,11 @@ float2 SpatialLuminanceMoments(uint2 pixel, uint2 outputSize, float3 demod)
     return float2(sm1, sm2);
 }
 
-// アンチラグが発火したときの累積上限。newLength < 4 の空間分散フォールバックの境目の
-// 1つ上に置き、発火画素を a-trous に強く混ぜさせる
-static const float kAntiLagMinFrames = 4.0f;
-
-// 残差駆動のアンチラグ。「現フレームの7x7平均を数フレームならした値」と「履歴の7x7平均」の
-// **相対変化**で変化を検出し、累積上限を落とす。
-//
-// 【ここへ来るまでに2つの設計を測って落とした。どちらも同じ地雷を別の形で踏んだ】
-// MegaLights の生標本は裾が重く(1/p の重み)、相対 std が画素ごとに 0.3〜1.0 と6倍ばらつき、
-// しかも**右へ歪んでいる**(中央値 < 平均)。BistroExteriorNight / 手法3 / 静止と消灯での実測:
-//
-//  (1) 平均の差を画素の時間std(sigT)で割る … σ換算係数を振っても両立しない
-//        σ    静止の誤発火   消灯の発火
-//        0.25  29.2%         97.8%
-//        1.0    0.98%        73.6%
-//        2.0    0.086%       34.2%
-//      消灯の信号(相対変化 1.0)と静止のノイズ(相対 0.1 程度)は10倍離れているのに、
-//      sigT で割ると画素ごとの sigT のばらつきに埋もれる。**正規化の物差しが違っていた**
-//  (2) タップごとの符号検定(生 < 履歴 を数える)… 静止で 30.8% 誤発火
-//      分布が右に歪んでいるので、静止でも約75%のタップが「生 < 平均」になる。
-//      符号検定は**分布の歪みで構造的に偏る**。ノイズではなく設計の誤り
-//
-// 【今の形】平均どうしを比べる(どちらも E[l] の不偏推定なので歪みで偏らない)。
-// 生の7x7平均はファイアフライ1個で動くので、**数フレームの短い EMA でならしてから**比べる。
-// ならした値は HistoryOutTexture.a に**負の値**で持ち回る(.a は読み手が無い枠。
-// 0 と OFF の 1.0 は「短い履歴なし」の番兵になり、OFF の書き込みは変えないので
-// バイト同一が保てる)。発火の遅れは EMA の長さぶん(既定4なら2〜3フレーム)で、
-// 64フレームの残光に比べれば無視できる。
-//
-// Params3.y = t0, Params3.z = t1(相対変化 |fast − hist| / max(fast, hist) に対する
-// smoothstep の両端)、Params3.w = 短い EMA の長さ[フレーム](0 で無効)。
-// 初期値は EngineDefaults.h(静止と消灯の両方を満たす領域を掃引で決める)
-float AntiLagCap(uint2 pixel, float2 historyUv, float maxFrames, out float fire, out float fastMu)
-{
-    const float2 texelSize = 1.0f / float2(Params0.xy);
-    // タップの復調は**タップごと**に行う(SpatialLuminanceMoments の「中心の係数で代用」は
-    // ここでは使えない)。HistoryTexture は画素ごとに復調された色なので、現フレーム側も
-    // 画素ごとに復調しないと、7x7 の窓にアルベドの縁が入るだけで両者の平均が恒常的に
-    // 食い違う。中心代用のときの静止での誤発火(k>0.5)は 2.95%、うち誤発火画素の
-    // 7x7 内の復調係数の変動係数は中央値 0.67(発火しない画素は 0.03)で、
-    // タップごとに直すと 0.17% へ落ちた(24 フレームの生入力からのオフライン再現、
-    // 実機の 3.06% を再現した上で比較。BistroExteriorNight / 手法3 / 静止)
-    float sumC = 0.0f;
-    float sumH = 0.0f;
-    [unroll]
-    for (int dy = -3; dy <= 3; ++dy)
-    {
-        [unroll]
-        for (int dx = -3; dx <= 3; ++dx)
-        {
-            const int2 p = clamp(int2(pixel) + int2(dx, dy), int2(0, 0), int2(Params0.xy) - 1);
-            const float2 pUv = (float2(p) + 0.5f) * texelSize;
-            const float tapDemodLum = max(Luminance(DemodulationFactor(pUv)), 1e-6f);
-            sumC += Luminance(InputTexture.Load(int3(p, 0)).rgb) / tapDemodLum;
-            const float2 tapUv = historyUv + float2(dx, dy) * texelSize;
-            sumH += Luminance(HistoryTexture.SampleLevel(ColorSampler, tapUv, 0).rgb);
-        }
-    }
-    const float muC = sumC / 49.0f;
-    const float muH = sumH / 49.0f;
-
-    // 前フレームの「ならした7x7平均」。負なら持っている、0以上(背景の0 / OFF の 1.0)なら無い
-    const float fastPrevRaw = HistoryTexture.SampleLevel(ColorSampler, historyUv, 0).a;
-    const float fastPrev = (fastPrevRaw < 0.0f) ? -fastPrevRaw : muC;
-    const float fastFrames = max(Params3.w, 1.0f);
-    fastMu = lerp(fastPrev, muC, 1.0f / fastFrames);
-
-    const float relDiff = abs(fastMu - muH) / max(max(fastMu, muH), 1e-6f);
-    fire = smoothstep(Params3.y, Params3.z, relDiff);
-    return lerp(maxFrames, kAntiLagMinFrames, fire);
-}
-
 // 履歴の1タップが「今の画素と同じ面か」を判定する。しきい値は従来と同一
 // (kMaxRelativeDepthDiff / kMinNormalDot / kMaxMaterialDiff)。**緩める方向へは一切動かさない。**
-bool HistoryTapValid(int2 tapPixel, uint2 outputSize, float viewZ, float3 N, float2 material)
+bool HistoryTapValid(
+    int2 tapPixel, uint2 outputSize, float expectedPrevViewZ,
+    float viewZ, float3 N, float2 material)
 {
     float hViewZ;
     float3 hN;
@@ -318,7 +174,8 @@ bool HistoryTapValid(int2 tapPixel, uint2 outputSize, float viewZ, float3 N, flo
     {
         return false;
     }
-    return MegaLightsGuideMatchesSurface(hViewZ, hN, hMaterial, viewZ, N, material);
+    return MegaLightsGuideMatchesSurface(
+        hViewZ, hN, hMaterial, expectedPrevViewZ, viewZ, N, material);
 }
 
 [numthreads(8, 8, 1)]
@@ -414,7 +271,6 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float2 material = MaterialTexture.SampleLevel(DataSampler, uv, 0).rg;
 
     // --- 再投影。TAAとまったく同じ引き方(historyUv = uv - velocity) ---
-    // 【引き方は同じでも、引くフィルタが違っていた】下の SampleHistoryColor を参照
     const float2 velocity = VelocityTexture.SampleLevel(DataSampler, uv, 0).rg;
     const float2 historyUv = uv - velocity;
 
@@ -434,15 +290,21 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
         // バイリニア重みで加重平均する**。時間再利用(MegaLightsTemporal)は
         // 元から2x2を走査しており、デノイザだけが片肺だった。
         //
-        // 【Catmull-Rom は「4タップ全部が通ったときだけ」併用する】部分採用があるとハードウェアの
-        // 補間に載せられないので、1つでも棄却されたタップがあれば通ったタップの加重平均(下)を使う。
-        // 全部通ったなら 2x2 の芯は同じ面なので Catmull-Rom(近傍クランプ付き)で引く ――
-        // 4タップ判定の「別の面を混ぜない」と Catmull-Rom の「なまりを累積させない」を両取りする。
-        // 4タップ判定が無効のときの Catmull-Rom は下の else 側(従来どおり)
         const float2 historyPixelF = historyUv * float2(outputSize) - 0.5f;
         const float2 baseF = floor(historyPixelF);
         const float2 frac2 = historyPixelF - baseF;
         const int2 baseI = int2(baseF);
+
+        // InvViewProj から現在のワールド位置を復元し、前フレームのカメラから見た
+        // 期待 ViewZ を求める。無効時と履歴ガイドを使えない代用経路では行列積を実行せず、
+        // 従来の比較値をそのまま使う。
+        float expectedPrevViewZ = viewZ;
+        [branch]
+        if (Params4.x != 0.0f && Params2.z != 0.0f)
+        {
+            const float3 worldPos = ReconstructWorldPos(uv, depth);
+            expectedPrevViewZ = mul(float4(worldPos, 1.0f), PrevViewProj).w;
+        }
 
         const float tapWeights[4] = {
             (1.0f - frac2.x) * (1.0f - frac2.y),
@@ -458,9 +320,6 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 【履歴長は加重平均ではなく通ったタップの最小値を採る】平均だと、片方だけ長い履歴を
         // 持つタップに引きずられて α が過小になり、別の面の色が長く残る。保守側へ倒す
         float minLength = 1e30f;
-        // 妥当性で落としたタップが1つでもあるか(Catmull-Rom へ切り替えてよいかの判定)
-        bool anyRejected = false;
-
         [unroll]
         for (uint tap = 0u; tap < 4u; ++tap)
         {
@@ -469,9 +328,8 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
             {
                 continue;
             }
-            if (!HistoryTapValid(tapPixel, outputSize, viewZ, N, material))
+            if (!HistoryTapValid(tapPixel, outputSize, expectedPrevViewZ, viewZ, N, material))
             {
-                anyRejected = true;
                 continue;
             }
             const int2 clamped = clamp(tapPixel, int2(0, 0), int2(outputSize) - 1);
@@ -485,10 +343,7 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         if (weightSum > 1e-5f)
         {
-            // 全タップが通ったときだけ Catmull-Rom(色のみ。モーメントは負のローブを避けてバイリニア)
-            historyColor = (Params2.w != 0.0f && !anyRejected)
-                               ? SampleHistoryColorCatmullRom(historyUv, outputSize)
-                               : colorSum / weightSum;
+            historyColor = colorSum / weightSum;
             historyMoments = momentSum / weightSum;
             historyLength = minLength;
             historyValid = true;
@@ -532,13 +387,17 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         if (hValid)
         {
-            if (MegaLightsGuideMatchesSurface(hViewZ, hN, hMaterial, viewZ, N, material))
+            float expectedPrevViewZ = viewZ;
+            [branch]
+            if (Params4.x != 0.0f && Params2.z != 0.0f)
             {
-                // 色だけ再サンプリングのフィルタを選べる。モーメントは必ずバイリニア
-                // (負のローブで履歴長と分散が壊れるため。SampleHistoryColorCatmullRom を参照)
-                historyColor = (Params2.w != 0.0f)
-                                   ? SampleHistoryColorCatmullRom(historyUv, outputSize)
-                                   : HistoryTexture.SampleLevel(ColorSampler, historyUv, 0).rgb;
+                const float3 worldPos = ReconstructWorldPos(uv, depth);
+                expectedPrevViewZ = mul(float4(worldPos, 1.0f), PrevViewProj).w;
+            }
+            if (MegaLightsGuideMatchesSurface(
+                    hViewZ, hN, hMaterial, expectedPrevViewZ, viewZ, N, material))
+            {
+                historyColor = HistoryTexture.SampleLevel(ColorSampler, historyUv, 0).rgb;
                 const float4 hm = HistoryMomentsTexture.SampleLevel(ColorSampler, historyUv, 0);
                 historyMoments = hm.xy;
                 historyLength = hm.z;
@@ -551,24 +410,8 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
     // α = 1/min(履歴の長さ+1, 上限)。上限で止めるのは、止めないと動く物に追従できなくなるため。
     // 上限をTAAより短くするのは冒頭の「二重に掛けない」の通り。
     //
-    // 【上限は一律ではない(アンチラグ)】従来の newLength は「その画素の信号が変化したか」を
-    // 一切見ていなかった。だから遅れは上限が全画素へ一律に決めており、
-    // 灯を消しても (1-1/上限)^t で尾を引く(上限64なら10%まで2.5秒。61.7j.6)。
-    // 残差が大きい画素だけ上限を cap まで落とすことで、静穏な画素は長く累積してノイズを
-    // 下げたまま、変化した画素だけ短く追従させる。式と罠は下の AntiLagCap を参照
     const float maxFrames = max(Params1.y, 1.0f);
-    const bool antiLagOn = (Params3.w > 0.0f);
-    float cap = maxFrames;
-    float fire = 0.0f;
-    // ならした7x7平均。HistoryOutTexture.a へ負の値で持ち回る(番兵の規約は AntiLagCap)
-    float fastMu = 0.0f;
-    bool fastMuValid = false;
-    if (antiLagOn && historyValid)
-    {
-        cap = AntiLagCap(pixel, historyUv, maxFrames, fire, fastMu);
-        fastMuValid = true;
-    }
-    const float newLength = historyValid ? min(historyLength + 1.0f, cap) : 1.0f;
+    const float newLength = historyValid ? min(historyLength + 1.0f, maxFrames) : 1.0f;
     const float alpha = 1.0f / newLength;
 
     const float3 blended = historyValid ? lerp(historyColor, current, alpha) : current;
@@ -587,10 +430,7 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 【履歴が短い画素は時間分散を信用しない】その場の7x7で代用する。
         // これをやらないと、遮蔽が外れた直後(disocclusion)の画素が
         // 「分散0 = 信用できる」と誤判定され、ノイズがそのまま残る。
-        // アンチラグが発火して cap が 4 未満へ落ちた画素もここへ来る ―― 発火画素は
-        // ノイズが多いので a-trous に強く混ぜさせるのは望ましい結合。
-        // 【ここでだけ計算する】OFF のときは従来と同じ場所・同じ順序で計算させ、
-        // 「OFF なら変更前とバイト同一」を保つ(ホイストすると丸めの順序が変わる)
+        // 【ここでだけ計算する】この位置と加算順を変えると丸めの順序が変わる。
         const float2 spatialMoments = SpatialLuminanceMoments(pixel, outputSize, demod);
         variance = max(spatialMoments.y - spatialMoments.x * spatialMoments.x, 0.0f);
     }
@@ -598,14 +438,9 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
     OutputTexture[pixel] = float4(blended, 1.0f);
     OutputMomentsTexture[pixel] = float4(moments, newLength, variance);
     // 翌フレームの履歴。pingはà-trousが上書きするので独立に残す。
-    // .wは翌フレームの時間累積では読まない(分散はそのフレームで作り直す)。
-    // 【アンチラグ有効時は .w に発火の度合い(0〜1)を写す】読み手が無い枠なので、
-    // 新しいテクスチャを足さずに -dumptex MegaLightsDenoiseMoments で発火マップが取れる。
-    // OFF のときは従来どおり分散(=ping と同じ値)を書き、バイト同一を保つ
-    // .a は読み手が無い枠。アンチラグが走ったフレームだけ「ならした7x7平均」を負の値で置く。
-    // それ以外(OFF・履歴無効)は従来どおり 1.0 を書き、バイト同一を保つ
-    HistoryOutTexture[pixel] = float4(blended, fastMuValid ? -fastMu : 1.0f);
-    HistoryMomentsOutTexture[pixel] = float4(moments, newLength, antiLagOn ? fire : variance);
+    // .wは翌フレームの時間累積では読まない。分散を ping と同じ値で残す。
+    HistoryOutTexture[pixel] = float4(blended, 1.0f);
+    HistoryMomentsOutTexture[pixel] = float4(moments, newLength, variance);
 }
 
 // ---------------------------------------------------------------------------

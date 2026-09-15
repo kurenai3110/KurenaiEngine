@@ -25,9 +25,9 @@
 // C++側 Passes::MegaLightsVisibleListConstants と並びを一致させること
 cbuffer MegaLightsVisibleListConstants : register(b0)
 {
-    // x=有効タイル数X, y=同Y, z=1タイルあたりのリスト容量, w=1画素あたりの標本数
+    // x=タイル数X, y=同Y, z=1タイルあたりのリスト容量, w=1画素あたりの標本数
     uint4 ListParams;
-    // x=レンダー解像度の幅, y=同 高さ, zw=タイル格子の画素オフセット(各0〜15)
+    // x=レンダー解像度の幅, y=同 高さ, zw=未使用
     uint4 ListSize;
 };
 
@@ -83,9 +83,7 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadID, 
     }
     GroupMemoryBarrierWithGroupSync();
 
-    // 候補プールとまったく同じ格子規約([tile*16-offset, tile*16-offset+16))。
-    // ずれると別タイルのリストを提案分布に混ぜることになる
-    const int2 tilePixelOrigin = int2(groupID.xy * 16u) - int2(ListSize.zw);
+    const int2 tilePixelOrigin = int2(groupID.xy * 16u);
     const int2 pixel = tilePixelOrigin + int2(groupThreadID.xy);
 
     if (all(pixel >= int2(0, 0)) && all(pixel < int2(renderSize)))

@@ -1098,8 +1098,6 @@ namespace Kurenai
             return m_MegaLightsPasses->HasCommonPipelineStates() && m_MegaLightsPasses->HasShadePipelineState() &&
                    m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
                    m_RenderTargets.MegaLightsReservoirBuffer != nullptr &&
-                   m_RenderTargets.MegaLightsBoostTexture != nullptr &&
-                   m_RenderTargets.MegaLightsBoostCountBuffer != nullptr &&
                    m_RenderTargets.MegaLightsHistoryGuide[0] != nullptr &&
                    m_RenderTargets.GBufferVelocity != nullptr;
         }
@@ -1110,8 +1108,6 @@ namespace Kurenai
             return m_MegaLightsPasses->HasCommonPipelineStates() && m_MegaLightsPasses->HasResolvePipelineState() &&
                    m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
                    m_RenderTargets.MegaLightsReservoirBuffer != nullptr &&
-                   m_RenderTargets.MegaLightsBoostTexture != nullptr &&
-                   m_RenderTargets.MegaLightsBoostCountBuffer != nullptr &&
                    m_RenderTargets.GBufferVelocity != nullptr &&
                    m_RenderTargets.MegaLightsHistoryGuide[0] != nullptr;
         }
@@ -1711,15 +1707,6 @@ namespace Kurenai
             "MegaLightsのファイアフライのクランプを設定しました: " + std::to_string(k));
     }
 
-    void KurenaiEngine3D::SetMegaLightsDenoiseHistoryCatmullRom(bool enabled)
-    {
-        m_Settings.MegaLights.DenoiseHistoryCatmullRom = enabled;
-        Core::Logger::Info(
-            "KurenaiEngine3D",
-            std::string("MegaLightsのデノイザの履歴の再サンプリングを設定しました: ") +
-                (enabled ? "Catmull-Rom" : "バイリニア(従来)"));
-    }
-
     void KurenaiEngine3D::SetMegaLightsDenoiseHistory4Tap(bool enabled)
     {
         m_Settings.MegaLights.DenoiseHistory4Tap = enabled;
@@ -1729,33 +1716,21 @@ namespace Kurenai
                 (enabled ? "バイリニア2x2の4タップ" : "最近傍1タップ(従来)"));
     }
 
-    void KurenaiEngine3D::SetMegaLightsDenoiseAntiLag(int enabled, float t0, float t1, int fastFrames)
+    void KurenaiEngine3D::SetMegaLightsDenoiseMotionCompensatedDepth(int enabled)
     {
-        auto& settings = m_Settings.MegaLights;
-        if (enabled >= 0)
-        {
-            settings.DenoiseAntiLag = (enabled != 0);
-        }
-        // 0以下は「既定のまま」。負や0を通すと smoothstep の両端が潰れて全画素が発火する
-        if (t0 > 0.0f && std::isfinite(t0)) settings.DenoiseAntiLagT0 = t0;
-        if (t1 > 0.0f && std::isfinite(t1)) settings.DenoiseAntiLagT1 = t1;
-        if (fastFrames > 0) settings.DenoiseAntiLagFastFrames = std::min(fastFrames, 64);
-        // 相対変化は [0,1] の量なので、両端もその範囲に収める
-        settings.DenoiseAntiLagT0 = std::clamp(settings.DenoiseAntiLagT0, 0.0f, 1.0f);
-        settings.DenoiseAntiLagT1 = std::clamp(settings.DenoiseAntiLagT1, 0.0f, 1.0f);
-        if (settings.DenoiseAntiLagT1 <= settings.DenoiseAntiLagT0)
+        if (enabled != 0 && enabled != 1)
         {
             Core::Logger::Warning(
                 "KurenaiEngine3D",
-                "MegaLightsのアンチラグは t1 > t0 でなければなりません(t0=" + std::to_string(settings.DenoiseAntiLagT0)
-                + ", t1=" + std::to_string(settings.DenoiseAntiLagT1) + ")。t1 を min(t0+0.1, 1) へ丸めます");
-            settings.DenoiseAntiLagT1 = std::min(settings.DenoiseAntiLagT0 + 0.1f, 1.0f);
+                "MegaLightsの履歴深度のカメラ移動補正は0または1で指定します。既定のままにします: " +
+                    std::to_string(enabled));
+            return;
         }
+        m_Settings.MegaLights.DenoiseMotionCompensatedDepth = (enabled != 0);
         Core::Logger::Info(
             "KurenaiEngine3D",
-            std::string("MegaLightsのデノイザのアンチラグを設定しました: ") + (settings.DenoiseAntiLag ? "有効" : "無効")
-            + " (t0=" + std::to_string(settings.DenoiseAntiLagT0) + ", t1=" + std::to_string(settings.DenoiseAntiLagT1)
-            + ", fastFrames=" + std::to_string(settings.DenoiseAntiLagFastFrames) + ")");
+            std::string("MegaLightsの履歴深度のカメラ移動補正を設定しました: ") +
+                (enabled != 0 ? "有効" : "無効(従来)"));
     }
 
     void KurenaiEngine3D::SetMegaLightsDenoiseSigmaLuminance(float sigma)
@@ -1915,34 +1890,6 @@ namespace Kurenai
                 " にしました(影レイの本数も同じ数になります)");
     }
 
-    void KurenaiEngine3D::SetMegaLightsQuadBoost(int samples, int mode)
-    {
-        // 負の値は「既定のまま」。CLIで片方だけ指定できるよう項目ごとに扱う。
-        if (samples >= 0)
-        {
-            m_Settings.MegaLights.QuadBoostSamples = samples;
-            Core::Logger::Info(
-                "KurenaiEngine3D",
-                "MegaLightsのクアッドブースト標本数を " + std::to_string(samples) + " にしました");
-        }
-
-        if (mode >= 0)
-        {
-            if (mode < 1 || mode > 3)
-            {
-                Core::Logger::Warning(
-                    "KurenaiEngine3D",
-                    "MegaLightsのクアッドブーストモードが範囲外のため無視します: " +
-                        std::to_string(mode) + " (1〜3)");
-                return;
-            }
-            m_Settings.MegaLights.QuadBoostMode = mode;
-            Core::Logger::Info(
-                "KurenaiEngine3D",
-                "MegaLightsのクアッドブーストモードを " + std::to_string(mode) + " にしました");
-        }
-    }
-
     void KurenaiEngine3D::SetMegaLightsVisibleList(int enabled, int capacity, float mix)
     {
         // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
@@ -2012,41 +1959,6 @@ namespace Kurenai
             "KurenaiEngine3D",
             "MegaLightsの候補プールの容量を " + std::to_string(m_Settings.MegaLights.TilePoolCapacity) +
                 " にしました");
-    }
-
-    void KurenaiEngine3D::SetMegaLightsTileJitter(int mode)
-    {
-        // 負の値は「既定のまま」。未指定時も現在値を起動ログへ残すためreturnしない
-        if (mode >= 0)
-        {
-            if (mode > 2)
-            {
-                Core::Logger::Warning(
-                    "KurenaiEngine3D",
-                    "MegaLightsのタイル格子ジッターのモードが範囲外のため無視します: " +
-                        std::to_string(mode) + " (0〜2)");
-            }
-            else
-            {
-                m_Settings.MegaLights.TileJitterMode = mode;
-            }
-        }
-
-        if (m_Settings.MegaLights.TileJitterMode == 1)
-        {
-            Core::Logger::Info(
-                "KurenaiEngine3D",
-                "MegaLightsのタイル格子ジッター: 有効 (m_History.FrameIndexのHalton(2,3)を16段階へ量子化)");
-        }
-        else if (m_Settings.MegaLights.TileJitterMode == 2)
-        {
-            Core::Logger::Info(
-                "KurenaiEngine3D", "MegaLightsのタイル格子ジッター: 有効 (検証用オフセット(0,0)固定)");
-        }
-        else
-        {
-            Core::Logger::Info("KurenaiEngine3D", "MegaLightsのタイル格子ジッター: 無効");
-        }
     }
 
     void KurenaiEngine3D::SetMegaLightsTilePoolBilinear(int mode)
@@ -2497,12 +2409,12 @@ namespace Kurenai
                 {
                     const uint64_t visibleListBytes =
                         static_cast<uint64_t>(sizeof(uint32_t)) * kMegaLightsVisibleListStride *
-                        (m_RenderTargets.LightTileCountX + 1u) * (m_RenderTargets.LightTileCountY + 1u);
+                        m_RenderTargets.LightTileCountX * m_RenderTargets.LightTileCountY;
                     Core::Logger::Info(
                         "KurenaiEngine3D",
                         "MegaLights 可視灯リスト: タイル " +
-                        std::to_string(m_RenderTargets.LightTileCountX + 1u) + "x" +
-                        std::to_string(m_RenderTargets.LightTileCountY + 1u) + " / 容量上限 " +
+                        std::to_string(m_RenderTargets.LightTileCountX) + "x" +
+                        std::to_string(m_RenderTargets.LightTileCountY) + " / 容量上限 " +
                         std::to_string(kMegaLightsVisibleListCapacityMax) + " / " +
                         std::to_string(visibleListBytes * 2u / 1024u) + " KB (ping-pong 2本)");
                 }

@@ -25,8 +25,6 @@
                                               [--mask-max 1.5] [--mask-invert]
     python Tools/texdump_inspect.py outliers --truth <連番*.bin> --candidate <連番*.bin>
                                               [--ratio 10] [--abs-mult K] [--mask <連番*.bin>]
-    python Tools/texdump_inspect.py gateagree --boost <連番*.bin> --moments <連番*.bin>
-                                               [--mask-max 1.5]
     python Tools/texdump_inspect.py seqcheck  --left <連番*.bin> --right <連番*.bin>
     python Tools/texdump_inspect.py png    <dump.bin> -o out.png [--exposure F]
                                            [--channel rgb|r|g|b|a|len]
@@ -574,11 +572,9 @@ def cmd_noise(args):
     print("channel  : {}  tile={}  offset={},{}".format(args.channel, args.tile, offset[0], offset[1]))
     print_noise_summary(summary, args.lit_threshold)
     if args.offset_sweep:
-        # 【最大値が主役】格子をフレームごとにずらす手法を評価するとき、固定オフセットの
-        # タイル間は**必ず**下がる ―― 測る格子が相手の格子と合わなくなるだけで、
-        # 中身は何も良くなっていない。**全オフセットでの最大**なら、単なる位相のずれは
-        # どこかのオフセットで再整列するので動かず、ブロック構造が本当に壊れたときだけ下がる。
-        # 合成データで確認済み(格子固定 0.9866@(0,0) / 格子ジッタ 0.6994@(12,10)、画素stdは同等)。
+        # 【最大値が主役】固定オフセットのタイル間だけを見ると、測る格子の位相が相手と
+        # 合わないだけで値が下がる。全オフセットでの最大なら、どこかで再整列するため
+        # 単なる位相差に左右されず、ブロック構造そのものを評価できる。
         #
         # 刻みを粗くすると最大を取り逃がす(上の例の最大は t/4 刻みの格子に載っていない)ので、
         # 既定では全オフセットを見る。--sweep-step で粗くできるが、そのときは最大が
@@ -1781,34 +1777,6 @@ def cmd_outliers(args):
     return 0
 
 
-def cmd_gateagree(args):
-    boost_dumps, bidx, bfirst = load_dump_series(args.boost, "--boost")
-    moments_dumps, midx, mfirst = load_dump_series(args.moments, "--moments")
-    require_matching_series(bidx, bfirst, midx, mfirst, "--boostと--moments")
-    print("=== gateagree ===")
-    print_series_header("boost", len(boost_dumps), bidx, bfirst)
-    print_series_header("moments", len(moments_dumps), midx, mfirst)
-    print("条件     : boost.a > 0 と moments.z <= {:g}".format(args.mask_max))
-    for frame, (boost, moments) in enumerate(zip(boost_dumps, moments_dumps)):
-        boost_values = boost.as_float()
-        moments_values = moments.as_float()
-        if boost_values.shape[2] < 4:
-            raise SystemExit("--boost は alpha を持つ4チャンネルのダンプが必要です: {}".format(boost.path))
-        if moments_values.shape[2] < 3:
-            raise SystemExit("--moments は Moments.z を持つ3チャンネル以上のダンプが必要です: {}".format(moments.path))
-        left = boost_values[:, :, 3] > 0.0
-        right = moments_values[:, :, 2] <= args.mask_max
-        both_true = int((left & right).sum())
-        left_only = int((left & ~right).sum())
-        right_only = int((~left & right).sum())
-        both_false = int((~left & ~right).sum())
-        total = left.size
-        print("frame {:<6d} 両方真 {:,}  boostのみ {:,}  momentsのみ {:,}  両方偽 {:,}  一致率 {:.2f}%".format(
-            bidx[frame], both_true, left_only, right_only, both_false,
-            100.0 * (both_true + both_false) / total if total else 0.0))
-    return 0
-
-
 def cmd_seqcheck(args):
     """2組の連番が、ヘッダを除くペイロードでビット同一かを確かめる。
 
@@ -1892,15 +1860,14 @@ def cmd_selftest(args):
               "実際 {}".format([values.min(), np.median(values), values.mean(), values.max()]))
         check("非有限は0件", int(np.count_nonzero(~np.isfinite(values))) == 0)
 
-        # --- 1b. 新しい3物差し: synthと同じwrite_dumpで既知の連番を作り、通る例と止まる例を通す ---
-        print("1b. 履歴マスク / outliers / gateagree")
+        # --- 1b. 新しい2物差し: synthと同じwrite_dumpで既知の連番を作り、通る例と止まる例を通す ---
+        print("1b. 履歴マスク / outliers")
         import contextlib
         import io
 
         truth_paths = []
         candidate_paths = []
         moments_paths = []
-        boost_paths = []
         history_values = np.array([[1.0, 2.0], [1.0, 2.0]], dtype=np.float32)
         for frame in range(2):
             truth_rgba = np.ones((2, 2, 4), dtype=np.float32)
@@ -1909,13 +1876,10 @@ def cmd_selftest(args):
                 candidate_rgba[0, 0, :3] = 11.0  # ratio=10を確実に超える既知の外れ値
             moments_rgba = np.zeros((2, 2, 4), dtype=np.float32)
             moments_rgba[:, :, 2] = history_values
-            boost_rgba = np.zeros((2, 2, 4), dtype=np.float32)
-            boost_rgba[:, :, 3] = (history_values <= 1.5).astype(np.float32)
             for paths, array, name in (
                 (truth_paths, truth_rgba, "SelfTestTruth"),
                 (candidate_paths, candidate_rgba, "SelfTestCandidate"),
                 (moments_paths, moments_rgba, "MegaLightsDenoiseMoments"),
-                (boost_paths, boost_rgba, "SelfTestBoost"),
             ):
                 path = os.path.join(workdir, "{}_{}.bin".format(name, frame))
                 write_dump(path, array, name, 3, frame_index=frame)
@@ -1952,23 +1916,6 @@ def cmd_selftest(args):
                                              mask=None, mask_max=1.5))
         check("outliersは外れ値がない落ちる例を0件と数える",
               "合計      : 外れ値 0 / 8 (0.00%)" in clean_outlier_out.getvalue(), clean_outlier_out.getvalue())
-
-        gate_out = io.StringIO()
-        with contextlib.redirect_stdout(gate_out):
-            cmd_gateagree(argparse.Namespace(boost=boost_paths, moments=moments_paths, mask_max=1.5))
-        check("gateagreeは一致する既知のゲートを100%と数える",
-              gate_out.getvalue().count("一致率 100.00%") == 2, gate_out.getvalue())
-
-        bad_moments = os.path.join(workdir, "bad_moments.bin")
-        write_dump(bad_moments, moments_rgba, "MegaLightsDenoiseMoments", 3, frame_index=99)
-        try:
-            with contextlib.redirect_stdout(io.StringIO()):
-                cmd_gateagree(argparse.Namespace(boost=boost_paths, moments=[moments_paths[0], bad_moments], mask_max=1.5))
-        except SystemExit:
-            mismatch_stopped = True
-        else:
-            mismatch_stopped = False
-        check("gateagreeはFrameIndex不一致の落ちる例を停止する", mismatch_stopped)
 
         # --- 2. nan: where が件数と座標を返す ---
         print("2. nan:10")
@@ -2203,66 +2150,6 @@ def cmd_selftest(args):
               control_between < control_inner * 0.2,
               "タイル間 {:.6g} / タイル内 {:.6g}".format(control_between, control_inner))
 
-        # --- 10. 全オフセットの最大は「位相のずれ」で動かず、「格子を壊した」ときだけ下がる ---
-        #
-        # 【なぜこの対照が要るか】タイル格子をフレームごとにずらす手法を、固定オフセットの
-        # タイル間で評価すると**必ず改善して見える**。測る格子が相手と合わなくなるだけで、
-        # 中身は何も良くなっていない。評価に使う統計量が、位相のずれでは動かないことを
-        # 先に示しておく。示さずに掃引すると、物差しの側で外す。
-        print("10. 全オフセット最大は位相不変で、格子を壊したときだけ下がる")
-        # 【厳密な不変ではなく、端の欠けぶんだけずれる】オフセットを付けると完全なタイルの数が
-        # 減る(例: 64画素幅・タイル16なら 4個 → 3個)ため、中央値を取る母集団が変わる。
-        # 画像が小さいとこの影響が大きく出るので、端の欠けが相対的に小さい寸法で確かめる
-        tile10 = 16
-        size10 = 128
-        frames10 = 32
-        rng10 = np.random.default_rng(20260906)
-
-        def planted_series(jitter):
-            """タイル共通の成分を持つ系列。jitter=Trueならフレームごとに格子をずらす"""
-            out = []
-            for _ in range(frames10):
-                coarse = rng10.normal(0.0, 0.05, size=(size10 // tile10 + 2, size10 // tile10 + 2))
-                big = np.repeat(np.repeat(coarse, tile10, axis=0), tile10, axis=1)
-                if jitter:
-                    oy, ox = int(rng10.integers(0, tile10)), int(rng10.integers(0, tile10))
-                else:
-                    oy, ox = 0, 0
-                out.append(big[oy:oy + size10, ox:ox + size10]
-                           + rng10.normal(0.0, 0.01, size=(size10, size10)))
-            return np.asarray(out, dtype=np.float64)
-
-        def sweep_max(series):
-            best = -1.0
-            for oy in range(tile10):
-                for ox in range(tile10):
-                    value = noise_percentiles(summarize_noise(series, tile10, (oy, ox))["between_std"])[0]
-                    if value > best:
-                        best = value
-            return best
-
-        fixed_series = planted_series(False)
-        fixed_max = sweep_max(fixed_series)
-        # 全フレームを同じだけずらす = 純粋な位相のずれ。最大は動いてはいけない
-        shifted_max = sweep_max(np.roll(fixed_series, (5, 7), axis=(1, 2)))
-        jitter_series = planted_series(True)
-        jitter_max = sweep_max(jitter_series)
-
-        # 端のタイルが欠けるぶんだけ母集団が変わるので、厳密な不変にはならない。
-        # ジッタの効き(下の -15%以上)とは桁が違うことが要点
-        check("純粋な位相のずれでは全オフセット最大がほぼ動かない(相対3%以内)",
-              abs(shifted_max - fixed_max) / fixed_max < 0.03,
-              "固定 {:.6g} / 平行移動後 {:.6g}".format(fixed_max, shifted_max))
-        check("フレームごとに格子を振ると全オフセット最大が下がる",
-              jitter_max < fixed_max * 0.85,
-              "固定 {:.6g} / ジッタ {:.6g}".format(fixed_max, jitter_max))
-        # ジッタは「1枚あたりのノイズ量」を減らす手法ではない。総量が変わっていないことも見る
-        fixed_pixel = np.median(np.std(fixed_series, axis=0, ddof=1))
-        jitter_pixel = np.median(np.std(jitter_series, axis=0, ddof=1))
-        check("ジッタは画素ごとの時間stdの総量を変えない(相対20%以内)",
-              abs(jitter_pixel - fixed_pixel) / fixed_pixel < 0.2,
-              "固定 {:.6g} / ジッタ {:.6g}".format(fixed_pixel, jitter_pixel))
-
         # --- 11〜15. 移動中の物差し: 遅れ・ノイズ・ぼけが互いに化けないこと ---
         #
         # 【broadband なパターンを使う理由】単一周波数の縞を等速で流すと、
@@ -2489,12 +2376,6 @@ def main(argv):
     p.add_argument("--mask", nargs="+", help="MegaLightsDenoiseMoments の連番")
     p.add_argument("--mask-max", type=float, default=1.5, help="Moments.z の上限（既定1.5）")
     p.set_defaults(func=cmd_outliers)
-
-    p = sub.add_parser("gateagree", help="boost alpha と Moments.z のゲート一致率を数える")
-    p.add_argument("--boost", nargs="+", required=True, help="boost の連番")
-    p.add_argument("--moments", nargs="+", required=True, help="MegaLightsDenoiseMoments の連番")
-    p.add_argument("--mask-max", type=float, default=1.5, help="Moments.z の上限（既定1.5）")
-    p.set_defaults(func=cmd_gateagree)
 
     p = sub.add_parser("seqcheck", help="2組の連番がペイロードでビット同一かを確かめる")
     p.add_argument("--left", nargs="+", required=True)
