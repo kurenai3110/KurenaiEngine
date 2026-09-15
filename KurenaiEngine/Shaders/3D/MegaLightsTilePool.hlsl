@@ -73,15 +73,6 @@ RWStructuredBuffer<uint> TilePool : register(u0);
 // **C++側 KurenaiEngine3D.cpp の kMaxLights と必ず同じ値にすること**
 static const uint kMegaLightsMaxLights = 1024u;
 
-// 届いたライトの重みに与える下限。
-//
-// 【これは効率の調整ではなく正しさの要件】重みが厳密に0になった灯は、そのタイルでは
-// **どのピクセルからも決して選ばれない**。届いているのに選ばれない灯があると、
-// 期待値が全灯評価と一致しなくなる(=バイアス)。距離減衰は Range の境界で厳密に0へ
-// 落ちるため、AABBで距離を過大に見積もった場合などに0が出うる。届くと判定した灯には
-// 必ず正の重みを与える
-static const float kMinCandidateWeight = 1e-8f;
-
 // 無効な候補スロットに入れるライト番号
 static const uint kInvalidLightIndex = 0xFFFFFFFFu;
 
@@ -109,12 +100,6 @@ uint HashUint(uint x)
 float UintToUnitFloat(uint x)
 {
     return float(x) * 2.3283064365e-10f; // uintの最大値で割って[0,1)へ
-}
-
-// 相対輝度。ライトの色から「どれくらい効きそうか」を1つの数にするために使う
-float Luminance(float3 c)
-{
-    return dot(c, float3(0.2126f, 0.7152f, 0.0722f));
 }
 
 [numthreads(16, 16, 1)]
@@ -202,32 +187,16 @@ void CSMain(
     {
         const GPULight light = Lights[lightIndex];
 
+        // 【重みの式は TileLightCulling.hlsli に1本だけ置いてある】読み手側の
+        // 確率的バイリニア参照(MegaLightsInitialSample.hlsl)が、隣のタイルについて
+        // **同じ関数**を呼んで q_j(y) を組み立てる。ここへ式を書き戻してはいけない
         float3 viewCenter;
         float radius;
-        float weight = 0.0f;
-        if (IsLightVisibleInTile(light, View, frustum, viewCenter, radius))
+        ComputeLightBoundingSphere(light, View, viewCenter, radius);
+        const float weight =
+            TileLightCandidateWeight(light, viewCenter, radius, frustum, aabbMin, aabbMax);
+        if (weight > 0.0f)
         {
-            // 【法線を使ってはいけない】タイルの中でピクセルごとに法線が違うため、法線に依存した
-            // 重みにすると「代表法線からは見えないが、あるピクセルからは見える」灯を落としてしまう。
-            // ここで使ってよいのは、そのタイルのどのピクセルにも共通する量だけ
-            const float intensity = Luminance(light.ColorRange.rgb);
-
-            float atten = 1.0f;
-            if ((uint)light.PositionType.w != 0u)
-            {
-                // タイルを包むAABB上で最も光源に近い点までの距離。錐台そのものより近く出る
-                // (= 減衰を強めに見積もる)ので、届く灯を取りこぼす方向には倒れない
-                const float3 closest = clamp(viewCenter, aabbMin, aabbMax);
-                const float3 toLight = viewCenter - closest;
-                // 【向きを使えないので上界を取る】ここは View 空間で、しかもタイルの中で
-                // 画素ごとに位置も法線も違う。エミッシブ光源の余弦ローブは方向に依存するため、
-                // 最大値((1-κ)/4 + κ)を掛ける ―― 過小に見積もると届く灯を取りこぼす
-                atten = LightAttenuationUpperBound(
-                    (uint)light.PositionType.w, dot(toLight, toLight), light.ColorRange.w,
-                    light.Params.z, light.Params.w);
-            }
-
-            weight = max(intensity * atten, kMinCandidateWeight);
             partialSum += weight;
             partialCount += 1u;
         }
