@@ -84,6 +84,18 @@ namespace Kurenai
             // 整定待ちが済んだか。摂動を効かせる判定にエンジンが使う
             uint32_t GetAccumWarmupFrames() const { return m_MegaLightsAccumWarmupFrames; }
 
+            // デノイザの履歴の**今フレームの書き込み先**の添字。ダンプの表が引く。
+            //
+            // 【「今フレームの書き込み先」で確定している】AdvanceDenoiseHistory() による反転は
+            // ResolveTextureDumps() より後に呼ばれる(KurenaiEngine3D.h の AdvanceFrameHistory の
+            // 規約と、KurenaiEngine3D.cpp の呼び出し順)。したがって TAAHistory / TAAHistoryPrev と
+            // まったく同じ扱いでよい。
+            //
+            // 【デノイザが走らなかったフレームは反転しない】AdvanceDenoiseHistory(false) は
+            // 添字を据え置く。-megalightsdenoise 0 では Moments と MomentsPrev が同じ絵を
+            // 指し続けるが、**これは正しい挙動であって配線のバグではない**
+            uint32_t GetDenoiseHistoryIndex() const { return m_MegaLightsDenoiseHistoryIndex; }
+
         private:
             IPassHost& m_Engine;
 

@@ -17,14 +17,16 @@
 namespace Kurenai::Passes
 {
         // 【実行時に振れる。ここは確保の上限】1タイルの抽出数Kは設定が持ち、シェーダへは
-        // 定数バッファで渡している。バッファの確保だけがコンパイル時の上限を要る
-        inline constexpr uint32_t kMegaLightsTilePoolCapacity = 128;
+        // 定数バッファで渡している。確保は1タイルあたり(6 + 2K) uintで、Kはレイの本数を増やさず
+        // 出力バッファの容量だけを増やす
+        inline constexpr uint32_t kMegaLightsTilePoolCapacity = 512;
         // Kの下限。これを下回るとタイルに届く灯を代表できない
         inline constexpr int32_t kMegaLightsTilePoolMinCapacity = 8;
-        // 1画素あたりの標本数の上限。リザーババッファはこの倍数まで太る
-        //(16バイト x 画素数 x 標本数。2560x1440・4本で236MB)ので、際限なく上げさせない。
+        // 1画素あたりの標本数の上限。リザーバ1本は16バイト x 画素数 x 標本数で、2560x1440では
+        // 1標本あたり約59MB、上限16標本では約944MBになる。同サイズのリザーバは初期・空間再利用の
+        // ping-pong・時間履歴の計5本を確保するため、実際の確保量はさらに大きい。
         // クアッド層化は4層なので、4を超えると層の割り当てが一巡して効きが鈍る
-        inline constexpr int32_t kMegaLightsMaxSamplesPerPixel = 4;
+        inline constexpr int32_t kMegaLightsMaxSamplesPerPixel = 16;
 
         // タイルライトカリングのタイルサイズ(1辺のピクセル数)。
         // LightCulling.hlsl の kTileSize および numthreads と必ず一致させること
@@ -98,8 +100,23 @@ namespace Kurenai::Passes
             // x=à-trousのステップ幅, y=時間累積の上限フレーム数,
             // z=輝度のエッジ停止の強さ, w=法線のエッジ停止の指数
             DirectX::XMFLOAT4 Params1;
-            // x=深度のエッジ停止の強さ, yzw=未使用
+            // x=深度のエッジ停止の強さ, y=ファイアフライのクランプ強さ(0で無効),
+            // z=前フレームの幾何(履歴ガイド)が使えるか(0なら現フレームのG-Bufferで代用),
+            // w=履歴の色を引くときの再サンプリング(0=バイリニア / 1=Catmull-Rom)
+            //
+            // 【この行はかつて「yzw=未使用」と嘘を書いていた】y と z は実際には使われており、
+            // HLSL側の宣言だけが正しかった。コメントを契約として使うコードベースなので、
+            // ここがずれていると次の改修が空き枠だと思って y や z を潰す
             DirectX::XMFLOAT4 Params2;
+            // x=履歴の妥当性を何タップで判定するか(0=最近傍1タップ(従来) / 1=バイリニア2x2の4タップ),
+            // y=アンチラグの相対変化の smoothstep 下端 t0, z=同 上端 t1,
+            // w=アンチラグの短い EMA の長さ[フレーム](0で無効)
+            //
+            // 【なぜ足したか】履歴の**色**はバイリニアで4タップ混ぜるのに、その4タップが
+            // 妥当かどうかは最近傍1点でしか見ていなかった。帰結は2つとも実害で、
+            // (1)1点だけがシルエットの向こう側だと履歴全体を棄却する(本当は妥当なのに捨てる)
+            // (2)1点が通れば残り3タップが別の面でも 3/4 の重みで色が入る
+            DirectX::XMFLOAT4 Params3;
         };
         // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
         // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
@@ -111,7 +128,10 @@ namespace Kurenai::Passes
         static_assert(offsetof(MegaLightsDenoiseConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
         static_assert(offsetof(MegaLightsDenoiseConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
         static_assert(offsetof(MegaLightsDenoiseConstants, Params2) == 32, "Params2 のレイアウトが変わっている");
-        static_assert(sizeof(MegaLightsDenoiseConstants) == 48, "MegaLightsDenoiseConstants の総サイズが変わっている");
+        // Params3 は履歴の妥当性判定のタップ数を載せるために**意図して足した**。
+        // 通すために期待値を書き換えたのではなく、動かしたことの記録としてここを更新している
+        static_assert(offsetof(MegaLightsDenoiseConstants, Params3) == 48, "Params3 のレイアウトが変わっている");
+        static_assert(sizeof(MegaLightsDenoiseConstants) == 64, "MegaLightsDenoiseConstants の総サイズが変わっている");
 
         // MegaLightsReference.hlsl側のcbuffer MegaLightsConstantsと一致させる必要がある
         struct alignas(16) MegaLightsConstants

@@ -12,6 +12,7 @@
 #include "Core/StringUtil.h"
 // パス群のカウンタを m_XxxPasses->Get...() で読むため、前方宣言では足りない
 #include "../Passes/GeometryPasses.h"
+#include "../Passes/MegaLightsPasses.h"
 #include "../Passes/ShadowPasses.h"
 #include "RenderDumpService.h"
 
@@ -21,8 +22,20 @@
 // (宣言は KurenaiEngine3D.h のまま)
 namespace Kurenai
 {
+    namespace
+    {
+        // MegaLights のパス群が作られていない環境(DX11・非DXR・PSO未生成)では
+        // 添字を引けないので0を返す。**表のエントリ自体は載せる** ―― 中身がnullptrでも
+        // 「名前が無い」と「今は作られていない」を呼び出し側が区別できるようにするため
+        uint32_t DenoiseHistoryIndexOf(const Passes::MegaLightsPasses* passes)
+        {
+            return passes != nullptr ? passes->GetDenoiseHistoryIndex() : 0u;
+        }
+    }
+
     std::vector<KurenaiEngine3D::DumpableTexture> KurenaiEngine3D::BuildDumpableTextureTable() const
     {
+        const uint32_t denoiseHistoryIndex = DenoiseHistoryIndexOf(m_MegaLightsPasses.get());
         // 名前 -> 中間テクスチャ。AddTextureDump(起動オプション -dumptex)が引く。
         //
         // 【DebugViewの番号と共有しない】あちらは「表示モード」でテクスチャと1対1ではない
@@ -66,6 +79,26 @@ namespace Kurenai
             // MegaLights
             { "MegaLightsTexture", m_RenderTargets.MegaLightsTexture.get() },
             { "MegaLightsDenoisedTexture", m_RenderTargets.MegaLightsDenoisedTexture.get() },
+            // 将来は .a > 0 がブーストの予測ゲートのマスクになる。
+            { "MegaLightsBoost", m_RenderTargets.MegaLightsBoostTexture.get() },
+            // デノイザの履歴とモーメント。TAAHistory / TAAHistoryPrev とまったく同じ扱いで、
+            // 添字は**今フレームの書き込み先**(MegaLightsPasses::GetDenoiseHistoryIndex のコメント)。
+            //
+            // 【何のために出せるようにしたか】Moments の **z 成分が履歴長**で、履歴が棄却された
+            // 画素は 1.0 に落ちる(MegaLightsDenoise.hlsl の CSTemporalAccum)。つまりこれは
+            // 「時間方向の記憶が実際に何フレームぶん効いているか」「どこで履歴を捨てているか」の
+            // 直接の観測になる。いまはどこからも読めず、移動中の粒の原因を棄却へ帰属できない。
+            //
+            // 【デノイザが走らないフレームは添字が据え置かれる】-megalightsdenoise 0 では
+            // Moments と MomentsPrev が同じ絵を指し続ける。正しい挙動であって配線のバグではない
+            { "MegaLightsDenoiseHistory",
+              m_RenderTargets.MegaLightsDenoiseHistory[denoiseHistoryIndex].get() },
+            { "MegaLightsDenoiseHistoryPrev",
+              m_RenderTargets.MegaLightsDenoiseHistory[denoiseHistoryIndex ^ 1u].get() },
+            { "MegaLightsDenoiseMoments",
+              m_RenderTargets.MegaLightsDenoiseMoments[denoiseHistoryIndex].get() },
+            { "MegaLightsDenoiseMomentsPrev",
+              m_RenderTargets.MegaLightsDenoiseMoments[denoiseHistoryIndex ^ 1u].get() },
             // 影・Hi-Z
             { "ShadowCascadeArray", m_RenderTargets.ShadowCascadeArray.get() },
             { "HiZTexture", m_RenderTargets.HiZTexture.get() },

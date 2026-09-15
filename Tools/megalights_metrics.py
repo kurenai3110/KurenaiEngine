@@ -300,6 +300,12 @@ def cmd_strafe(args):
     print(f"+16階調以上 : {100.0 * over16 / total:.4f}%")
     print(f"p99.9       : {np.percentile(all_dev, 99.9):+.1f} 階調")
     print("\n【ノイズ下限34%】同一構成の2回でこれだけ動く。この幅より小さい差を改善と呼ばないこと(61.7g.7)")
+    print("\n【この指標はノイズと鮮鋭さを分離できない(61.7j.7)】局所コントラストを測っているので")
+    print("**ぼかせば必ず良くなり**、デノイザを通らない参照実装が最悪と出る。上振れしか数えないため")
+    print("残像にも反応しない。移動中の品質は、決定的なカメラ経路(-camerapath)で真値を作って")
+    print("  python Tools/texdump_inspect.py lag       --truth ... --candidate ...")
+    print("  python Tools/texdump_inspect.py pathnoise --truth ... --candidate ...")
+    print("を使うこと。ここは過去の数値の出所を辿れるように残してある。")
 
 
 def cmd_perf(args):

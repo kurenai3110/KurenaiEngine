@@ -59,6 +59,9 @@ Texture2D BRDFLUTTexture : register(t5);
 
 // 候補プール。レイアウトは MegaLightsTilePool.hlsl 冒頭を参照
 StructuredBuffer<uint> TilePool : register(t7);
+// デノイザと同じ再投影に使うモーションベクターと、前フレームの幾何ガイド。
+Texture2D VelocityTexture : register(t8);
+StructuredBuffer<MegaLightsHistoryGuide> HistoryGuide : register(t9);
 
 RWStructuredBuffer<MegaLightsReservoir> Reservoirs : register(u0);
 // 画素ごとの「遮蔽が確定した灯」のキャッシュ(0xFFFFFFFFで無し)。
@@ -70,6 +73,9 @@ RWStructuredBuffer<MegaLightsReservoir> Reservoirs : register(u0);
 // RISがほぼ毎フレーム引き直すので、遮蔽が解けた次のフレームには消える。
 // 履歴が無効なフレーム(解像度変更直後など)は読まずに上書きだけする
 RWStructuredBuffer<uint> BlockedLights : register(u1);
+// ブースト標本の項と件数。ゲート外・背景・空タイルは全経路でゼロを書く。
+RWTexture2D<float4> MegaLightsBoostTexture : register(u2);
+RWStructuredBuffer<uint> MegaLightsBoostCount : register(u3);
 
 #include "ShaderInterop/Common.hlsli"
 
@@ -117,7 +123,7 @@ float TraceLightVisibility(float3 rayOrigin, float3 L, float originBias, float d
     return (query.CommittedStatus() == COMMITTED_TRIANGLE_HIT) ? 0.0f : 1.0f;
 }
 
-// --- 候補プールの確率的バイリニア参照(Params5.z) ---
+// --- 候補プールの確率的バイリニア参照(Params6.w) ---
 //
 // 【何を直しているか】候補プールは16x16タイルごとに毎フレームK灯を抽選する。抽選の当たり外れは
 // **そのタイルの256画素すべてに共有される**ので、タイル粒度の乱数がそのままタイル形の
@@ -214,6 +220,307 @@ void WriteAllReservoirs(uint base, uint count, MegaLightsReservoir value)
     }
 }
 
+// 1スロットぶんの RIS と初期可視レイを実行する。
+// BlockedLights 自体は触らず、基底ループが読んだ値だけを受け取る。
+MegaLightsReservoir DrawSample(
+    uint sampleSlot, uint2 pixel, uint2 outputSize, MegaLightsPoolTile poolTiles[4],
+    uint poolTileCount, uint ownTileSlot, uint bilinearMode,
+    uint sampleCount, uint blockedLight,
+    float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo,
+    float metallic, float roughness, float translucency, SpecularEnergyContext energy,
+    out uint selectedLightIndex, out bool visible)
+{
+    // --- RIS: 候補プールから M 個引いて、寄与の大きさに比例する重みで1つ残す ---
+    // 【スロットの抽選だけ低食い違い量列にする】画素ごとの位相をブルーノイズ的に配り、
+    // 同じ画素の中では M 個が均等に散るようにする。周辺分布は一様のままなので
+    // 割り戻しも期待値も変わらない(MegaLightsCommon.hlsli の説明を参照)。
+    // 採用判定は白色のまま ―― あちらは M 回の判定の独立性を使っている。
+    // 標本番号を位相の次元として渡し、N本が同じ列を引かないようにする
+    const float slotPhase = MegaLightsPixelPhase(pixel, Params1.w, sampleSlot);
+    uint rngState = HashUint(pixel.x + pixel.y * outputSize.x + Params1.w * 0x9E3779B9u +
+                             sampleSlot * 0xB5297A4Du);
+
+    // --- 参照するタイルを b_j の確率で1つ選ぶ(確率的バイリニア参照) ---
+    // 【白色乱数にしないこと】隣接画素で離れる配り方でないと、タイル境界を溶かした先が
+    // また低周波になる。位相の次元は slotPhase(= sampleSlot)と衝突しないよう離す。
+    // 【粒度】画素ごと(モード2)に選ぶとばらけるが、クアッド層化(Params4.w)は
+    // タイルのスロットを2x2の4画素へ割り振るので、4人が別のプールを引くと層化が壊れる。
+    // クアッドごと(モード1)なら層化は保たれ、相関の単位が16x16から2x2まで落ちる。
+    // **既定はクアッドごと** ―― どちらが良いかは実測で決める
+    // 【標本ごとに引き直す】sampleSlot を次元に渡すので、N本が別のタイルを引いてさらにばらける
+    uint selectedTile = ownTileSlot;
+    if (poolTileCount > 1u)
+    {
+        const uint2 phasePixel = (bilinearMode == 2u) ? pixel : (pixel >> 1u);
+        const float tileRandom = MegaLightsPixelPhase(phasePixel, Params1.w, 64u + sampleSlot);
+        float cdf = 0.0f;
+        bool picked = false;
+        [unroll]
+        for (uint j = 0u; j < 4u; ++j)
+        {
+            cdf += poolTiles[j].BilinearWeight;
+            if (!picked && tileRandom < cdf)
+            {
+                selectedTile = j;
+                picked = true;
+            }
+        }
+        // picked が false のまま(浮動小数の丸めで最後まで超えなかった)なら
+        // ownTileSlot が残る。重みが必ず0.25以上あるので、確率0のタイルへは落ちない
+    }
+    const MegaLightsPoolTile pool = poolTiles[selectedTile];
+
+    // --- クアッド層化(手法3。Params4.w) ---
+    // 2x2クアッドの4画素へ候補スロットを1/4ずつ割り当て、クアッド全体で列挙させる。
+    // 【層化は「選んだタイル」の有効候補数で行う】自分のタイルの数で割ると、
+    // 背景タイルを選んだときに stratumCount が0になり、スロットの添字が確保外へ飛ぶ
+    const uint poolCandidates = pool.ValidCandidates;
+    const bool quadStratify = (Params4.w != 0u);
+    uint stratumBase = 0u;
+    uint stratumCount = poolCandidates;
+    if (quadStratify && poolCandidates >= 4u)
+    {
+        const uint2 quad = pixel >> 1u;
+        const uint lane = (pixel.x & 1u) | ((pixel.y & 1u) << 1u);
+        const uint rotation = HashUint(quad.x + quad.y * 0x9E3779B9u + Params1.w * 0x85EBCA6Bu) & 3u;
+        const uint stratum = (lane + rotation + sampleSlot) & 3u;
+        const uint width = poolCandidates >> 2u;
+        stratumBase = stratum * width;
+        // 最後の層は端数を引き受け、候補の定義域を欠けさせない
+        stratumCount = (stratum == 3u) ? (poolCandidates - stratumBase) : width;
+    }
+
+    float risWeightSum = 0.0f;
+    selectedLightIndex = 0xFFFFFFFFu;
+    float selectedTargetPdf = 0.0f;
+    visible = false;
+
+    // 【空のタイルを選んだときは1本も引かない】バイリニア参照では背景タイルを
+    // 引き当てうる。その標本は「M個の候補を検討して全部外した」のと同じ扱いになり、
+    // 下の棄却の枝が M = sampleCount のリザーバを書く(混合分布 q̄ は
+    // そのタイルの寄与を0として数えているので、期待値は変わらない)
+    const bool poolUsable = (poolCandidates > 0u) && (pool.SumW > 0.0f);
+
+    [loop]
+    for (uint m = 0u; poolUsable && m < sampleCount; ++m)
+    {
+        const float slotRandom = MegaLightsLowDiscrepancy1D(m, slotPhase);
+        const uint slot =
+            stratumBase + min((uint)(slotRandom * float(stratumCount)), stratumCount - 1u);
+        const uint lightIndex = TilePool[pool.Base + kMegaLightsTilePoolHeader + 2u * slot + 0u];
+        const float candidateWeight = asfloat(TilePool[pool.Base + kMegaLightsTilePoolHeader + 2u * slot + 1u]);
+        // 候補の中身にかかわらず採用判定の乱数を引き、画素ごとの列をずらさない
+        const float acceptRandom = NextRandom(rngState);
+
+        if (lightIndex == 0xFFFFFFFFu || candidateWeight <= 0.0f)
+        {
+            continue;
+        }
+        if (lightIndex == blockedLight)
+        {
+            continue;
+        }
+        const GPULight light = Lights[lightIndex];
+        const PunctualGeometry geometry = EvaluatePunctualGeometry(light, worldPos, N, translucency);
+        if (!geometry.Contributes)
+        {
+            continue;
+        }
+
+        // 目標関数。遮蔽は含めず、可視性は選択後の1本だけで求める
+        const float3 unshadowed = EvaluatePunctualContribution(
+            light, geometry, N, V, NdotV, albedo, metallic, roughness, translucency, energy, 1.0f);
+        const float targetPdf = Luminance(unshadowed);
+        if (targetPdf <= 0.0f)
+        {
+            continue;
+        }
+
+        // 提案分布の確率密度。プールは「一様枝 + 重み枝」の混合で引いている
+        // (MegaLightsTilePool.hlsl)ので、割り戻しも同じ混合式で行う
+        float sourcePdf;
+        if (poolTileCount == 1u)
+        {
+            // 従来経路。自分のタイルの提案確率そのもの。
+            // **重みはプールに書かれている値をそのまま使う**(再計算しない)ので、
+            // バイリニア参照を切ったときの出力は変更前とビット同一になる
+            sourcePdf = kMegaLightsUniformMixFraction / float(max(pool.ReachableCount, 1u)) +
+                        (1.0f - kMegaLightsUniformMixFraction) * (candidateWeight / pool.SumW);
+        }
+        else
+        {
+            // 確率的バイリニア参照。**選んだタイルの q_i(y) で割ってはいけない** ――
+            // q_i(y) = 0 の灯が存在するので定義域が欠けてバイアスになる。
+            // 混合分布 q̄(y) = Σ_j b_j q_j(y) で割ること(理由は MegaLightsPoolTile の説明)。
+            // 境界球はタイルに依らないので、4タイルぶんの前に1回だけ求める
+            float3 viewCenter;
+            float radius;
+            ComputeLightBoundingSphere(light, View, viewCenter, radius);
+            sourcePdf = 0.0f;
+            [unroll]
+            for (uint j = 0u; j < 4u; ++j)
+            {
+                if (poolTiles[j].BilinearWeight > 0.0f)
+                {
+                    sourcePdf += poolTiles[j].BilinearWeight *
+                                 MegaLightsTileSourcePdf(poolTiles[j], light, viewCenter, radius);
+                }
+            }
+            // 【0除算のガード】選んだタイルから引けた灯なので q̄ > 0 のはずだが、
+            // ここでNaNを出すと直接光→SceneColor→TAAの履歴まで壊れて復帰しない
+            if (sourcePdf <= 0.0f)
+            {
+                continue;
+            }
+        }
+        const float risWeight = targetPdf / sourcePdf;
+
+        risWeightSum += risWeight;
+        if (acceptRandom < risWeight / risWeightSum)
+        {
+            selectedLightIndex = lightIndex;
+            selectedTargetPdf = targetPdf;
+        }
+    }
+
+    if (selectedLightIndex == 0xFFFFFFFFu || selectedTargetPdf <= 0.0f || risWeightSum <= 0.0f)
+    {
+        MegaLightsReservoir rejected = MegaLightsMakeEmptyReservoir();
+        rejected.M = float(sampleCount);
+        selectedLightIndex = 0xFFFFFFFFu;
+        return rejected;
+    }
+
+    // 球光源で狙う点は選択ループの外で必ず2次元ぶん引く
+    const float2 sampleUV = float2(NextRandom(rngState), NextRandom(rngState));
+    visible = true;
+    if (Params0.w != 0u && Params2.w != 0u)
+    {
+        const GPULight selectedLight = Lights[selectedLightIndex];
+        if (LightCastsRaytracedShadow(selectedLight.Params.y))
+        {
+            const PunctualGeometry geometry =
+                EvaluatePunctualGeometry(selectedLight, worldPos, N, translucency);
+            if (geometry.Contributes)
+            {
+                const float slopeScale = 1.0f / max(dot(N, geometry.L), kMinSlopeScaleNdotL);
+                const float originBias =
+                    (kRayOriginBias + length(worldPos - CameraPosition.xyz) * kRayOriginBiasSlope) * slopeScale;
+                const float3 samplePos = MegaLightsLightSamplePosition(
+                    selectedLight.PositionType.xyz, selectedLight.Params.z,
+                    selectedLight.DirectionAngle.xyz, (uint)selectedLight.PositionType.w, sampleUV);
+                const float3 toSample = samplePos - worldPos;
+                const float sampleDist = length(toSample);
+                if (sampleDist > originBias)
+                {
+                    visible = TraceLightVisibility(
+                                  worldPos + N * originBias, toSample / sampleDist, originBias, sampleDist) > 0.0f;
+                }
+            }
+        }
+    }
+
+    if (!visible)
+    {
+        MegaLightsReservoir killed = MegaLightsMakeEmptyReservoir();
+        killed.IndexAndFlags = MegaLightsPackLightAndFlags(selectedLightIndex, false);
+        killed.SampleUV = MegaLightsPackSampleUV(sampleUV);
+        killed.M = float(sampleCount);
+        return killed;
+    }
+
+    MegaLightsReservoir reservoir;
+    reservoir.IndexAndFlags = MegaLightsPackLightAndFlags(selectedLightIndex, true);
+    reservoir.SampleUV = MegaLightsPackSampleUV(sampleUV);
+    reservoir.W = risWeightSum / (float(sampleCount) * selectedTargetPdf);
+    reservoir.M = float(sampleCount);
+    return reservoir;
+}
+
+// Initial からデノイザの履歴棄却を予測するため、同じ1タップ判定を使う。
+bool MegaLightsInitialHistoryTapValid(
+    int2 tapPixel, uint2 outputSize, float viewZ, float3 N, float2 material)
+{
+    const int2 clamped = clamp(tapPixel, int2(0, 0), int2(outputSize) - 1);
+    float hViewZ;
+    float3 hN;
+    float2 hMaterial;
+    bool hValid;
+    if ((Params5.w & 2u) != 0u)
+    {
+        const MegaLightsHistoryGuide guide = HistoryGuide[clamped.y * outputSize.x + clamped.x];
+        hViewZ = guide.ViewZ;
+        hN = OctDecode(MegaLightsUnpackNormalOct(guide.NormalOct));
+        MegaLightsUnpackMaterial(guide.Material, hMaterial.x, hMaterial.y);
+        hValid = (guide.ViewZ != 0.0f);
+    }
+    else
+    {
+        const float2 tapUv = (float2(clamped) + 0.5f) / float2(outputSize);
+        const float hDepth = DepthTexture.SampleLevel(DataSampler, tapUv, 0).r;
+        const float3 hWorldPos = ReconstructWorldPos(tapUv, hDepth);
+        hViewZ = (hDepth > 0.0f) ? mul(float4(hWorldPos, 1.0f), View).z : 0.0f;
+        hN = OctDecode(NormalTexture.SampleLevel(DataSampler, tapUv, 0).xy);
+        hMaterial = MaterialTexture.SampleLevel(DataSampler, tapUv, 0).rg;
+        hValid = (hDepth > 0.0f);
+    }
+    return hValid && MegaLightsGuideMatchesSurface(hViewZ, hN, hMaterial, viewZ, N, material);
+}
+
+bool MegaLightsInitialPredictsDenoiseRejection(
+    uint2 outputSize, float2 uv, float viewZ, float3 N, float2 material)
+{
+    if (Params5.y == 0u)
+    {
+        return false;
+    }
+    if (Params5.z == 3u)
+    {
+        return true;
+    }
+    // mode 2 の履歴長条件は Moments を Initial に束縛していないため、今回は mode 1 と同じ。
+    if ((Params5.w & 1u) == 0u)
+    {
+        return true;
+    }
+
+    const float2 velocity = VelocityTexture.SampleLevel(DataSampler, uv, 0).rg;
+    const float2 historyUv = uv - velocity;
+    if (!all(historyUv >= 0.0f) || !all(historyUv <= 1.0f))
+    {
+        return true;
+    }
+
+    if ((Params5.w & 4u) != 0u)
+    {
+        const float2 historyPixelF = historyUv * float2(outputSize) - 0.5f;
+        const float2 baseF = floor(historyPixelF);
+        const float2 frac2 = historyPixelF - baseF;
+        const int2 baseI = int2(baseF);
+        const float tapWeights[4] = {
+            (1.0f - frac2.x) * (1.0f - frac2.y),
+            frac2.x * (1.0f - frac2.y),
+            (1.0f - frac2.x) * frac2.y,
+            frac2.x * frac2.y,
+        };
+        const int2 tapOffsets[4] = { int2(0, 0), int2(1, 0), int2(0, 1), int2(1, 1) };
+        [unroll]
+        for (uint tap = 0u; tap < 4u; ++tap)
+        {
+            if (tapWeights[tap] > 0.0f &&
+                MegaLightsInitialHistoryTapValid(baseI + tapOffsets[tap], outputSize, viewZ, N, material))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    const int2 historyPixel =
+        clamp(int2(historyUv * float2(outputSize)), int2(0, 0), int2(outputSize) - 1);
+    return !MegaLightsInitialHistoryTapValid(historyPixel, outputSize, viewZ, N, material);
+}
+
 [numthreads(8, 8, 1)]
 void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 {
@@ -229,6 +536,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     const uint samplesPerPixel = max(Params5.x, 1u);
     const uint reservoirIndex = pixel.y * outputSize.x + pixel.x;
     const uint reservoirBase = reservoirIndex * samplesPerPixel;
+
+    // RHIにUAVクリアが無いため、有効画素は背景や空タイルを含め必ず初期化する。
+    MegaLightsBoostTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    MegaLightsBoostCount[reservoirIndex] = 0u;
 
     const float2 uv = (float2(pixel) + 0.5f) / float2(outputSize);
     const float depth = DepthTexture.SampleLevel(DataSampler, uv, 0).r;
@@ -249,6 +560,10 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float2 material = MaterialTexture.SampleLevel(DataSampler, uv, 0).rg;
     const float metallic = material.r;
     const float roughness = material.g;
+    const float viewZ = mul(float4(worldPos, 1.0f), View).z;
+
+    // このフレームの乱数を1つも引く前に、速度・履歴ガイド・G-Bufferだけでゲートを確定する。
+    const bool boostPixel = MegaLightsInitialPredictsDenoiseRejection(outputSize, uv, viewZ, N, material);
 
     const float3 V = normalize(CameraPosition.xyz - worldPos);
     const float NdotV = saturate(dot(N, V)) + 1e-5f;
@@ -264,10 +579,6 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     const uint candidateCount = Params1.z;
     const uint tileBase = MegaLightsTilePoolBase(tileCoord, Params1.x, candidateCount);
 
-    // 【ここで見るのは自分のタイルだけ】確率的バイリニア参照でも、この画素に寄与しうる灯は
-    // 必ず自分のタイルの定義域に入る(光源の境界球が自分のタイルの錐台+深度スラブに
-    // 触れないなら、その画素は光源の影響半径の外にいる)。自分のタイルが空なら
-    // どの隣のタイルを引いても寄与0の灯しか出てこない
     const float sumW = asfloat(TilePool[tileBase + 0u]);
     const uint validCandidates = TilePool[tileBase + 2u];
     const uint sampleCount = max(Params0.z, 1u);
@@ -290,7 +601,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
 
     // --- 参照する候補プールを決める(確率的バイリニア参照。既定は従来どおり自分のタイル固定) ---
     // 0=自分のタイル固定、1=2x2クアッドごとに1タイル、2=画素ごとに1タイル
-    const uint bilinearMode = Params5.z;
+    const uint bilinearMode = Params6.w;
     MegaLightsPoolTile poolTiles[4];
     uint poolTileCount = 1u;
     // 丸めで抽選が最後まで超えなかったときに落とす先。自分のタイルは重みが必ず0.25以上ある
@@ -323,8 +634,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 自分のタイルは、各軸で補間係数が0.5以上なら +1 側にいる(上の格子の作り方から)
         ownTileSlot = ((frac2.x >= 0.5f) ? 1u : 0u) | (((frac2.y >= 0.5f) ? 1u : 0u) << 1u);
 
-        // タイル数はジッター有効時に +1 されている(Params1.x / Params5.y)
-        const int2 maxTile = int2(int(max(Params1.x, 1u)) - 1, int(max(Params5.y, 1u)) - 1);
+        // タイル数はジッター有効時に +1 されている(Params1.x / Params6.z)
+        const int2 maxTile = int2(int(max(Params1.x, 1u)) - 1, int(max(Params6.z, 1u)) - 1);
 
         [unroll]
         for (uint j = 0u; j < 4u; ++j)
@@ -384,192 +695,17 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     for (uint sampleSlot = 0u; sampleSlot < samplesPerPixel; ++sampleSlot)
     {
         const bool ownsCache = (sampleSlot == 0u);
+        uint selectedLightIndex;
+        bool visible;
+        const MegaLightsReservoir reservoir = DrawSample(
+            sampleSlot, pixel, outputSize, poolTiles, poolTileCount, ownTileSlot, bilinearMode,
+            sampleCount,
+            blockedLight, worldPos, N, V, NdotV, albedo, metallic, roughness, translucency, energy,
+            selectedLightIndex, visible);
 
-        // --- RIS: 候補プールから M 個引いて、寄与の大きさに比例する重みで1つ残す ---
-        // 【スロットの抽選だけ低食い違い量列にする】画素ごとの位相をブルーノイズ的に配り、
-        // 同じ画素の中では M 個が均等に散るようにする。周辺分布は一様のままなので
-        // 割り戻しも期待値も変わらない(MegaLightsCommon.hlsli の説明を参照)。
-        // 採用判定は白色のまま ―― あちらは M 回の判定の独立性を使っている。
-        // 標本番号を位相の次元として渡し、N本が同じ列を引かないようにする
-        const float slotPhase = MegaLightsPixelPhase(pixel, Params1.w, sampleSlot);
-        uint rngState = HashUint(pixel.x + pixel.y * outputSize.x + Params1.w * 0x9E3779B9u +
-                                 sampleSlot * 0xB5297A4Du);
-
-        // --- 参照するタイルを b_j の確率で1つ選ぶ(確率的バイリニア参照) ---
-        // 【白色乱数にしないこと】隣接画素で離れる配り方でないと、タイル境界を溶かした先が
-        // また低周波になる。位相の次元は slotPhase(= sampleSlot)と衝突しないよう離す。
-        // 【粒度】画素ごと(モード2)に選ぶとばらけるが、クアッド層化(Params4.w)は
-        // タイルのスロットを2x2の4画素へ割り振るので、4人が別のプールを引くと層化が壊れる。
-        // クアッドごと(モード1)なら層化は保たれ、相関の単位が16x16から2x2まで落ちる。
-        // **既定はクアッドごと** ―― どちらが良いかは実測で決める
-        // 【標本ごとに引き直す】sampleSlot を次元に渡すので、N本が別のタイルを引いてさらにばらける
-        uint selectedTile = ownTileSlot;
-        if (poolTileCount > 1u)
+        if (selectedLightIndex == 0xFFFFFFFFu)
         {
-            const uint2 phasePixel = (bilinearMode == 2u) ? pixel : (pixel >> 1u);
-            const float tileRandom = MegaLightsPixelPhase(phasePixel, Params1.w, 64u + sampleSlot);
-            float cdf = 0.0f;
-            bool picked = false;
-            [unroll]
-            for (uint j = 0u; j < 4u; ++j)
-            {
-                cdf += poolTiles[j].BilinearWeight;
-                if (!picked && tileRandom < cdf)
-                {
-                    selectedTile = j;
-                    picked = true;
-                }
-            }
-            // picked が false のまま(浮動小数の丸めで最後まで超えなかった)なら
-            // ownTileSlot が残る。重みが必ず0.25以上あるので、確率0のタイルへは落ちない
-        }
-        const MegaLightsPoolTile pool = poolTiles[selectedTile];
-
-        // --- クアッド層化(手法3。Params4.w) ---
-        // 2x2クアッドの4画素へ候補スロットを1/4ずつ割り当て、**クアッド全体でK個のスロットを
-        // 重複なく列挙させる**。手法3は4画素の標本を平均するので、4人が同じ灯を引いてしまうと
-        // 実効的な標本数が減る。
-        //
-        // 【周辺分布は変わらないので割り戻しはそのまま厳密】プールのK個のスロットは
-        // 混合分布(一様枝+重み枝)からの **i.i.d. 抽出** である(MegaLightsTilePool.hlsl)。
-        // スロットの中身を見ずに番号だけで選ぶ限り、どのスロットを引いても得られる灯の分布は
-        // 同じ混合分布のままで、下の sourcePdf の式は変わらない。
-        // 【MegaLightsCommon.hlsli が禁じている層化とは別物】あちらが禁じているのは
-        // 「1つのスロット列の中で (m + phase)/M と等間隔に取る」形で、周辺分布が層の中に
-        // 閉じてしまうために提案と割り戻しが食い違う。こちらは層の中で一様に引いている。
-        // 【レーンの割り当てはクアッドごと・フレームごとに回す】固定すると
-        // 「左上の画素はいつも先頭8スロットから引く」形になり、2画素周期の模様が焼き付く。
-        // 標本番号ぶんもずらして、同じ画素のN本が同じ層に固まらないようにする
-        // 【層化は「選んだタイル」の有効候補数で行う】自分のタイルの数で割ると、
-        // 背景タイルを選んだときに stratumCount が0になり、スロットの添字が確保外へ飛ぶ
-        const uint poolCandidates = pool.ValidCandidates;
-        const bool quadStratify = (Params4.w != 0u);
-        uint stratumBase = 0u;
-        uint stratumCount = poolCandidates;
-        if (quadStratify && poolCandidates >= 4u)
-        {
-            const uint2 quad = pixel >> 1u;
-            const uint lane = (pixel.x & 1u) | ((pixel.y & 1u) << 1u);
-            const uint rotation = HashUint(quad.x + quad.y * 0x9E3779B9u + Params1.w * 0x85EBCA6Bu) & 3u;
-            const uint stratum = (lane + rotation + sampleSlot) & 3u;
-            const uint width = poolCandidates >> 2u;
-            stratumBase = stratum * width;
-            // 最後の層は端数を引き受ける(K=32なら割り切れるが、Kを変えても定義域が欠けないように)
-            stratumCount = (stratum == 3u) ? (poolCandidates - stratumBase) : width;
-        }
-
-        float risWeightSum = 0.0f;
-        uint selectedLightIndex = 0xFFFFFFFFu;
-        float selectedTargetPdf = 0.0f;
-
-        // 【空のタイルを選んだときは1本も引かない】バイリニア参照では背景タイルを
-        // 引き当てうる。その標本は「M個の候補を検討して全部外した」のと同じ扱いになり、
-        // 下の棄却の枝が M = sampleCount のリザーバを書く(混合分布 q̄ は
-        // そのタイルの寄与を0として数えているので、期待値は変わらない)
-        const bool poolUsable = (poolCandidates > 0u) && (pool.SumW > 0.0f);
-
-        [loop]
-        for (uint m = 0u; poolUsable && m < sampleCount; ++m)
-        {
-            const float slotRandom = MegaLightsLowDiscrepancy1D(m, slotPhase);
-            // 層化しているときは自分の層の中だけを引く(層化していなければ全スロットが自分の層)
-            const uint slot =
-                stratumBase + min((uint)(slotRandom * float(stratumCount)), stratumCount - 1u);
-            const uint lightIndex = TilePool[pool.Base + kMegaLightsTilePoolHeader + 2u * slot + 0u];
-            const float candidateWeight = asfloat(TilePool[pool.Base + kMegaLightsTilePoolHeader + 2u * slot + 1u]);
-            // 採用判定の乱数は候補が無効でも必ず引いて状態を進める
-            // (引く回数がループの中身で変わると、ピクセルごとに乱数列の位相がずれる)
-            const float acceptRandom = NextRandom(rngState);
-
-            if (lightIndex == 0xFFFFFFFFu || candidateWeight <= 0.0f)
-            {
-                continue;
-            }
-            // 遮蔽が確定している灯は目標関数0として扱う(= 選ばない)。提案分布は
-            // 変えていないので「引いたが目標0で外れた」という正当な棄却で、期待値は不変
-            if (lightIndex == blockedLight)
-            {
-                continue;
-            }
-            const GPULight light = Lights[lightIndex];
-            const PunctualGeometry geometry = EvaluatePunctualGeometry(light, worldPos, N, translucency);
-            if (!geometry.Contributes)
-            {
-                continue;
-            }
-
-            // 目標関数。遮蔽は含めない(含めるにはレイを撃つことになりRISの意味が無くなる)
-            const float3 unshadowed = EvaluatePunctualContribution(
-                light, geometry, N, V, NdotV, albedo, metallic, roughness, translucency, energy, 1.0f);
-            const float targetPdf = Luminance(unshadowed);
-            if (targetPdf <= 0.0f)
-            {
-                continue;
-            }
-
-            // 提案分布の確率密度。プールは「一様枝 + 重み枝」の混合で引いている
-            // (MegaLightsTilePool.hlsl)ので、割り戻しも同じ混合式で行う。
-            // プールが w_i / SumW / 届いた灯数 を別々に持っているので厳密に再現できる
-            float sourcePdf;
-            if (poolTileCount == 1u)
-            {
-                // 従来経路。自分のタイルの提案確率そのもの。
-                // **重みはプールに書かれている値をそのまま使う**(再計算しない)ので、
-                // バイリニア参照を切ったときの出力は変更前とビット同一になる
-                sourcePdf = kMegaLightsUniformMixFraction / float(max(pool.ReachableCount, 1u)) +
-                            (1.0f - kMegaLightsUniformMixFraction) * (candidateWeight / pool.SumW);
-            }
-            else
-            {
-                // 確率的バイリニア参照。**選んだタイルの q_i(y) で割ってはいけない** ――
-                // q_i(y) = 0 の灯が存在するので定義域が欠けてバイアスになる。
-                // 混合分布 q̄(y) = Σ_j b_j q_j(y) で割ること(理由は MegaLightsPoolTile の説明)。
-                // 境界球はタイルに依らないので、4タイルぶんの前に1回だけ求める
-                float3 viewCenter;
-                float radius;
-                ComputeLightBoundingSphere(light, View, viewCenter, radius);
-                sourcePdf = 0.0f;
-                [unroll]
-                for (uint j = 0u; j < 4u; ++j)
-                {
-                    if (poolTiles[j].BilinearWeight > 0.0f)
-                    {
-                        sourcePdf += poolTiles[j].BilinearWeight *
-                                     MegaLightsTileSourcePdf(poolTiles[j], light, viewCenter, radius);
-                    }
-                }
-                // 【0除算のガード】選んだタイルから引けた灯なので q̄ > 0 のはずだが、
-                // ここでNaNを出すと直接光→SceneColor→TAAの履歴まで壊れて復帰しない
-                if (sourcePdf <= 0.0f)
-                {
-                    continue;
-                }
-            }
-            const float risWeight = targetPdf / sourcePdf;
-
-            risWeightSum += risWeight;
-            if (acceptRandom < risWeight / risWeightSum)
-            {
-                selectedLightIndex = lightIndex;
-                selectedTargetPdf = targetPdf;
-            }
-        }
-
-        // 【0除算のガードは必須】どの候補も寄与しないピクセルでここを割るとNaNが出て、
-        // 直接光→SceneColor→TAAの履歴まで壊れて復帰しなくなる
-        if (selectedLightIndex == 0xFFFFFFFFu || selectedTargetPdf <= 0.0f || risWeightSum <= 0.0f)
-        {
-            // 【M=0 で書いてはいけない ―― 空間再利用の明るい側の系統誤差の原因だった】
-            // 「M個引いて全部外した(全候補が背向き等)」は、遮蔽で殺した場合と同じく
-            // 「M個の候補を検討して寄与0だった」という正当な結果である。ここを M=0 にすると、
-            // 結合の分母(confidenceSum と、不偏化方式の Z)からこの画素の分だけが消える。
-            // 全部外すのは背向き候補率の高い画素に集中して起きるため、その周囲だけ分母が
-            // 系統的に過小になり、期待値が明るい側へ偏る(不偏性の条件は
-            // 「分母 = 選ばれた灯を生成しえた候補の M の合計」であり、
-            // 外した画素も生成しえた=確率が正だった以上、M ごと数えなければならない)
-            MegaLightsReservoir rejected = MegaLightsMakeEmptyReservoir();
-            rejected.M = float(sampleCount);
-            Reservoirs[reservoirBase + sampleSlot] = rejected;
+            Reservoirs[reservoirBase + sampleSlot] = reservoir;
             if (ownsCache && Params4.x == 0u)
             {
                 BlockedLights[reservoirIndex] = 0xFFFFFFFFu;
@@ -577,66 +713,13 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             continue;
         }
 
-        // --- 球光源: 狙う点を抽選してリザーバへ持たせる ---
-        // 【選択ループの外で引くこと】ループ内で引くと、候補が無効だった回数で乱数列の位相が
-        // ずれて画素ごとに相関が出る。半径0なら使われないが、引く回数は常に同じにしておく
-        const float2 sampleUV = float2(NextRandom(rngState), NextRandom(rngState));
-
-        // --- 初期可視レイ: 遮蔽されていたらここで殺す ---
-        // 殺すと「遮蔽で真っ黒になる灯」が近傍へ配られなくなる(RTXDI系の標準の段)。
-        // 【ただし空間再利用の不偏化(Z)とは両立しない】殺された画素の実効的な定義域は
-        // p̂ から p̂・可視率 へ変わるが、Zはレイを撃たずに可視率を判定できないため、
-        // 影の縁に暗い側の系統誤差が残る。Params2.w で切って測れるようにしてある。
-        // 【レイはここで標本ごとに1本ずつ撃つ】1画素あたりの影レイの本数は
-        // samplesPerPixel そのものになる
-        bool visible = true;
-        if (Params0.w != 0u && Params2.w != 0u)
-        {
-            const GPULight selectedLight = Lights[selectedLightIndex];
-            if (LightCastsRaytracedShadow(selectedLight.Params.y))
-            {
-                const PunctualGeometry geometry =
-                    EvaluatePunctualGeometry(selectedLight, worldPos, N, translucency);
-                if (geometry.Contributes)
-                {
-                    const float slopeScale = 1.0f / max(dot(N, geometry.L), kMinSlopeScaleNdotL);
-                    const float originBias =
-                        (kRayOriginBias + length(worldPos - CameraPosition.xyz) * kRayOriginBiasSlope) * slopeScale;
-                    // シェード側と同じ点へ撃つ(違う点を狙うと、殺す判断と影の階調が食い違う)
-                    const float3 samplePos = MegaLightsLightSamplePosition(
-                        selectedLight.PositionType.xyz, selectedLight.Params.z,
-                        selectedLight.DirectionAngle.xyz, (uint)selectedLight.PositionType.w, sampleUV);
-                    const float3 toSample = samplePos - worldPos;
-                    const float sampleDist = length(toSample);
-                    if (sampleDist > originBias)
-                    {
-                        visible = TraceLightVisibility(
-                                      worldPos + N * originBias, toSample / sampleDist, originBias, sampleDist) > 0.0f;
-                    }
-                }
-            }
-        }
-
         if (!visible)
         {
-            // 【どの灯を殺したかを残す ―― 全部消して書いてはいけない】
-            // W=0 なので結合の選択からは外れる(IsEmptyがtrue)が、
-            // 「この画素はこの灯への可視レイが遮蔽された(V=0 が確定した)」という事実を
-            // ライト番号と可視フラグで持ち回る。空間再利用の不偏化の分母(Z)は
-            // 「その候補が選ばれた灯を生成しえたか」を数えるが、殺された灯は
-            // その候補からは決して出て来られない。番号を消すと Z がそれを知れずに
-            // M を数え、殺しの起きる画素の周囲だけ分母が太って**暗い側の系統誤差**になる
-            // (実測 -3.6%。docs/ImplementationDetail.md 61.7f)。
-            // M は残す ―― 「M個の候補を検討した」ことは事実で、他の灯の Z には数えるべき
-            MegaLightsReservoir killed = MegaLightsMakeEmptyReservoir();
-            killed.IndexAndFlags = MegaLightsPackLightAndFlags(selectedLightIndex, false);
-            killed.SampleUV = MegaLightsPackSampleUV(sampleUV);
-            killed.M = float(sampleCount);
-            Reservoirs[reservoirBase + sampleSlot] = killed;
-            // 【点光源だけキャッシュする】球光源の殺しは球面上の1点への判定で、
-            // 灯そのものの遮蔽の証明にならない
+            // 殺された灯の番号はリザーバへ残す。キャッシュの所有者は基底のslot 0だけ。
+            Reservoirs[reservoirBase + sampleSlot] = reservoir;
             if (ownsCache)
             {
+                // 球光源の1点の遮蔽は灯全体の遮蔽を証明しないためキャッシュしない
                 if (Lights[selectedLightIndex].Params.z <= 0.0f)
                 {
                     BlockedLights[reservoirIndex] = selectedLightIndex;
@@ -649,22 +732,53 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             continue;
         }
 
-        // 可視レイを通った(または影を撃たない灯を選んだ)。キャッシュの灯と同じなら
-        // 「遮蔽が解けた」ことの証明なので消す。違う灯ならキャッシュは維持
+        // 可視だったキャッシュ対象の灯は遮蔽が解けたため消す。読み書きは基底側だけに置く。
         if (ownsCache && (Params4.x == 0u || BlockedLights[reservoirIndex] == selectedLightIndex))
         {
             BlockedLights[reservoirIndex] = 0xFFFFFFFFu;
         }
-
-        MegaLightsReservoir reservoir;
-        // ライト番号は16bitへ詰める(kMaxLights = 1024 なので収まる)
-        reservoir.IndexAndFlags = MegaLightsPackLightAndFlags(selectedLightIndex, true);
-        // 球面上のどこを狙ったか。時空間再利用がこの点ごと持ち回るので、借りた側も同じ点へ撃つ
-        // (半径0なら中心になり、点光源と完全に一致する)
-        reservoir.SampleUV = MegaLightsPackSampleUV(sampleUV);
-        // 不偏寄与重み W = (1/p̂(y)) * (1/M) * Σw
-        reservoir.W = risWeightSum / (float(sampleCount) * selectedTargetPdf);
-        reservoir.M = float(sampleCount);
         Reservoirs[reservoirBase + sampleSlot] = reservoir;
+    }
+
+    if (boostPixel)
+    {
+        float3 boostSum = float3(0.0f, 0.0f, 0.0f);
+        uint boostCount = 0u;
+        const uint boostSamples = Params5.y;
+        [loop]
+        for (uint k = 0u; k < boostSamples; ++k)
+        {
+            uint selectedLightIndex;
+            bool visible;
+            // 基底N本と独立な列を使い、キャッシュは読まず書かず無効値を渡す。
+            const MegaLightsReservoir boostReservoir = DrawSample(
+                samplesPerPixel + k, pixel, outputSize, poolTiles, poolTileCount, ownTileSlot,
+                bilinearMode, sampleCount, 0xFFFFFFFFu, worldPos, N, V, NdotV, albedo, metallic,
+                roughness, translucency, energy, selectedLightIndex, visible);
+
+            // 分母は引いた回数で決まり、空・遮蔽・寄与0の標本も必ず数える。
+            ++boostCount;
+            float3 term = float3(0.0f, 0.0f, 0.0f);
+            if (selectedLightIndex != 0xFFFFFFFFu && boostReservoir.W > 0.0f)
+            {
+                const GPULight light = Lights[selectedLightIndex];
+                const PunctualGeometry geometry =
+                    EvaluatePunctualGeometry(light, worldPos, N, translucency);
+                if (geometry.Contributes)
+                {
+                    // Resolveの自面評価と同じ式。Vだけはこの画素で撃ったレイの結果を使う。
+                    const float visibility = visible ? 1.0f : 0.0f;
+                    term = EvaluatePunctualContribution(
+                               light, geometry, N, V, NdotV, albedo, metallic, roughness,
+                               translucency, energy, visibility) *
+                           boostReservoir.W;
+                }
+            }
+            boostSum += term;
+        }
+
+        // .a は輝度統計ではなく項数。真っ暗な項でも .a > 0 のゲート印を残す。
+        MegaLightsBoostTexture[pixel] = float4(boostSum, (float)boostCount);
+        MegaLightsBoostCount[reservoirIndex] = boostCount;
     }
 }

@@ -58,6 +58,21 @@ namespace Kurenai
         // 【前進の直後に載せること】下げると、パス群だけが1つ古い番号を見る
         frameContext.FrameIndex = m_History.FrameIndex;
 
+        // 【推測をここで潰す】決定的カメラ経路は「Updateのn回目とRenderのn回目が対応する」
+        // ことを前提にしている(キュー深度1でUpdate:Renderが1:1という構造から読める)。
+        // その前提が崩れると、経路のフレーム番号と、乱数の種・ジッター・ダンプの番号が
+        // ずれ、測定そのものが成立しない。構造から読めることと確かめたことは別なので比べる。
+        // ログが埋まらないよう最初の1回だけ出す
+        if (!m_PathFrameMismatchLogged && frameState.PathFrameIndex != m_History.FrameIndex)
+        {
+            m_PathFrameMismatchLogged = true;
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "Updateとレンダーのフレーム番号が食い違いました(Update " + std::to_string(frameState.PathFrameIndex)
+                + " / Render " + std::to_string(m_History.FrameIndex)
+                + ")。決定的カメラ経路の測定結果は信用できません");
+        }
+
         // --- MegaLights候補プールのタイル格子ジッター ---
         // 書き手・Initial/Spatial・Presentへ配る値をここで一度だけ決める。
         // 各パスが個別にフレーム番号から導くと、式の片側だけを直した際に別タイルを静かに読むため

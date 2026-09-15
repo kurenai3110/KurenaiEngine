@@ -742,13 +742,19 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-megalightsfirefly <k>` | 時間累積前のファイアフライ抑制を指定する。根拠は docs/ImplementationDetail.md 61.7g.4節。 |
 | `-megalightsdenoiseframes <上限>` | デノイザの時間累積上限を指定する。根拠は docs/ImplementationDetail.md 61.7j.6節。 |
 | `-megalightsquadshare <0\|1>` | クアッド共有の有無を指定する。根拠は docs/ImplementationDetail.md 61.7j.3節。 |
-| `-megalightsquadsamples <1〜4>` | クアッド共有の画素あたり標本数を指定する。根拠は docs/ImplementationDetail.md 61.7l節。 |
-| `-megalightspool <8〜128>` | 候補プールのライト数を指定する。根拠は docs/ImplementationDetail.md 61.7m節。 |
+| `-megalightsquadsamples <1〜16>` | クアッド共有の画素あたり標本数を指定する。根拠は docs/ImplementationDetail.md 61.7l節。 |
+| `-megalightspool <8〜512>` | 候補プールのライト数を指定する。根拠は docs/ImplementationDetail.md 61.7m節。 |
 | `-megalightsquadstratify <0\|1>` | クアッド内の候補割り当てを層化するか指定する。 |
 | `-megalightsblockedcache <0\|1>` | 遮蔽済みライトのキャッシュを使うか指定する。 |
 | `-megalightstilejitter <0\|1\|2>` | 候補プールのタイル格子ジッターを指定する。根拠は docs/ImplementationDetail.md 61.7n節。 |
-| `-megalightspoolbilinear <0\|1\|2>` | 候補プールを自分のタイル固定で引くか(0)、最も近い4タイルから確率的バイリニアで引くかを指定する(1=2x2クアッドごとに1タイル(既定)、2=画素ごとに1タイル)。タイル形のムラを画素ごとの乱数へ溶かす。根拠は docs/ImplementationDetail.md 61.7o節。 |
-| `-megalightsperturb <0\|1\|2>` | 蓄積開始時に検証用のシーン摂動を加える。 |
+| `-megalightsdenoise4tap <0\|1>` | デノイザの時間累積が履歴の妥当性を何タップで判定するかを指定する(`0` = 最近傍1タップ、`1` = バイリニア2x2の4タップ)。**既定は0** ―― 指標はすべて改善するが、動かして見比べても差が分からなかったため既定にしていない。根拠は docs/ImplementationDetail.md 61.7o.9節。 |
+| `-megalightsdenoisecatmull <0\|1>` | デノイザの時間累積が履歴の色を引くときの再サンプリングを指定する(`0` = バイリニア、`1` = Catmull-Rom)。**既定は0** ―― 重みの正規化を直したあとは移動中の鮮鋭さ・誤差・総和比のすべてでバイリニアを上回るが、既定は目視のあとに決める。`-megalightsdenoise4tap 1` と両方指定すると4タップが全部通った画素だけ Catmull-Rom で引き、指標はこの組が最良。根拠は docs/ImplementationDetail.md 61.7q節。 |
+| `-megalightsquadboost <B>` / `-megalightsquadboostmode <1\|2\|3>` | クアッド共有(手法3)で、デノイザに棄却されると予測した画素にだけ B 本の標本を足す(`1` = 予測棄却画素、`2` = 今は 1 と同じ、`3` = 全画素・検算専用)。**既定は 0(無効)** ―― 棄却画素のノイズは減るが最悪画素の 7% にしか届かない。根拠は docs/ImplementationDetail.md 61.7q.5節。 |
+| `-megalightsdenoiseantilag <0\|1>` | デノイザの時間累積に残差駆動のアンチラグを掛けるか指定する(灯や影が変わった画素だけ累積上限を4へ落とし、残光を短くする)。**既定は0** ―― 目視で既定を決めるまでは無効。根拠は docs/ImplementationDetail.md 61.7p節。 |
+| `-megalightsdenoiseantilagt0 <0..1>` / `-megalightsdenoiseantilagt1 <0..1>` | アンチラグが発火する相対変化のしきい値(smoothstep の両端。既定 0.35 / 0.6)。 |
+| `-megalightsdenoiseantilagfast <フレーム数>` | アンチラグが現フレームの 7x7 平均をならす短い EMA の長さ(既定 4)。長いほど誤発火は減り、検出は遅れる。 |
+| `-megalightspoolbilinear <0\|1\|2>` | 候補プールを自分のタイル固定で引くか(0)、最も近い4タイルから確率的バイリニアで引くかを指定する(1=2x2クアッドごとに1タイル(既定)、2=画素ごとに1タイル)。タイル形のムラを画素ごとの乱数へ溶かす。根拠は docs/ImplementationDetail.md 61.7t節。 |
+| `-megalightsperturb <0\|1\|2>` | 蓄積開始時に検証用のシーン摂動を加える(`-megalightsaccum` が 0 だと効かない)。 |
 | `-megalightsspatial <0\|1>` | 空間再利用の有無を指定する。根拠は docs/ImplementationDetail.md 61.7f節。 |
 | `-megalightsspatialmis <0\|1>` | 空間再利用の結合方式を指定する。 |
 | `-megalightsspatialneighbors <k>` | 借りる近傍数を指定する。 |
@@ -769,6 +775,9 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-ddgifollow` | DDGIの各LODの原点をカメラへ追従させる(`.kscene`の`FollowCamera`と同じ)。 |
 | `-upscale <0\|1>` | 超解像の有無を指定する。 |
 | `-fixedstep <秒>` | 1フレームの時間を固定する。実時間に依らず同じフレームで同じ状態を作るためのもので、`-dumpframe`と組で使う。0以下や非有限値はエラーにして既定のまま続行する。 |
+| `-camerapath <名前>` | `.kscene`の`[CameraPath]`を1本選んで再生する。フレーム番号だけから姿勢が決まり、**再生中は視点の入力操作を受け付けない**。カメラを動かしたときの品質を測るには同じ軌跡を再現する必要があるが、通常の操作は移動量がΔtに比例し視点回転はPostMessageから駆動できないため、この口が要る。`-fixedstep`の指定が無ければ 1/60 を警告つきで自動設定する。根拠は docs/ImplementationDetail.md 61.7o節。 |
+| `-camerapathstart <N>` | 経路の再生を始めるフレーム。それまでは先頭キーの姿勢で静止して整定を待つ。既定は`-dumpframe`の既定と同じ 180。根拠は docs/ImplementationDetail.md 61.7o.2節。 |
+| `-camerapathvalidate` | シーンが持つ`[CameraPath]`すべてについて、1フレームあたりの移動量・視線角差・見かけ速度をログへ出す。ほぼ動かないフレームがあれば警告する。根拠は docs/ImplementationDetail.md 61.7o.3節。 |
 | `-passmanifest <パス>` | RenderGraphの登録順と実行順をテキストへ書き出す。パスの構成が変わっていないことを比較するための物差し。根拠は docs/ImplementationDetail.md 64.7節。 |
 | `-passmanifestframes <N>` | `-passmanifest`を何フレームぶん書き出すか(既定 `1`、1未満は1へ丸める)。 |
 

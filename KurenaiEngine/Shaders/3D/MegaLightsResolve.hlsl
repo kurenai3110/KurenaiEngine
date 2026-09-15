@@ -9,15 +9,20 @@
 //
 // UE5 の MegaLights は「候補ごとに可視性レイが要る」という理由で ReSTIR を採らず、
 // 固定本数のレイ + 重要度サンプリング + 時間フィードバック + デノイザで解いている。
-// このパスはその構造を採る。1画素が撃つ影レイは Initial の1本だけで、
-// 再利用のための追加レイは**1本も撃たない**。
+// このパス自体は影レイを撃たない。Initial の基底N本に加え、履歴を棄却される画素だけ
+// ブーストB本を自分の面から撃つ。クアッド再利用のための追加レイは撃たない。
 //
 // 【推定量】画素 x について、x を含む 2x2 クアッド Q の4標本 y_j を
 //
-//     L(x) = (1/n) * sum_{j in Q, 幾何ゲート通過} f_x(y_j) * V_j * W_j
+//     L(x) = (1/(n+b(x))) * (
+//              sum_{j in Q, 幾何ゲート通過} f_x(y_j) * V_j * W_j
+//            + sum_{k=0}^{b(x)-1} f_x(z_k) * V_x(z_k) * W_k)
 //
 // で合成する。f_x は **x 自身の面**での寄与(隣で良かった灯が x で良いとは限らない)、
 // V_j は**仲間 j が撃ったレイの結果**、W_j は j のリザーバが持つ不偏寄与重みである。
+// ブースト項は自分の画素で撃った V を使うので、クアッド項の V 代用の偏りを持たない。
+// 分母 b(x) は速度・前フレームの幾何ガイド・G-Buffer・フラグの決定的関数で、
+// このフレームの乱数を引く前に確定している(値でゲートを決めない)。
 //
 // 【なぜ不偏なのか】RIS の性質 E[g(y_j) * W_j] = sum_i g(i) は**任意の g** について成り立つ。
 // g = f_x * V(x, ・) と置けば各項が sum_i f_x(i) V(x,i) の不偏推定量になる。n は幾何だけで
@@ -68,6 +73,9 @@ Texture2D BRDFLUTTexture : register(t5);
 #include "MegaLightsCommon.hlsli"
 
 StructuredBuffer<MegaLightsReservoir> Reservoirs : register(t7);
+// Initial が自分の面で評価したブースト項と、その項数を読む。
+Texture2D MegaLightsBoostTexture : register(t8);
+StructuredBuffer<uint> MegaLightsBoostCount : register(t9);
 
 RWTexture2D<float4> MegaLightsOutput : register(u0);
 // 【手法3にも履歴ガイドが要る】デノイザの履歴の妥当性判定は「前フレームの幾何」と
@@ -241,6 +249,15 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             lumSum += termLum;
             lumSquaredSum += termLum * termLum;
         }
+    }
+
+    // 書き手と同じ平坦添字で、自分の画素にだけ追加された項を基底ループの後から足す。
+    const uint boostCount = MegaLightsBoostCount[index];
+    if (boostCount > 0u)
+    {
+        // B=0では加算自体を通らず、既存の演算順とビット列を保つ。
+        sum += MegaLightsBoostTexture.Load(int3(pixel, 0)).rgb;
+        acceptedCount += boostCount;
     }
 
     if (acceptedCount == 0u)

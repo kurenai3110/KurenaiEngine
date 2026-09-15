@@ -18,6 +18,16 @@
     python Tools/texdump_inspect.py noise  <連番*.bin> [--tile 16] [--offset Y,X]
                                            [--offset-sweep] [--channel rgba|r|g|b|a|luma]
                                            [--lit-threshold 1e-4]
+    python Tools/texdump_inspect.py lag       --truth <連番*.bin> --candidate <連番*.bin>
+                                              [--nmax 24] [--lit-threshold 1e-4]
+    python Tools/texdump_inspect.py pathnoise --truth <連番*.bin> --candidate <連番*.bin>
+                                              [--lit-threshold 1e-4] [--mask <連番*.bin>]
+                                              [--mask-max 1.5] [--mask-invert]
+    python Tools/texdump_inspect.py outliers --truth <連番*.bin> --candidate <連番*.bin>
+                                              [--ratio 10] [--abs-mult K] [--mask <連番*.bin>]
+    python Tools/texdump_inspect.py gateagree --boost <連番*.bin> --moments <連番*.bin>
+                                               [--mask-max 1.5]
+    python Tools/texdump_inspect.py seqcheck  --left <連番*.bin> --right <連番*.bin>
     python Tools/texdump_inspect.py png    <dump.bin> -o out.png [--exposure F]
                                            [--channel rgb|r|g|b|a|len]
                                            [--mode linear|srgb|signed|falsecolor] [--range lo,hi]
@@ -44,6 +54,22 @@ import struct
 import sys
 
 import numpy as np
+
+# 【日本語コンソール(cp932)で印字が落ちないようにする】
+# このスクリプトの出力には日本語と一部の数学記号が混ざる。cp932 のコンソールへ
+# 出せない文字(≈ / — / ² など)が1つでも入っていると UnicodeEncodeError で
+# **途中まで正しく計算していたのに異常終了する**。実際 selftest が57件中56件まで
+# PASS したところで落ちた。計算結果が出せないのは物差しとして致命的なので、
+# 出せない文字は '?' に落として印字だけは必ず通す(値は壊さない)。
+# 【encoding を utf-8 へ変えないこと】cp932 のコンソールへ UTF-8 を流すと
+# 日本語が丸ごと化ける。errors だけを緩めるのが正しい
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        # 古い Python や、リダイレクト先が reconfigure を持たない場合は諦める。
+        # 印字が落ちうるが、ここで例外を投げると本体が動かなくなるので握る
+        pass
 
 # === ファイル形式 (KurenaiEngine3D::WriteTextureDumpFile と一致させること) ===
 #   off  size  内容
@@ -471,7 +497,7 @@ def print_noise_summary(summary, lit_threshold):
         "タイル内", format_float(inner_all[0]), format_float(inner_all[1]),
         format_float(inner_lit[0]), format_float(inner_lit[1])))
     # 合成は「報告した2つの中央値」から作る(61.7m の表の作り方。√(4.03²+8.30²)=9.22 と一致する)
-    print("{:<8}: 全体 median={}  未点灯除外 median={}   ← √(タイル間²+タイル内²)".format(
+    print("{:<8}: 全体 median={}  未点灯除外 median={}   <- sqrt(タイル間^2 + タイル内^2)".format(
         "合成", format_float(math.hypot(between_all[0], inner_all[0])),
         format_float(math.hypot(between_lit[0], inner_lit[0]))))
     pixel_p50, pixel_p90 = noise_percentiles(summary["pixel_std"])
@@ -1352,6 +1378,481 @@ def cmd_synth(args):
 
 
 # =============================================================================
+# 移動中の品質 (真値との誤差から、ノイズ・ぼけ・遅れを分離する)
+#
+# 【なぜ新しい物差しが要るか】既存の megalights_metrics.py strafe は
+# 「局所中央値からの上振れ」を数えており、**ぼかせば必ず良くなる**。そのためデノイザを
+# 通らない参照実装が最悪と出て、参照実装との比較に使えない(61.7j.7 でそう結論している)。
+# 加えて上振れしか数えないので、履歴の引きずり(残像)には原理的に反応しない。
+#
+# ここは決定的なカメラ経路(-camerapath)が作れるようになったことを前提に、
+# **同じ経路で参照実装を走らせた1フレームごとの真値**との誤差を測る。
+# 真値があるので、局所コントラストではなく誤差そのものを分解できる。
+#
+# 【縮退に注意】等速の平行移動だけの経路では「時間シフト」と「空間シフト」が
+# 数学的に区別できない ―― 単一周波数の縞に対しては、ぼかしも遅れも同じ符号の相関を作る。
+# 経路に回転や加速を必ず含めること。selftest の 13番がこの縮退を突いている
+# =============================================================================
+
+
+def box3(values):
+    """3x3の箱平均。端は複製で埋める。scipy を持ち込まないため素朴に畳む"""
+    padded = np.pad(values, 1, mode="edge")
+    total = np.zeros_like(values, dtype=np.float64)
+    for dy in range(3):
+        for dx in range(3):
+            total += padded[dy:dy + values.shape[0], dx:dx + values.shape[1]]
+    return total / 9.0
+
+
+def lag_profile(truth, cand, masks, nmax):
+    """ρ(N) を N=0..nmax で返す。truth/cand/masks は (H,W) の配列のリスト。
+
+    D_t^N = truth[t-N] - truth[t]   「Nフレーム前の真値の方向」
+    e_t   = cand[t]   - truth[t]    誤差
+    ρ(N)  = Σ e·D / sqrt(Σe² · ΣD²)
+
+    【相関である理由】相関は誤差の**向き**を見るので、誤差の**大きさ**(ノイズ)と直交する。
+    白色ノイズは D^N と無相関なので ρ の期待値は 0 になる。これが分離の中身。
+
+    【t の範囲を N によらず固定する】N ごとに使えるフレームが変わると、
+    ρ(N) の差が「窓が変わったこと」を測ってしまう。全 N で t ∈ [nmax, T-1] に揃える
+    """
+    frames = len(truth)
+    if frames <= nmax + 1:
+        raise SystemExit(
+            "lag には nmax+2 枚以上の連番が要ります (nmax={} に対し {} 枚)".format(nmax, frames))
+
+    rho = []
+    for n in range(nmax + 1):
+        num = 0.0
+        sum_ee = 0.0
+        sum_dd = 0.0
+        for t in range(nmax, frames):
+            mask = masks[t]
+            if not mask.any():
+                continue
+            err = (cand[t] - truth[t])[mask]
+            delta = (truth[t - n] - truth[t])[mask]
+            num += float(np.dot(err, delta))
+            sum_ee += float(np.dot(err, err))
+            sum_dd += float(np.dot(delta, delta))
+        denom = math.sqrt(sum_ee * sum_dd)
+        rho.append(num / denom if denom > 0.0 else 0.0)
+    return rho
+
+
+def sharpness_ratio(truth, cand, masks):
+    """候補自身の高周波エネルギーが、真値の何倍か。**誤差ではなく候補そのものを見る。**
+
+    S > 1 : 真値より高周波が多い = ノイズが乗っている
+    S < 1 : 真値より高周波が少ない = なまっている(ぼけ)
+    S ≈ 1 : 鮮鋭さは真値どおり(遅れや一様な明暗のずれはここに出ない)
+
+    【これが 61.7j.7 で足りなかったもの】あちらは「局所コントラスト」を測っており、
+    ノイズとぼけを1つの数に混ぜていた。だからぼかせば必ず良くなり、デノイザを通らない
+    参照実装が最悪と出た。S は向きを持つので、両者が反対側へ出る
+    """
+    num = 0.0
+    den = 0.0
+    for tru, cnd, mask in zip(truth, cand, masks):
+        if not mask.any():
+            continue
+        high_t = tru - box3(tru)
+        high_c = cnd - box3(cnd)
+        num += float(np.sum(high_c[mask] ** 2))
+        den += float(np.sum(high_t[mask] ** 2))
+    return math.sqrt(num / den) if den > 0.0 else float("nan")
+
+
+def noise_metrics(truth, cand, masks):
+    """誤差を高周波(N1)・低周波(B1)・時間差分(N2)へ分ける。
+
+    【実測で確かめた各指標の意味】合成データに既知のものを植えて確かめた値:
+
+        植えたもの      N1      B1/N1   S      ρ最大
+        白色ノイズ      0.189   0.36    1.87   0.000
+        ぼかし          0.104   0.60    0.20   0.612
+        遅れ2フレーム   0.159   1.32    1.00   1.000
+        一様に5%暗く    0.006   83.7    0.95   0.032
+
+    読み方:
+      - **B1/N1 が大きい** → 系統的な偏り(エネルギーの損失など)。これは明快に出る
+      - **S が1から外れる** → ノイズ(>1)かぼけ(<1)。ここが 61.7j.7 で分離できなかった軸
+      - **ρ最大が1に近い** → 遅れ。ただし ρ だけでは足りない ――
+        ぼかしも ρ≈0.6 を出す(ぼけの誤差も、遅れの方向も、どちらも同じ画像の高周波だから)。
+        **ρ と S を必ず一緒に読むこと。** 遅れなら S≈1、ぼけなら S<<1 で区別がつく
+
+    【計画に書いていた「ぼかすと N1 が下がり B1 が上がる」は誤りだった】
+    ぼかしの誤差 e = blur(x) - x は「取り除かれた高周波」そのものなので、
+    N1 は大きく B1 は小さい。ノイズと同じ側に出る。だから S を足した
+    """
+    n1_vals = []
+    b1_vals = []
+    signs = []
+    prev_err = None
+    n2_vals = []
+    for t in range(len(truth)):
+        mask = masks[t]
+        err = cand[t] - truth[t]
+        low = box3(err)
+        high = err - low
+        if mask.any():
+            n1_vals.append(np.abs(high[mask]))
+            b1_vals.append(np.abs(low[mask]))
+            signs.append(err[mask] > 0.0)
+        if prev_err is not None and mask.any():
+            n2_vals.append(np.abs((err - prev_err)[mask]))
+        prev_err = err
+
+    def pct(chunks):
+        if not chunks:
+            return (float("nan"),) * 2
+        joined = np.concatenate(chunks)
+        return tuple(np.percentile(joined, [50, 90]))
+
+    positive = float(np.concatenate(signs).mean()) if signs else float("nan")
+    return {
+        "N1": pct(n1_vals),
+        "B1": pct(b1_vals),
+        "N2": pct(n2_vals),
+        "S": sharpness_ratio(truth, cand, masks),
+        "positive_fraction": positive,
+    }
+
+
+# ρ の最大値がこれ未満なら「遅れは検出できない」と言う。
+# selftest の 11〜13番で、真の遅れ(ρ≈1)と、ぼけが作る見かけの相関を隔てる位置に置いてある
+LAG_RHO_THRESHOLD = 0.30
+
+
+def describe_lag(rho):
+    """ρ(N) の表から「遅れフレーム数」と、それが一意に決まるかを言う"""
+    best_n = int(np.argmax(rho))
+    best = rho[best_n]
+    detected = best >= LAG_RHO_THRESHOLD and best_n > 0
+    # ピークの鋭さ。±3 の外がすぐ同じ高さなら、遅れは一意に決まっていない
+    outside = [value for index, value in enumerate(rho) if abs(index - best_n) > 3]
+    sharpness = best - max(outside) if outside else float("nan")
+    return best_n, best, detected, sharpness
+
+
+def expand_dump_inputs(patterns, label):
+    """グロブを展開して重複を落とす。cmd_noise と同じ作法(同じ引数を二度渡しても二重に数えない)"""
+    paths = []
+    for pattern in patterns:
+        matches = sorted(glob.glob(pattern))
+        if not matches:
+            raise SystemExit("{}: 一致するファイルがありません: {}".format(label, pattern))
+        paths.extend(matches)
+    unique_paths = []
+    seen = set()
+    for path in paths:
+        absolute = os.path.abspath(path)
+        if absolute not in seen:
+            seen.add(absolute)
+            unique_paths.append(path)
+    return unique_paths
+
+
+def load_luma_series(patterns, label):
+    """連番を読んで (輝度の配列リスト, フレーム番号リスト, 先頭のDump) を返す"""
+    paths = expand_dump_inputs(patterns, label)
+    if len(paths) < 2:
+        raise SystemExit("{} には2枚以上の連番が要ります (実際 {} 枚)".format(label, len(paths)))
+    dumps = [load(path) for path in paths]
+    dumps.sort(key=lambda dump: dump.frame_index)
+    first = dumps[0]
+    for dump in dumps[1:]:
+        if (dump.width, dump.height) != (first.width, first.height):
+            raise SystemExit("{} の連番で寸法が違います: {}".format(label, dump.path))
+    return ([noise_channel(dump.as_float(), "luma") for dump in dumps],
+            [dump.frame_index for dump in dumps], first)
+
+
+def build_masks(truth, lit_threshold):
+    return [value > lit_threshold for value in truth]
+
+
+def load_dump_series(patterns, label):
+    """連番をDumpのまま読み、寸法とFrameIndexの対応を呼び出し側で検査できる形で返す。"""
+    paths = expand_dump_inputs(patterns, label)
+    if len(paths) < 2:
+        raise SystemExit("{} には2枚以上の連番が要ります (実際 {} 枚)".format(label, len(paths)))
+    dumps = sorted((load(path) for path in paths), key=lambda dump: dump.frame_index)
+    first = dumps[0]
+    for dump in dumps[1:]:
+        if (dump.width, dump.height) != (first.width, first.height):
+            raise SystemExit("{} の連番で寸法が違います: {}".format(label, dump.path))
+    return dumps, [dump.frame_index for dump in dumps], first
+
+
+def history_masks(mask_dumps, mask_max, invert):
+    """Moments.z の履歴長から対象画素を作る。チャンネル不足は黙って0扱いにしない。"""
+    result = []
+    for dump in mask_dumps:
+        values = dump.as_float()
+        if values.shape[2] < 3:
+            raise SystemExit("--mask は Moments.z を持つ3チャンネル以上のダンプが必要です: {}".format(dump.path))
+        selected = values[:, :, 2] <= mask_max
+        result.append(~selected if invert else selected)
+    return result
+
+
+def require_matching_series(reference_indices, reference_first, other_indices, other_first, label):
+    """連番を画素単位で重ねる前に、別フレームを比較していないことを止める。"""
+    if reference_indices != other_indices:
+        raise SystemExit("{} のFrameIndexが違います:\n  左 {}\n  右 {}".format(label, reference_indices, other_indices))
+    if (reference_first.width, reference_first.height) != (other_first.width, other_first.height):
+        raise SystemExit("{} の寸法が違います: {}x{} 対 {}x{}".format(
+            label, reference_first.width, reference_first.height, other_first.width, other_first.height))
+
+
+def rgb_luminance(dump):
+    """RGBをRec.709輝度へ変換する。存在しない色成分を補わない。"""
+    values = dump.as_float()
+    if values.shape[2] < 3:
+        raise SystemExit("RGB輝度には3チャンネル以上のダンプが必要です: {}".format(dump.path))
+    return np.tensordot(values[:, :, :3], np.array([0.2126, 0.7152, 0.0722]), axes=([2], [0]))
+
+
+def print_series_header(label, frames, indices, first):
+    print("{:<6}: {}  {}枚  {}x{}  frame {}..{}".format(
+        label, first.name or "(名前なし)", frames, first.width, first.height,
+        indices[0], indices[-1]))
+
+
+def cmd_lag(args):
+    truth, tidx, tfirst = load_luma_series(args.truth, "--truth")
+    cand, cidx, cfirst = load_luma_series(args.candidate, "--candidate")
+    print("=== lag ===")
+    print_series_header("真値", len(truth), tidx, tfirst)
+    print_series_header("候補", len(cand), cidx, cfirst)
+    if tidx != cidx:
+        raise SystemExit("真値と候補のフレーム番号が違います:\n  真値 {}\n  候補 {}".format(tidx, cidx))
+
+    masks = build_masks(truth, args.lit_threshold)
+    kept = float(np.mean([mask.mean() for mask in masks]))
+    print("点灯マスク: 輝度 > {:g} の画素が平均 {:.2%}".format(args.lit_threshold, kept))
+    print("単位     : 線形の生値（階調・8bit値ではない）")
+
+    rho = lag_profile(truth, cand, masks, args.nmax)
+    best_n, best, detected, sharpness = describe_lag(rho)
+
+    print("")
+    print("ρ(N) - 誤差が「Nフレーム前の真値の方向」をどれだけ向いているか")
+    for n, value in enumerate(rho):
+        bar = "#" * max(0, int(round(value * 40)))
+        print("  N={:<3d} {:+.4f}  {}".format(n, value, bar))
+    print("")
+    if abs(rho[0]) > 1e-9:
+        print("!! ρ(0) が 0 ではありません ({:.3g})。定義上 D^0 = 0 なので実装のバグです".format(rho[0]))
+    # 【ρ だけでは遅れとぼけが分けられない】ぼかしの誤差も、遅れの方向も、
+    # どちらも同じ画像の高周波なので一般に相関する。合成データではぼかしが ρ≈0.61 を出した。
+    # 鮮鋭度比 S が 1 から大きく外れていれば、その ρ はぼけを見ている疑いが強い
+    sharp = sharpness_ratio(truth, cand, masks)
+    print("鮮鋭度比 S (候補/真値の高周波エネルギー) = {:.4f}".format(sharp))
+    print("")
+    if detected:
+        print("遅れ: {} フレーム (ρ={:.4f})".format(best_n, best))
+        if not np.isnan(sharpness) and sharpness < 0.05:
+            print("  ただしピークが鈍い(±3の外との差 {:.4f})。**遅れは一意に決まっていない**".format(sharpness))
+        if sharp < 0.8:
+            print("  !! S={:.3f} と大きくなまっています。**この ρ は遅れではなくぼけを見ている可能性**が高い".format(sharp))
+            print("     (合成データでは、ぼかしだけを植えても ρ=0.61 が出た。純粋な遅れなら S=1)")
+    else:
+        print("遅れ: 検出できない (ρの最大 {:.4f} < しきい値 {:.2f}、最大を与える N={})".format(
+            best, LAG_RHO_THRESHOLD, best_n))
+    if best_n == args.nmax and detected:
+        print("  !! 最大が掃引の端にあります。--nmax を広げて測り直すこと")
+    return 0
+
+
+def cmd_pathnoise(args):
+    truth, tidx, tfirst = load_luma_series(args.truth, "--truth")
+    cand, cidx, cfirst = load_luma_series(args.candidate, "--candidate")
+    print("=== pathnoise ===")
+    print_series_header("真値", len(truth), tidx, tfirst)
+    print_series_header("候補", len(cand), cidx, cfirst)
+    if tidx != cidx:
+        raise SystemExit("真値と候補のフレーム番号が違います")
+
+    masks = build_masks(truth, args.lit_threshold)
+    if args.mask:
+        mask_dumps, midx, mfirst = load_dump_series(args.mask, "--mask")
+        require_matching_series(tidx, tfirst, midx, mfirst, "真値と--mask")
+        history = history_masks(mask_dumps, args.mask_max, args.mask_invert)
+        masks = [lit & selected for lit, selected in zip(masks, history)]
+        masked_count = sum(int(selected.sum()) for selected in history)
+        masked_total = sum(selected.size for selected in history)
+        direction = ">" if args.mask_invert else "<="
+        print("履歴マスク: Moments.z {} {:g}: {}".format(
+            direction, args.mask_max, count_line(masked_count, masked_total)))
+    kept = float(np.mean([mask.mean() for mask in masks]))
+    print("点灯マスク: 輝度 > {:g} の画素が平均 {:.2%}".format(args.lit_threshold, kept))
+    print("単位     : 線形の生値（階調・8bit値ではない）")
+
+    metrics = noise_metrics(truth, cand, masks)
+    print("")
+    print("{:<28} {:>12} {:>12}".format("", "中央値", "p90"))
+    print("{:<28} {:>12.5g} {:>12.5g}".format("N1 誤差の高周波(ノイズ)", *metrics["N1"]))
+    print("{:<28} {:>12.5g} {:>12.5g}".format("B1 誤差の低周波(ぼけ・偏り)", *metrics["B1"]))
+    print("{:<28} {:>12.5g} {:>12.5g}".format("N2 誤差の時間差分(ちらつき)", *metrics["N2"]))
+    n1_median = metrics["N1"][0]
+    print("{:<28} {:>12.5g}".format("B1/N1 (偏りの強さ)", metrics["B1"][0] / max(n1_median, 1e-12)))
+    print("{:<28} {:>12.5g}".format("S  鮮鋭度比(候補/真値)", metrics["S"]))
+    print("")
+    print("誤差が正(明るすぎ)の画素: {:.2%}".format(metrics["positive_fraction"]))
+    print("")
+    print("【読み方(合成データで確かめた対応)】")
+    print("  B1/N1 が大きい  -> 系統的な偏り(エネルギーの損失など)")
+    print("  S > 1           -> ノイズが乗っている    S < 1 -> なまっている(ぼけ)")
+    print("  S が約1 で N1 が大きい -> 位置は合っているが値がずれている(遅れなど。lag で見る)")
+    print("")
+    print("**S を必ず添えること。** N1 だけでは「ノイズが減った」と「ぼかした」が区別できない ――")
+    print("61.7j.7 が参照実装を最悪と判定して潰れたのは、その軸を持っていなかったため。")
+    print("p99 は使わない ―― 点灯しきい値を 0.4% の画素ぶん動かすだけで 34% 動く実測がある。")
+    return 0
+
+
+def cmd_outliers(args):
+    truth_dumps, tidx, tfirst = load_dump_series(args.truth, "--truth")
+    cand_dumps, cidx, cfirst = load_dump_series(args.candidate, "--candidate")
+    require_matching_series(tidx, tfirst, cidx, cfirst, "真値と候補")
+    if args.ratio <= 0.0:
+        raise SystemExit("--ratio は0より大きくしてください: {}".format(args.ratio))
+    if args.abs_mult is not None and args.abs_mult < 0.0:
+        raise SystemExit("--abs-mult は0以上にしてください: {}".format(args.abs_mult))
+
+    history = None
+    if args.mask:
+        mask_dumps, midx, mfirst = load_dump_series(args.mask, "--mask")
+        require_matching_series(tidx, tfirst, midx, mfirst, "真値と--mask")
+        history = history_masks(mask_dumps, args.mask_max, False)
+
+    print("=== outliers ===")
+    print_series_header("真値", len(truth_dumps), tidx, tfirst)
+    print_series_header("候補", len(cand_dumps), cidx, cfirst)
+    print("条件     : 候補 > {:g} x 真値、点灯は真値輝度 > {:g}".format(args.ratio, args.lit_threshold))
+    if args.abs_mult is not None:
+        print("絶対条件 : 候補 - 真値 > {:g} x 点灯画素の真値中央値".format(args.abs_mult))
+
+    total_lit = total_ratio = total_abs = total_outlier = 0
+    buckets = {"履歴<=": [0, 0], "履歴>": [0, 0]} if history is not None else None
+    worst = []
+    for frame, (truth_dump, cand_dump) in enumerate(zip(truth_dumps, cand_dumps)):
+        truth = rgb_luminance(truth_dump)
+        cand = rgb_luminance(cand_dump)
+        lit = np.isfinite(truth) & (truth > args.lit_threshold)
+        ratio_hit = lit & (cand > args.ratio * truth)
+        abs_hit = np.zeros_like(lit)
+        if args.abs_mult is not None:
+            median = float(np.median(truth[lit])) if lit.any() else float("nan")
+            abs_hit = lit & (cand - truth > args.abs_mult * median)
+        outlier = ratio_hit | abs_hit
+        total_lit += int(lit.sum())
+        total_ratio += int(ratio_hit.sum())
+        total_abs += int(abs_hit.sum())
+        total_outlier += int(outlier.sum())
+        print("frame {:<6d} 外れ値 {}  比率条件 {}{}".format(
+            tidx[frame], count_line(outlier.sum(), lit.sum()), count_line(ratio_hit.sum(), lit.sum()),
+            "  絶対条件 {}".format(count_line(abs_hit.sum(), lit.sum())) if args.abs_mult is not None else ""))
+        if buckets is not None:
+            for label, selected in (("履歴<=", history[frame]), ("履歴>", ~history[frame])):
+                population = lit & selected
+                hits = outlier & selected
+                buckets[label][0] += int(hits.sum())
+                buckets[label][1] += int(population.sum())
+                print("  {}: {}".format(label, count_line(hits.sum(), population.sum())))
+        ys, xs = np.nonzero(outlier)
+        for y, x in zip(ys, xs):
+            worst.append((float(cand[y, x] / truth[y, x]), tidx[frame], int(x), int(y), float(cand[y, x]), float(truth[y, x])))
+
+    print("合計      : 外れ値 {}  比率条件 {}{}".format(
+        count_line(total_outlier, total_lit), count_line(total_ratio, total_lit),
+        "  絶対条件 {}".format(count_line(total_abs, total_lit)) if args.abs_mult is not None else ""))
+    if buckets is not None:
+        print("母集団別  : {} / {}".format(
+            "履歴<= " + count_line(*buckets["履歴<="]), "履歴> " + count_line(*buckets["履歴>"])))
+    print("最悪画素 (候補/真値の降順、最大10件):")
+    for rank, (ratio, frame_index, x, y, cand_value, truth_value) in enumerate(sorted(worst, reverse=True)[:10], 1):
+        print("  {:2d}. frame={} x={} y={}  候補={:.6g} 真値={:.6g} 比={:.6g}".format(
+            rank, frame_index, x, y, cand_value, truth_value, ratio))
+    return 0
+
+
+def cmd_gateagree(args):
+    boost_dumps, bidx, bfirst = load_dump_series(args.boost, "--boost")
+    moments_dumps, midx, mfirst = load_dump_series(args.moments, "--moments")
+    require_matching_series(bidx, bfirst, midx, mfirst, "--boostと--moments")
+    print("=== gateagree ===")
+    print_series_header("boost", len(boost_dumps), bidx, bfirst)
+    print_series_header("moments", len(moments_dumps), midx, mfirst)
+    print("条件     : boost.a > 0 と moments.z <= {:g}".format(args.mask_max))
+    for frame, (boost, moments) in enumerate(zip(boost_dumps, moments_dumps)):
+        boost_values = boost.as_float()
+        moments_values = moments.as_float()
+        if boost_values.shape[2] < 4:
+            raise SystemExit("--boost は alpha を持つ4チャンネルのダンプが必要です: {}".format(boost.path))
+        if moments_values.shape[2] < 3:
+            raise SystemExit("--moments は Moments.z を持つ3チャンネル以上のダンプが必要です: {}".format(moments.path))
+        left = boost_values[:, :, 3] > 0.0
+        right = moments_values[:, :, 2] <= args.mask_max
+        both_true = int((left & right).sum())
+        left_only = int((left & ~right).sum())
+        right_only = int((~left & right).sum())
+        both_false = int((~left & ~right).sum())
+        total = left.size
+        print("frame {:<6d} 両方真 {:,}  boostのみ {:,}  momentsのみ {:,}  両方偽 {:,}  一致率 {:.2f}%".format(
+            bidx[frame], both_true, left_only, right_only, both_false,
+            100.0 * (both_true + both_false) / total if total else 0.0))
+    return 0
+
+
+def cmd_seqcheck(args):
+    """2組の連番が、ヘッダを除くペイロードでビット同一かを確かめる。
+
+    決定的なカメラ経路の上で参照実装を2回走らせ、ビット同一にならなければ
+    それは真値ではない ―― という判定に使う
+    """
+    left, lidx, lfirst = load_luma_series(args.left, "--left")
+    right, ridx, rfirst = load_luma_series(args.right, "--right")
+    print("=== seqcheck ===")
+    print_series_header("左", len(left), lidx, lfirst)
+    print_series_header("右", len(right), ridx, rfirst)
+
+    lpaths = expand_dump_inputs(args.left, "--left")
+    rpaths = expand_dump_inputs(args.right, "--right")
+    ldumps = sorted((load(path) for path in lpaths), key=lambda d: d.frame_index)
+    rdumps = sorted((load(path) for path in rpaths), key=lambda d: d.frame_index)
+    if len(ldumps) != len(rdumps):
+        raise SystemExit("枚数が違います: {} 対 {}".format(len(ldumps), len(rdumps)))
+    if lidx != ridx:
+        raise SystemExit("フレーム番号が違います:\n  左 {}\n  右 {}".format(lidx, ridx))
+
+    intervals = np.diff(lidx)
+    if intervals.size and np.all(intervals == intervals[0]):
+        print("撮影間隔 : {} フレーム(一定)".format(int(intervals[0])))
+    else:
+        print("撮影間隔 : 一定ではない: {}".format(", ".join(str(int(v)) for v in intervals)))
+
+    mismatched = []
+    for ldump, rdump in zip(ldumps, rdumps):
+        if ldump.data.tobytes() != rdump.data.tobytes():
+            mismatched.append(ldump.frame_index)
+    print("")
+    print("一致 : {} / {} フレームがペイロードでビット同一".format(
+        len(ldumps) - len(mismatched), len(ldumps)))
+    if mismatched:
+        print("不一致のフレーム番号: {}".format(", ".join(str(v) for v in mismatched)))
+        print("**ビット同一にならないものを真値として使わないこと。**")
+        print("切り分けの順序: (1)経路のフレーム番号の食い違いログ (2)-fixedstep が効いているか")
+        print("              (3)整定待ちが足りているか (4)diff で差の分布を見る")
+        return 1
+    return 0
+
+
+# =============================================================================
 # selftest (物差しが機能することを、エンジン抜きで先に示す)
 # =============================================================================
 
@@ -1390,6 +1891,84 @@ def cmd_selftest(args):
               np.allclose([values.min(), np.median(values), values.mean(), values.max()], 0.25),
               "実際 {}".format([values.min(), np.median(values), values.mean(), values.max()]))
         check("非有限は0件", int(np.count_nonzero(~np.isfinite(values))) == 0)
+
+        # --- 1b. 新しい3物差し: synthと同じwrite_dumpで既知の連番を作り、通る例と止まる例を通す ---
+        print("1b. 履歴マスク / outliers / gateagree")
+        import contextlib
+        import io
+
+        truth_paths = []
+        candidate_paths = []
+        moments_paths = []
+        boost_paths = []
+        history_values = np.array([[1.0, 2.0], [1.0, 2.0]], dtype=np.float32)
+        for frame in range(2):
+            truth_rgba = np.ones((2, 2, 4), dtype=np.float32)
+            candidate_rgba = truth_rgba.copy()
+            if frame == 0:
+                candidate_rgba[0, 0, :3] = 11.0  # ratio=10を確実に超える既知の外れ値
+            moments_rgba = np.zeros((2, 2, 4), dtype=np.float32)
+            moments_rgba[:, :, 2] = history_values
+            boost_rgba = np.zeros((2, 2, 4), dtype=np.float32)
+            boost_rgba[:, :, 3] = (history_values <= 1.5).astype(np.float32)
+            for paths, array, name in (
+                (truth_paths, truth_rgba, "SelfTestTruth"),
+                (candidate_paths, candidate_rgba, "SelfTestCandidate"),
+                (moments_paths, moments_rgba, "MegaLightsDenoiseMoments"),
+                (boost_paths, boost_rgba, "SelfTestBoost"),
+            ):
+                path = os.path.join(workdir, "{}_{}.bin".format(name, frame))
+                write_dump(path, array, name, 3, frame_index=frame)
+                paths.append(path)
+
+        pathnoise_out = io.StringIO()
+        with contextlib.redirect_stdout(pathnoise_out):
+            cmd_pathnoise(argparse.Namespace(truth=truth_paths, candidate=candidate_paths,
+                                              lit_threshold=1e-4, mask=moments_paths,
+                                              mask_max=1.5, mask_invert=False))
+        check("pathnoiseの履歴マスクは対象画素数を出す",
+              "履歴マスク: Moments.z <= 1.5: 4 / 8 (50.00%)" in pathnoise_out.getvalue())
+        pathnoise_invert_out = io.StringIO()
+        with contextlib.redirect_stdout(pathnoise_invert_out):
+            cmd_pathnoise(argparse.Namespace(truth=truth_paths, candidate=candidate_paths,
+                                              lit_threshold=1e-4, mask=moments_paths,
+                                              mask_max=1.5, mask_invert=True))
+        check("pathnoiseの反転マスクは落ちる側の画素へ切り替わる",
+              "履歴マスク: Moments.z > 1.5: 4 / 8 (50.00%)" in pathnoise_invert_out.getvalue())
+
+        outlier_out = io.StringIO()
+        with contextlib.redirect_stdout(outlier_out):
+            cmd_outliers(argparse.Namespace(truth=truth_paths, candidate=candidate_paths,
+                                             ratio=10.0, abs_mult=None, lit_threshold=1e-4,
+                                             mask=moments_paths, mask_max=1.5))
+        check("outliersは既知の比率外れ値1件を数える",
+              "合計      : 外れ値 1 / 8 (12.50%)" in outlier_out.getvalue(), outlier_out.getvalue())
+        check("outliersは母集団別に履歴<=側の1件を数える",
+              "履歴<= 1 / 4 (25.00%)" in outlier_out.getvalue(), outlier_out.getvalue())
+        clean_outlier_out = io.StringIO()
+        with contextlib.redirect_stdout(clean_outlier_out):
+            cmd_outliers(argparse.Namespace(truth=truth_paths, candidate=truth_paths,
+                                             ratio=10.0, abs_mult=None, lit_threshold=1e-4,
+                                             mask=None, mask_max=1.5))
+        check("outliersは外れ値がない落ちる例を0件と数える",
+              "合計      : 外れ値 0 / 8 (0.00%)" in clean_outlier_out.getvalue(), clean_outlier_out.getvalue())
+
+        gate_out = io.StringIO()
+        with contextlib.redirect_stdout(gate_out):
+            cmd_gateagree(argparse.Namespace(boost=boost_paths, moments=moments_paths, mask_max=1.5))
+        check("gateagreeは一致する既知のゲートを100%と数える",
+              gate_out.getvalue().count("一致率 100.00%") == 2, gate_out.getvalue())
+
+        bad_moments = os.path.join(workdir, "bad_moments.bin")
+        write_dump(bad_moments, moments_rgba, "MegaLightsDenoiseMoments", 3, frame_index=99)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_gateagree(argparse.Namespace(boost=boost_paths, moments=[moments_paths[0], bad_moments], mask_max=1.5))
+        except SystemExit:
+            mismatch_stopped = True
+        else:
+            mismatch_stopped = False
+        check("gateagreeはFrameIndex不一致の落ちる例を停止する", mismatch_stopped)
 
         # --- 2. nan: where が件数と座標を返す ---
         print("2. nan:10")
@@ -1684,6 +2263,116 @@ def cmd_selftest(args):
               abs(jitter_pixel - fixed_pixel) / fixed_pixel < 0.2,
               "固定 {:.6g} / ジッタ {:.6g}".format(fixed_pixel, jitter_pixel))
 
+        # --- 11〜15. 移動中の物差し: 遅れ・ノイズ・ぼけが互いに化けないこと ---
+        #
+        # 【broadband なパターンを使う理由】単一周波数の縞を等速で流すと、
+        # ぼかしも遅れも同じ符号の相関を作る(⟨e·D^N⟩ ∝ sin²(kvN/2))ので区別できない。
+        # 広帯域にすると、ぼけの作る見かけの相関は周波数ごとにピーク位置が散ってならされ、
+        # 本物の遅れだけが全周波数で同じ N に揃う。**この縮退を突くのが13番の役目**
+        print("11-15. 移動中の物差し(遅れ / ノイズ / ぼけ)")
+        rng = np.random.default_rng(20260912)
+        base_h, base_w = 96, 128
+        field = rng.standard_normal((base_h * 3, base_w * 3)).astype(np.float64)
+        field = box3(box3(field))  # 少しだけ相関を持たせる。それでも広帯域
+
+        def planted_truth(frames=24):
+            """加速しながら流れる広帯域のパターン。等速にしないのは時間/空間シフトの縮退を避けるため"""
+            series = []
+            for t in range(frames):
+                # 変位が t² に比例する = 等速でない
+                shift_x = int(round(0.05 * t * t + 2.0 * t))
+                shift_y = int(round(0.03 * t * t))
+                window = field[shift_y:shift_y + base_h, shift_x:shift_x + base_w]
+                # 正の値にしておく(点灯マスクと相対誤差が定義できるように)
+                series.append(window + 10.0)
+            return series
+
+        truth11 = planted_truth()
+        masks11 = [np.ones_like(v, dtype=bool) for v in truth11]
+        nmax11 = 12
+
+        # 11. 遅れ k を植えたら、ちょうど k を返す
+        for k in (0, 1, 3, 8):
+            cand = [truth11[max(0, t - k)] for t in range(len(truth11))]
+            rho = lag_profile(truth11, cand, masks11, nmax11)
+            best_n, best, detected, _ = describe_lag(rho)
+            if k == 0:
+                check("11. 遅れ0を植えたら遅れなしと出る",
+                      not detected, "ρ最大 {:.4f} @ N={}".format(best, best_n))
+            else:
+                check("11. 遅れ{}を植えたら{}と出る".format(k, k),
+                      detected and best_n == k and best > 0.9,
+                      "N={} ρ={:.4f} 検出={}".format(best_n, best, detected))
+
+        # 12. 白色ノイズは遅れに化けない。かつ S > 1 (高周波が増える) で識別できる
+        noise_scale = 0.5
+        cand_noise = [v + rng.standard_normal(v.shape) * noise_scale for v in truth11]
+        rho_noise = lag_profile(truth11, cand_noise, masks11, nmax11)
+        _, best_noise, detected_noise, _ = describe_lag(rho_noise)
+        check("12. 白色ノイズは遅れとして検出されない",
+              not detected_noise and abs(best_noise) < 0.1,
+              "ρ最大 {:.4f}".format(best_noise))
+        m_noise = noise_metrics(truth11, cand_noise, masks11)
+        m_clean = noise_metrics(truth11, list(truth11), masks11)
+        check("12. ノイズを足すと N1 が上がる",
+              m_noise["N1"][0] > m_clean["N1"][0] + 0.05,
+              "clean {:.5g} -> noise {:.5g}".format(m_clean["N1"][0], m_noise["N1"][0]))
+        check("12. ノイズは S > 1 になる(高周波が増える)",
+              m_noise["S"] > 1.2, "S={:.4f}".format(m_noise["S"]))
+
+        # 13. ぼけの識別。**ρ だけでは遅れと分けられない**ことを、ここで明示的に確かめる。
+        #
+        # 【これは物差しの欠陥ではなく、画像だけから決まる事実】ぼかしの誤差 e = blur(x)-x も、
+        # 遅れの方向 D^N = x_{t-N} - x_t も、どちらも同じ画像の高周波なので一般に相関する。
+        # 移動速度を 2px/frame から 10px/frame へ上げても ρ は 0.6 のまま(ピーク位置が動くだけ)。
+        # 分けているのは S のほうで、ぼけは S << 1、純粋な遅れは S ≈ 1 になる
+        cand_blur = [box3(box3(v)) for v in truth11]
+        rho_blur = lag_profile(truth11, cand_blur, masks11, nmax11)
+        best_n_blur, best_blur, _, _ = describe_lag(rho_blur)
+        m_blur = noise_metrics(truth11, cand_blur, masks11)
+        cand_lag3 = [truth11[max(0, t - 3)] for t in range(len(truth11))]
+        m_lag3 = noise_metrics(truth11, cand_lag3, masks11)
+        check("13. ぼけは S << 1 になる(なまっている)",
+              m_blur["S"] < 0.5, "S={:.4f}".format(m_blur["S"]))
+        check("13. 純粋な遅れは S が約1 のまま(鮮鋭さは失われない)",
+              abs(m_lag3["S"] - 1.0) < 0.1, "S={:.4f}".format(m_lag3["S"]))
+        check("13. S がぼけと遅れを分ける(ρ だけでは分けられない)",
+              m_blur["S"] < 0.5 < m_lag3["S"],
+              "ぼけ S={:.4f} (ρ={:.3f}) / 遅れ S={:.4f}".format(m_blur["S"], best_blur, m_lag3["S"]))
+        check("13. ぼけと遅れは S で分かれるが ρ では紛らわしい(既知の限界)",
+              best_blur > 0.3, "ぼけの ρ最大 {:.4f} @ N={}".format(best_blur, best_n_blur))
+
+        # 13b. 一様な暗化(エネルギーの損失)は B1/N1 が突出する
+        cand_dark = [v * 0.95 for v in truth11]
+        m_dark = noise_metrics(truth11, cand_dark, masks11)
+        ratio_dark = m_dark["B1"][0] / max(m_dark["N1"][0], 1e-12)
+        ratio_noise = m_noise["B1"][0] / max(m_noise["N1"][0], 1e-12)
+        check("13b. 系統的な偏りは B1/N1 が突出する",
+              ratio_dark > 10.0 * ratio_noise,
+              "暗化 {:.2f} / ノイズ {:.2f}".format(ratio_dark, ratio_noise))
+
+        # 14. 同じ分散の別のノイズを2回植えて、物差しのばらつき(下限)を出す
+        cand_noise2 = [v + rng.standard_normal(v.shape) * noise_scale for v in truth11]
+        m_noise2 = noise_metrics(truth11, cand_noise2, masks11)
+        n1_spread = abs(m_noise2["N1"][0] - m_noise["N1"][0]) / m_noise["N1"][0]
+        print("    物差しのばらつき(同じ分散の別ノイズ2回での N1 中央値の差): {:.2%}".format(n1_spread))
+        check("14. 同種のノイズ2回で N1 が5%以内に再現する",
+              n1_spread < 0.05, "実際 {:.2%}".format(n1_spread))
+
+        # 15. ノイズと遅れを同時に植てても、互いを汚染しない
+        cand_both = [truth11[max(0, t - 3)] + rng.standard_normal(truth11[t].shape) * noise_scale
+                     for t in range(len(truth11))]
+        rho_both = lag_profile(truth11, cand_both, masks11, nmax11)
+        best_n_both, best_both, detected_both, _ = describe_lag(rho_both)
+        check("15. ノイズ+遅れ3 でも遅れ3と出る",
+              detected_both and best_n_both == 3,
+              "N={} ρ={:.4f}".format(best_n_both, best_both))
+        m_both = noise_metrics(truth11, cand_both, masks11)
+        n1_contam = abs(m_both["N1"][0] - m_noise["N1"][0]) / m_noise["N1"][0]
+        check("15. 遅れを足しても N1 が大きく動かない(30%以内)",
+              n1_contam < 0.30, "ノイズのみ {:.5g} -> ノイズ+遅れ {:.5g} ({:.1%})".format(
+                  m_noise["N1"][0], m_both["N1"][0], n1_contam))
+
     print("")
     if failures:
         print("selftest: {} 件中 {} 件が失敗".format(checks, len(failures)))
@@ -1772,6 +2461,45 @@ def main(argv):
     p.add_argument("--channel", default="luma", choices=["rgba", "r", "g", "b", "a", "luma"])
     p.add_argument("--lit-threshold", type=float, default=1e-4, help="時間平均がこれ以下のタイルを別集計する")
     p.set_defaults(func=cmd_noise)
+
+    p = sub.add_parser("lag", help="移動中の遅れ(残像)を、真値との誤差の向きから測る")
+    p.add_argument("--truth", nargs="+", required=True,
+                   help="真値の連番(同じ -camerapath で参照実装を走らせたもの)")
+    p.add_argument("--candidate", nargs="+", required=True, help="比較する側の連番")
+    p.add_argument("--nmax", type=int, default=24, help="ρ(N) を掃引する上限(既定24)")
+    p.add_argument("--lit-threshold", type=float, default=1e-4,
+                   help="真値の輝度がこれ以下の画素は除く(暗部は相対誤差の分母が潰れる)")
+    p.set_defaults(func=cmd_lag)
+
+    p = sub.add_parser("pathnoise", help="移動中のノイズを、鮮鋭さと混ぜずに測る")
+    p.add_argument("--truth", nargs="+", required=True, help="真値の連番")
+    p.add_argument("--candidate", nargs="+", required=True, help="比較する側の連番")
+    p.add_argument("--lit-threshold", type=float, default=1e-4, help="真値の輝度の下限")
+    p.add_argument("--mask", nargs="+", help="MegaLightsDenoiseMoments の連番")
+    p.add_argument("--mask-max", type=float, default=1.5, help="Moments.z の上限（既定1.5）")
+    p.add_argument("--mask-invert", action="store_true", help="Moments.z が上限より大きい画素を使う")
+    p.set_defaults(func=cmd_pathnoise)
+
+    p = sub.add_parser("outliers", help="真値より極端に明るい候補画素を数える")
+    p.add_argument("--truth", nargs="+", required=True, help="真値の連番")
+    p.add_argument("--candidate", nargs="+", required=True, help="比較する側の連番")
+    p.add_argument("--ratio", type=float, default=10.0, help="候補/真値の外れ値しきい値（既定10）")
+    p.add_argument("--abs-mult", type=float, help="真値中央値を基準にする絶対差の倍率")
+    p.add_argument("--lit-threshold", type=float, default=1e-4, help="真値の輝度の下限")
+    p.add_argument("--mask", nargs="+", help="MegaLightsDenoiseMoments の連番")
+    p.add_argument("--mask-max", type=float, default=1.5, help="Moments.z の上限（既定1.5）")
+    p.set_defaults(func=cmd_outliers)
+
+    p = sub.add_parser("gateagree", help="boost alpha と Moments.z のゲート一致率を数える")
+    p.add_argument("--boost", nargs="+", required=True, help="boost の連番")
+    p.add_argument("--moments", nargs="+", required=True, help="MegaLightsDenoiseMoments の連番")
+    p.add_argument("--mask-max", type=float, default=1.5, help="Moments.z の上限（既定1.5）")
+    p.set_defaults(func=cmd_gateagree)
+
+    p = sub.add_parser("seqcheck", help="2組の連番がペイロードでビット同一かを確かめる")
+    p.add_argument("--left", nargs="+", required=True)
+    p.add_argument("--right", nargs="+", required=True)
+    p.set_defaults(func=cmd_seqcheck)
 
     p = sub.add_parser("png", help="PNGへ書き出す(判定の根拠にはしないこと)")
     p.add_argument("path")
