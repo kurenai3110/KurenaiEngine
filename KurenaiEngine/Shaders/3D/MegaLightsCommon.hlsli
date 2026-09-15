@@ -208,6 +208,20 @@ void MegaLightsUnpackMaterial(uint packed, out float metallic, out float roughne
     roughness = float((packed >> 8u) & 0xFFu) / 255.0f;
 }
 
+// 履歴ガイドの1タップが現在のサーフェスと一致するか。
+// 比較式と演算順はデノイザで使っていた形を保ち、各呼び出し側で判定がずれないようにする。
+bool MegaLightsGuideMatchesSurface(
+    float hViewZ, float3 hN, float2 hMaterial, float viewZ, float3 N, float2 material)
+{
+    const float kMaxRelativeDepthDiff = 0.05f;
+    const float kMinNormalDot = 0.9f;
+    const float kMaxMaterialDiff = 0.1f;
+    return abs(hViewZ - viewZ) <= kMaxRelativeDepthDiff * max(abs(viewZ), 1e-3f) &&
+           dot(N, hN) >= kMinNormalDot &&
+           abs(hMaterial.r - material.r) <= kMaxMaterialDiff &&
+           abs(hMaterial.g - material.g) <= kMaxMaterialDiff;
+}
+
 // --- 球光源のサンプリング(段階6) ---
 //
 // 【何をサンプリングしているか】光源が半径を持つと、遮蔽の判定は「中心へ1本」ではなく

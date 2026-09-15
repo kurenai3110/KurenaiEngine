@@ -862,10 +862,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsQuadShare = ParseIntOption(L"-megalightsquadshare", -1);
         const int megaLightsQuadStratify = ParseIntOption(L"-megalightsquadstratify", -1);
         const int megaLightsBlockedCache = ParseIntOption(L"-megalightsblockedcache", -1);
-        // -megalightsquadsamples <1〜4>。クアッド共有が1画素あたりに引く標本の数。
+        // -megalightsquadsamples <1〜16>。クアッド共有が1画素あたりに引く標本の数。
         // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
         const int megaLightsQuadSamples = ParseIntOption(L"-megalightsquadsamples", -1);
-        // -megalightspool <8〜128>。候補プールが1タイルあたりに抽出する灯の数(K)。
+        // ブースト標本数Bと対象モード(1=予測棄却、2=短い履歴も対象、3=全画素・検算専用)
+        const int megaLightsQuadBoost = ParseIntOption(L"-megalightsquadboost", -1);
+        const int megaLightsQuadBoostMode = ParseIntOption(L"-megalightsquadboostmode", -1);
+        // -megalightspool <8〜512>。候補プールが1タイルあたりに抽出する灯の数(K)。
         // 1画素あたりの標本数では減らない「タイル間」のノイズがここで決まる
         const int megaLightsPoolCapacity = ParseIntOption(L"-megalightspool", -1);
         // -megalightstilejitter <0|1|2>。1=Halton(2,3)で格子をずらす、2=有効だがオフセット0固定
@@ -899,6 +902,21 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const float megaLightsDenoiseSigma = ParseFloatOption(L"-megalightsdenoisesigma", -1.0f);
         // -megalightsfirefly <k>。ファイアフライの近傍クランプの強さ(0で無効)
         const float megaLightsFireflyClamp = ParseFloatOption(L"-megalightsfirefly", -1.0f);
+        // -megalightsdenoisecatmull <0|1>。デノイザの時間累積が履歴の色を引くときの
+        // 再サンプリング。0=バイリニア(従来) / 1=Catmull-Rom。
+        // バイリニアだと毎フレーム補間が重なって移動中の鮮鋭さが累積的に失われる
+        const int megaLightsDenoiseCatmull = ParseIntOption(L"-megalightsdenoisecatmull", -1);
+        // -megalightsdenoise4tap <0|1>。履歴の妥当性を2x2の4タップで判定するか。
+        // 従来は最近傍1点だけで見ており、1点がシルエットの向こう側だと履歴全体を棄却していた
+        const int megaLightsDenoise4Tap = ParseIntOption(L"-megalightsdenoise4tap", -1);
+        // -megalightsdenoiseantilag <0|1> と、そのしきい値 t0 / t1(相対変化の両端)/
+        // fast(短い EMA の長さ[フレーム])。変化した画素だけ時間累積の上限を短く落とし、
+        // 灯を消したあとの残光を縮める。値は 0 以下なら既定のまま
+        // (根拠は EngineDefaults.h の MegaLightsDenoiseAntiLag)
+        const int megaLightsAntiLag = ParseIntOption(L"-megalightsdenoiseantilag", -1);
+        const float megaLightsAntiLagT0 = ParseFloatOption(L"-megalightsdenoiseantilagt0", -1.0f);
+        const float megaLightsAntiLagT1 = ParseFloatOption(L"-megalightsdenoiseantilagt1", -1.0f);
+        const int megaLightsAntiLagFast = ParseIntOption(L"-megalightsdenoiseantilagfast", -1);
         // -perfdump <パス> / -perfdumpframes <枚数>。GPUの区間計測を平均してCSVへ書き出す。
         // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
         const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
@@ -942,6 +960,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const float fixedTimeStep = ParseFloatOption(L"-fixedstep", kMissingFixedTimeStep);
         // -taa 0|1。TAAは時間方向に蓄積するため、画素単位の一致を測るときは切る
         const int taa = ParseIntOption(L"-taa", -1);
+        // -camerapath <名前>。.ksceneの[CameraPath]を1本選んで再生する。
+        // 【計測専用】カメラを動かしたときのノイズと遅れを測るには同じ軌跡を再現する必要があるが、
+        // 通常の操作は移動量がΔtに比例し、視点回転はPostMessageから駆動できない。
+        // 再生中は視点の入力操作を受け付けず、フレーム番号だけから姿勢が決まる。
+        // -fixedstep の指定が無ければ 1/60 が自動で入る(警告を出したうえで)
+        const std::wstring cameraPathName = ParseStringOption(L"-camerapath");
+        // -camerapathstart <N>。経路の再生を始めるフレーム。既定は整定待ちの180
+        // (-dumpframe の既定と同じ定数を共有する)
+        const int cameraPathStart = ParseIntOption(L"-camerapathstart", -1);
+        // -camerapathvalidate。経路が本当に画面を動かすかの検算ログだけを出す
+        const bool cameraPathValidate = HasFlagOption(L"-camerapathvalidate");
         // -meshlet 0|1。メッシュレット描画の有無。切ると従来の頂点シェーダー経路へ落ち、
         // メッシュレット単位のカリングが一切かからない。**両経路の絵は一致するのが正しい**
         // ので、これが「増幅シェーダーが何か落としていないか」を見るときの基準になる
@@ -1036,6 +1065,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetTAAEnabled(taa != 0);
             }
+            // 【開始フレームを先に設定すること】SelectCameraPath が「開始フレーム」を
+            // ログへ出すので、後に回すと出る値と実際に効く値が食い違う
+            if (cameraPathStart >= 0)
+            {
+                engine.SetCameraPathStartFrame(cameraPathStart);
+            }
+            if (cameraPathValidate)
+            {
+                engine.SetCameraPathValidate(true);
+            }
+            if (!cameraPathName.empty())
+            {
+                engine.SelectCameraPath(cameraPathName.c_str());
+            }
             if (meshlet >= 0)
             {
                 engine.SetMeshletRenderingEnabled(meshlet != 0);
@@ -1086,6 +1129,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetMegaLightsQuadSamples(megaLightsQuadSamples);
             }
+            if (megaLightsQuadBoost >= 0 || megaLightsQuadBoostMode >= 0)
+            {
+                engine.SetMegaLightsQuadBoost(megaLightsQuadBoost, megaLightsQuadBoostMode);
+            }
             if (megaLightsPoolCapacity >= 0)
             {
                 engine.SetMegaLightsTilePoolCapacity(megaLightsPoolCapacity);
@@ -1126,6 +1173,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (megaLightsFireflyClamp >= 0.0f)
             {
                 engine.SetMegaLightsDenoiseFireflyClamp(megaLightsFireflyClamp);
+            }
+            if (megaLightsDenoiseCatmull >= 0)
+            {
+                engine.SetMegaLightsDenoiseHistoryCatmullRom(megaLightsDenoiseCatmull != 0);
+            }
+            if (megaLightsDenoise4Tap >= 0)
+            {
+                engine.SetMegaLightsDenoiseHistory4Tap(megaLightsDenoise4Tap != 0);
+            }
+            if (megaLightsAntiLag >= 0 || megaLightsAntiLagT0 > 0.0f || megaLightsAntiLagT1 > 0.0f ||
+                megaLightsAntiLagFast > 0)
+            {
+                engine.SetMegaLightsDenoiseAntiLag(
+                    megaLightsAntiLag, megaLightsAntiLagT0, megaLightsAntiLagT1, megaLightsAntiLagFast);
             }
             if (megaLightsSpatialIterations > 0)
             {

@@ -53,6 +53,13 @@ namespace Kurenai
         int32_t QuadDenoiseMaxFrames = Defaults::MegaLightsQuadDenoiseMaxFrames;
         float DenoiseSigmaLuminance = Defaults::MegaLightsDenoiseSigmaLuminance;
         float DenoiseFireflyClamp = Defaults::MegaLightsDenoiseFireflyClamp;
+        bool DenoiseHistoryCatmullRom = Defaults::MegaLightsDenoiseHistoryCatmullRom;
+        bool DenoiseHistory4Tap = Defaults::MegaLightsDenoiseHistory4Tap;
+        // 残差駆動のアンチラグ。変化した画素だけ時間累積の上限を短く落とす(根拠は EngineDefaults.h)
+        bool DenoiseAntiLag = Defaults::MegaLightsDenoiseAntiLag;
+        float DenoiseAntiLagT0 = Defaults::MegaLightsDenoiseAntiLagT0;
+        float DenoiseAntiLagT1 = Defaults::MegaLightsDenoiseAntiLagT1;
+        int32_t DenoiseAntiLagFastFrames = Defaults::MegaLightsDenoiseAntiLagFastFrames;
 
         bool TemporalEnabled = Defaults::MegaLightsTemporalEnabled;
         // 履歴のM(何個の候補から絞ったか)の上限。大きいほど収束は速いが、
@@ -96,6 +103,11 @@ namespace Kurenai
         // 手法2の時間・空間再利用は「1画素1リザーバ」を前提に添字を組み立てているため。
         // 影レイの本数はそのままこの数になる(標本ごとに1本撃つ)
         int32_t QuadSamplesPerPixel = Defaults::MegaLightsQuadSamplesPerPixel;
+        // デノイザの予測棄却画素へ追加する標本数と対象モード。
+        // 1=予測棄却、2=予測棄却または短い履歴、3=全画素(検算専用)。
+        // 既定は無効。効き代の実測は docs 61.7q.1(棄却画素は最悪画素の 7%)。
+        int32_t QuadBoostSamples = Defaults::MegaLightsQuadBoostSamples;
+        int32_t QuadBoostMode = Defaults::MegaLightsQuadBoostMode;
         // 候補プールが1タイルあたりに抽出する灯の数(K)。
         // **1画素あたりの標本数では減らないノイズがここで決まる** ―― プールはタイルに1つで、
         // タイル内の全画素が同じK個から引くので、プールの引き方のばらつきはタイル内で

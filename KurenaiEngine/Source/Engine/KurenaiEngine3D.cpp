@@ -58,6 +58,17 @@ namespace Kurenai
         using Core::GetModuleDirectory;
         using Core::WideToUtf8;
 
+        // カメラ経路の検算で「回転由来の見かけ速度[px/frame]」を出すときの基準の画面高さ。
+        //
+        // 【実際の内部解像度を使わない理由】2つある。
+        //   1. m_RenderHeight を書くのはRenderスレッドで、経路を解決するUpdateスレッドから
+        //      読むと競合になる(m_RenderAspect がわざわざ atomic にしてあるのと同じ事情)
+        //   2. 実解像度に依存させると、**同じ経路が解像度によって合格したり拒否されたり**する。
+        //      経路が動いているかどうかは経路そのものの性質であって、窓の大きさの話ではない
+        // したがってこの値は「1080p 相当の目安」であり、実際の画面速度の確認は
+        // -dumptex GBufferVelocity の実測で行う
+        constexpr uint32_t kCameraPathNominalHeight = 1080u;
+
         // 視錐台カリングの一式は Rendering/GeometryDrawLoop.h へ移した。
         // 描画パスの共通ループ(ForEachGeometryDraw)と同じ場所にある必要がある
         using Rendering::FrustumPlanes;
@@ -1086,7 +1097,11 @@ namespace Kurenai
         {
             return m_MegaLightsPasses->HasCommonPipelineStates() && m_MegaLightsPasses->HasShadePipelineState() &&
                    m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
-                   m_RenderTargets.MegaLightsReservoirBuffer != nullptr;
+                   m_RenderTargets.MegaLightsReservoirBuffer != nullptr &&
+                   m_RenderTargets.MegaLightsBoostTexture != nullptr &&
+                   m_RenderTargets.MegaLightsBoostCountBuffer != nullptr &&
+                   m_RenderTargets.MegaLightsHistoryGuide[0] != nullptr &&
+                   m_RenderTargets.GBufferVelocity != nullptr;
         }
         if (m_Settings.MegaLights.Mode == MegaLightsMode::QuadShared)
         {
@@ -1095,6 +1110,9 @@ namespace Kurenai
             return m_MegaLightsPasses->HasCommonPipelineStates() && m_MegaLightsPasses->HasResolvePipelineState() &&
                    m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
                    m_RenderTargets.MegaLightsReservoirBuffer != nullptr &&
+                   m_RenderTargets.MegaLightsBoostTexture != nullptr &&
+                   m_RenderTargets.MegaLightsBoostCountBuffer != nullptr &&
+                   m_RenderTargets.GBufferVelocity != nullptr &&
                    m_RenderTargets.MegaLightsHistoryGuide[0] != nullptr;
         }
         return m_MegaLightsPasses->HasReferencePipelineState();
@@ -1426,6 +1444,208 @@ namespace Kurenai
         Core::Logger::Info("KurenaiEngine3D", "固定タイムステップを設定しました: " + std::to_string(seconds) + " 秒");
     }
 
+    void KurenaiEngine3D::SelectCameraPath(const wchar_t* name)
+    {
+        if (name == nullptr || name[0] == L'\0')
+        {
+            m_RequestedCameraPathName.clear();
+            m_CameraPathNeedsResolve.store(true, std::memory_order_relaxed);
+            Core::Logger::Info("KurenaiEngine3D", "カメラ経路の再生を解除しました");
+            return;
+        }
+
+        m_RequestedCameraPathName = name;
+        m_CameraPathNeedsResolve.store(true, std::memory_order_relaxed);
+
+        // 【ここでは成否を返さない】シーンの適用よりオプションの指定が先になることがあり、
+        // その時点では一覧が空で「見つからない」としか言えない。実際の解決とErrorログは
+        // ResolveCameraPath が行う
+        Core::Logger::Info(
+            "KurenaiEngine3D", "カメラ経路を要求しました: \"" + Core::WideToUtf8(m_RequestedCameraPathName) + "\"");
+
+        // 【固定タイムステップが無いと軌跡は再現しない】移動量はΔtに比例するので、
+        // 実時間で進めると同じフレーム番号でも別の姿勢になる。黙って変えず、警告してから入れる
+        if (m_FixedTimeStep <= 0.0f)
+        {
+            constexpr float kDefaultFixedStep = 1.0f / 60.0f;
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "カメラ経路の再生には固定タイムステップが要ります。-fixedstep の指定が無いため "
+                + std::to_string(kDefaultFixedStep) + " 秒を自動で設定します");
+            SetFixedTimeStep(kDefaultFixedStep);
+        }
+    }
+
+    void KurenaiEngine3D::SetCameraPathStartFrame(int frame)
+    {
+        m_CameraPathStartFrame = frame;
+        const uint32_t effective = (frame >= 0)
+            ? static_cast<uint32_t>(frame)
+            : static_cast<uint32_t>(Passes::kMegaLightsAccumWarmup);
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "カメラ経路の開始フレームを設定しました: " + std::to_string(effective)
+            + (frame >= 0 ? "" : " (既定)"));
+    }
+
+    void KurenaiEngine3D::SetCameraPathValidate(bool enabled)
+    {
+        m_CameraPathValidateRequested = enabled;
+        // シーンが既に適用済みならこの場で出したいので、解決の要求も立てる
+        m_CameraPathNeedsResolve.store(true, std::memory_order_relaxed);
+    }
+
+    uint32_t KurenaiEngine3D::GetCameraPathStartFrame() const
+    {
+        return (m_CameraPathStartFrame >= 0)
+            ? static_cast<uint32_t>(m_CameraPathStartFrame)
+            : static_cast<uint32_t>(Passes::kMegaLightsAccumWarmup);
+    }
+
+    void KurenaiEngine3D::LogCameraPathMotionStats(
+        const Assets::CameraPath& path, const Assets::CameraPathMotionStats& stats)
+    {
+        const std::string name = Core::WideToUtf8(path.GetName());
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "カメラ経路 \"" + name + "\" 検算: " + std::to_string(stats.FrameCount) + "フレーム"
+            + " / 位置[m/frame] 最小 " + std::to_string(stats.MinMetersPerFrame)
+            + " 中央 " + std::to_string(stats.MedianMetersPerFrame)
+            + " 最大 " + std::to_string(stats.MaxMetersPerFrame)
+            + " / 視線[deg/frame] 最小 " + std::to_string(stats.MinDegreesPerFrame)
+            + " 中央 " + std::to_string(stats.MedianDegreesPerFrame)
+            + " 最大 " + std::to_string(stats.MaxDegreesPerFrame)
+            + " / 回転由来の見かけ速度[px/frame] 最小 " + std::to_string(stats.MinPixelsPerFrame)
+            + " 中央 " + std::to_string(stats.MedianPixelsPerFrame)
+            + " 最大 " + std::to_string(stats.MaxPixelsPerFrame));
+
+        // 【px/frame は下界である】位置の移動による見かけ速度は被写体までの距離に依存し、
+        // ジオメトリを知らないここでは出せない。実際の画面速度の確認は
+        // -dumptex GBufferVelocity の実測で行うこと
+        if (stats.StillFrameCount > 0u)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "カメラ経路 \"" + name + "\" には位置も向きもほぼ動かないフレームが "
+                + std::to_string(stats.StillFrameCount) + " / " + std::to_string(stats.FrameCount)
+                + " あります。その区間は静止カメラの測定になります");
+        }
+    }
+
+    void KurenaiEngine3D::ResolveCameraPath()
+    {
+        m_CameraPathNeedsResolve.store(false, std::memory_order_relaxed);
+
+        std::vector<Assets::CameraPath> paths;
+        {
+            std::lock_guard<std::mutex> lock(m_AppliedSceneMutex);
+            paths = m_AppliedSceneCameraPaths;
+        }
+
+        // -camerapathvalidate。シーンが適用されてから全経路ぶん出す
+        if (m_CameraPathValidateRequested && !paths.empty())
+        {
+            m_CameraPathValidateRequested = false;
+            for (const Assets::CameraPath& path : paths)
+            {
+                Assets::CameraPathMotionStats stats;
+                if (path.ComputeMotionStats(m_Camera.GetFovY(), kCameraPathNominalHeight, stats))
+                {
+                    LogCameraPathMotionStats(path, stats);
+                }
+                else
+                {
+                    Core::Logger::Error(
+                        "KurenaiEngine3D",
+                        "カメラ経路 \"" + Core::WideToUtf8(path.GetName()) + "\" の検算に失敗しました");
+                }
+            }
+        }
+
+        if (m_RequestedCameraPathName.empty())
+        {
+            m_CameraPathActive = false;
+            m_CameraPath = Assets::CameraPath{};
+            return;
+        }
+
+        if (paths.empty())
+        {
+            // まだシーンが適用されていないだけかもしれないので、ここではまだ諦めない。
+            // シーンが適用されると ApplyLoadedScene が再解決を要求する
+            m_CameraPathActive = false;
+            return;
+        }
+
+        const auto found = std::find_if(
+            paths.begin(), paths.end(),
+            [this](const Assets::CameraPath& path) { return path.GetName() == m_RequestedCameraPathName; });
+
+        if (found == paths.end())
+        {
+            // 【黙って落とさず、黙って再生もしない】指定したのに再生されない理由が
+            // 分からないのがいちばん困るので、選べる名前を添えて出す
+            std::string available;
+            for (const Assets::CameraPath& path : paths)
+            {
+                if (!available.empty()) available += ", ";
+                available += "\"" + Core::WideToUtf8(path.GetName()) + "\"";
+            }
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "カメラ経路 \"" + Core::WideToUtf8(m_RequestedCameraPathName)
+                + "\" がこのシーンに見つかりません。再生せず、従来の入力操作のまま続行します。"
+                + " このシーンにある経路: " + (available.empty() ? "(無し)" : available));
+            m_CameraPathActive = false;
+            m_CameraPath = Assets::CameraPath{};
+            return;
+        }
+
+        // 【動いていない経路は拒否する】静止カメラのまま測ると、測りたかったものが
+        // 1つも測れていないのに数値だけは出てしまう。着手前にここで落とす
+        Assets::CameraPathMotionStats stats;
+        const bool hasStats = found->ComputeMotionStats(
+            m_Camera.GetFovY(), kCameraPathNominalHeight, stats);
+        if (hasStats)
+        {
+            LogCameraPathMotionStats(*found, stats);
+            if (stats.StillFrameCount + 1u >= stats.FrameCount)
+            {
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "カメラ経路 \"" + Core::WideToUtf8(found->GetName())
+                    + "\" は全フレームで静止しています。これで測ると静止カメラの測定になるため再生を拒否します");
+                m_CameraPathActive = false;
+                m_CameraPath = Assets::CameraPath{};
+                return;
+            }
+        }
+
+        m_CameraPath = *found;
+        m_CameraPathActive = true;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "カメラ経路を再生します: \"" + Core::WideToUtf8(m_CameraPath.GetName())
+            + "\" (" + std::to_string(m_CameraPath.FrameCount()) + "フレーム、開始フレーム "
+            + std::to_string(GetCameraPathStartFrame()) + ")。再生中は視点の入力操作を受け付けません");
+    }
+
+    void KurenaiEngine3D::UpdateCameraPath()
+    {
+        const uint32_t startFrame = GetCameraPathStartFrame();
+        // 開始フレームまでは先頭キーの姿勢で静止し、履歴・リザーバ・ストリーミング・
+        // 内部解像度が整定するのを待つ。0を渡すと EvaluatePose が先頭キーを返す
+        const uint32_t pathFrame = (m_UpdateFrameIndex >= startFrame) ? (m_UpdateFrameIndex - startFrame) : 0u;
+
+        const Assets::CameraPathPose pose = m_CameraPath.EvaluatePose(pathFrame);
+
+        // 【絶対値で置くこと】Camera::Move / Rotate は累積するので使わない。
+        // 累積するとΔtや呼ばれた回数に依存し、同じフレーム番号で同じ姿勢にならなくなる
+        m_Camera.SetPosition(pose.Position);
+        m_Camera.SetYawPitch(pose.YawRadians, pose.PitchRadians);
+    }
+
+
     void KurenaiEngine3D::SetPerfDump(const wchar_t* path, int frames)
     {
         if (path == nullptr || path[0] == L'\0' || frames <= 0)
@@ -1489,6 +1709,53 @@ namespace Kurenai
         Core::Logger::Info(
             "KurenaiEngine3D",
             "MegaLightsのファイアフライのクランプを設定しました: " + std::to_string(k));
+    }
+
+    void KurenaiEngine3D::SetMegaLightsDenoiseHistoryCatmullRom(bool enabled)
+    {
+        m_Settings.MegaLights.DenoiseHistoryCatmullRom = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("MegaLightsのデノイザの履歴の再サンプリングを設定しました: ") +
+                (enabled ? "Catmull-Rom" : "バイリニア(従来)"));
+    }
+
+    void KurenaiEngine3D::SetMegaLightsDenoiseHistory4Tap(bool enabled)
+    {
+        m_Settings.MegaLights.DenoiseHistory4Tap = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("MegaLightsのデノイザの履歴の妥当性判定を設定しました: ") +
+                (enabled ? "バイリニア2x2の4タップ" : "最近傍1タップ(従来)"));
+    }
+
+    void KurenaiEngine3D::SetMegaLightsDenoiseAntiLag(int enabled, float t0, float t1, int fastFrames)
+    {
+        auto& settings = m_Settings.MegaLights;
+        if (enabled >= 0)
+        {
+            settings.DenoiseAntiLag = (enabled != 0);
+        }
+        // 0以下は「既定のまま」。負や0を通すと smoothstep の両端が潰れて全画素が発火する
+        if (t0 > 0.0f && std::isfinite(t0)) settings.DenoiseAntiLagT0 = t0;
+        if (t1 > 0.0f && std::isfinite(t1)) settings.DenoiseAntiLagT1 = t1;
+        if (fastFrames > 0) settings.DenoiseAntiLagFastFrames = std::min(fastFrames, 64);
+        // 相対変化は [0,1] の量なので、両端もその範囲に収める
+        settings.DenoiseAntiLagT0 = std::clamp(settings.DenoiseAntiLagT0, 0.0f, 1.0f);
+        settings.DenoiseAntiLagT1 = std::clamp(settings.DenoiseAntiLagT1, 0.0f, 1.0f);
+        if (settings.DenoiseAntiLagT1 <= settings.DenoiseAntiLagT0)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのアンチラグは t1 > t0 でなければなりません(t0=" + std::to_string(settings.DenoiseAntiLagT0)
+                + ", t1=" + std::to_string(settings.DenoiseAntiLagT1) + ")。t1 を min(t0+0.1, 1) へ丸めます");
+            settings.DenoiseAntiLagT1 = std::min(settings.DenoiseAntiLagT0 + 0.1f, 1.0f);
+        }
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("MegaLightsのデノイザのアンチラグを設定しました: ") + (settings.DenoiseAntiLag ? "有効" : "無効")
+            + " (t0=" + std::to_string(settings.DenoiseAntiLagT0) + ", t1=" + std::to_string(settings.DenoiseAntiLagT1)
+            + ", fastFrames=" + std::to_string(settings.DenoiseAntiLagFastFrames) + ")");
     }
 
     void KurenaiEngine3D::SetMegaLightsDenoiseSigmaLuminance(float sigma)
@@ -1646,6 +1913,34 @@ namespace Kurenai
             "KurenaiEngine3D",
             "MegaLightsのクアッド標本数を " + std::to_string(m_Settings.MegaLights.QuadSamplesPerPixel) +
                 " にしました(影レイの本数も同じ数になります)");
+    }
+
+    void KurenaiEngine3D::SetMegaLightsQuadBoost(int samples, int mode)
+    {
+        // 負の値は「既定のまま」。CLIで片方だけ指定できるよう項目ごとに扱う。
+        if (samples >= 0)
+        {
+            m_Settings.MegaLights.QuadBoostSamples = samples;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsのクアッドブースト標本数を " + std::to_string(samples) + " にしました");
+        }
+
+        if (mode >= 0)
+        {
+            if (mode < 1 || mode > 3)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "MegaLightsのクアッドブーストモードが範囲外のため無視します: " +
+                        std::to_string(mode) + " (1〜3)");
+                return;
+            }
+            m_Settings.MegaLights.QuadBoostMode = mode;
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsのクアッドブーストモードを " + std::to_string(mode) + " にしました");
+        }
     }
 
     void KurenaiEngine3D::SetMegaLightsTilePoolCapacity(int capacity)
@@ -2789,6 +3084,11 @@ namespace Kurenai
 
         // 同じフレーム番号でも実時間が異なると、アニメーションが進んで描画結果を比較できない。
         const float deltaTime = m_FixedTimeStep > 0.0f ? m_FixedTimeStep : realDeltaTime;
+
+        // 【Updateより前に前進させること】Renderスレッドの m_History.FrameIndex も
+        // DecideFrameJitterAndCamera の最初の実行文で前進し、最初のフレームが1になる。
+        // ここを後ろへ下げると経路が1フレームずれ、乱数の種・ジッターと食い違う
+        ++m_UpdateFrameIndex;
         Update(deltaTime);
 
         // m_CameraはUpdateスレッド(UpdateMouseLook/UpdateMovement/UpdateAppliedSceneHandoff)
@@ -2797,6 +3097,7 @@ namespace Kurenai
         FrameState newFrameState;
         newFrameState.Camera = m_Camera;
         newFrameState.ImGuiVisible = m_ImGuiVisible;
+        newFrameState.PathFrameIndex = m_UpdateFrameIndex;
 
         // Renderスレッドが直前フレーム分を取り込み終えるまで待つ(キュー深度1)。
         // 取り込み自体はスナップショットのコピーだけなので即座に完了し、その後の重いGPU発行は
@@ -3122,12 +3423,25 @@ namespace Kurenai
         // (m_RenderAspectの宣言のコメント参照)。同じ値なら再設定しても副作用は無いので毎フレーム呼ぶ
         m_Camera.SetAspectRatio(m_RenderAspect.load(std::memory_order_relaxed));
 
-        UpdateMouseLook(imguiWantsMouse);
-
-        // ライト名のInputTextを編集中にWASDがカメラ移動として解釈されるのを防ぐ
-        if (!imguiWantsKeyboard)
+        // 【計測専用】決定的カメラ経路。名前の解決はシーンの適用と指定のどちらが先でも
+        // 起きうるので、要求が立っていればここで解決する
+        if (m_CameraPathNeedsResolve.load(std::memory_order_relaxed))
         {
-            UpdateMovement(deltaTime);
+            ResolveCameraPath();
+        }
+
+        // 経路の再生中は視点の入力操作を受け付けない。
+        // 【回転は元から入力で駆動できない】UpdateMouseLookはGetAsyncKeyState(VK_RBUTTON)を
+        // 見ており、PostMessageでは発火しない。だから経路は入力ではなくここで直接与える
+        if (!m_CameraPathActive)
+        {
+            UpdateMouseLook(imguiWantsMouse);
+
+            // ライト名のInputTextを編集中にWASDがカメラ移動として解釈されるのを防ぐ
+            if (!imguiWantsKeyboard)
+            {
+                UpdateMovement(deltaTime);
+            }
         }
 
 
@@ -3138,6 +3452,14 @@ namespace Kurenai
         UpdateImGuiToggle();
         // 新しいシーンが反映されていれば、その初期カメラとウィンドウタイトルをここで取り込む
         UpdateAppliedSceneHandoff();
+
+        // 【ハンドオフより後に置くこと】先に置くと、シーンが切り替わったフレームだけ
+        // 経路の姿勢が.ksceneの[Camera]に上書きされ、そのフレームだけ絵が飛ぶ。
+        // ここで無条件に上書きすることで、経路が常に勝つ
+        if (m_CameraPathActive)
+        {
+            UpdateCameraPath();
+        }
         // 昼夜サイクルの自動進行(m_Settings.Sky.TimeOfDay)はRenderThreadMain側で行う(RenderThreadMain参照)
     }
 

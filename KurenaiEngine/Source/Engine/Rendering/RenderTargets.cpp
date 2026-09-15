@@ -1,6 +1,9 @@
 #include "Rendering/RenderTargets.h"
 
 #include <algorithm>
+#include <string>
+
+#include "Core/Logger.h"
 
 namespace Kurenai::Rendering
 {
@@ -178,6 +181,16 @@ namespace Kurenai::Rendering
             static_cast<uint32_t>(sizeof(uint32_t)) * stride * (LightTileCountX + 1u) * (LightTileCountY + 1u);
         tilePoolBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
         MegaLightsTilePoolBuffer = device.CreateBuffer(tilePoolBufferDesc);
+        if (!MegaLightsTilePoolBuffer)
+        {
+            Core::Logger::Error("RenderTargets", "MegaLightsの候補プールバッファの確保に失敗しました");
+            return;
+        }
+
+        constexpr double kBytesPerMegabyte = 1000.0 * 1000.0;
+        const double tilePoolMegabytes = static_cast<double>(tilePoolBufferDesc.SizeInBytes) / kBytesPerMegabyte;
+        Core::Logger::Info(
+            "RenderTargets", "MegaLightsの候補プールバッファを確保しました: " + std::to_string(tilePoolMegabytes) + " MB");
     }
 
     void RenderTargets::CreateMegaLightsOutput(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
@@ -217,6 +230,19 @@ namespace Kurenai::Rendering
         blockedBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * width * height;
         blockedBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
         MegaLightsBlockedLightBuffer = device.CreateBuffer(blockedBufferDesc);
+
+        // ブースト項は解像度に追従して作り直す。Initial は予測棄却画素以外にゼロを書く。
+        MegaLightsBoostTexture = device.CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
+        RHI::BufferDesc boostCountBufferDesc;
+        boostCountBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+        boostCountBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * width * height;
+        boostCountBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+        MegaLightsBoostCountBuffer = device.CreateBuffer(boostCountBufferDesc);
+        if (!MegaLightsBoostTexture || !MegaLightsBoostCountBuffer)
+        {
+            Core::Logger::Error(
+                "RenderTargets", "MegaLightsのブースト用テクスチャまたはカウントバッファの確保に失敗しました");
+        }
         // 空間再利用の出力先。近傍を読むので入力と同じバッファへは書けない。
         // 2回以上回すときは2本を ping-pong する
         MegaLightsReservoirSpatialBuffer = device.CreateBuffer(reservoirBufferDesc);
@@ -230,6 +256,28 @@ namespace Kurenai::Rendering
         for (auto& buffer : MegaLightsReservoirHistory)
         {
             buffer = device.CreateBuffer(reservoirBufferDesc);
+        }
+
+        if (!MegaLightsReservoirBuffer || !MegaLightsReservoirSpatialBuffer || !MegaLightsReservoirSpatialBuffer2 ||
+            !MegaLightsReservoirHistory[0] || !MegaLightsReservoirHistory[1] || !MegaLightsBlockedLightBuffer ||
+            !MegaLightsBoostCountBuffer)
+        {
+            Core::Logger::Error("RenderTargets", "MegaLightsのリザーバ系バッファの確保に失敗しました");
+            return;
+        }
+
+        constexpr uint64_t kReservoirBufferCount = 5u;
+        constexpr uint64_t kAuxiliaryBufferCount = 2u;
+        constexpr double kBytesPerMegabyte = 1000.0 * 1000.0;
+        const uint64_t reservoirBytes = static_cast<uint64_t>(reservoirBufferDesc.SizeInBytes) * kReservoirBufferCount +
+            static_cast<uint64_t>(blockedBufferDesc.SizeInBytes) * kAuxiliaryBufferCount;
+        const double reservoirMegabytes = static_cast<double>(reservoirBytes) / kBytesPerMegabyte;
+        Core::Logger::Info(
+            "RenderTargets", "MegaLightsのリザーバ系バッファを確保しました: " + std::to_string(reservoirMegabytes) + " MB");
+        if (reservoirMegabytes > 2048.0)
+        {
+            Core::Logger::Warning(
+                "RenderTargets", "MegaLightsのリザーバ系バッファが2048MBを超えています。標本数を下げるかレンダー解像度を下げてください");
         }
     }
 

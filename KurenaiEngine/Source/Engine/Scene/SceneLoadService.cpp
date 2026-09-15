@@ -976,7 +976,13 @@ namespace Kurenai
             m_AppliedSceneApplyCamera = !(m_Settings.System.SceneReloadKeepsCamera && isSameSceneReload);
             m_AppliedSceneCamera = loaded.Camera;
             m_AppliedSceneTitle = std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name;
+            // 決定的カメラ経路(計測専用)。**カメラ本体と違ってconsumeせず持ち続ける** ――
+            // -camerapath の指定がシーンの適用より後になることがあり、そのとき名前を
+            // 解決できなくなるため(起動オプションの適用順に依存させない)
+            m_AppliedSceneCameraPaths = m_Scene.CameraPaths;
         }
         m_AppliedScenePending.store(true, std::memory_order_release);
+        // シーンが変われば経路の実体も変わる。Updateスレッドに解決し直させる
+        m_CameraPathNeedsResolve.store(true, std::memory_order_relaxed);
     }
 }
