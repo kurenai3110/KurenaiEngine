@@ -140,6 +140,9 @@ namespace Kurenai::Passes
             // (1)1点だけがシルエットの向こう側だと履歴全体を棄却する(本当は妥当なのに捨てる)
             // (2)1点が通れば残り3タップが別の面でも 3/4 の重みで色が入る
             DirectX::XMFLOAT4 Params3;
+            // x=履歴深度のカメラ移動補正(0=従来の現在ViewZとの比較 / 1=前フレームの期待ViewZ)、
+            // yzw=未使用
+            DirectX::XMFLOAT4 Params4;
         };
         // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
         // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
@@ -154,7 +157,10 @@ namespace Kurenai::Passes
         // Params3 は履歴の妥当性判定のタップ数を載せるために**意図して足した**。
         // 通すために期待値を書き換えたのではなく、動かしたことの記録としてここを更新している
         static_assert(offsetof(MegaLightsDenoiseConstants, Params3) == 48, "Params3 のレイアウトが変わっている");
-        static_assert(sizeof(MegaLightsDenoiseConstants) == 64, "MegaLightsDenoiseConstants の総サイズが変わっている");
+        // Params4 はカメラ移動補正のスイッチを載せるために**意図して足した**。
+        // 通すために期待値を書き換えたのではなく、追加したことの記録としてここを更新している
+        static_assert(offsetof(MegaLightsDenoiseConstants, Params4) == 64, "Params4 のレイアウトが変わっている");
+        static_assert(sizeof(MegaLightsDenoiseConstants) == 80, "MegaLightsDenoiseConstants の総サイズが変わっている");
 
         // MegaLightsReference.hlsl側のcbuffer MegaLightsConstantsと一致させる必要がある
         struct alignas(16) MegaLightsConstants

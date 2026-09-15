@@ -54,6 +54,7 @@ namespace Kurenai
         float DenoiseSigmaLuminance = Defaults::MegaLightsDenoiseSigmaLuminance;
         float DenoiseFireflyClamp = Defaults::MegaLightsDenoiseFireflyClamp;
         bool DenoiseHistory4Tap = Defaults::MegaLightsDenoiseHistory4Tap;
+        bool DenoiseMotionCompensatedDepth = Defaults::MegaLightsDenoiseMotionCompensatedDepth;
 
         bool TemporalEnabled = Defaults::MegaLightsTemporalEnabled;
         // 履歴のM(何個の候補から絞ったか)の上限。大きいほど収束は速いが、

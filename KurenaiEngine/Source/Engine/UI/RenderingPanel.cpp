@@ -368,6 +368,15 @@ namespace Kurenai::UI
                     "(BistroExteriorNight / Strafe経路 / 2560x1440。分母は参照実装)。\n\n"
                     "【既定は有効】");
 
+                CheckboxEx(
+                    "履歴深度のカメラ移動を補正###MegaLightsDenoiseMotionDepth",
+                    &m_Engine.GetSettings().MegaLights.DenoiseMotionCompensatedDepth,
+                    Defaults::MegaLightsDenoiseMotionCompensatedDepth,
+                    "現在のワールド位置を前フレームのViewProjectionで投影し、履歴ガイドのViewZと比較する。"
+                    "同じ面を見続けたままカメラが前後へ動いたとき、カメラ自身の移動による深度差で履歴を"
+                    "捨てるのを防ぐ。法線・材質・相対深度しきい値は従来のまま。\n\n"
+                    "【既定は無効】無効時は現在のViewZと履歴ViewZを直接比較する従来経路を使う");
+
             }
 
             if (megaLightsQuadUI)

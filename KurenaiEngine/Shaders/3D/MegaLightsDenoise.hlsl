@@ -43,6 +43,8 @@ cbuffer MegaLightsDenoiseConstants : register(b1)
     // x=履歴の妥当性の判定タップ数(0=最近傍1タップ(従来) / 1=バイリニア2x2の4タップ),
     // yzw=未使用
     float4 Params3;
+    // x=履歴深度のカメラ移動補正(0=従来 / 1=前フレームの期待ViewZ)、yzw=未使用
+    float4 Params4;
 };
 
 // 前フレームの幾何。時間再利用(MegaLightsTemporal)が毎フレーム全画素へ書いている。
@@ -137,7 +139,9 @@ float2 SpatialLuminanceMoments(uint2 pixel, uint2 outputSize, float3 demod)
 
 // 履歴の1タップが「今の画素と同じ面か」を判定する。しきい値は従来と同一
 // (kMaxRelativeDepthDiff / kMinNormalDot / kMaxMaterialDiff)。**緩める方向へは一切動かさない。**
-bool HistoryTapValid(int2 tapPixel, uint2 outputSize, float viewZ, float3 N, float2 material)
+bool HistoryTapValid(
+    int2 tapPixel, uint2 outputSize, float expectedPrevViewZ,
+    float viewZ, float3 N, float2 material)
 {
     float hViewZ;
     float3 hN;
@@ -170,7 +174,8 @@ bool HistoryTapValid(int2 tapPixel, uint2 outputSize, float viewZ, float3 N, flo
     {
         return false;
     }
-    return MegaLightsGuideMatchesSurface(hViewZ, hN, hMaterial, viewZ, N, material);
+    return MegaLightsGuideMatchesSurface(
+        hViewZ, hN, hMaterial, expectedPrevViewZ, viewZ, N, material);
 }
 
 [numthreads(8, 8, 1)]
@@ -290,6 +295,17 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
         const float2 frac2 = historyPixelF - baseF;
         const int2 baseI = int2(baseF);
 
+        // InvViewProj から現在のワールド位置を復元し、前フレームのカメラから見た
+        // 期待 ViewZ を求める。無効時と履歴ガイドを使えない代用経路では行列積を実行せず、
+        // 従来の比較値をそのまま使う。
+        float expectedPrevViewZ = viewZ;
+        [branch]
+        if (Params4.x != 0.0f && Params2.z != 0.0f)
+        {
+            const float3 worldPos = ReconstructWorldPos(uv, depth);
+            expectedPrevViewZ = mul(float4(worldPos, 1.0f), PrevViewProj).w;
+        }
+
         const float tapWeights[4] = {
             (1.0f - frac2.x) * (1.0f - frac2.y),
             frac2.x * (1.0f - frac2.y),
@@ -312,7 +328,7 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
             {
                 continue;
             }
-            if (!HistoryTapValid(tapPixel, outputSize, viewZ, N, material))
+            if (!HistoryTapValid(tapPixel, outputSize, expectedPrevViewZ, viewZ, N, material))
             {
                 continue;
             }
@@ -371,7 +387,15 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         if (hValid)
         {
-            if (MegaLightsGuideMatchesSurface(hViewZ, hN, hMaterial, viewZ, N, material))
+            float expectedPrevViewZ = viewZ;
+            [branch]
+            if (Params4.x != 0.0f && Params2.z != 0.0f)
+            {
+                const float3 worldPos = ReconstructWorldPos(uv, depth);
+                expectedPrevViewZ = mul(float4(worldPos, 1.0f), PrevViewProj).w;
+            }
+            if (MegaLightsGuideMatchesSurface(
+                    hViewZ, hN, hMaterial, expectedPrevViewZ, viewZ, N, material))
             {
                 historyColor = HistoryTexture.SampleLevel(ColorSampler, historyUv, 0).rgb;
                 const float4 hm = HistoryMomentsTexture.SampleLevel(ColorSampler, historyUv, 0);

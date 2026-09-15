@@ -1716,6 +1716,23 @@ namespace Kurenai
                 (enabled ? "バイリニア2x2の4タップ" : "最近傍1タップ(従来)"));
     }
 
+    void KurenaiEngine3D::SetMegaLightsDenoiseMotionCompensatedDepth(int enabled)
+    {
+        if (enabled != 0 && enabled != 1)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsの履歴深度のカメラ移動補正は0または1で指定します。既定のままにします: " +
+                    std::to_string(enabled));
+            return;
+        }
+        m_Settings.MegaLights.DenoiseMotionCompensatedDepth = (enabled != 0);
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("MegaLightsの履歴深度のカメラ移動補正を設定しました: ") +
+                (enabled != 0 ? "有効" : "無効(従来)"));
+    }
+
     void KurenaiEngine3D::SetMegaLightsDenoiseSigmaLuminance(float sigma)
     {
         if (!(sigma > 0.0f))

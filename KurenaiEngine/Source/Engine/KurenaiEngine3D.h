@@ -350,6 +350,8 @@ namespace Kurenai
         // 履歴の妥当性を2x2の4タップで判定するか(既定は最近傍1タップ)。
         // 根拠は EngineDefaults.h の MegaLightsDenoiseHistory4Tap
         void SetMegaLightsDenoiseHistory4Tap(bool enabled);
+        // カメラ移動を補正した前フレームの期待 ViewZ で履歴の深度を判定するか(0/1のみ)。
+        void SetMegaLightsDenoiseMotionCompensatedDepth(int enabled);
         // 空間再利用の反復回数(負なら既定のまま)
         void SetMegaLightsSpatialIterations(int iterations);
         // 時間再利用の有無と、履歴のMの上限。負/0は既定のまま

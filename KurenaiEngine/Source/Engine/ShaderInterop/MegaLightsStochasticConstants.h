@@ -53,7 +53,8 @@ namespace Kurenai::ShaderInterop
         // x=asuint(可視灯リストを提案分布へ混ぜた割合 c。0で従来どおり。
         //   Initialが割り戻しに使う。**候補プール側 MegaLightsTilePoolConstants の
         //   VisibleListParams.z と必ず同じ値にすること** ―― 抽出した確率と
-        //   割り戻す確率が食い違うと、絵は出たまま静かに偏る)yzw=未使用
+        //   割り戻す確率が食い違うと、絵は出たまま静かに偏る)、
+        // y=Temporalの履歴深度のカメラ移動補正(0=従来 / 1=前フレームの期待ViewZ)、zw=未使用
         //
         // 【枠を1つ増やす代償を承知で足している】このcbufferは MegaLights の5本が
         // 共有しており、宣言を1つ増やすだけで5本すべてのDXILが変わる。機能を切っていても
@@ -73,7 +74,7 @@ namespace Kurenai::ShaderInterop
     static_assert(offsetof(MegaLightsStochasticConstants, Params4) == 64, "MegaLightsStochasticConstants.hlsli の Params4 と位置が食い違っている");
     static_assert(offsetof(MegaLightsStochasticConstants, Params5) == 80, "MegaLightsStochasticConstants.hlsli の Params5 と位置が食い違っている");
     static_assert(offsetof(MegaLightsStochasticConstants, Params6) == 96, "MegaLightsStochasticConstants.hlsli の Params6 と位置が食い違っている");
-    // Params7 は可視灯リストの混合率を載せるために**意図して足した**。
+    // Params7 は可視灯リストの混合率と履歴深度のカメラ移動補正を載せるために**意図して足した**。
     // 通すために期待値を書き換えたのではなく、追加したことの記録としてここを更新している
     static_assert(offsetof(MegaLightsStochasticConstants, Params7) == 112, "MegaLightsStochasticConstants.hlsli の Params7 と位置が食い違っている");
     static_assert(sizeof(MegaLightsStochasticConstants) == 128, "MegaLightsStochasticConstants の総サイズが変わっている");

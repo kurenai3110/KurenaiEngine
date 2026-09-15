@@ -280,14 +280,16 @@ void MegaLightsUnpackMaterial(uint packed, out float metallic, out float roughne
 }
 
 // 履歴ガイドの1タップが現在のサーフェスと一致するか。
-// 比較式と演算順はデノイザで使っていた形を保ち、各呼び出し側で判定がずれないようにする。
+// expectedPrevViewZ は、補正時には現在のワールド位置を前フレームのカメラから見た ViewZ、
+// 従来経路では現在の viewZ を渡す。しきい値の分母は現在の viewZ のまま変えない。
 bool MegaLightsGuideMatchesSurface(
-    float hViewZ, float3 hN, float2 hMaterial, float viewZ, float3 N, float2 material)
+    float hViewZ, float3 hN, float2 hMaterial, float expectedPrevViewZ,
+    float viewZ, float3 N, float2 material)
 {
     const float kMaxRelativeDepthDiff = 0.05f;
     const float kMinNormalDot = 0.9f;
     const float kMaxMaterialDiff = 0.1f;
-    return abs(hViewZ - viewZ) <= kMaxRelativeDepthDiff * max(abs(viewZ), 1e-3f) &&
+    return abs(hViewZ - expectedPrevViewZ) <= kMaxRelativeDepthDiff * max(abs(viewZ), 1e-3f) &&
            dot(N, hN) >= kMinNormalDot &&
            abs(hMaterial.r - material.r) <= kMaxMaterialDiff &&
            abs(hMaterial.g - material.g) <= kMaxMaterialDiff;

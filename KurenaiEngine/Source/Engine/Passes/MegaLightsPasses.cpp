@@ -680,7 +680,13 @@ namespace Kurenai::Passes
                 // 割り戻す確率が食い違うと、絵は出たまま静かに偏る。
                 // どのタイルのリストを引いたかはプールがヘッダへ書き残しており、
                 // Initial はそれを読むので再投影の式はこちらには無い
-                stochasticConstants.Params7 = { visibleListMixBits, 0u, 0u, 0u };
+                // y は Temporal の履歴深度のカメラ移動補正を切り替える。
+                stochasticConstants.Params7 = {
+                    visibleListMixBits,
+                    megaLightsSettings.DenoiseMotionCompensatedDepth ? 1u : 0u,
+                    0u,
+                    0u
+                };
                 return stochasticConstants;
             };
             const auto updateStochasticConstants = [this, buildStochasticConstants](RHI::IRHICommandList* cmd)
@@ -1095,6 +1101,12 @@ namespace Kurenai::Passes
                 // yzw は定数バッファのレイアウトを保つための未使用成分。
                 denoiseConstants.Params3 = {
                     megaLightsSettings.DenoiseHistory4Tap ? 1.0f : 0.0f,
+                    0.0f,
+                    0.0f,
+                    0.0f
+                };
+                denoiseConstants.Params4 = {
+                    megaLightsSettings.DenoiseMotionCompensatedDepth ? 1.0f : 0.0f,
                     0.0f,
                     0.0f,
                     0.0f
