@@ -414,9 +414,11 @@ namespace Kurenai::Defaults
     // 「ほぼ0」とは書けるが「速くなった」と読んではいけない。
     //
     //
+    // **目視の確認を経て既定 ON にした(2026-09-16)。** 指標はすべて改善し、
+    // コストは対照2回のばらつきに埋もれている。
     //
     // 経緯と検算は docs/ImplementationDetail.md 61.7o
-    inline constexpr bool MegaLightsDenoiseHistory4Tap = false;
+    inline constexpr bool MegaLightsDenoiseHistory4Tap = true;
     // 履歴ガイドの ViewZ を、現在のワールド位置を前フレームの VP で投影した期待 ViewZ と比べるか。
     // false では従来どおり現在の ViewZ と直接比較する。カメラ移動時の深度差だけを補正し、
     // 法線・材質の判定と相対深度しきい値は変えない。
@@ -440,7 +442,8 @@ namespace Kurenai::Defaults
     //
     // 【速度0なら何も変わらない】静止では OFF / ON の出力がビット同一(4/4)。
     //
-    inline constexpr bool MegaLightsDenoiseMotionCompensatedDepth = false;
+    // **目視の確認を経て既定 ON にした(2026-09-16)。**
+    inline constexpr bool MegaLightsDenoiseMotionCompensatedDepth = true;
     // --- MegaLights クアッド共有(手法3) ---
     // 2x2クアッドの4画素がそれぞれ別の灯へ影レイを1本ずつ撃ち、**4本の可視性を
     // クアッド内で共有して平均する**。追加のレイは1本も撃たない。
@@ -531,8 +534,11 @@ namespace Kurenai::Defaults
     //                            真値に近い(遅れは増えていない)
     //   消灯応答                 全灯消灯後の残光は ON/OFF とも 0 画素(差なし)
     //
+    // 5 m/s の前進では隣接タイル段差を単独で -13.8%、確率的バイリニア参照との併用で
+    // -39.3% 減らす(0.1245 -> 0.0756)。
     //
-    inline constexpr bool MegaLightsVisibleListEnabled = false;
+    // **目視の確認を経て既定 ON にした(2026-09-16)。**
+    inline constexpr bool MegaLightsVisibleListEnabled = true;
     // 1タイル(16x16画素)あたりに覚える灯の数。
     // **MegaLightsCommon.hlsli の kMegaLightsVisibleListCapacityMax 以下であること。**
     //
