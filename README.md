@@ -751,13 +751,7 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-megalightsvisiblelistcapacity <1〜16>` | タイルごとに保持する可視灯リストの容量を指定する。根拠は docs/ImplementationDetail.md 61.7u節。 |
 | `-megalightsquadstratify <0\|1>` | クアッド内の候補割り当てを層化するか指定する。 |
 | `-megalightsblockedcache <0\|1>` | 遮蔽済みライトのキャッシュを使うか指定する。 |
-| `-megalightstilejitter <0\|1\|2>` | 候補プールのタイル格子ジッターを指定する。根拠は docs/ImplementationDetail.md 61.7n節。 |
-| `-megalightsdenoise4tap <0\|1>` | デノイザの時間累積が履歴の妥当性を何タップで判定するかを指定する(`0` = 最近傍1タップ、`1` = バイリニア2x2の4タップ)。**既定は0** ―― 指標はすべて改善するが、動かして見比べても差が分からなかったため既定にしていない。根拠は docs/ImplementationDetail.md 61.7o.9節。 |
-| `-megalightsdenoisecatmull <0\|1>` | デノイザの時間累積が履歴の色を引くときの再サンプリングを指定する(`0` = バイリニア、`1` = Catmull-Rom)。**既定は0** ―― 重みの正規化を直したあとは移動中の鮮鋭さ・誤差・総和比のすべてでバイリニアを上回るが、既定は目視のあとに決める。`-megalightsdenoise4tap 1` と両方指定すると4タップが全部通った画素だけ Catmull-Rom で引き、指標はこの組が最良。根拠は docs/ImplementationDetail.md 61.7q節。 |
-| `-megalightsquadboost <B>` / `-megalightsquadboostmode <1\|2\|3>` | クアッド共有(手法3)で、デノイザに棄却されると予測した画素にだけ B 本の標本を足す(`1` = 予測棄却画素、`2` = 今は 1 と同じ、`3` = 全画素・検算専用)。**既定は 0(無効)** ―― 棄却画素のノイズは減るが最悪画素の 7% にしか届かない。根拠は docs/ImplementationDetail.md 61.7q.5節。 |
-| `-megalightsdenoiseantilag <0\|1>` | デノイザの時間累積に残差駆動のアンチラグを掛けるか指定する(灯や影が変わった画素だけ累積上限を4へ落とし、残光を短くする)。**既定は0** ―― 目視で既定を決めるまでは無効。根拠は docs/ImplementationDetail.md 61.7p節。 |
-| `-megalightsdenoiseantilagt0 <0..1>` / `-megalightsdenoiseantilagt1 <0..1>` | アンチラグが発火する相対変化のしきい値(smoothstep の両端。既定 0.35 / 0.6)。 |
-| `-megalightsdenoiseantilagfast <フレーム数>` | アンチラグが現フレームの 7x7 平均をならす短い EMA の長さ(既定 4)。長いほど誤発火は減り、検出は遅れる。 |
+| `-megalightsdenoise4tap <0\|1>` | デノイザの時間累積が履歴の妥当性を何タップで判定するかを指定する(`0` = 最近傍1タップ、`1` = バイリニア2x2の4タップ)。**既定は1**。根拠は docs/ImplementationDetail.md 61.7o.9節。 |
 | `-megalightspoolbilinear <0\|1\|2>` | 候補プールを自分のタイル固定で引くか(0)、最も近い4タイルから確率的バイリニアで引くかを指定する(1=2x2クアッドごとに1タイル(既定)、2=画素ごとに1タイル)。タイル形のムラを画素ごとの乱数へ溶かす。根拠は docs/ImplementationDetail.md 61.7t節。 |
 | `-megalightsperturb <0\|1\|2>` | 蓄積開始時に検証用のシーン摂動を加える(`-megalightsaccum` が 0 だと効かない)。 |
 | `-megalightsspatial <0\|1>` | 空間再利用の有無を指定する。根拠は docs/ImplementationDetail.md 61.7f節。 |

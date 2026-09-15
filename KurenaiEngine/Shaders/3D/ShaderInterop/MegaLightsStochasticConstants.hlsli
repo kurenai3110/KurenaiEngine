@@ -18,9 +18,9 @@ cbuffer MegaLightsStochasticConstants : register(b1)
     uint4 Params2;
     float4 Params3;
     uint4 Params4;
-    // x=1画素あたりの標本数、y=ブースト標本数B、z=対象モード、
-    // w=述語フラグ(bit0=デノイズ履歴有効、bit1=幾何ガイド有効、bit2=4タップ判定)
+    // x=1画素あたりの標本数、yzw=未使用
     uint4 Params5;
+    // xy=未使用、z=候補プールのタイル数Y、w=確率的バイリニア参照のモード
     uint4 Params6;
     // x=asuint(可視灯リストを提案分布へ混ぜた割合 c)、yzw=未使用
     uint4 Params7;

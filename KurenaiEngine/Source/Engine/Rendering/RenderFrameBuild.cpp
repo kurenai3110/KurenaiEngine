@@ -45,8 +45,7 @@ namespace Kurenai
     // フレームのジッターと、カメラ由来の行列を確定させる。
     //
     // 【最初に呼ぶこと】m_History.FrameIndex の前進がここの最初の実行文で、
-    // MegaLights のタイル格子ジッターと TAA のサブピクセルジッターの両方が
-    // この番号から導かれる。呼ぶ位置が下がると、両者が別のフレーム番号を見る
+    // TAA のサブピクセルジッターはこの番号から導かれる
     void KurenaiEngine3D::DecideFrameJitterAndCamera(
         const KurenaiEngine3D::FrameState& frameState, Rendering::RenderFrameContext& frameContext)
     {
@@ -72,30 +71,6 @@ namespace Kurenai
                 + " / Render " + std::to_string(m_History.FrameIndex)
                 + ")。決定的カメラ経路の測定結果は信用できません");
         }
-
-        // --- MegaLights候補プールのタイル格子ジッター ---
-        // 書き手・Initial/Spatial・Presentへ配る値をここで一度だけ決める。
-        // 各パスが個別にフレーム番号から導くと、式の片側だけを直した際に別タイルを静かに読むため
-        const bool megaLightsTileJitterEnabled = m_Settings.MegaLights.TileJitterMode != 0;
-        DirectX::XMUINT2 megaLightsTileOffset{ 0u, 0u };
-        if (m_Settings.MegaLights.TileJitterMode == 1)
-        {
-            // Halton(2,3)を16段階へ量子化する。RadicalInverseは[0,1)だが、丸め誤差でも
-            // 16にならないようタイル幅-1で明示的に押さえる
-            megaLightsTileOffset.x = std::min<uint32_t>(
-                static_cast<uint32_t>(Rendering::RadicalInverse(m_History.FrameIndex, 2u) * Passes::kLightTileSize),
-                Passes::kLightTileSize - 1u);
-            megaLightsTileOffset.y = std::min<uint32_t>(
-                static_cast<uint32_t>(Rendering::RadicalInverse(m_History.FrameIndex, 3u) * Passes::kLightTileSize),
-                Passes::kLightTileSize - 1u);
-        }
-        frameContext.MegaLightsTileOffset = megaLightsTileOffset;
-        // 無効時だけ従来のタイル数をそのまま使い、添字・乱数の種・ディスパッチ数を保存する。
-        // モード2は対照実験なので、オフセット0でも有効側と同じ+1タイルを通す
-        frameContext.MegaLightsEffectiveTilesX =
-            megaLightsTileJitterEnabled ? (m_RenderTargets.LightTileCountX + 1u) : m_RenderTargets.LightTileCountX;
-        frameContext.MegaLightsEffectiveTilesY =
-            megaLightsTileJitterEnabled ? (m_RenderTargets.LightTileCountY + 1u) : m_RenderTargets.LightTileCountY;
 
         DirectX::XMFLOAT2 jitterOffsetPixels{ 0.0f, 0.0f };
         if (m_Settings.PostProcess.TAAEnabled)

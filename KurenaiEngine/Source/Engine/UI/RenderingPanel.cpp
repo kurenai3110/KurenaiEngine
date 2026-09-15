@@ -304,20 +304,6 @@ namespace Kurenai::UI
                 }
             }
 
-            // CLIのモード2も有効として表示する。UIで一度切った後に戻す場合は通常のHalton列へ戻す
-            bool tileJitterEnabled = m_Engine.GetSettings().MegaLights.TileJitterMode != 0;
-            if (CheckboxEx(
-                    "タイル格子ジッター###MegaLightsTileJitter", &tileJitterEnabled,
-                    Defaults::MegaLightsTileJitterEnabled,
-                    "候補プールの16x16格子をフレームごとに画素単位でずらす。"
-                    "タイル内で共通する抽出誤差を時間方向に別の場所へ移し、時間累積後の"
-                    "ブロック状の残差を抑える。\n\n"
-                    "【1フレームのノイズ量は減らない】格子と誤差の位置を動かす機能であり、"
-                    "1枚だけの比較では改善を判定できない"))
-            {
-                m_Engine.SetMegaLightsTileJitter(tileJitterEnabled ? 1 : 0);
-            }
-
             // CLIのモード2(画素ごと)も有効として表示する。UIで一度切った後に戻す場合は
             // 既定の粒度(クアッドごと)へ戻す
             bool poolBilinearEnabled = m_Engine.GetSettings().MegaLights.TilePoolBilinearMode != 0;
@@ -326,9 +312,6 @@ namespace Kurenai::UI
                     Defaults::MegaLightsTilePoolBilinearMode != 0,
                     "候補プールを自分のタイル固定で引くのをやめ、最も近い4タイルの中から"
                     "バイリニアの確率で1つ選ぶ。タイル境界の硬い割り当てを画素ごとの乱数へ溶かす。\n\n"
-                    "【格子ジッターとは別物】あちらは境界の位置を動かすだけで、"
-                    "「1画素は1タイルに属する」割り当てが残る。タイル内の256画素が同じ抽出誤差を"
-                    "共有している限り、空間フィルタでは原理的に取れない。\n\n"
                     "【不偏性は保たれる】選んだタイルではなく混合分布 q̄ = Σ b_j q_j で割り戻す。"
                     "選んだタイルで割ると、そこへ届かない灯の定義域が欠けてバイアスになる"))
             {
@@ -369,8 +352,8 @@ namespace Kurenai::UI
                     "【クアッド共有では既定を長くしてある】あちらはリザーバを持ち回らないので、"
                     "デノイザだけが時間方向の記憶になる");
 
-                // 【履歴を捨てない】下の2つは履歴が持つ量(復調済みの色・モーメント)の意味を
-                // 変えないので、切り替えても InvalidateDenoiseHistory は呼ばない。
+                // 【履歴を捨てない】履歴の妥当性判定を切り替えても、履歴が持つ量
+                // (復調済みの色・モーメント)の意味は変わらないので InvalidateDenoiseHistory は呼ばない。
                 // 呼ぶと全画素の履歴長が1へ落ちて1フレームだけ全面にノイズが出るが、それは
                 // 切り替えの効果ではなく「捨てた」効果で、動かしながらの A/B を汚す
                 CheckboxEx(
@@ -383,53 +366,8 @@ namespace Kurenai::UI
                     "混ぜる。\n\n"
                     "移動中の棄却率 4.84% → 2.63%、誤差の中央値 -18%、鮮鋭さ +28%、総和比が1へ近づく"
                     "(BistroExteriorNight / Strafe経路 / 2560x1440。分母は参照実装)。\n\n"
-                    "【既定は無効】指標はすべて改善するが、動かして見比べても差が分からなかったため。"
-                    "効くのは棄却される画素だけで、それは画面の数%。\n"
-                    "違いが出るのはカメラを動かしている最中だけ(止めると historyUv == uv で同じ結果)");
+                    "【既定は有効】");
 
-                CheckboxEx(
-                    "履歴を Catmull-Rom で引く###MegaLightsDenoiseCatmull",
-                    &m_Engine.GetSettings().MegaLights.DenoiseHistoryCatmullRom,
-                    Defaults::MegaLightsDenoiseHistoryCatmullRom,
-                    "バイリニアで引くと毎フレーム「補間した結果をまた補間する」ことになり、移動中の"
-                    "鮮鋭さが累積的に失われる(累積上限を伸ばすほど単調になまる)。TAAはこの理由で"
-                    "Catmull-Romを使っている。\n\n"
-                    "【既定は無効 ―― 目視のあとに決める】最初は総和が暗く偏って落としたが、原因は"
-                    "5タップ化で落とした角の重みぶん(和が 1 にならない)が上限64の帰還で育っていたこと。"
-                    "正規化したあとは移動中の鮮鋭さ +21%、誤差の中央値 -14%、総和比も改善し、"
-                    "符号の偏りは無い(BistroExteriorNight / Strafe経路 / 2560x1440。分母は参照実装)。\n"
-                    "4タップ判定と両方有効にすると、4タップが全部通った画素だけ Catmull-Rom で引く。"
-                    "指標はこの組が最良(鮮鋭さ +44%、総和比 0.927 → 0.949)");
-
-                CheckboxEx(
-                    "アンチラグ(変化した画素だけ累積を短く)###MegaLightsDenoiseAntiLag",
-                    &m_Engine.GetSettings().MegaLights.DenoiseAntiLag,
-                    Defaults::MegaLightsDenoiseAntiLag,
-                    "従来の累積は「その画素の信号が変化したか」を見ていない。だから灯を消したあとの"
-                    "残光は上限が一律に決め、上限64なら10%まで2.5秒尾を引く。\n\n"
-                    "「現フレームの7x7平均を数フレームならした値」と「履歴の7x7平均」の相対変化で"
-                    "変化を検出して、変化した画素だけ上限を4まで落とす。静穏な画素は長く累積したまま。"
-                    "**上限を伸ばしてノイズを下げても遅れが増えない**形にするための仕組みで、"
-                    "上限の引き上げと対で使う。\n\n"
-                    "【効かないもの】カメラ移動中のなまりには効かない(再投影が効いている面では残差が出ない)。\n"
-                    "【見るなら】灯を数秒つけて履歴を育ててから消す。デバッグ表示20(直接光単体)、TAAは切る");
-                if (m_Engine.GetSettings().MegaLights.DenoiseAntiLag)
-                {
-                    SliderFloatEx(
-                        "  相対変化 下端 t0###MegaLightsAntiLagT0", &m_Engine.GetSettings().MegaLights.DenoiseAntiLagT0,
-                        0.0f, 1.0f, Defaults::MegaLightsDenoiseAntiLagT0, "%.2f", 0,
-                        "|ならした現在 - 履歴| / max(現在, 履歴) がこれ未満なら発火しない。"
-                        "消灯なら 1.0 へ向かう。下げると敏感になる(静止時の誤発火が増える)");
-                    SliderFloatEx(
-                        "  相対変化 上端 t1###MegaLightsAntiLagT1", &m_Engine.GetSettings().MegaLights.DenoiseAntiLagT1,
-                        0.0f, 1.0f, Defaults::MegaLightsDenoiseAntiLagT1, "%.2f", 0,
-                        "これ以上なら完全に発火(上限4へ)。t0 との間はなだらかに移る");
-                    SliderIntEx(
-                        "  ならす長さ[フレーム]###MegaLightsAntiLagFast", &m_Engine.GetSettings().MegaLights.DenoiseAntiLagFastFrames,
-                        1, 16, Defaults::MegaLightsDenoiseAntiLagFastFrames,
-                        "現フレームの7x7平均をこの長さの EMA でならしてから比べる。ファイアフライ1個で動く"
-                        "単フレームの平均をならす。長いほど誤発火は減り、検出はその分だけ遅れる");
-                }
             }
 
             if (megaLightsQuadUI)
@@ -454,28 +392,6 @@ namespace Kurenai::UI
                         "16標本では4GB級になる(確保サイズと超過警告は起動ログに出る)"))
                 {
                     m_Engine.SetMegaLightsQuadSamples(quadSamples);
-                }
-
-                // ブースト項は定数バッファだけで効く(確保し直しは無い)ので設定へ直接書く
-                SliderIntEx(
-                    "棄却画素へのブースト標本数###MegaLightsQuadBoost",
-                    &m_Engine.GetSettings().MegaLights.QuadBoostSamples, 0, 8,
-                    Defaults::MegaLightsQuadBoostSamples,
-                    "デノイザに履歴を棄却されると**予測した画素にだけ**、この本数の標本(影レイ)を"
-                    "自分の画素で追加して引く。棄却画素は生の1標本がそのまま出るので、そこだけ"
-                    "標本を増やす。予測は Initial の時点でデノイザと同じ判定式を使い、ビット一致する。\n\n"
-                    "【既定は 0】棄却画素のノイズ(N1)は B=4 で -9%、B=8 で -11% 減るが、"
-                    "最悪画素の 7% にしか届かない(残りは明るい縁のにじみ)。"
-                    "コストは B=4 で Initial +0.4〜0.5ms、B=8 で +0.9ms(2560x1440)。\n"
-                    "違いが出るのはカメラを動かしている最中だけ(止めると棄却が起きない)");
-                if (m_Engine.GetSettings().MegaLights.QuadBoostSamples > 0)
-                {
-                    SliderIntEx(
-                        "  ブーストの対象###MegaLightsQuadBoostMode",
-                        &m_Engine.GetSettings().MegaLights.QuadBoostMode, 1, 3,
-                        Defaults::MegaLightsQuadBoostMode,
-                        "1 = 予測棄却画素だけ / 2 = 今は 1 と同じ(履歴長の条件は未実装) / "
-                        "3 = 全画素(検算専用。不偏性の確認に使う)");
                 }
 
                 CheckboxEx(

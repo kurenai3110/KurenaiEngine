@@ -51,15 +51,13 @@ namespace Kurenai::Passes
         struct alignas(16) MegaLightsTilePoolConstants
         {
             DirectX::XMFLOAT4X4 View;
-            // xy=候補プールの有効タイル数(格子ジッター有効時だけ通常のタイル数+1)、
-            // z=有効ライト数, w=1タイルあたりの候補数K
+            // xy=候補プールのタイル数、z=有効ライト数, w=1タイルあたりの候補数K
             DirectX::XMUINT4 TileParams;
             // x=レンダー解像度の幅, y=同 高さ, zw=未使用
             DirectX::XMUINT4 RenderSize;
             // x=射影行列の(0,0)成分, y=同(1,1)成分、z=深度リニアライズ定数a, w=同b
             DirectX::XMFLOAT4 ProjParams;
-            // x=フレーム番号(候補を毎フレーム引き直すための乱数の種)、
-            // yz=タイル格子の画素オフセット(各0〜15)、w=未使用
+            // x=フレーム番号(候補を毎フレーム引き直すための乱数の種)、yzw=未使用
             DirectX::XMUINT4 PoolParams;
             // 可視灯リスト(提案分布の第3成分)。
             // x=リストの容量(0なら機能そのものが無効)、y=前フレームのリストが使えるか、
@@ -86,9 +84,9 @@ namespace Kurenai::Passes
         // MegaLightsVisibleLights.hlsl側のcbuffer MegaLightsVisibleListConstantsと並びを一致させること
         struct alignas(16) MegaLightsVisibleListConstants
         {
-            // x=有効タイル数X, y=同Y, z=1タイルあたりのリスト容量, w=1画素あたりの標本数
+            // x=タイル数X, y=同Y, z=1タイルあたりのリスト容量, w=1画素あたりの標本数
             DirectX::XMUINT4 ListParams;
-            // x=レンダー解像度の幅, y=同 高さ, zw=タイル格子の画素オフセット(各0〜15)
+            // x=レンダー解像度の幅, y=同 高さ, zw=未使用
             DirectX::XMUINT4 ListSize;
         };
         static_assert(offsetof(MegaLightsVisibleListConstants, ListParams) == 0, "ListParams のレイアウトが変わっている");
@@ -128,15 +126,14 @@ namespace Kurenai::Passes
             DirectX::XMFLOAT4 Params1;
             // x=深度のエッジ停止の強さ, y=ファイアフライのクランプ強さ(0で無効),
             // z=前フレームの幾何(履歴ガイド)が使えるか(0なら現フレームのG-Bufferで代用),
-            // w=履歴の色を引くときの再サンプリング(0=バイリニア / 1=Catmull-Rom)
+            // w=未使用
             //
             // 【この行はかつて「yzw=未使用」と嘘を書いていた】y と z は実際には使われており、
             // HLSL側の宣言だけが正しかった。コメントを契約として使うコードベースなので、
             // ここがずれていると次の改修が空き枠だと思って y や z を潰す
             DirectX::XMFLOAT4 Params2;
             // x=履歴の妥当性を何タップで判定するか(0=最近傍1タップ(従来) / 1=バイリニア2x2の4タップ),
-            // y=アンチラグの相対変化の smoothstep 下端 t0, z=同 上端 t1,
-            // w=アンチラグの短い EMA の長さ[フレーム](0で無効)
+            // yzw=未使用
             //
             // 【なぜ足したか】履歴の**色**はバイリニアで4タップ混ぜるのに、その4タップが
             // 妥当かどうかは最近傍1点でしか見ていなかった。帰結は2つとも実害で、

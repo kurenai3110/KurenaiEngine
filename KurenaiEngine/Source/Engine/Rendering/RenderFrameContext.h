@@ -159,16 +159,6 @@ namespace Kurenai::Rendering
         // Present のデバッグ表示が「走っていないなら中身は残骸なので切り替えない」判断に使う
         bool PlanarReflectionPassRuns = false;
 
-        // MegaLights のタイルジッタを含めた実効タイル数(X)。
-        // 候補プールのデバッグ表示が、プールの添字を組み立てるのに使う
-        uint32_t MegaLightsEffectiveTilesX = 0;
-        uint32_t MegaLightsEffectiveTilesY = 0;
-
-        // MegaLights のタイルジッタで格子をずらした量[画素]。
-        // **書き手と読み手が同じ格子を読むこと** ―― デバッグ表示が別の格子を読むと
-        // A/B の比較結果そのものが嘘になる
-        DirectX::XMUINT2 MegaLightsTileOffset{ 0u, 0u };
-
         // 手動露出時にTonemap/Bloomが割り戻す倍率
         float ManualExposureScale = 1.0f;
 

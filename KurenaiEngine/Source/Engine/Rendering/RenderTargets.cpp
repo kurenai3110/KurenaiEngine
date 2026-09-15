@@ -175,10 +175,8 @@ namespace Kurenai::Rendering
     {
         RHI::BufferDesc tilePoolBufferDesc;
         tilePoolBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
-        // ジッター有効時は右端・下端のタイル座標が1つ増える。トグル変更でGPUを
-        // 待って再確保しなくて済むよう、無効時も常に+1ぶんを確保しておく
         tilePoolBufferDesc.SizeInBytes =
-            static_cast<uint32_t>(sizeof(uint32_t)) * stride * (LightTileCountX + 1u) * (LightTileCountY + 1u);
+            static_cast<uint32_t>(sizeof(uint32_t)) * stride * LightTileCountX * LightTileCountY;
         tilePoolBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
         MegaLightsTilePoolBuffer = device.CreateBuffer(tilePoolBufferDesc);
         if (!MegaLightsTilePoolBuffer)
@@ -197,9 +195,8 @@ namespace Kurenai::Rendering
     {
         RHI::BufferDesc visibleListBufferDesc;
         visibleListBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
-        // 候補プールと同じ格子。ジッター有効時に右端・下端が1つ増えるぶんも常に確保しておく
         visibleListBufferDesc.SizeInBytes =
-            static_cast<uint32_t>(sizeof(uint32_t)) * stride * (LightTileCountX + 1u) * (LightTileCountY + 1u);
+            static_cast<uint32_t>(sizeof(uint32_t)) * stride * LightTileCountX * LightTileCountY;
         visibleListBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
         for (auto& buffer : MegaLightsVisibleLists)
         {
@@ -245,18 +242,6 @@ namespace Kurenai::Rendering
         blockedBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
         MegaLightsBlockedLightBuffer = device.CreateBuffer(blockedBufferDesc);
 
-        // ブースト項は解像度に追従して作り直す。Initial は予測棄却画素以外にゼロを書く。
-        MegaLightsBoostTexture = device.CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
-        RHI::BufferDesc boostCountBufferDesc;
-        boostCountBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
-        boostCountBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * width * height;
-        boostCountBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
-        MegaLightsBoostCountBuffer = device.CreateBuffer(boostCountBufferDesc);
-        if (!MegaLightsBoostTexture || !MegaLightsBoostCountBuffer)
-        {
-            Core::Logger::Error(
-                "RenderTargets", "MegaLightsのブースト用テクスチャまたはカウントバッファの確保に失敗しました");
-        }
         // 空間再利用の出力先。近傍を読むので入力と同じバッファへは書けない。
         // 2回以上回すときは2本を ping-pong する
         MegaLightsReservoirSpatialBuffer = device.CreateBuffer(reservoirBufferDesc);
@@ -273,15 +258,14 @@ namespace Kurenai::Rendering
         }
 
         if (!MegaLightsReservoirBuffer || !MegaLightsReservoirSpatialBuffer || !MegaLightsReservoirSpatialBuffer2 ||
-            !MegaLightsReservoirHistory[0] || !MegaLightsReservoirHistory[1] || !MegaLightsBlockedLightBuffer ||
-            !MegaLightsBoostCountBuffer)
+            !MegaLightsReservoirHistory[0] || !MegaLightsReservoirHistory[1] || !MegaLightsBlockedLightBuffer)
         {
             Core::Logger::Error("RenderTargets", "MegaLightsのリザーバ系バッファの確保に失敗しました");
             return;
         }
 
         constexpr uint64_t kReservoirBufferCount = 5u;
-        constexpr uint64_t kAuxiliaryBufferCount = 2u;
+        constexpr uint64_t kAuxiliaryBufferCount = 1u;
         constexpr double kBytesPerMegabyte = 1000.0 * 1000.0;
         const uint64_t reservoirBytes = static_cast<uint64_t>(reservoirBufferDesc.SizeInBytes) * kReservoirBufferCount +
             static_cast<uint64_t>(blockedBufferDesc.SizeInBytes) * kAuxiliaryBufferCount;

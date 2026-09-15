@@ -79,8 +79,6 @@ namespace Kurenai
             // MegaLights
             { "MegaLightsTexture", m_RenderTargets.MegaLightsTexture.get() },
             { "MegaLightsDenoisedTexture", m_RenderTargets.MegaLightsDenoisedTexture.get() },
-            // 将来は .a > 0 がブーストの予測ゲートのマスクになる。
-            { "MegaLightsBoost", m_RenderTargets.MegaLightsBoostTexture.get() },
             // デノイザの履歴とモーメント。TAAHistory / TAAHistoryPrev とまったく同じ扱いで、
             // 添字は**今フレームの書き込み先**(MegaLightsPasses::GetDenoiseHistoryIndex のコメント)。
             //
@@ -144,8 +142,8 @@ namespace Kurenai
 
     std::vector<KurenaiEngine3D::DumpableBuffer> KurenaiEngine3D::BuildDumpableBufferTable() const
     {
-        const uint64_t tileCount = static_cast<uint64_t>(m_RenderTargets.LightTileCountX + 1u) *
-            (m_RenderTargets.LightTileCountY + 1u);
+        const uint64_t tileCount = static_cast<uint64_t>(m_RenderTargets.LightTileCountX) *
+            m_RenderTargets.LightTileCountY;
         return {
             { "MegaLightsTilePoolBuffer", m_RenderTargets.MegaLightsTilePoolBuffer.get(),
                 static_cast<uint32_t>(tileCount * kMegaLightsTilePoolStride), static_cast<uint32_t>(sizeof(uint32_t)) },

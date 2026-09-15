@@ -265,9 +265,7 @@ float4 PSMain(PSInput input) : SV_TARGET
     {
         const uint2 pixelCoord = uint2(saturate(input.UV) * TileRenderSize.xy);
         const uint tileSize = max((uint)TileParams.y, 1u);
-        // zwは候補プールを書いた格子の画素オフセット。C++側のTileParams.xも有効タイル幅である
-        const uint2 tileOffset = uint2(TileRenderSize.zw);
-        const uint2 tileCoord = (pixelCoord + tileOffset) / tileSize;
+        const uint2 tileCoord = pixelCoord / tileSize;
         // 候補プールのレイアウトは MegaLightsTilePool.hlsl 冒頭を参照。
         // base = tileIndex * (6 + 2K)、届いたライト数は [base + 1](MegaLightsCommon.hlsli 参照)
         const uint candidateCount = (uint)TileParams.z;

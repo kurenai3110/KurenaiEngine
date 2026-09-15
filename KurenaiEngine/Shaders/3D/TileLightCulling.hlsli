@@ -39,7 +39,7 @@ float TileViewZFromDepth(float depth, float a, float b)
     return b / (depth - a);
 }
 
-// 画素原点からタイルの視錐台を組み立てる。原点は格子ジッターで負になりうるためint2。
+// 画素原点からタイルの視錐台を組み立てる。
 // はみ出した範囲を画面内へクランプし、実際に深度を集めた画素範囲より錐台を狭めない
 // 射影行列(行ベクトル規約)は clip.x = viewX * P00、clip.w = viewZ なので ndc.x = viewX * P00 / viewZ。
 // タイルのNDC範囲に入る条件をそのまま平面にする
