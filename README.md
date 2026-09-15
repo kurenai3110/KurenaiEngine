@@ -747,6 +747,7 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-megalightsquadstratify <0\|1>` | クアッド内の候補割り当てを層化するか指定する。 |
 | `-megalightsblockedcache <0\|1>` | 遮蔽済みライトのキャッシュを使うか指定する。 |
 | `-megalightstilejitter <0\|1\|2>` | 候補プールのタイル格子ジッターを指定する。根拠は docs/ImplementationDetail.md 61.7n節。 |
+| `-megalightspoolbilinear <0\|1\|2>` | 候補プールを自分のタイル固定で引くか(0)、最も近い4タイルから確率的バイリニアで引くかを指定する(1=2x2クアッドごとに1タイル(既定)、2=画素ごとに1タイル)。タイル形のムラを画素ごとの乱数へ溶かす。根拠は docs/ImplementationDetail.md 61.7o節。 |
 | `-megalightsperturb <0\|1\|2>` | 蓄積開始時に検証用のシーン摂動を加える。 |
 | `-megalightsspatial <0\|1>` | 空間再利用の有無を指定する。根拠は docs/ImplementationDetail.md 61.7f節。 |
 | `-megalightsspatialmis <0\|1>` | 空間再利用の結合方式を指定する。 |
