@@ -61,6 +61,12 @@ namespace Kurenai::Passes
             // x=フレーム番号(候補を毎フレーム引き直すための乱数の種)、
             // yz=タイル格子の画素オフセット(各0〜15)、w=未使用
             DirectX::XMUINT4 PoolParams;
+            // 可視灯リスト(提案分布の第3成分)。
+            // x=リストの容量(0なら機能そのものが無効)、y=前フレームのリストが使えるか、
+            // z=asuint(リスト枝へ回す混合率 c)、w=未使用。
+            // **z は MegaLightsStochasticConstants.Params7.x と必ず同じ値にすること**
+            // (抽出した確率と割り戻す確率が食い違うと、絵は出たまま静かに偏る)
+            DirectX::XMUINT4 VisibleListParams;
         };
         // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
         // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
@@ -74,7 +80,27 @@ namespace Kurenai::Passes
         static_assert(offsetof(MegaLightsTilePoolConstants, RenderSize) == 80, "RenderSize のレイアウトが変わっている");
         static_assert(offsetof(MegaLightsTilePoolConstants, ProjParams) == 96, "ProjParams のレイアウトが変わっている");
         static_assert(offsetof(MegaLightsTilePoolConstants, PoolParams) == 112, "PoolParams のレイアウトが変わっている");
-        static_assert(sizeof(MegaLightsTilePoolConstants) == 128, "MegaLightsTilePoolConstants の総サイズが変わっている");
+        static_assert(offsetof(MegaLightsTilePoolConstants, VisibleListParams) == 128, "VisibleListParams のレイアウトが変わっている");
+        static_assert(sizeof(MegaLightsTilePoolConstants) == 144, "MegaLightsTilePoolConstants の総サイズが変わっている");
+
+        // MegaLightsVisibleLights.hlsl側のcbuffer MegaLightsVisibleListConstantsと並びを一致させること
+        struct alignas(16) MegaLightsVisibleListConstants
+        {
+            // x=有効タイル数X, y=同Y, z=1タイルあたりのリスト容量, w=1画素あたりの標本数
+            DirectX::XMUINT4 ListParams;
+            // x=レンダー解像度の幅, y=同 高さ, zw=タイル格子の画素オフセット(各0〜15)
+            DirectX::XMUINT4 ListSize;
+        };
+        static_assert(offsetof(MegaLightsVisibleListConstants, ListParams) == 0, "ListParams のレイアウトが変わっている");
+        static_assert(offsetof(MegaLightsVisibleListConstants, ListSize) == 16, "ListSize のレイアウトが変わっている");
+        static_assert(sizeof(MegaLightsVisibleListConstants) == 32, "MegaLightsVisibleListConstants の総サイズが変わっている");
+
+        // 可視灯リストの1タイルぶんのヘッダ長と容量の上限。
+        // **MegaLightsCommon.hlsli の kMegaLightsVisibleListHeader /
+        //   kMegaLightsVisibleListCapacityMax と必ず一致させること**
+        // (片方だけ直すと無関係な位置を候補として読む。絵は出るので気付けない)
+        inline constexpr uint32_t kMegaLightsVisibleListHeader = 2u;
+        inline constexpr uint32_t kMegaLightsVisibleListCapacityMax = 16u;
 
         // MegaLightsAccum.hlsl側のcbuffer MegaLightsAccumConstantsと一致させる必要がある
         struct alignas(16) MegaLightsAccumConstants

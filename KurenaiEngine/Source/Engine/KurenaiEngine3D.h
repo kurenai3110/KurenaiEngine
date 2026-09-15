@@ -377,6 +377,9 @@ namespace Kurenai
         // 候補プールが1タイルあたりに抽出する灯の数(K)。
         // kMegaLightsTilePoolMinCapacity 〜 kMegaLightsTilePoolCapacity
         void SetMegaLightsTilePoolCapacity(int capacity);
+        // 可視灯リスト(提案分布の第3成分)。enabled<0 / capacity<=0 / mix<0 は「既定のまま」。
+        // mix は一様枝(0.25)を除いた残りのうちリスト枝へ回す割合で、**値に依らず不偏**
+        void SetMegaLightsVisibleList(int enabled, int capacity, float mix);
         // 候補プールのタイル格子を画素単位でずらすモード。
         // 0=無効(従来とビット同一)、1=Halton(2,3)、2=有効だが検証用にオフセット0固定。
         // 範囲外はログを出して無視し、負の値では既定値の状態をログへ残す
@@ -1448,6 +1451,15 @@ namespace Kurenai
         // 手前のViewZ / 奥のViewZ)、
         // 以降は候補1つにつき2個(ライト番号と重み)。MegaLightsTilePool.hlsl 冒頭のレイアウトと一致させること
         static constexpr uint32_t kMegaLightsTilePoolStride = 6 + 2 * kMegaLightsTilePoolCapacity;
+
+        // 可視灯リスト1タイルぶんの要素数。先頭2個がヘッダ(格納した灯数 / 打ち切る前の相異なる灯数)、
+        // 以降が容量ぶんのライト番号。MegaLightsCommon.hlsli のレイアウトと一致させること。
+        // **容量の上限で確保する** ―― 設定で容量を変えるたびに確保し直さずに済むよう、
+        // 常に上限ぶんを取ってシェーダーは先頭から使う
+        static constexpr uint32_t kMegaLightsVisibleListCapacityMax =
+            Passes::kMegaLightsVisibleListCapacityMax;
+        static constexpr uint32_t kMegaLightsVisibleListStride =
+            Passes::kMegaLightsVisibleListHeader + kMegaLightsVisibleListCapacityMax;
 
         // タイル容量の超過"条件"(シーンのライト数が容量を超えている)を検出した最初のフレームだけ
         // 警告ログを出すためのフラグ(m_LightOverflowLoggedと同じ作法)。

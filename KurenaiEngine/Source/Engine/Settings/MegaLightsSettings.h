@@ -124,6 +124,16 @@ namespace Kurenai
         // 違わなかったので、壊れないクアッドごとを既定にしてある。根拠は EngineDefaults.h
         int32_t TilePoolBilinearMode = Defaults::MegaLightsTilePoolBilinearMode;
 
+        // 前フレームの可視灯リストを提案分布の第3成分として混ぜるか。
+        // 【OFFのとき出力はビット同一】混合率0で候補プールの抽選は1bitも変わらない
+        // (枝ごとに別の定数で種をハッシュしており、乱数の*列*ではないため)
+        bool VisibleListEnabled = Defaults::MegaLightsVisibleListEnabled;
+        // 1タイルあたりに覚える灯の数。上限は kMegaLightsVisibleListCapacityMax
+        int32_t VisibleListCapacity = Defaults::MegaLightsVisibleListCapacity;
+        // リスト枝へ回す割合 c。一様枝(0.25)は削らないので不偏性は c に依らない。
+        // 上げるほど可視灯へ寄るが、リストが1フレーム古いぶん遅れが増える
+        float VisibleListMix = Defaults::MegaLightsVisibleListMix;
+
         // 何フレーム足したら止めるか。0なら蓄積そのものを行わない。
         // **止めることに意味がある** ―― 止めれば表示が静止し、「ちょうどNサンプルの平均」を
         // 決定的に撮れる(1/√Nで誤差が下がるかを測るのに要る)

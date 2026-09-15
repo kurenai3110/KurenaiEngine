@@ -55,6 +55,17 @@ namespace Kurenai::ShaderInterop
         // 【なぜ Params5 ではなくここなのか】Params5.yzw はクアッドブーストが
         // 3成分とも使っている。**空き枠だと思って上書きしないこと**
         DirectX::XMUINT4 Params6;
+        // x=asuint(可視灯リストを提案分布へ混ぜた割合 c。0で従来どおり。
+        //   Initialが割り戻しに使う。**候補プール側 MegaLightsTilePoolConstants の
+        //   VisibleListParams.z と必ず同じ値にすること** ―― 抽出した確率と
+        //   割り戻す確率が食い違うと、絵は出たまま静かに偏る)、yzw=未使用
+        //
+        // 【枠を1つ増やす代償を承知で足している】このcbufferは MegaLights の5本が
+        // 共有しており、宣言を1つ増やすだけで5本すべてのDXILが変わる。機能を切っていても
+        // 浮動小数の丸めが動いて出力がビット同一でなくなる(実測値は 61.7u)。
+        // **それでも足したのは、Params0〜Params6 に空き成分が1つも無いから。**
+        // 既存の意味へ相乗りさせるほうが、後から読む人には危険である
+        DirectX::XMUINT4 Params7;
     };
 
     // 【レイアウトを固定する本体】HLSL側は宣言順でオフセットが決まる。
@@ -68,5 +79,8 @@ namespace Kurenai::ShaderInterop
     static_assert(offsetof(MegaLightsStochasticConstants, Params4) == 64, "MegaLightsStochasticConstants.hlsli の Params4 と位置が食い違っている");
     static_assert(offsetof(MegaLightsStochasticConstants, Params5) == 80, "MegaLightsStochasticConstants.hlsli の Params5 と位置が食い違っている");
     static_assert(offsetof(MegaLightsStochasticConstants, Params6) == 96, "MegaLightsStochasticConstants.hlsli の Params6 と位置が食い違っている");
-    static_assert(sizeof(MegaLightsStochasticConstants) == 112, "MegaLightsStochasticConstants の総サイズが変わっている");
+    // Params7 は可視灯リストの混合率を載せるために**意図して足した**。
+    // 通すために期待値を書き換えたのではなく、追加したことの記録としてここを更新している
+    static_assert(offsetof(MegaLightsStochasticConstants, Params7) == 112, "MegaLightsStochasticConstants.hlsli の Params7 と位置が食い違っている");
+    static_assert(sizeof(MegaLightsStochasticConstants) == 128, "MegaLightsStochasticConstants の総サイズが変わっている");
 }

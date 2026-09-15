@@ -193,6 +193,20 @@ namespace Kurenai::Rendering
             "RenderTargets", "MegaLightsの候補プールバッファを確保しました: " + std::to_string(tilePoolMegabytes) + " MB");
     }
 
+    void RenderTargets::CreateMegaLightsVisibleLists(RHI::IRHIDevice& device, uint32_t stride)
+    {
+        RHI::BufferDesc visibleListBufferDesc;
+        visibleListBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+        // 候補プールと同じ格子。ジッター有効時に右端・下端が1つ増えるぶんも常に確保しておく
+        visibleListBufferDesc.SizeInBytes =
+            static_cast<uint32_t>(sizeof(uint32_t)) * stride * (LightTileCountX + 1u) * (LightTileCountY + 1u);
+        visibleListBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+        for (auto& buffer : MegaLightsVisibleLists)
+        {
+            buffer = device.CreateBuffer(visibleListBufferDesc);
+        }
+    }
+
     void RenderTargets::CreateMegaLightsOutput(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
     {
         MegaLightsTexture = device.CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);

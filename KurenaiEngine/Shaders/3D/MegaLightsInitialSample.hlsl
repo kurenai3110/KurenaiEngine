@@ -62,6 +62,11 @@ StructuredBuffer<uint> TilePool : register(t7);
 // デノイザと同じ再投影に使うモーションベクターと、前フレームの幾何ガイド。
 Texture2D VelocityTexture : register(t8);
 StructuredBuffer<MegaLightsHistoryGuide> HistoryGuide : register(t9);
+// 前フレームの可視灯リスト(提案分布の第3成分)。**候補プールが実際に引いたのと
+// 同じリストを見ること** ―― どのリストを使ったかはプールのヘッダ[base+3]に書いてある。
+// 【t8/t9 はブースト項が使っている】ので t10 へ置く
+StructuredBuffer<uint> VisibleLights : register(t10);
+
 
 RWStructuredBuffer<MegaLightsReservoir> Reservoirs : register(u0);
 // 画素ごとの「遮蔽が確定した灯」のキャッシュ(0xFFFFFFFFで無し)。
@@ -159,6 +164,10 @@ struct MegaLightsPoolTile
     uint ValidCandidates;
     // バイリニア重み b_j。4つの和は1
     float BilinearWeight;
+    // 前フレームの可視灯リスト。**そのタイルのヘッダ[base+3]が指す先**を読む。
+    // 再投影の式をこちらに書かないのは、どのリストを引いたかを決めたのが候補プールだから
+    uint ListLength;
+    uint ListCache[kMegaLightsVisibleListCapacityMax];
     // w_j(y) の再計算に要る。側面はタイル座標から、深度スラブはヘッダから作る
     TileFrustum Frustum;
     float3 AabbMin;
@@ -178,6 +187,29 @@ MegaLightsPoolTile MegaLightsLoadPoolTile(
     tile.ValidCandidates = TilePool[tile.Base + 2u];
     tile.BilinearWeight = bilinearWeight;
 
+    // 【リストはここで登録へ載せる】RIS の M 回の抽選のたびにバッファを読み直すと
+    // 1画素あたり M*L 回の読み出しになる。載せ替えは1タイル1回で済む
+    const uint listBase = TilePool[tile.Base + 3u];
+    tile.ListLength = 0u;
+    [unroll]
+    for (uint li = 0u; li < kMegaLightsVisibleListCapacityMax; ++li)
+    {
+        tile.ListCache[li] = kMegaLightsInvalidLight;
+    }
+    if (listBase != 0xFFFFFFFFu && asfloat(Params7.x) > 0.0f)
+    {
+        // 書き手(候補プール)と同じ1つの関数を通す。実行時の容量でクランプしない
+        tile.ListLength = MegaLightsVisibleListLength(VisibleLights, listBase);
+        [unroll]
+        for (uint lj = 0u; lj < kMegaLightsVisibleListCapacityMax; ++lj)
+        {
+            if (lj < tile.ListLength)
+            {
+                tile.ListCache[lj] = VisibleLights[listBase + kMegaLightsVisibleListHeader + lj];
+            }
+        }
+    }
+
     // 深度スラブは候補プールがヘッダへ書いている(そのタイルを走査しないと分からないため)
     const float nearestViewZ = asfloat(TilePool[tile.Base + 4u]);
     const float farthestViewZ = asfloat(TilePool[tile.Base + 5u]);
@@ -190,10 +222,28 @@ MegaLightsPoolTile MegaLightsLoadPoolTile(
     return tile;
 }
 
+// そのタイルの可視灯リストに灯 y が何回現れるか。
+// 【出現回数で数える】リストは重複を許す(書き手の競合を正しさの問題にしないため)。
+// 数え方は MegaLightsVisibleLights.hlsl の書き手と1つの規約で揃えてある
+float MegaLightsTileListCount(MegaLightsPoolTile tile, uint lightIndex)
+{
+    float count = 0.0f;
+    [unroll]
+    for (uint k = 0u; k < kMegaLightsVisibleListCapacityMax; ++k)
+    {
+        if (k < tile.ListLength && tile.ListCache[k] == lightIndex)
+        {
+            count += 1.0f;
+        }
+    }
+    return count;
+}
+
 // そのタイルが灯 y を1スロットぶん提案する確率 q_j(y)。届かなければ 0。
 // 【重みは TileLightCulling.hlsli の関数で再計算する】書き手(MegaLightsTilePool.hlsl)と
 // 同じ1本を呼ぶこと。式を写すと、ずれた瞬間に静かにバイアスが乗る
-float MegaLightsTileSourcePdf(MegaLightsPoolTile tile, GPULight light, float3 viewCenter, float radius)
+float MegaLightsTileSourcePdf(
+    MegaLightsPoolTile tile, uint lightIndex, GPULight light, float3 viewCenter, float radius)
 {
     if (tile.ValidCandidates == 0u || tile.SumW <= 0.0f)
     {
@@ -204,8 +254,18 @@ float MegaLightsTileSourcePdf(MegaLightsPoolTile tile, GPULight light, float3 vi
     {
         return 0.0f;
     }
+    // 【3成分の混合。a>0 が不偏性の担保】
+    //   q_j(y) = a/R_j + (1-a) * [ (1-c) * w_j(y)/SumW_j + c * count_j(y)/L_j ]
+    // c をどれだけ上げても一様枝 a は削らないので、そのタイルへ届くどの灯にも
+    // 正の下限確率が残る。**リストに載っている灯は3成分すべてを足すこと** ――
+    // リスト枝で引けた灯は重み枝からも一様枝からも出て来られる
+    const float listMix = (tile.ListLength > 0u) ? asfloat(Params7.x) : 0.0f;
+    const float listTerm =
+        (tile.ListLength > 0u)
+            ? (listMix * MegaLightsTileListCount(tile, lightIndex) / float(tile.ListLength))
+            : 0.0f;
     return kMegaLightsUniformMixFraction / float(max(tile.ReachableCount, 1u)) +
-           (1.0f - kMegaLightsUniformMixFraction) * (w / tile.SumW);
+           (1.0f - kMegaLightsUniformMixFraction) * ((1.0f - listMix) * (w / tile.SumW) + listTerm);
 }
 
 // 1画素ぶんの標本すべてへ同じリザーバを書く(背景・候補なしの早期脱出用)。
@@ -344,8 +404,17 @@ MegaLightsReservoir DrawSample(
             // 従来経路。自分のタイルの提案確率そのもの。
             // **重みはプールに書かれている値をそのまま使う**(再計算しない)ので、
             // バイリニア参照を切ったときの出力は変更前とビット同一になる
+            // 可視灯リストの枝(c)も同じ形で足す。**重みはプールに書かれている値を
+            // そのまま使う**(再計算しない)ので、c=0 かつバイリニア参照を切ったときの
+            // 出力は従来とビット同一になる
+            const float listMix = (pool.ListLength > 0u) ? asfloat(Params7.x) : 0.0f;
+            const float listTerm =
+                (pool.ListLength > 0u)
+                    ? (listMix * MegaLightsTileListCount(pool, lightIndex) / float(pool.ListLength))
+                    : 0.0f;
             sourcePdf = kMegaLightsUniformMixFraction / float(max(pool.ReachableCount, 1u)) +
-                        (1.0f - kMegaLightsUniformMixFraction) * (candidateWeight / pool.SumW);
+                        (1.0f - kMegaLightsUniformMixFraction) *
+                            ((1.0f - listMix) * (candidateWeight / pool.SumW) + listTerm);
         }
         else
         {
@@ -363,7 +432,7 @@ MegaLightsReservoir DrawSample(
                 if (poolTiles[j].BilinearWeight > 0.0f)
                 {
                     sourcePdf += poolTiles[j].BilinearWeight *
-                                 MegaLightsTileSourcePdf(poolTiles[j], light, viewCenter, radius);
+                                 MegaLightsTileSourcePdf(poolTiles[j], lightIndex, light, viewCenter, radius);
                 }
             }
             // 【0除算のガード】選んだタイルから引けた灯なので q̄ > 0 のはずだが、
@@ -582,6 +651,43 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float sumW = asfloat(TilePool[tileBase + 0u]);
     const uint validCandidates = TilePool[tileBase + 2u];
     const uint sampleCount = max(Params0.z, 1u);
+
+    // --- 提案分布の第3成分(可視灯リスト)を、候補プールが引いたのと同じ形で復元する ---
+    //
+    // 【再投影の式をここに書かない】どのタイルのリストを引いたかは候補プールが決めており、
+    // その結果の添字がヘッダ[base+3]に入っている。式を両側に書くと、片方だけ直したときに
+    // 割り戻しが実際の抽出確率と食い違って静かに偏る(プール本体と同じ考え方)。
+    //
+    // 【リストをレジスタへ載せてから数える】RIS の M 回の抽選のたびにバッファを
+    // L 回読み直すと 1画素あたり M*L 回の読み出しになる。載せ替えは1画素1回で済む
+    const uint listBase = TilePool[tileBase + 3u];
+    const bool listValid = (listBase != 0xFFFFFFFFu);
+    // 候補プールが実際に使った混合率。**新しい定数の枠を足していない** ――
+    // このcbufferは MegaLights の5本が共有しており、宣言を1つ増やすだけで
+    // 5本すべてのDXILが変わって、機能を切っていても絵がビット同一でなくなる
+    const float listMix = listValid ? asfloat(Params6.z) : 0.0f;
+    uint listLength = 0u;
+    uint listCache[kMegaLightsVisibleListCapacityMax];
+    {
+        [unroll]
+        for (uint i = 0u; i < kMegaLightsVisibleListCapacityMax; ++i)
+        {
+            listCache[i] = kMegaLightsInvalidLight;
+        }
+        if (listValid)
+        {
+            // 書き手(候補プール)と同じ1つの関数を通す。実行時の容量でクランプしない
+            listLength = MegaLightsVisibleListLength(VisibleLights, listBase);
+            [unroll]
+            for (uint j = 0u; j < kMegaLightsVisibleListCapacityMax; ++j)
+            {
+                if (j < listLength)
+                {
+                    listCache[j] = VisibleLights[listBase + kMegaLightsVisibleListHeader + j];
+                }
+            }
+        }
+    }
     if (sumW <= 0.0f || validCandidates == 0u)
     {
         // 【空でも M は候補数を持たせる】M はこの画素が「何個の候補を検討したか」で、

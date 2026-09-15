@@ -71,7 +71,14 @@ namespace Kurenai
             void AdvanceDenoiseHistory(bool denoiseRan);
             // 解像度が変わると添字の意味が変わる。バッファのクリアが無いRHIなので、
             // シェーダ側へ「履歴を読むな」と伝えるために倒す
-            void InvalidateHistory() { m_MegaLightsHistoryValid = false; }
+            // 【可視灯リストも一緒に無効化する】解像度やタイル数が変われば、前フレームの
+            // リストは別の格子のものになる。リストは提案分布にしか効かないので偏りはしないが、
+            // 中身が未定義のバッファを読ませない約束はここで守る
+            void InvalidateHistory()
+            {
+                m_MegaLightsHistoryValid = false;
+                m_MegaLightsVisibleListValid = false;
+            }
             void InvalidateDenoiseHistory() { m_MegaLightsDenoiseHistoryValid = false; }
             // 蓄積と書き出しを取り直す。解像度が変わったときに呼ぶ
             void ResetAccumulation();
@@ -158,6 +165,17 @@ namespace Kurenai
             std::unique_ptr<RHI::IRHIShader> m_MegaLightsTilePoolComputeShader;
             std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTilePoolPipelineState;
             std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsTilePoolConstantBuffer;
+
+            // 可視灯リストの構築(MegaLightsVisibleLights.hlsl)。初期サンプリングの結果から
+            // 「このタイルで実際に可視だった灯」を集め、次フレームの提案分布の第3成分にする
+            std::unique_ptr<RHI::IRHIShader> m_MegaLightsVisibleListComputeShader;
+            std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsVisibleListPipelineState;
+            std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsVisibleListConstantBuffer;
+            // ping-pong の書き込み側。前フレームが書いた側を候補プールが読む
+            uint32_t m_MegaLightsVisibleListIndex = 0u;
+            // 前フレームのリストが使えるか。解像度変更・機能の切り替え直後は中身が未定義なので、
+            // 1フレーム構築が走るまで読ませない(読むと前の残骸を可視灯として扱う)
+            bool m_MegaLightsVisibleListValid = false;
 
             // 確率的サンプリング本体。2パスに分かれる。
             //   Initial (MegaLightsInitialSample.hlsl) … 候補プールからM個引きRISで1灯へ絞り、
