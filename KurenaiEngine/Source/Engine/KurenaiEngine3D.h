@@ -343,6 +343,8 @@ namespace Kurenai
         // 0=無効(従来とビット同一)、1=Halton(2,3)、2=有効だが検証用にオフセット0固定。
         // 範囲外はログを出して無視し、負の値では既定値の状態をログへ残す
         void SetMegaLightsTileJitter(int mode);
+        // 候補プールの参照を確率的バイリニアにする(0=自分のタイル固定、1=クアッドごと、2=画素ごと)
+        void SetMegaLightsTilePoolBilinear(int mode);
 
         // 【検証専用】蓄積が始まった瞬間にシーンへ摂動を加える。時間再利用の「追従」を測る入口。
         //   0 = 何もしない(既定)

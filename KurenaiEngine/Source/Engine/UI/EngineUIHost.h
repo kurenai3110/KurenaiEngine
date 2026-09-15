@@ -92,6 +92,7 @@ namespace Kurenai::UI
         virtual void ResetSceneDependentParams() = 0;
         virtual void SetMegaLightsQuadSamples(int samples) = 0;
         virtual void SetMegaLightsTileJitter(int mode) = 0;
+        virtual void SetMegaLightsTilePoolBilinear(int mode) = 0;
         virtual void SetMegaLightsTilePoolCapacity(int capacity) = 0;
         virtual bool ShouldRunMegaLights() const = 0;
     };

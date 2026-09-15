@@ -503,7 +503,7 @@ namespace Kurenai::Passes
             // Initial側のExecuteで1回だけ更新すればよい
             const auto buildStochasticConstants =
                 [this, megaLightsSamplesPerPixel, megaLightsSettings, jitteredProj, megaLightsQuadShared, megaLightsEffectiveTilesX,
-                 megaLightsTileOffset, frameIndex, renderWidth, renderHeight](uint32_t spatialIteration)
+                 megaLightsEffectiveTilesY, megaLightsTileOffset, frameIndex, renderWidth, renderHeight](uint32_t spatialIteration)
             {
                 MegaLightsStochasticConstants stochasticConstants{};
                 stochasticConstants.Params0 =
@@ -579,9 +579,15 @@ namespace Kurenai::Passes
                 };
                 // 1画素あたりの標本数。**リザーババッファの確保と必ず同じ値にすること** ――
                 // ずれると Initial が確保外へ書くか、Resolve が別画素の標本を読む
-                // (どちらも例外にならず、絵が「それらしく」出るので気付けない)
+                // (どちらも例外にならず、絵が「それらしく」出るので気付けない)。
+                // y は候補プールの有効タイル数Y。**Params1.x と同じ「ジッター込み」の値を
+                // 渡すこと** ―― 確率的バイリニア参照が隣タイルの添字をこれでクランプするので、
+                // 生のタイル数を渡すとジッター有効時に最終行のタイルを読めなくなる
                 stochasticConstants.Params5 = {
-                    static_cast<uint32_t>(megaLightsSamplesPerPixel), 0u, 0u, 0u
+                    static_cast<uint32_t>(megaLightsSamplesPerPixel),
+                    megaLightsEffectiveTilesY,
+                    static_cast<uint32_t>(std::max(0, megaLightsSettings.TilePoolBilinearMode)),
+                    0u
                 };
                 // 候補プールを書いたときと同じ格子オフセット。末尾へ足して、途中までしか
                 // 宣言しない Shade / Temporal / Resolve の既存レイアウトを変えない

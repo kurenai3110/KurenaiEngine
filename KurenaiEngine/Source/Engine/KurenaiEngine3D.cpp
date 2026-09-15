@@ -1711,6 +1711,43 @@ namespace Kurenai
         }
     }
 
+    void KurenaiEngine3D::SetMegaLightsTilePoolBilinear(int mode)
+    {
+        // 負の値は「既定のまま」。未指定時も現在値を起動ログへ残すためreturnしない
+        if (mode >= 0)
+        {
+            if (mode > 2)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "MegaLightsの候補プールの確率的バイリニア参照のモードが範囲外のため無視します: " +
+                        std::to_string(mode) + " (0〜2)");
+            }
+            else
+            {
+                m_Settings.MegaLights.TilePoolBilinearMode = mode;
+            }
+        }
+
+        if (m_Settings.MegaLights.TilePoolBilinearMode == 1)
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsの候補プールの確率的バイリニア参照: 有効 (2x2クアッドごとに1タイル)");
+        }
+        else if (m_Settings.MegaLights.TilePoolBilinearMode == 2)
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D",
+                "MegaLightsの候補プールの確率的バイリニア参照: 有効 (画素ごとに1タイル)");
+        }
+        else
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D", "MegaLightsの候補プールの確率的バイリニア参照: 無効 (自分のタイル固定)");
+        }
+    }
+
     int32_t KurenaiEngine3D::MegaLightsSamplesPerPixel() const
     {
         // 【手法3以外は必ず1】手法2の時間・空間再利用は「1画素1リザーバ」を前提に

@@ -272,6 +272,23 @@ namespace Kurenai::UI
                 m_Engine.SetMegaLightsTileJitter(tileJitterEnabled ? 1 : 0);
             }
 
+            // CLIのモード2(画素ごと)も有効として表示する。UIで一度切った後に戻す場合は
+            // 既定の粒度(クアッドごと)へ戻す
+            bool poolBilinearEnabled = m_Engine.GetSettings().MegaLights.TilePoolBilinearMode != 0;
+            if (CheckboxEx(
+                    "候補プールのバイリニア参照###MegaLightsTilePoolBilinear", &poolBilinearEnabled,
+                    Defaults::MegaLightsTilePoolBilinearMode != 0,
+                    "候補プールを自分のタイル固定で引くのをやめ、最も近い4タイルの中から"
+                    "バイリニアの確率で1つ選ぶ。タイル境界の硬い割り当てを画素ごとの乱数へ溶かす。\n\n"
+                    "【格子ジッターとは別物】あちらは境界の位置を動かすだけで、"
+                    "「1画素は1タイルに属する」割り当てが残る。タイル内の256画素が同じ抽出誤差を"
+                    "共有している限り、空間フィルタでは原理的に取れない。\n\n"
+                    "【不偏性は保たれる】選んだタイルではなく混合分布 q̄ = Σ b_j q_j で割り戻す。"
+                    "選んだタイルで割ると、そこへ届かない灯の定義域が欠けてバイアスになる"))
+            {
+                m_Engine.SetMegaLightsTilePoolBilinear(poolBilinearEnabled ? 1 : 0);
+            }
+
             CheckboxEx(
                 "デノイザ###MegaLightsDenoise", &m_Engine.GetSettings().MegaLights.DenoiseEnabled,
                 Defaults::MegaLightsDenoiseEnabled,
