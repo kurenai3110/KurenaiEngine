@@ -316,6 +316,10 @@ namespace Kurenai
         {
             m_DumpService.AddTextureDump(name, path, mipLevel, arraySlice, frames, stride);
         }
+        void AddBufferDump(const wchar_t* name, const wchar_t* path)
+        {
+            m_DumpService.AddBufferDump(name, path);
+        }
 
         // 何フレーム目のものを書き出すか。負なら既定(Passes::kMegaLightsAccumWarmup)。
         // **整定を待たずに撮ると、内部解像度が既定値のままの絵を掴む**(実際に起きた)
@@ -1191,9 +1195,11 @@ namespace Kurenai
         // 名前 -> テクスチャ の対応表。CreateRenderTargetsでテクスチャを増やしたら
         // BuildDumpableTextureTableにも足すこと(表の実体はそちらのコメントを参照)
         using DumpableTexture = Diagnostics::DumpableTexture;
+        using DumpableBuffer = Diagnostics::DumpableBuffer;
         // 【毎回作り直す】レンダーターゲットはリサイズやバッファ精度の切り替えで
         // ポインタごと作り直される。キャッシュすると解放済みのテクスチャを指す
         std::vector<DumpableTexture> BuildDumpableTextureTable() const;
+        std::vector<DumpableBuffer> BuildDumpableBufferTable() const;
 
         // ダンプとパスマニフェストの状態と処理。**表は毎回作り直して渡すこと**
         // (理由は Diagnostics/RenderDumpServiceState.h)
