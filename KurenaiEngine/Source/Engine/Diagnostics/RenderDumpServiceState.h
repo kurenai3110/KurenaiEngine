@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "RHI/IRHIDevice.h"
+#include "RHI/IRHIBuffer.h"
 #include "RHI/IRHITexture.h"
 
 namespace Kurenai::Core { class RenderGraph; class Window; }
@@ -27,12 +28,21 @@ namespace Kurenai::Diagnostics
         RHI::IRHITexture* Texture = nullptr;
     };
 
+    struct DumpableBuffer
+    {
+        const char* Name = nullptr;
+        RHI::IRHIBuffer* Buffer = nullptr;
+        uint32_t ElementCount = 0;
+        uint32_t StrideInBytes = 0;
+    };
+
     class RenderDumpService
     {
     public:
         // --- 起動オプションからの予約 ---
         void AddTextureDump(
             const wchar_t* name, const wchar_t* path, int mipLevel, int arraySlice, int frames, int stride);
+        void AddBufferDump(const wchar_t* name, const wchar_t* path);
         void SetTextureDumpFrame(int frame);
         void SetExitAfterDump(bool enabled);
         void SetPassManifest(const wchar_t* path, int frames);
@@ -44,6 +54,9 @@ namespace Kurenai::Diagnostics
         void MarkDebugNamesDirty() { m_DebugNamesDirty = true; }
         void IssueTextureDumps(
             Core::RenderGraph& graph, const std::vector<DumpableTexture>& table,
+            uint32_t frameIndex, RHI::IRHIDevice& device);
+        void IssueBufferDumps(
+            Core::RenderGraph& graph, const std::vector<DumpableBuffer>& table,
             uint32_t frameIndex, RHI::IRHIDevice& device);
         void ResolveTextureDumps(uint32_t frameIndex, Core::Window* window, bool isDX12);
         void WritePassManifestIfDue(Core::RenderGraph& graph, uint32_t frameIndex, bool isDX12);
@@ -108,6 +121,19 @@ namespace Kurenai::Diagnostics
             bool Done = false;
         };
 
+        struct BufferDumpRequest
+        {
+            std::string Name;
+            std::wstring Path;
+            std::unique_ptr<RHI::IRHIBuffer> Readback;
+            uint32_t ElementCount = 0;
+            uint32_t StrideInBytes = 0;
+            uint32_t CopyFrame = 0;
+            uint32_t FailedFrames = 0;
+            bool Issued = false;
+            bool Done = false;
+        };
+
         // 読み戻しを何フレーム失敗し続けたら諦めるか。DX11のMap(DO_NOT_WAIT)は
         // GPUが詰まっていると何度も失敗しうるので、1フレームで諦めてはいけない
         static constexpr uint32_t kTextureDumpMaxFailedFrames = 60;
@@ -119,6 +145,7 @@ namespace Kurenai::Diagnostics
         static constexpr size_t kTextureDumpRingMaxBytes = 512ull * 1024 * 1024;
 
         std::vector<TextureDumpRequest> m_TextureDumps;
+        std::vector<BufferDumpRequest> m_BufferDumps;
         // 何フレーム目で撮るか。負なら Passes::kMegaLightsAccumWarmup を使う
         // (新しい定数を作らないのは、あちらのコメントに書かれた「整定を待つ理由」が
         //  そのまま当てはまり、値が2つに割れると片方だけ直す事故が起きるため)
@@ -137,5 +164,6 @@ namespace Kurenai::Diagnostics
         bool WriteTextureDumpFile(
             const TextureDumpRequest& request, const TextureDumpSlot& slot, const std::vector<uint8_t>& pixels,
             bool isDX12) const;
+        bool WriteBufferDumpFile(const BufferDumpRequest& request, const std::vector<uint8_t>& bytes) const;
     };
 }

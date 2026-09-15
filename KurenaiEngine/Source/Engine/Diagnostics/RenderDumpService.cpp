@@ -109,6 +109,23 @@ namespace Kurenai
         return names;
     }
 
+    std::vector<KurenaiEngine3D::DumpableBuffer> KurenaiEngine3D::BuildDumpableBufferTable() const
+    {
+        const uint64_t tileCount = static_cast<uint64_t>(m_RenderTargets.LightTileCountX + 1u) *
+            (m_RenderTargets.LightTileCountY + 1u);
+        return {
+            { "MegaLightsTilePoolBuffer", m_RenderTargets.MegaLightsTilePoolBuffer.get(),
+                static_cast<uint32_t>(tileCount * kMegaLightsTilePoolStride), static_cast<uint32_t>(sizeof(uint32_t)) },
+            { "MegaLightsVisibleLists[0]", m_RenderTargets.MegaLightsVisibleLists[0].get(),
+                static_cast<uint32_t>(tileCount * kMegaLightsVisibleListStride), static_cast<uint32_t>(sizeof(uint32_t)) },
+            { "MegaLightsVisibleLists[1]", m_RenderTargets.MegaLightsVisibleLists[1].get(),
+                static_cast<uint32_t>(tileCount * kMegaLightsVisibleListStride), static_cast<uint32_t>(sizeof(uint32_t)) },
+            { "MegaLightsReservoirBuffer", m_RenderTargets.MegaLightsReservoirBuffer.get(),
+                static_cast<uint32_t>(static_cast<uint64_t>(m_RenderWidth) * m_RenderHeight *
+                    static_cast<uint32_t>(m_MegaLightsAllocatedSamplesPerPixel)), static_cast<uint32_t>(sizeof(uint32_t)) * 4u },
+        };
+    }
+
 
     void KurenaiEngine3D::ApplyDebugNamesIfDirty()
     {
@@ -119,6 +136,7 @@ namespace Kurenai
     void KurenaiEngine3D::IssueTextureDumps(Core::RenderGraph& graph)
     {
         m_DumpService.IssueTextureDumps(graph, BuildDumpableTextureTable(), m_History.FrameIndex, *m_Device);
+        m_DumpService.IssueBufferDumps(graph, BuildDumpableBufferTable(), m_History.FrameIndex, *m_Device);
     }
 
     void KurenaiEngine3D::ResolveTextureDumps()
