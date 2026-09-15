@@ -965,6 +965,14 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsPoolCapacity = ParseIntOption(L"-megalightspool", -1);
         // -megalightstilejitter <0|1|2>。1=Halton(2,3)で格子をずらす、2=有効だがオフセット0固定
         const int megaLightsTileJitter = ParseIntOption(L"-megalightstilejitter", -1);
+        // -megalightsvisiblelist <0|1> / -megalightsvisiblelistcapacity <1〜16> /
+        // -megalightsvisiblelistmix <0.0〜1.0>。前フレームの可視灯リストを提案分布へ混ぜる。
+        // mix は「一様枝(0.25)を除いた残りのうち、リスト枝へ回す割合 c」。
+        // **c をいくつにしても不偏**(一様枝を削らないので、届くどの灯にも正の下限確率が残る)
+        const int megaLightsVisibleList = ParseIntOption(L"-megalightsvisiblelist", -1);
+        const int megaLightsVisibleListCapacity =
+            ParseIntOption(L"-megalightsvisiblelistcapacity", -1);
+        const float megaLightsVisibleListMix = ParseFloatOption(L"-megalightsvisiblelistmix", -1.0f);
         // -megalightstemporal <0|1> / -megalightstemporalmclamp <上限>。時間再利用
         const int megaLightsTemporal = ParseIntOption(L"-megalightstemporal", -1);
         const int megaLightsTemporalMClamp = ParseIntOption(L"-megalightstemporalmclamp", -1);
@@ -1201,6 +1209,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             }
             // 未指定時も呼び、既定の無効状態を起動ログへ1行残す
             engine.SetMegaLightsTileJitter(megaLightsTileJitter);
+            if (megaLightsVisibleList >= 0 || megaLightsVisibleListCapacity > 0 ||
+                megaLightsVisibleListMix >= 0.0f)
+            {
+                engine.SetMegaLightsVisibleList(
+                    megaLightsVisibleList, megaLightsVisibleListCapacity, megaLightsVisibleListMix);
+            }
             if (megaLightsTemporal >= 0 || megaLightsTemporalMClamp > 0)
             {
                 engine.SetMegaLightsTemporal(megaLightsTemporal, megaLightsTemporalMClamp);

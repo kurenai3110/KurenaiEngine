@@ -46,6 +46,17 @@ namespace Kurenai::ShaderInterop
         DirectX::XMUINT4 Params5;
         // xy=候補プールのタイル格子オフセット(画素、各0〜15)、zw=未使用。
         // 書き手と全読み手で同じ値を使わないと、別タイルの候補を静かに読む
+        // xy=候補プールのタイル格子オフセット(画素、各0〜15)、
+        // z=asuint(可視灯リストを提案分布へ混ぜた割合 c。0で従来どおり。Initialが割り戻しに使う。
+        //   **候補プール側 MegaLightsTilePoolConstants.VisibleListParams.z と必ず同じ値にすること** ――
+        //   抽出した確率と割り戻す確率が食い違うと、絵は出たまま静かに偏る)、w=未使用。
+        //
+        // 【枠を増やさず既存の未使用スロットへ入れてある】このcbufferは MegaLights の
+        // 5本のシェーダーが共有しており、**宣言を1つ増やすだけで5本すべてのDXILが変わる。**
+        // 機能を切っていても浮動小数の丸めが動いて出力がビット同一でなくなる
+        // (実測: float4 を1つ足しただけで Shade / Spatial / Resolve の .kshader が
+        //  48〜96バイト変わり、絵に相対 1.8e-7 のULP差が出た)。
+        // **可視灯リストのために新しい枠を足さないこと**
         DirectX::XMUINT4 Params6;
     };
 

@@ -451,6 +451,21 @@ Blackboardを参照捕捉すると、あとで別の群が書き換えた値を�
 次フレームが参照する前フレーム状態の確定、計測とダンプの回収、履歴バッファのping-pong反転</li>
 </ol>
 
+<h4>2.4.1 MegaLights可視灯リストの登録順</h4>
+<p>
+確率的サンプリングで可視灯リストを有効にすると、<code>MegaLightsInitial</code>の直後に
+<code>MegaLightsVisibleList</code>が1本登録される。前者の初期可視レイが書いたリザーバから、
+後者が16x16タイルごとの可視灯を集めて ping-pong の書き込み側へ保存する。次フレームの
+<code>MegaLightsPool</code>と<code>MegaLightsInitial</code>は、プールヘッダに記録されたタイル番号を
+介して同じ読み出し側リストを参照する。
+</p>
+<p>
+<strong>このパスをInitialより前、または空間再利用より後へ動かしてはいけない。</strong>
+前へ動かすと今フレームの初期可視性を読む依存が満たせず、後ろへ動かすと近傍画素から借りた
+可視フラグを「このタイルから見えた灯」として集めることになる。RenderGraphは依存が同点なら
+登録順を優先するため、ここでも登録位置は責務の一部である。
+</p>
+
 <h3>2.5 スナップショットが指す先の寿命</h3>
 <p>
 <code>RenderFrameContext</code>の81フィールドのうち<strong>22個は生ポインタ</strong>で、

@@ -120,6 +120,21 @@ namespace Kurenai::Passes
         megaLightsTilePoolConstantBufferDesc.SizeInBytes = sizeof(MegaLightsTilePoolConstants);
         m_MegaLightsTilePoolConstantBuffer = device.CreateBuffer(megaLightsTilePoolConstantBufferDesc);
 
+        // 可視灯リストの構築。レイを撃たないので3バリアントすべてで焼ける
+        // (wave 組み込み関数ではなく groupshared のアトミックだけで済ませてある)
+        RHI::ShaderDesc megaLightsVisibleListCsDesc;
+        megaLightsVisibleListCsDesc.Stage = RHI::ShaderStage::Compute;
+        megaLightsVisibleListCsDesc.FilePath = shaderDirectory + L"MegaLightsVisibleLights.kshader";
+        megaLightsVisibleListCsDesc.EntryPoint = "CSMain";
+        m_MegaLightsVisibleListComputeShader = device.CreateShader(megaLightsVisibleListCsDesc);
+        m_MegaLightsVisibleListPipelineState =
+            device.CreateComputePipelineState({ m_MegaLightsVisibleListComputeShader.get() });
+
+        RHI::BufferDesc megaLightsVisibleListConstantBufferDesc;
+        megaLightsVisibleListConstantBufferDesc.Usage = RHI::BufferUsage::Constant;
+        megaLightsVisibleListConstantBufferDesc.SizeInBytes = sizeof(MegaLightsVisibleListConstants);
+        m_MegaLightsVisibleListConstantBuffer = device.CreateBuffer(megaLightsVisibleListConstantBufferDesc);
+
         // MegaLightsの確率的サンプリング本体(2パス)。
         // 【この4本はすべて RayQuery を含む】Initial は初期可視レイ、Temporal は
         // 時間検証レイ、Spatial は目標関数の可視性とバイアス補正レイ、Shade は影レイ。
@@ -269,6 +284,44 @@ namespace Kurenai::Passes
         // 候補プールと確率的サンプリングの種。登録から実行までの間に進むことはないので値で持つ
         const uint32_t frameIndex = frame.FrameIndex;
 
+        // --- 可視灯リスト(提案分布の第3成分)の可否を1か所で決める ---
+        //
+        // 【容量と混合率をここで1回だけ決める理由】この2つは候補プール(抽出する側)と
+        // 初期サンプリング(割り戻す側)の**両方**の定数バッファへ入る。別々に組み立てると、
+        // 片方だけ条件を書き換えたときに「抽出した確率」と「割り戻す確率」が食い違い、
+        // 絵は出たまま静かに偏る。ローカルへ確定させて両方から同じ値を配る
+        const bool megaLightsStochasticPath =
+            megaLightsSettings.Mode == MegaLightsMode::Stochastic ||
+            megaLightsSettings.Mode == MegaLightsMode::QuadShared;
+        const bool visibleListRuns =
+            megaLightsRuns && megaLightsStochasticPath && megaLightsSettings.VisibleListEnabled &&
+            m_MegaLightsVisibleListPipelineState != nullptr && targets->MegaLightsVisibleLists[0] &&
+            targets->MegaLightsVisibleLists[1] && targets->MegaLightsReservoirBuffer;
+        const uint32_t visibleListCapacity =
+            visibleListRuns ? static_cast<uint32_t>(std::clamp(
+                                  megaLightsSettings.VisibleListCapacity, 1,
+                                  static_cast<int32_t>(Passes::kMegaLightsVisibleListCapacityMax)))
+                            : 0u;
+        // 【一様枝(0.25)は削らないので、cをいくつにしても不偏】上げるほど可視灯へ寄るが、
+        // リストは1フレーム古いので遅れが増える。1.0は重み枝を殺すだけでバイアスにはならない
+        const float visibleListMix =
+            visibleListRuns ? std::clamp(megaLightsSettings.VisibleListMix, 0.0f, 1.0f) : 0.0f;
+        // cbufferの枠を増やさずに float を uint の枠で運ぶためのビット列。
+        // **memcpy で写す** ―― reinterpret_cast は厳密エイリアシング規則の上では未定義
+        uint32_t visibleListMixBits = 0u;
+        std::memcpy(&visibleListMixBits, &visibleListMix, sizeof(visibleListMixBits));
+        // ping-pong。前フレームが書いた側を候補プールが読み、構築パスはもう片方へ書く
+        const uint32_t visibleListWriteIndex = m_MegaLightsVisibleListIndex;
+        const uint32_t visibleListReadIndex = m_MegaLightsVisibleListIndex ^ 1u;
+        // 前フレームに構築が走っていなければ読ませない(中身が未定義)
+        const bool visibleListHistoryUsable = visibleListRuns && m_MegaLightsVisibleListValid;
+        // 【確保に失敗していても何かをバインドする】DX12は宣言したリソースが未バインドだと壊れる。
+        // 容量0を渡してあるのでシェーダーは中身を読みにいかない ―― 束縛を満たすためだけの差し替え
+        RHI::IRHIBuffer* const visibleListReadBuffer =
+            targets->MegaLightsVisibleLists[visibleListReadIndex]
+                ? targets->MegaLightsVisibleLists[visibleListReadIndex].get()
+                : targets->MegaLightsTilePoolBuffer.get();
+
         // --- タイルライトカリングパス: 画面を16x16のタイルに分け、タイルごとに「そのタイルに届くライト」の
         //     インデックスリストをコンピュートシェーダーで作る。直接光パスはそのリストだけをループする。
         //     BufferReads/BufferWritesを宣言しているのは、このパスと直接光パスがどちらもtargets->GBufferDepthを
@@ -331,10 +384,15 @@ namespace Kurenai::Passes
         {
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLightsPool",
-                .Reads = { targets->GBufferDepth.get() },
-                .BufferReads = { lightBuffer },
+                // 【機能のON/OFFに関わらず宣言もバインドもする】DX12は宣言したリソースが
+                // 未バインドだと壊れる。使うかどうかはシェーダー側が VisibleListParams で
+                // 分岐して決める(混合率0なら読みにいかない)。
+                // リストは ping-pong で読み書きが別バッファなので、構築パスとの間に
+                // 張られるのは素直なRAWの辺だけで、循環にはならない
+                .Reads = { targets->GBufferDepth.get(), targets->GBufferVelocity.get() },
+                .BufferReads = { lightBuffer, visibleListReadBuffer },
                 .BufferWrites = { targets->MegaLightsTilePoolBuffer.get() },
-                .Execute = [this, targets, lightBuffer, megaLightsSettings, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset, frameIndex, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, lightBuffer, megaLightsSettings, &gpuLights, viewMatrix, jitteredProj, megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset, frameIndex, renderWidth, renderHeight, visibleListCapacity, visibleListMixBits, visibleListHistoryUsable, visibleListReadBuffer](RHI::IRHICommandList* cmd)
                 {
                     Passes::MegaLightsTilePoolConstants poolConstants{};
                     DirectX::XMStoreFloat4x4(&poolConstants.View, DirectX::XMMatrixTranspose(viewMatrix));
@@ -369,6 +427,17 @@ namespace Kurenai::Passes
                         megaLightsTileOffset.y,
                         0u,
                     };
+                    // 可視灯リスト(提案分布の第3成分)。
+                    // **混合率は初期サンプリング側(Params7.x)と同じローカルから配っている** ――
+                    // 抽出した確率と割り戻す確率が食い違うと、絵は出たまま静かに偏る
+                    poolConstants.VisibleListParams =
+                    {
+                        visibleListHistoryUsable ? visibleListCapacity : 0u,
+                        visibleListHistoryUsable ? 1u : 0u,
+                        // floatのビット列をuintの枠で運ぶ(cbufferの枠を増やさないため)
+                        visibleListMixBits,
+                        0u,
+                    };
 
                     cmd->UpdateBuffer(m_MegaLightsTilePoolConstantBuffer.get(), &poolConstants, sizeof(poolConstants));
 
@@ -376,6 +445,10 @@ namespace Kurenai::Passes
                     cmd->SetComputeConstantBuffer(0, m_MegaLightsTilePoolConstantBuffer.get());
                     cmd->SetComputeShaderResourceBuffer(0, lightBuffer);
                     cmd->SetComputeTexture(1, targets->GBufferDepth.get());
+                    // 可視灯リストの再投影に使う速度と、前フレームのリスト本体。
+                    // **使わない構成でもバインドする**(DX12は宣言したリソースが未バインドだと壊れる)
+                    cmd->SetComputeTexture(2, targets->GBufferVelocity.get());
+                    cmd->SetComputeShaderResourceBuffer(3, visibleListReadBuffer);
                     // UAVはDispatch直後に解除されるため毎回バインドし直す
                     cmd->SetComputeUnorderedAccessBuffer(0, targets->MegaLightsTilePoolBuffer.get());
                     cmd->Dispatch(megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, 1);
@@ -503,7 +576,7 @@ namespace Kurenai::Passes
             // Initial側のExecuteで1回だけ更新すればよい
             const auto buildStochasticConstants =
                 [this, megaLightsSamplesPerPixel, megaLightsSettings, jitteredProj, megaLightsQuadShared, megaLightsEffectiveTilesX,
-                 megaLightsTileOffset, frameIndex, renderWidth, renderHeight](uint32_t spatialIteration)
+                 megaLightsTileOffset, frameIndex, renderWidth, renderHeight, visibleListMixBits](uint32_t spatialIteration)
             {
                 MegaLightsStochasticConstants stochasticConstants{};
                 stochasticConstants.Params0 =
@@ -585,8 +658,15 @@ namespace Kurenai::Passes
                 };
                 // 候補プールを書いたときと同じ格子オフセット。末尾へ足して、途中までしか
                 // 宣言しない Shade / Temporal / Resolve の既存レイアウトを変えない
+                // z = 可視灯リストを提案分布へ混ぜた割合 c のビット列。
+                // **候補プールへ渡したのと同じローカル**(VisibleListParams.z)から配る ――
+                // 抽出した確率と割り戻す確率が食い違うと、絵は出たまま静かに偏る。
+                // どのタイルのリストを引いたかはプールがヘッダへ書き残しており、
+                // Initial はそれを読むので再投影の式はこちらには無い。
+                // 【新しい枠を足さず未使用スロットへ入れている】理由は
+                // MegaLightsStochasticConstants.h の Params6 のコメント
                 stochasticConstants.Params6 = {
-                    megaLightsTileOffset.x, megaLightsTileOffset.y, 0u, 0u
+                    megaLightsTileOffset.x, megaLightsTileOffset.y, visibleListMixBits, 0u
                 };
                 return stochasticConstants;
             };
@@ -661,9 +741,11 @@ namespace Kurenai::Passes
                     targets->GBufferAlbedo.get(), targets->GBufferNormal.get(), targets->GBufferMaterial.get(), targets->GBufferDepth.get(),
                     brdfLUTTexture,
                 },
-                .BufferReads = { lightBuffer, tilePoolBufferForBinding },
+                // 可視灯リストは候補プールが引いたのと同じものを読む(どれを引いたかは
+                // プールのヘッダに書いてある)。使わない構成でもバインドは要る
+                .BufferReads = { lightBuffer, tilePoolBufferForBinding, visibleListReadBuffer },
                 .BufferWrites = { targets->MegaLightsReservoirBuffer.get(), targets->MegaLightsBlockedLightBuffer.get() },
-                .Execute = [this, targets, lightBuffer, raytracingScene, brdfLUTTexture, tilePoolBufferForBinding, updateStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, lightBuffer, raytracingScene, brdfLUTTexture, tilePoolBufferForBinding, visibleListReadBuffer, updateStochasticConstants, renderWidth, renderHeight, frameConstantBuffer, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     updateStochasticConstants(cmd);
 
@@ -682,12 +764,63 @@ namespace Kurenai::Passes
                     cmd->SetComputeTexture(5, brdfLUTTexture);
                     cmd->SetComputeShaderResourceBuffer(6, lightBuffer);
                     cmd->SetComputeShaderResourceBuffer(7, tilePoolBufferForBinding);
+                    cmd->SetComputeShaderResourceBuffer(8, visibleListReadBuffer);
 
                     cmd->SetComputeUnorderedAccessBuffer(0, targets->MegaLightsReservoirBuffer.get());
                     cmd->SetComputeUnorderedAccessBuffer(1, targets->MegaLightsBlockedLightBuffer.get());
                     cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                 },
             });
+
+            // --- 可視灯リストの構築: このフレームで実際に可視だった灯をタイルごとに集める ---
+            //
+            // 【初期サンプリングの直後に置く ―― 再利用の後ではない】空間再利用の後の
+            // リザーバは近傍から借りたもので、可視フラグは**別の画素から見た可視性**を指す。
+            // 「このタイルから見えた灯」という意味を保つため、初期可視レイの結果だけを集める。
+            //
+            // 【RenderGraphは登録順に依存する】Reads を書いてもパスは前へ動かないので、
+            // 初期サンプリングより後に登録すること。読むのは今フレームのリザーバ、
+            // 書くのは ping-pong のもう片方 ―― 次フレームの候補プールがそちらを読む
+            if (visibleListRuns)
+            {
+                RHI::IRHIBuffer* const visibleListWriteBuffer =
+                    targets->MegaLightsVisibleLists[visibleListWriteIndex].get();
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "MegaLightsVisibleList",
+                    .BufferReads = { targets->MegaLightsReservoirBuffer.get() },
+                    .BufferWrites = { visibleListWriteBuffer },
+                    .Execute = [this, targets, visibleListWriteBuffer, visibleListCapacity, megaLightsSamplesPerPixel,
+                                megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, megaLightsTileOffset,
+                                renderWidth, renderHeight](RHI::IRHICommandList* cmd)
+                    {
+                        Passes::MegaLightsVisibleListConstants listConstants{};
+                        listConstants.ListParams =
+                        {
+                            megaLightsEffectiveTilesX,
+                            megaLightsEffectiveTilesY,
+                            visibleListCapacity,
+                            // **リザーババッファの確保と同じ本数でなければならない** ――
+                            // ずれると別画素の標本を可視灯として数える
+                            static_cast<uint32_t>(megaLightsSamplesPerPixel),
+                        };
+                        listConstants.ListSize =
+                        {
+                            renderWidth, renderHeight, megaLightsTileOffset.x, megaLightsTileOffset.y
+                        };
+                        cmd->UpdateBuffer(
+                            m_MegaLightsVisibleListConstantBuffer.get(), &listConstants, sizeof(listConstants));
+
+                        cmd->SetComputePipelineState(m_MegaLightsVisibleListPipelineState.get());
+                        cmd->SetComputeConstantBuffer(0, m_MegaLightsVisibleListConstantBuffer.get());
+                        // レジスタ割り当てはMegaLightsVisibleLights.hlsl側の宣言と一致させること
+                        cmd->SetComputeShaderResourceBuffer(0, targets->MegaLightsReservoirBuffer.get());
+                        // UAVはDispatch直後に解除されるため毎回バインドし直す
+                        cmd->SetComputeUnorderedAccessBuffer(0, visibleListWriteBuffer);
+                        // 1グループ = 1タイル(16x16スレッド)
+                        cmd->Dispatch(megaLightsEffectiveTilesX, megaLightsEffectiveTilesY, 1);
+                    },
+                });
+            }
 
             // --- 時間再利用: 前フレームの自分が選んだ灯を再投影して借りる ---
             // 実効サンプル数がフレーム方向に積み上がるので収束が速くなる。
@@ -1216,6 +1349,25 @@ namespace Kurenai::Passes
                 }
                 m_MegaLightsDumpDone = true;
             }
+        }
+
+        // --- 可視灯リストの ping-pong を進める ---
+        //
+        // 【Register の最後で進める】今フレームの構築パスが書いた側を、次フレームの
+        // 候補プールが読む。各パスへは既に添字を値で渡してあるので、ここで反転しても
+        // 今フレームの束縛は動かない。
+        // 【構築が走ったフレームだけ有効にする】走らないフレームを挟むとリストが
+        // 2フレーム以上古くなる。不偏性は一様枝が担保しているので偏りはしないが、
+        // 「遅れ」の原因を追えなくなるので、途切れたら素直に無効へ戻す
+        // (時間再利用の履歴と同じ作法)
+        if (visibleListRuns)
+        {
+            m_MegaLightsVisibleListIndex ^= 1u;
+            m_MegaLightsVisibleListValid = true;
+        }
+        else
+        {
+            m_MegaLightsVisibleListValid = false;
         }
     }
 }

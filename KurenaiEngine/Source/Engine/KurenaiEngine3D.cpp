@@ -1671,6 +1671,49 @@ namespace Kurenai
                 " にしました(影レイの本数も同じ数になります)");
     }
 
+    void KurenaiEngine3D::SetMegaLightsVisibleList(int enabled, int capacity, float mix)
+    {
+        // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
+        if (enabled >= 0)
+        {
+            m_Settings.MegaLights.VisibleListEnabled = (enabled != 0);
+        }
+        if (capacity > 0)
+        {
+            if (capacity > static_cast<int>(kMegaLightsVisibleListCapacityMax))
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "MegaLightsの可視灯リストの容量が範囲外のため無視します: " + std::to_string(capacity) +
+                        " (1〜" + std::to_string(kMegaLightsVisibleListCapacityMax) + ")");
+            }
+            else
+            {
+                m_Settings.MegaLights.VisibleListCapacity = capacity;
+            }
+        }
+        if (mix >= 0.0f)
+        {
+            if (mix > 1.0f)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "MegaLightsの可視灯リストの混合率が範囲外のため無視します: " + std::to_string(mix) +
+                        " (0.0〜1.0)");
+            }
+            else
+            {
+                m_Settings.MegaLights.VisibleListMix = mix;
+            }
+        }
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("MegaLightsの可視灯リスト: ") +
+                (m_Settings.MegaLights.VisibleListEnabled ? "有効" : "無効") + " / 容量 " +
+                std::to_string(m_Settings.MegaLights.VisibleListCapacity) + " / 混合率 " +
+                std::to_string(m_Settings.MegaLights.VisibleListMix));
+    }
+
     void KurenaiEngine3D::SetMegaLightsTilePoolCapacity(int capacity)
     {
         // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
@@ -2135,6 +2178,31 @@ namespace Kurenai
             if (m_RenderCapabilities.RaytracingAvailable)
             {
                 m_RenderTargets.CreateMegaLightsTilePool(*m_Device, kMegaLightsTilePoolStride);
+
+                // 可視灯リスト(提案分布の第3成分)。候補プールと同じ格子で、
+                // **容量は設定で変わるので常に上限ぶんを確保する** ―― 実行中に容量を
+                // 変えるたびにGPUを待って確保し直すのを避けるため。ストライドも上限で固定し、
+                // シェーダーは実行時の容量で先頭から使う
+                m_RenderTargets.CreateMegaLightsVisibleLists(*m_Device, kMegaLightsVisibleListStride);
+                if (m_RenderTargets.MegaLightsVisibleLists[0])
+                {
+                    const uint64_t visibleListBytes =
+                        static_cast<uint64_t>(sizeof(uint32_t)) * kMegaLightsVisibleListStride *
+                        (m_RenderTargets.LightTileCountX + 1u) * (m_RenderTargets.LightTileCountY + 1u);
+                    Core::Logger::Info(
+                        "KurenaiEngine3D",
+                        "MegaLights 可視灯リスト: タイル " +
+                        std::to_string(m_RenderTargets.LightTileCountX + 1u) + "x" +
+                        std::to_string(m_RenderTargets.LightTileCountY + 1u) + " / 容量上限 " +
+                        std::to_string(kMegaLightsVisibleListCapacityMax) + " / " +
+                        std::to_string(visibleListBytes * 2u / 1024u) + " KB (ping-pong 2本)");
+                }
+                else
+                {
+                    Core::Logger::Warning(
+                        "KurenaiEngine3D",
+                        "MegaLights 可視灯リストの確保に失敗した。可視灯リストは無効のまま動作する");
+                }
 
                 // 1画素につきN本のリザーバ(1本16バイト)。MegaLightsCommon.hlsli の
                 // MegaLightsReservoir と**ストライドを一致させること**。

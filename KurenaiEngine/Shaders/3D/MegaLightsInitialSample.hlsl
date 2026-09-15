@@ -56,6 +56,9 @@ Texture2D BRDFLUTTexture : register(t5);
 
 // 候補プール。レイアウトは MegaLightsTilePool.hlsl 冒頭を参照
 StructuredBuffer<uint> TilePool : register(t7);
+// 前フレームの可視灯リスト(提案分布の第3成分)。**候補プールが実際に引いたのと
+// 同じリストを見ること** ―― どのリストを使ったかはプールのヘッダ[base+3]に書いてある
+StructuredBuffer<uint> VisibleLights : register(t8);
 
 RWStructuredBuffer<MegaLightsReservoir> Reservoirs : register(u0);
 // 画素ごとの「遮蔽が確定した灯」のキャッシュ(0xFFFFFFFFで無し)。
@@ -181,6 +184,43 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     const uint reachableCount = TilePool[tileBase + 1u];
     const uint validCandidates = TilePool[tileBase + 2u];
     const uint sampleCount = max(Params0.z, 1u);
+
+    // --- 提案分布の第3成分(可視灯リスト)を、候補プールが引いたのと同じ形で復元する ---
+    //
+    // 【再投影の式をここに書かない】どのタイルのリストを引いたかは候補プールが決めており、
+    // その結果の添字がヘッダ[base+3]に入っている。式を両側に書くと、片方だけ直したときに
+    // 割り戻しが実際の抽出確率と食い違って静かに偏る(プール本体と同じ考え方)。
+    //
+    // 【リストをレジスタへ載せてから数える】RIS の M 回の抽選のたびにバッファを
+    // L 回読み直すと 1画素あたり M*L 回の読み出しになる。載せ替えは1画素1回で済む
+    const uint listBase = TilePool[tileBase + 3u];
+    const bool listValid = (listBase != 0xFFFFFFFFu);
+    // 候補プールが実際に使った混合率。**新しい定数の枠を足していない** ――
+    // このcbufferは MegaLights の5本が共有しており、宣言を1つ増やすだけで
+    // 5本すべてのDXILが変わって、機能を切っていても絵がビット同一でなくなる
+    const float listMix = listValid ? asfloat(Params6.z) : 0.0f;
+    uint listLength = 0u;
+    uint listCache[kMegaLightsVisibleListCapacityMax];
+    {
+        [unroll]
+        for (uint i = 0u; i < kMegaLightsVisibleListCapacityMax; ++i)
+        {
+            listCache[i] = kMegaLightsInvalidLight;
+        }
+        if (listValid)
+        {
+            // 書き手(候補プール)と同じ1つの関数を通す。実行時の容量でクランプしない
+            listLength = MegaLightsVisibleListLength(VisibleLights, listBase);
+            [unroll]
+            for (uint j = 0u; j < kMegaLightsVisibleListCapacityMax; ++j)
+            {
+                if (j < listLength)
+                {
+                    listCache[j] = VisibleLights[listBase + kMegaLightsVisibleListHeader + j];
+                }
+            }
+        }
+    }
     if (sumW <= 0.0f || validCandidates == 0u)
     {
         // 【空でも M は候補数を持たせる】M はこの画素が「何個の候補を検討したか」で、
@@ -328,8 +368,39 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
             // 提案分布の確率密度。プールは「一様枝 + 重み枝」の混合で引いている
             // (MegaLightsTilePool.hlsl)ので、割り戻しも同じ混合式で行う。
             // プールが w_i / SumW / 届いた灯数 を別々に持っているので厳密に再現できる
+            //
+            // 【3成分の混合。a>0 が不偏性の担保】
+            //   q(y) = a/R + (1-a) * [ (1-c) * w_y/SumW + c * count_y/L ]
+            // a = kMegaLightsUniformMixFraction(固定)、c = リスト枝へ回す割合。
+            // **c をどれだけ上げても a は削らない**ので、そのタイルへ届くどの灯にも
+            // 正の下限確率が残る ―― リストだけから引くと、載っていない灯の確率が0になって
+            // 定義域が欠け(=バイアス)、しかも「一度落ちた灯は二度と選ばれない」という
+            // 自己強化のループに入る。
+            //
+            // 【リストに載っている灯は3成分すべてを足すこと】リスト枝で引けた灯は
+            // 重み枝からも一様枝からも出て来られる。片方だけ数えると割り戻しが
+            // 実際の抽出確率と食い違い、静かにバイアスが乗る。
+            // 【出現回数で数える】リストは重複を許す(書き手の競合を正しさの問題にしないため)。
+            // 数え方は MegaLightsVisibleLights.hlsl の書き手と1つの規約で揃えてある
+            float listCount = 0.0f;
+            if (listLength > 0u)
+            {
+                [unroll]
+                for (uint k = 0u; k < kMegaLightsVisibleListCapacityMax; ++k)
+                {
+                    if (k < listLength && listCache[k] == lightIndex)
+                    {
+                        listCount += 1.0f;
+                    }
+                }
+            }
+            const float listTerm =
+                (listLength > 0u) ? (listMix * listCount / float(listLength)) : 0.0f;
+            const float weightTerm =
+                (listLength > 0u) ? ((1.0f - listMix) * (candidateWeight / sumW))
+                                  : (candidateWeight / sumW);
             const float sourcePdf = kMegaLightsUniformMixFraction / float(max(reachableCount, 1u)) +
-                                    (1.0f - kMegaLightsUniformMixFraction) * (candidateWeight / sumW);
+                                    (1.0f - kMegaLightsUniformMixFraction) * (weightTerm + listTerm);
             const float risWeight = targetPdf / sourcePdf;
 
             risWeightSum += risWeight;

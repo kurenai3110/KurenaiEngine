@@ -54,6 +54,10 @@ cbuffer MegaLightsTilePoolConstants : register(b0)
     // x=フレーム番号(サンプルを毎フレーム変えるための乱数の種)、
     // yz=タイル格子の画素オフセット(各0〜15)、w=未使用
     uint4 PoolParams;
+    // 可視灯リスト(提案分布の第3成分)。
+    // x=リストの容量(0なら機能そのものが無効)、y=前フレームのリストが使えるか(0で使わない)、
+    // z=asuint(リスト枝へ回す混合率 c)、w=未使用
+    uint4 VisibleListParams;
 };
 
 // ライト1灯ぶんのデータ(struct GPULight)とライトリストの宣言。BRDFは使わないため
@@ -66,6 +70,10 @@ cbuffer MegaLightsTilePoolConstants : register(b0)
 #include "MegaLightsCommon.hlsli"
 
 Texture2D<float> DepthTexture : register(t1);
+// タイルを前フレームへ再投影するための速度(TAAと同じ引き方: historyUv = uv - velocity)
+Texture2D<float2> VelocityTexture : register(t2);
+// 前フレームの可視灯リスト(MegaLightsVisibleLights.hlsl が書いたもの)
+StructuredBuffer<uint> VisibleLights : register(t3);
 
 RWStructuredBuffer<uint> TilePool : register(u0);
 
@@ -87,6 +95,9 @@ static const uint kInvalidLightIndex = 0xFFFFFFFFu;
 
 groupshared uint gsMinDepthBits;
 groupshared uint gsMaxDepthBits;
+// タイルを代表する速度。最も手前のサーフェスのものを採る(TAAの速度ディレーションと同じ考え方)。
+// タイルが深度の段差をまたぐとき、平均には意味が無い
+groupshared float2 gsTileVelocity;
 // ライトごとの重み。届かない灯は0
 groupshared float gsWeight[kMegaLightsMaxLights];
 // スレッドごとの部分和と、届いた灯の数
@@ -138,6 +149,7 @@ void CSMain(
     {
         gsMinDepthBits = 0xFFFFFFFFu;
         gsMaxDepthBits = 0u;
+        gsTileVelocity = float2(0.0f, 0.0f);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -167,7 +179,8 @@ void CSMain(
             TilePool[tileBase + 0u] = asuint(0.0f);
             TilePool[tileBase + 1u] = 0u;
             TilePool[tileBase + 2u] = 0u;
-            TilePool[tileBase + 3u] = 0u;
+            // 可視灯リストは使っていない(読み手はここで早期に打ち切るが、約束は守る)
+            TilePool[tileBase + 3u] = kInvalidLightIndex;
             // 深度スラブも書く。読み手(空間再利用のMIS)は有効候補数0で先に打ち切るが、
             // 「書かずにreturnしない」という約束をここでも守る
             TilePool[tileBase + 4u] = asuint(0.0f);
@@ -180,6 +193,19 @@ void CSMain(
         }
         return;
     }
+
+    // --- タイルを代表する速度を拾う(可視灯リストの再投影に使う) ---
+    // 最も手前のサーフェスを持つ画素の速度を採る。同じ深度の画素が複数あれば競合するが、
+    // 深度が同じなら速度もほぼ同じなので、どれが勝っても構わない
+    if (VisibleListParams.x != 0u && VisibleListParams.y != 0u &&
+        all(pixel >= int2(0, 0)) && all(pixel < int2(RenderSize.xy)))
+    {
+        if (asuint(DepthTexture.Load(int3(pixel, 0))) == gsMaxDepthBits)
+        {
+            gsTileVelocity = VelocityTexture.Load(int3(pixel, 0)).rg;
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
 
     // Reverse-Zなので「深度値が大きい=手前」
     const float nearestViewZ = TileViewZFromDepth(asfloat(gsMaxDepthBits), ProjParams.z, ProjParams.w);
@@ -251,6 +277,45 @@ void CSMain(
     const float sumW = gsPartialSum[0];
     const uint reachableCount = gsPartialCount[0];
 
+    // --- 前フレームの可視灯リストを再投影して引き当てる(提案分布の第3成分) ---
+    //
+    // 【再投影が外れても偏らない】リストは提案分布を可視な灯へ*寄せる*ためのもので、
+    // 定義域そのものは一様枝(a>0)が押さえている。外れたリストを引いても
+    // 「効率の悪い提案」になるだけで期待値は動かない。だから妥当性の判定は要らず、
+    // UE と同じく範囲外は最寄りのタイルへ丸める(clamp がその役をする)。
+    //
+    // 【引き当てた場所をヘッダへ書き残す ―― 読み手に同じ式を書かせない】
+    // 割り戻す側(MegaLightsInitialSample.hlsl)は、ここで実際に使ったリストと
+    // **同じもの**を見なければ、割り戻しが実際の抽出確率と食い違って静かに偏る。
+    // 再投影の式を両側に書くと片方だけ直す事故が起きるので、結果の添字を
+    // プールのヘッダ[base+3](従来は予約・読み手なし)へ書いて唯一の出所にする
+    uint listBase = kInvalidLightIndex;
+    uint listLength = 0u;
+    float listMix = 0.0f;
+    if (VisibleListParams.x != 0u && VisibleListParams.y != 0u && sumW > 0.0f &&
+        asfloat(VisibleListParams.z) > 0.0f)
+    {
+        // タイル中心を前フレームへ送る(TAAと同じ引き方: historyUv = uv - velocity)
+        const float2 centerPixel = float2(tilePixelOrigin) + float(kTileSize) * 0.5f;
+        const float2 historyPixel = centerPixel - gsTileVelocity * float2(RenderSize.xy);
+        const int2 historyTile =
+            int2(floor((historyPixel + float2(PoolParams.yz)) / float(kTileSize)));
+        const uint2 clampedTile = uint2(clamp(
+            historyTile, int2(0, 0), int2(int(tileCountX) - 1, int(tileCountY) - 1)));
+
+        const uint candidateBase = MegaLightsVisibleListBase(clampedTile, tileCountX);
+        // 【実行時の容量でクランプしない】読み手(Initial)と同じ1つの関数を通す。
+        // 容量を下げた直後は前の容量で書かれた長さが入っており、
+        // 片方だけ切り詰めると提案確率の分母 L が食い違って静かに偏る
+        const uint length = MegaLightsVisibleListLength(VisibleLights, candidateBase);
+        if (length > 0u)
+        {
+            listBase = candidateBase;
+            listLength = length;
+            listMix = asfloat(VisibleListParams.z);
+        }
+    }
+
     // --- K個の候補を抽出する(一様枝と重み枝の混合) ---
     // 【重みだけで引いてはいけない】距離減衰は光源のそばで発散するため、重みに比例した
     // 抽出だけだと1灯が K スロットを独占し、その灯が寄与0になる画素が何フレーム待っても
@@ -265,6 +330,10 @@ void CSMain(
     {
         uint pickedIndex = kInvalidLightIndex;
         float pickedWeight = 0.0f;
+        // リスト枝は「届かない灯を引いたら空振り」で終わってよい。下の丸め対策の保険を
+        // そこへ効かせてしまうと、空振りのはずのスロットに別の灯が入って
+        // 割り戻しと食い違う(= 静かなバイアス)。枝を見分けるための印
+        bool listBranch = false;
 
         if (sumW > 0.0f)
         {
@@ -293,6 +362,29 @@ void CSMain(
                     }
                 }
             }
+            else if (listLength > 0u && UintToUnitFloat(HashUint(seed ^ 0x2545F491u)) < listMix)
+            {
+                // リスト枝: 前フレームに可視だった灯から番号で一様に選ぶ。
+                // 【種を目的ごとに別の定数でハッシュしている】ここは乱数の*列*ではないので、
+                // 枝を1つ足しても既存の一様枝・重み枝の抽選はビット単位で変わらない
+                // (混合率0のときに出力がビット同一である根拠)
+                listBranch = true;
+                const uint ordinal = min(
+                    (uint)(UintToUnitFloat(HashUint(seed ^ 0xB7E15163u)) * float(listLength)),
+                    listLength - 1u);
+                const uint candidate = VisibleLights[listBase + kMegaLightsVisibleListHeader + ordinal];
+                // 【このタイルへ届かない灯は捨てる ―― 定義域を広げてはいけない】
+                // リストは1フレーム古く、載っている灯が今フレームもこのタイルへ届くとは限らない。
+                // 届かない灯を候補にすると候補集合が候補プールの定義域を超え、
+                // 空間再利用のMIS(LightInTileDomain)の前提が崩れる。
+                // ここで捨てた場合このスロットは無効のまま = 「空振り」で、
+                // 割り戻す側もその確率ぶんを込みで数えているので偏らない
+                if (candidate < lightCount && gsWeight[candidate] > 0.0f)
+                {
+                    pickedIndex = candidate;
+                    pickedWeight = gsWeight[candidate];
+                }
+            }
             else
             {
                 // 重み枝: 逆CDF法
@@ -312,8 +404,10 @@ void CSMain(
             }
 
             // 浮動小数の丸めで最後まで超えなかった場合の保険。重みが正の最後の灯を採る
-            // (ここで無効のまま返すと、そのスロットぶんの寄与が黙って欠ける)
-            if (pickedIndex == kInvalidLightIndex)
+            // (ここで無効のまま返すと、そのスロットぶんの寄与が黙って欠ける)。
+            // 【リスト枝には効かせない】あちらの無効は丸め誤差ではなく
+            // 「届かない灯を引いた」という正規の空振りで、埋めると割り戻しと食い違う
+            if (pickedIndex == kInvalidLightIndex && !listBranch)
             {
                 [loop]
                 for (uint j = lightCount; j > 0u; --j)
@@ -337,7 +431,9 @@ void CSMain(
         TilePool[tileBase + 0u] = asuint(sumW);
         TilePool[tileBase + 1u] = reachableCount;
         TilePool[tileBase + 2u] = (sumW > 0.0f) ? candidateCount : 0u;
-        TilePool[tileBase + 3u] = 0u;
+        // 提案分布の第3成分に使った可視灯リストの先頭添字(0xFFFFFFFF で「使わなかった」)。
+        // 読み手はこれをそのまま使う ―― 再投影の式を二度書かないための唯一の出所
+        TilePool[tileBase + 3u] = listBase;
         // 空間再利用のMIS重みが、隣のタイルの錐台を組み立て直すのに使う
         TilePool[tileBase + 4u] = asuint(nearestViewZ);
         TilePool[tileBase + 5u] = asuint(farthestViewZ);

@@ -258,6 +258,50 @@ namespace Kurenai::UI
                 m_Engine.SetMegaLightsTilePoolCapacity(poolCapacity);
             }
 
+            // --- 可視灯リスト(提案分布の第3成分) ---
+            // 【目視A/B用につまみを出す】効きは「影の縁の暗黒点が減るか」と
+            // 「動いたときに遅れ(残像)が増えないか」の両方を見ないと決まらない
+            CheckboxEx(
+                "可視灯リスト###MegaLightsVisibleList",
+                &m_Engine.GetSettings().MegaLights.VisibleListEnabled,
+                Defaults::MegaLightsVisibleListEnabled,
+                "前フレームにそのタイルで実際に可視だった灯を覚えておき、"
+                "次フレームの提案分布へ混ぜる。\n\n"
+                "【何を直すためのものか】候補プールの重みは距離減衰だけで決まり、"
+                "可視性を一切見ていない。影の縁では目標関数を支配する灯が自分からは"
+                "遮蔽されていることがあり、RISは毎フレームその灯を選んでは殺される"
+                "(デノイズ前の暗黒点の主因)。\n\n"
+                "【混合率をいくつにしても不偏】一様枝(0.25)を削らないので、"
+                "そのタイルへ届くどの灯にも正の下限確率が残る。"
+                "リストが外れても「効率の悪い提案」になるだけで期待値は動かない。\n\n"
+                "【遅れは別の軸】リストは1フレーム古いので、前進(拡大)や"
+                "灯が消えた直後に残像として出うる。既定が無効なのはこのため");
+            if (m_Engine.GetSettings().MegaLights.VisibleListEnabled)
+            {
+                float visibleListMix = m_Engine.GetSettings().MegaLights.VisibleListMix;
+                if (SliderFloatEx(
+                        "リストの混合率 c###MegaLightsVisibleListMix", &visibleListMix, 0.0f, 1.0f,
+                        Defaults::MegaLightsVisibleListMix, "%.2f", 0,
+                        "一様枝(0.25)を除いた残りのうち、リスト枝へ回す割合 c。\n\n"
+                        "  q(y) = 0.25/R + 0.75 * [ (1-c)*w_y/SumW + c*count_y/L ]\n\n"
+                        "上げるほど標本が可視灯へ寄って分散が下がるが、リストは1フレーム"
+                        "古いので遅れが増える。0で従来どおり(ビット同一)"))
+                {
+                    m_Engine.SetMegaLightsVisibleList(-1, -1, visibleListMix);
+                }
+                int visibleListCapacity = m_Engine.GetSettings().MegaLights.VisibleListCapacity;
+                if (SliderIntEx(
+                        "リストの容量###MegaLightsVisibleListCapacity", &visibleListCapacity, 1,
+                        static_cast<int>(Passes::kMegaLightsVisibleListCapacityMax),
+                        Defaults::MegaLightsVisibleListCapacity,
+                        "1タイルあたりに覚える灯の数。\n\n"
+                        "リストの長さは本質的に「タイルあたりの可視標本数」で頭打ちになる。"
+                        "あふれた数は構築パスがヘッダへ残すので、実測で決め直せる"))
+                {
+                    m_Engine.SetMegaLightsVisibleList(-1, visibleListCapacity, -1.0f);
+                }
+            }
+
             // CLIのモード2も有効として表示する。UIで一度切った後に戻す場合は通常のHalton列へ戻す
             bool tileJitterEnabled = m_Engine.GetSettings().MegaLights.TileJitterMode != 0;
             if (CheckboxEx(
