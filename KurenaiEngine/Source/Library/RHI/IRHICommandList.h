@@ -232,7 +232,7 @@ namespace Kurenai::RHI
         // 別に明示的なバインドが要る(DX12はグラフィックス・コンピュートで同じサンプラーヒープを共有するため
         // 呼び出し不要でも動作するが、DX11との整合のため両バックエンドで同じ呼び出し規約にする)
         virtual void SetComputeSamplerSet(IRHISamplerSet* samplerSet) = 0;
-        // RWTexture2D/RWStructuredBufferとしてバインドする(書き込み可能)。有効なスロットはu0〜u3。
+        // RWTexture2D/RWStructuredBufferとしてバインドする(書き込み可能)。有効なスロットはu0〜u4。
         // mipLevelはCreateMippedUAVTextureで作成したミップチェーンテクスチャの特定ミップを指定する場合に使う
         // (通常のCreateUAVTextureは常に1ミップのみのため既定値の0で問題ない)。
         //

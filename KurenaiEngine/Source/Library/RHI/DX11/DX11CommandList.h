@@ -76,7 +76,7 @@ namespace Kurenai::RHI
         // (H3でt21を足したときに実際に踏んだ。DX11だけで確認していると気付けない)。
         // 各スロットの意味と内訳もあちらにある
 
-        // SetComputeUnorderedAccessTexture/Bufferで使えるUAVスロット数(u0〜u3)
+        // SetComputeUnorderedAccessTexture/Bufferで使えるUAVスロット数(u0〜u4)
         static constexpr uint32_t kComputeUavSlotCount = RHIBindingLimits::kComputeUavSlotCount;
         // SetVertexShaderResourceBufferで使える頂点シェーダのSRVスロット数
         static constexpr uint32_t kVertexShaderSrvSlotCount = RHIBindingLimits::kVertexShaderSrvSlotCount;
