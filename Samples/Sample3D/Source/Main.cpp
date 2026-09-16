@@ -904,6 +904,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -megalightspoolbilinear <0|1|2>。候補プールの確率的バイリニア参照。
         // 0=自分のタイル固定(従来)、1=2x2クアッドごとに1タイル、2=画素ごとに1タイル
         const int megaLightsPoolBilinear = ParseIntOption(L"-megalightspoolbilinear", -1);
+        // -megalightsnoise <0|1|2>。画素ごとの乱数位相の配り方。
+        // 0=Interleaved Gradient Noise(従来)、1=白色ハッシュ、2=ブルーノイズマスク
+        const int megaLightsNoiseMode = ParseIntOption(L"-megalightsnoise", -1);
         // -megalightsvisiblelist <0|1> / -megalightsvisiblelistcapacity <1〜16> /
         // -megalightsvisiblelistmix <0.0〜1.0>。前フレームの可視灯リストを提案分布へ混ぜる。
         // mix は「一様枝(0.25)を除いた残りのうち、リスト枝へ回す割合 c」。
@@ -1165,6 +1168,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 engine.SetMegaLightsTilePoolCapacity(megaLightsPoolCapacity);
             }
             engine.SetMegaLightsTilePoolBilinear(megaLightsPoolBilinear);
+            engine.SetMegaLightsNoiseMode(megaLightsNoiseMode);
             if (megaLightsVisibleList >= 0 || megaLightsVisibleListCapacity > 0 ||
                 megaLightsVisibleListMix >= 0.0f)
             {

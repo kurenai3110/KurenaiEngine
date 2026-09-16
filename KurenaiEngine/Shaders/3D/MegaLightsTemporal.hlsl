@@ -333,7 +333,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // WRS の独立性を使わないため、位相を隣どうしで離しても選択確率は厳密に保たれる。
     // どちらの灯を映すかが画素ごとに決まる場所なので、ここを白色にしておくと
     // 見た目の粒がそのまま白色ノイズになる
-    const float switchPhase = MegaLightsPixelPhase(pixel, Params1.w, 1u);
+    const float switchPhase = MegaLightsPixelPhaseMode(pixel, Params1.w, 1u, Params7.z);
     uint acceptCount = 0u;
 
     float weightSum = 0.0f;

@@ -318,6 +318,30 @@ namespace Kurenai::UI
                 m_Engine.SetMegaLightsTilePoolBilinear(poolBilinearEnabled ? 1 : 0);
             }
 
+            static const char* kNoiseModeNames[] = { "Interleaved Gradient Noise", "白色ハッシュ",
+                                                     "ブルーノイズ 64x64" };
+            int noiseModeIndex = m_Engine.GetSettings().MegaLights.NoiseMode;
+            if (ComboEx(
+                    "乱数位相の配り方###MegaLightsNoiseMode", &noiseModeIndex, kNoiseModeNames,
+                    IM_ARRAYSIZE(kNoiseModeNames), Defaults::MegaLightsNoiseMode,
+                    "画素ごとの位相をどう配るか。位相が決まると、その画素が候補プールの"
+                    "どのスロットを見に行くかまで決まる。\n\n"
+                    "【IGNは等方ではない】保証しているのは「隣接画素の値が離れる」ことだけで、"
+                    "等値線は直線になる。角度エネルギーの偏り"
+                    "(周期4〜32画素・5度ビンの最大比。等方は0.028):\n"
+                    "  IGN 0.36 / 白色 0.031 / ブルーノイズ 0.051\n\n"
+                    "【筋として見えるのは初期候補数Mが小さいときだけ】候補スロットは位相で"
+                    "決まるが、どれを採るかは白色の採用判定が決めるので、Mが大きいと洗い流される。"
+                    "M=1・デノイザ切で27.5度の筋が出る。\n\n"
+                    "【デノイザを通すと向きは消える】残るのはちらつきの差で、IGN比で"
+                    "白色 +5.4% / ブルーノイズ -7.4%(同一構成2回の下限は±0.22%)。"
+                    "時間累積の上限が既定(64)のままでは目視で分からず、下げると見えてくる。\n\n"
+                    "白色はIGNより悪く、既定の候補ではない。筋が位相から来ていることを"
+                    "示した対照として残してある"))
+            {
+                m_Engine.SetMegaLightsNoiseMode(noiseModeIndex);
+            }
+
             CheckboxEx(
                 "デノイザ###MegaLightsDenoise", &m_Engine.GetSettings().MegaLights.DenoiseEnabled,
                 Defaults::MegaLightsDenoiseEnabled,

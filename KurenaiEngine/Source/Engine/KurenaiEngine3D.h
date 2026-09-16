@@ -373,6 +373,8 @@ namespace Kurenai
         void SetMegaLightsVisibleList(int enabled, int capacity, float mix);
         // 候補プールの参照を確率的バイリニアにする(0=自分のタイル固定、1=クアッドごと、2=画素ごと)
         void SetMegaLightsTilePoolBilinear(int mode);
+        // 画素ごとの乱数位相の配り方(0=IGN、1=白色ハッシュ、2=ブルーノイズ)。負の値は「既定のまま」
+        void SetMegaLightsNoiseMode(int mode);
 
         // 【検証専用】蓄積が始まった瞬間にシーンへ摂動を加える。時間再利用の「追従」を測る入口。
         //   0 = 何もしない(既定)

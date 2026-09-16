@@ -1961,6 +1961,40 @@ namespace Kurenai
                 " にしました");
     }
 
+    void KurenaiEngine3D::SetMegaLightsNoiseMode(int mode)
+    {
+        // 負の値は「既定のまま」。未指定時も現在値を起動ログへ残すためreturnしない
+        if (mode >= 0)
+        {
+            if (mode > 2)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "MegaLightsの乱数位相の配り方が範囲外のため無視します: " + std::to_string(mode) +
+                        " (0〜2)");
+            }
+            else
+            {
+                m_Settings.MegaLights.NoiseMode = mode;
+            }
+        }
+
+        if (m_Settings.MegaLights.NoiseMode == 1)
+        {
+            Core::Logger::Info("KurenaiEngine3D", "MegaLightsの乱数位相: 白色ハッシュ (等方だが低周波を含む)");
+        }
+        else if (m_Settings.MegaLights.NoiseMode == 2)
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D", "MegaLightsの乱数位相: ブルーノイズマスク 64x64 (等方かつ高周波)");
+        }
+        else
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D", "MegaLightsの乱数位相: Interleaved Gradient Noise (斜め方向へ偏る)");
+        }
+    }
+
     void KurenaiEngine3D::SetMegaLightsTilePoolBilinear(int mode)
     {
         // 負の値は「既定のまま」。未指定時も現在値を起動ログへ残すためreturnしない

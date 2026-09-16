@@ -23,7 +23,8 @@ cbuffer MegaLightsStochasticConstants : register(b1)
     // xy=未使用、z=候補プールのタイル数Y、w=確率的バイリニア参照のモード
     uint4 Params6;
     // x=asuint(可視灯リストを提案分布へ混ぜた割合 c)、
-    // y=Temporalの履歴深度のカメラ移動補正、zw=未使用
+    // y=Temporalの履歴深度のカメラ移動補正、
+    // z=画素ごとの位相の配り方(0=IGN / 1=白色 / 2=ブルーノイズ)、w=未使用
     uint4 Params7;
 };
 
