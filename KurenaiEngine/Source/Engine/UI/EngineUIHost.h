@@ -90,6 +90,7 @@ namespace Kurenai::UI
         virtual void RequestSceneLoad(size_t sceneIndex) = 0;
         virtual void RequestUpscaleSettings(bool enabled, UpscaleQualityMode mode, uint32_t outputWidth, uint32_t outputHeight) = 0;
         virtual void ResetSceneDependentParams() = 0;
+        virtual void SetMegaLightsNoiseMode(int mode) = 0;
         virtual void SetMegaLightsQuadSamples(int samples) = 0;
         virtual void SetMegaLightsTilePoolBilinear(int mode) = 0;
         virtual void SetMegaLightsTilePoolCapacity(int capacity) = 0;

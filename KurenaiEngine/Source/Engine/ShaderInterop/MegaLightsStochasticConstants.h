@@ -54,7 +54,9 @@ namespace Kurenai::ShaderInterop
         //   Initialが割り戻しに使う。**候補プール側 MegaLightsTilePoolConstants の
         //   VisibleListParams.z と必ず同じ値にすること** ―― 抽出した確率と
         //   割り戻す確率が食い違うと、絵は出たまま静かに偏る)、
-        // y=Temporalの履歴深度のカメラ移動補正(0=従来 / 1=前フレームの期待ViewZ)、zw=未使用
+        // y=Temporalの履歴深度のカメラ移動補正(0=従来 / 1=前フレームの期待ViewZ)、
+        // z=画素ごとの位相の配り方(0=IGN / 1=白色ハッシュ / 2=ブルーノイズマスク。
+        //   MegaLightsCommon.hlsli の MegaLightsPixelPhaseMode が読む)、w=未使用
         //
         // 【枠を1つ増やす代償を承知で足している】このcbufferは MegaLights の5本が
         // 共有しており、宣言を1つ増やすだけで5本すべてのDXILが変わる。機能を切っていても

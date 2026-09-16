@@ -15,6 +15,8 @@
 #ifndef KURENAI_MEGALIGHTS_COMMON_HLSLI
 #define KURENAI_MEGALIGHTS_COMMON_HLSLI
 
+#include "MegaLightsBlueNoise.hlsli"
+
 // 無効なライト番号。リザーバが空であることを表す
 // 番号は30bit。bit30 をメッシュライトの印、bit31 を可視フラグに使う。
 //
@@ -57,15 +59,74 @@ static const float kMegaLightsUniformMixFraction = 0.25f;
 // 相関のある列を渡すと選択確率が狂う。判定が1回しかない場所(候補が2つの時間再利用)は
 // 独立性を使わないので安全。候補が3つ以上の空間再利用では白色のままにすること。
 
-// Interleaved Gradient Noise。隣接画素で値が大きく離れる(ブルーノイズ的な配り方)
-float MegaLightsPixelPhase(uint2 pixel, uint frameIndex, uint dimension)
+// 【位相の配り方は3通りから選べる】Params7.z が選ぶ。既定は 0(従来の IGN)。
+//
+//   0 = Interleaved Gradient Noise
+//   1 = 白色ハッシュ(等方だが低周波を含む。0 の縞が消えることを見るための対照)
+//   2 = void-and-cluster のブルーノイズマスク(等方かつ高周波)
+//
+// 【IGN の位相の場は等方ではない】満たしているのは「隣接画素の値が離れる」ことだけ。
+// frac(52.98 * (0.0671x + 0.00584y)) の等値線は直線で、格子上へ折り返した基本波は
+// (-0.4443, 0.3093) cycle/画素(縞は55度・間隔1.85画素)。周期4〜32画素の帯で
+// 角度エネルギーを5度ビンに分けた最大ビンは、等方 0.028 に対して
+//   IGN 0.36 / 白色ハッシュ 0.031 / ブルーノイズマスク 0.051。
+//
+// 【出力に出るのは初期候補数 M が小さいときだけ】候補スロットの列は位相ただ1つで決まるが、
+// **そこからどれを採るかは白色の採用判定が決める**(MegaLightsInitialSample.hlsl)。
+// M が大きいとそちらに洗い流される。実測(SceneColor・デノイザ切・平らな壁・順位変換後):
+//   M=1: IGN 0.069〜0.075(ピーク27.5度) / 白色 0.031〜0.034 / ブルー 0.030〜0.034
+//   M=8: 位相64ビンの相関比 eta^2 = 0.00002。画素ハッシュの陰性対照 0.00004 と差が無い
+// **M=8 で測って「効かない」と結論しかけた。再現条件を外すと指標は嘘になる。**
+//
+// 【デノイザを通すと向きは消えるが、残る量に差がある】a-trous 後はどの配り方でも
+// ピーク角が0〜5度へ移り、斜めの筋は見えなくなる。精度(参照実装との誤差中央値)の差も
+// 同一構成2回のばらつき(±0.85%)の内側。差が出るのは**ちらつき**で、下限 ±0.22% に対し
+//   白色 +5.4% / ブルーノイズ -7.4%(いずれも IGN 比)。
+// 白色が悪いのは等方でも低周波を含むからで、a-trous が落としきれない。
+// **時間累積の上限を下げると目視でも差が出る**(上限64のままでは見えない)。
+// 数値と測定条件は docs/ImplementationDetail.md 61.7x
+uint MegaLightsHashUint(uint x)
 {
-    const float2 p = float2(pixel) + float2(float(dimension) * 5.0f, float(dimension) * 11.0f);
-    float phase = frac(52.9829189f * frac(0.06711056f * p.x + 0.00583715f * p.y));
+    x ^= x >> 16;
+    x *= 0x7FEB352Du;
+    x ^= x >> 15;
+    x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float MegaLightsPixelPhaseMode(uint2 pixel, uint frameIndex, uint dimension, uint mode)
+{
+    float phase;
+    if (mode == 2u)
+    {
+        // 【マスクは回すだけで次元とフレームを分ける】値へ定数を足しても
+        // 空間の並び(どの画素が近い値を持つか)は境目を除いて保たれるので、
+        // ブルーノイズ性を壊さずに独立な列を取り出せる。周辺分布も一様のまま
+        phase = MegaLightsBlueNoiseValue(pixel);
+        phase = frac(phase + float(dimension) * 0.7548776662f);
+    }
+    else if (mode == 1u)
+    {
+        // 対照用。等方だが低周波を含むので、a-trous で落としきれない粒が残る
+        const uint seed = MegaLightsHashUint(pixel.x * 0x9E3779B9u + pixel.y * 0x85EBCA6Bu +
+                                             dimension * 0xC2B2AE35u);
+        phase = float(seed >> 8u) * (1.0f / 16777216.0f);
+    }
+    else
+    {
+        const float2 p = float2(pixel) + float2(float(dimension) * 5.0f, float(dimension) * 11.0f);
+        phase = frac(52.9829189f * frac(0.06711056f * p.x + 0.00583715f * p.y));
+    }
     // 【フレームごとに回す】回さないと新しい情報が入らず、ちらつかないまま永遠に収束しない。
     // 黄金比で回すのは、どのフレーム数で切っても偏りが小さいため
-    phase = frac(phase + float(frameIndex) * 0.61803398875f);
-    return phase;
+    return frac(phase + float(frameIndex) * 0.61803398875f);
+}
+
+// 従来どおりの呼び出し口(IGN 固定)。配り方を選べない場所はこちらを使う
+float MegaLightsPixelPhase(uint2 pixel, uint frameIndex, uint dimension)
+{
+    return MegaLightsPixelPhaseMode(pixel, frameIndex, dimension, 0u);
 }
 
 // 1次元の低食い違い量列(Kronecker列。a = 1/plastic number = 0.7548776662)。

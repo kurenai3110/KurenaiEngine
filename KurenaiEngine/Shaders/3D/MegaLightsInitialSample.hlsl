@@ -286,7 +286,7 @@ MegaLightsReservoir DrawSample(
     // 割り戻しも期待値も変わらない(MegaLightsCommon.hlsli の説明を参照)。
     // 採用判定は白色のまま ―― あちらは M 回の判定の独立性を使っている。
     // 標本番号を位相の次元として渡し、N本が同じ列を引かないようにする
-    const float slotPhase = MegaLightsPixelPhase(pixel, Params1.w, sampleSlot);
+    const float slotPhase = MegaLightsPixelPhaseMode(pixel, Params1.w, sampleSlot, Params7.z);
     uint rngState = HashUint(pixel.x + pixel.y * outputSize.x + Params1.w * 0x9E3779B9u +
                              sampleSlot * 0xB5297A4Du);
 
@@ -302,7 +302,8 @@ MegaLightsReservoir DrawSample(
     if (poolTileCount > 1u)
     {
         const uint2 phasePixel = (bilinearMode == 2u) ? pixel : (pixel >> 1u);
-        const float tileRandom = MegaLightsPixelPhase(phasePixel, Params1.w, 64u + sampleSlot);
+        const float tileRandom =
+            MegaLightsPixelPhaseMode(phasePixel, Params1.w, 64u + sampleSlot, Params7.z);
         float cdf = 0.0f;
         bool picked = false;
         [unroll]

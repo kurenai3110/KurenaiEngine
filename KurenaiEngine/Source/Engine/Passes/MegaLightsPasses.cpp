@@ -687,10 +687,11 @@ namespace Kurenai::Passes
                 // どのタイルのリストを引いたかはプールがヘッダへ書き残しており、
                 // Initial はそれを読むので再投影の式はこちらには無い
                 // y は Temporal の履歴深度のカメラ移動補正を切り替える。
+                // z は画素ごとの位相の配り方(0=IGN / 1=白色 / 2=ブルーノイズ)。
                 stochasticConstants.Params7 = {
                     visibleListMixBits,
                     megaLightsSettings.DenoiseMotionCompensatedDepth ? 1u : 0u,
-                    0u,
+                    static_cast<uint32_t>(std::clamp(megaLightsSettings.NoiseMode, 0, 2)),
                     0u
                 };
                 return stochasticConstants;

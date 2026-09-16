@@ -121,6 +121,14 @@ namespace Kurenai
         // 違わなかったので、壊れないクアッドごとを既定にしてある。根拠は EngineDefaults.h
         int32_t TilePoolBilinearMode = Defaults::MegaLightsTilePoolBilinearMode;
 
+        // 画素ごとの乱数位相の配り方。0=Interleaved Gradient Noise(従来)、
+        // 1=白色ハッシュ、2=void-and-cluster のブルーノイズマスク。
+        // 0 の枝の演算は従来のまま触っていない。
+        // IGN は「隣接画素が離れる」だけで位相の場は等方ではなく、初期候補数 M が
+        // 小さいときはデノイズ前の絵に 27.5度 の斜めの筋として出る。
+        // 既定を 0 のままにしている理由と実測は EngineDefaults.h
+        int32_t NoiseMode = Defaults::MegaLightsNoiseMode;
+
         // 前フレームの可視灯リストを提案分布の第3成分として混ぜるか。
         // 【OFFのとき出力はビット同一】混合率0で候補プールの抽選は1bitも変わらない
         // (枝ごとに別の定数で種をハッシュしており、乱数の*列*ではないため)

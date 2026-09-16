@@ -754,6 +754,7 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-megalightsdenoise4tap <0\|1>` | デノイザの時間累積が履歴の妥当性を何タップで判定するかを指定する(`0` = 最近傍1タップ、`1` = バイリニア2x2の4タップ)。**既定は1**。根拠は docs/ImplementationDetail.md 61.7o.9節。 |
 | `-megalightsdenoisemotiondepth <0\|1>` | デノイザの履歴の妥当性判定で、カメラ自身の移動による深度変化を補正するか指定する(`0` = 従来どおり現在の ViewZ と直接比較、`1` = 現在のワールド位置を前フレームの VP で投影した期待 ViewZ と比較)。**既定は1**。補正しないと、毎秒5mの前進で視距離1.67m以内の画素が遮蔽が変わらなくても履歴を捨てられる。根拠は docs/ImplementationDetail.md 61.7v節。 |
 | `-megalightspoolbilinear <0\|1\|2>` | 候補プールを自分のタイル固定で引くか(0)、最も近い4タイルから確率的バイリニアで引くかを指定する(1=2x2クアッドごとに1タイル(既定)、2=画素ごとに1タイル)。タイル形のムラを画素ごとの乱数へ溶かす。根拠は docs/ImplementationDetail.md 61.7t節。 |
+| `-megalightsnoise <0\|1\|2>` | 画素ごとの乱数位相の配り方を指定する(0=Interleaved Gradient Noise(既定)、1=白色ハッシュ、2=ブルーノイズマスク 64x64)。IGN は等方でないため、初期候補数 M が小さくデノイザを切っていると斜めの筋が出る。根拠は docs/ImplementationDetail.md 61.7x節。 |
 | `-megalightsperturb <0\|1\|2\|3>` | 蓄積開始時に検証用のシーン摂動を加える(`-megalightsaccum` が 0 だと効かない)。`1` = 全ライトを消す / `2` = 露出を+2段跳ばす / `3` = ライトを1つおきに消す(局所的な変化)。 |
 | `-megalightsdenoisegrad <0.0〜1.0>` | デノイザの時間累積で、8x8タイル内の平均の相対変化が大きい場所だけ履歴を短くする強さ。`0` で無効(従来の指数移動平均と一致)。**上限フレーム数の引き上げと対で使う。**根拠は docs/ImplementationDetail.md 61.7w節。 |
 | `-megalightsdenoisegradt0 <値>` / `-megalightsdenoisegradt1 <値>` | 上の相対変化のしきい値(疑い始める値 / 履歴を捨てきる値)。負なら既定のまま。 |
