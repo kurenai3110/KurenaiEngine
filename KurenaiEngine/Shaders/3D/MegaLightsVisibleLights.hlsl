@@ -52,6 +52,44 @@ groupshared uint gsSeen[kSeenWordCount];
 groupshared uint gsList[kMegaLightsVisibleListCapacityMax];
 // 打ち切る前に観測された相異なる灯の数。容量を超えることがある
 groupshared uint gsDistinct;
+// 決定的な選抜の1巡ぶんの勝者(下の VisibleListKey を InterlockedMin で畳んだ値)
+groupshared uint gsBestKey;
+
+// 【リストの中身を実行順から切り離すための鍵】
+//
+// かつてここは InterlockedAdd の戻り値をそのままスロット番号にしていた。原子加算の
+// 戻り順は GPU のスレッド実行順で決まるので、**同じビルド・同じ引数で起動し直すだけで
+// リストの並びが変わり、候補プールが引く灯が変わり、絵が変わっていた**
+// (実測: 同一ビルドの2回で MegaLightsTexture の要素の 86% が相違。
+//  -megalightsvisiblelist 0 にするとビット同一になる)。
+// 同じ問題を LightCulling.hlsl はライト番号の昇順ソートで潰しており、対策が
+// 片方にしか入っていなかった。
+//
+// 【番号順のソートでは足りない】並びだけ揃えても、容量を超えたときに**どの灯が残るか**が
+// 原子加算の勝者(=実行順)のままになる。そこで、集合そのものを鍵で決める。
+//
+// 【なぜ番号順に若いものから残さないのか】それも決定的だが、若い番号だけが常に残る。
+// ライト番号はシーンの記述順で、空間的に偏っていることがある ―― 偏りを入れずに
+// 決定的にするため、灯とタイルから作った鍵の小さい順に採る。
+// **フレーム番号は混ぜない。** 混ぜると残る集合が毎フレーム変わり、
+// 「前フレームに見えていた灯へ寄せる」という狙いに時間方向のちらつきを持ち込む。
+//
+// 下位10ビットにライト番号そのものを置くのは、鍵を**全順序**にするため
+// (同点があると順位が一意に決まらない)。ライト番号は kMegaLightsMaxLights=1024 未満で、
+// 10ビットに収まることが上の枝で保証されている
+uint VisibleListKey(uint lightIndex, uint2 tile)
+{
+    uint h = lightIndex * 0x9E3779B1u;
+    h ^= tile.x * 0x85EBCA6Bu;
+    h ^= tile.y * 0xC2B2AE35u;
+    h ^= h >> 15;
+    h *= 0x2545F491u;
+    h ^= h >> 13;
+    // 【最上位ビットを落として 0xFFFFFFFF を作らせない】その値は下の選抜で
+    // 「候補が無い」を表す番人として使っている。鍵がたまたま一致すると、
+    // 実在する灯を「無い」と読んで黙って取りこぼす
+    return (h & 0x7FFFFC00u) | (lightIndex & 0x3FFu);
+}
 
 [numthreads(16, 16, 1)]
 void CSMain(uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
@@ -123,19 +161,58 @@ void CSMain(uint3 groupID : SV_GroupID, uint3 groupThreadID : SV_GroupThreadID, 
                 continue;
             }
 
-            uint slot = 0u;
-            InterlockedAdd(gsDistinct, 1u, slot);
-            if (slot < capacity)
-            {
-                gsList[slot] = lightIndex;
-            }
+            // 【ここでは数えるだけ。リストへは積まない】原子加算の戻り値をスロット番号に
+            // 使うと、並びも「容量を超えたとき残る集合」も実行順で決まってしまう
+            // (VisibleListKey のコメント)。**加算した合計そのものは順序に依らない**ので、
+            // 相異なる灯の数としては正しく、容量を決める実測にそのまま使える
+            uint ignoredSlot = 0u;
+            InterlockedAdd(gsDistinct, 1u, ignoredSlot);
             // 【あふれたぶんは黙って捨ててよい】リストは提案分布を*寄せる*ためのもので、
             // 定義域そのものは候補プールの一様枝が押さえている。載らなかった灯にも
-            // 正の確率が残るので、捨てても偏らない(効率が落ちるだけ)。
-            // どれくらいあふれたかは gsDistinct に残り、容量を決める実測に使う
+            // 正の確率が残るので、捨てても偏らない(効率が落ちるだけ)
         }
     }
     GroupMemoryBarrierWithGroupSync();
+
+    // --- 決定的な選抜: 鍵の小さい順に capacity 個を採る ---
+    // 【ビットマスクは順序に依らない】OR は可換なので、gsSeen が表す「相異なる灯の集合」は
+    // スレッドの実行順に関係なく同じになる。非決定だったのは gsList への積み方だけなので、
+    // 出力はここで集合から作り直す。
+    // 【InterlockedMin も順序に依らない】どの順で畳んでも最小値は同じ。
+    // 1巡ごとに勝者のビットを落とし、次の最小を採る。巡回数は容量(最大16)で、
+    // 1巡あたりの走査は 1024ビット = 32語。
+    // 【選ばれた灯はビットを落とす】gsSeen はこの先で使わないので壊してよい
+    // (相異なる灯の数は gsDistinct に取ってある)
+    for (uint round = 0u; round < capacity; ++round)
+    {
+        if (groupIndex == 0u)
+        {
+            gsBestKey = 0xFFFFFFFFu;
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        for (uint sw = groupIndex; sw < kSeenWordCount; sw += kTileThreadCount)
+        {
+            uint bits = gsSeen[sw];
+            while (bits != 0u)
+            {
+                const uint lowBit = firstbitlow(bits);
+                bits &= ~(1u << lowBit);
+                const uint candidate = (sw << 5u) + lowBit;
+                InterlockedMin(gsBestKey, VisibleListKey(candidate, groupID.xy));
+            }
+        }
+        GroupMemoryBarrierWithGroupSync();
+
+        if (groupIndex == 0u && gsBestKey != 0xFFFFFFFFu)
+        {
+            // 下位10ビットにライト番号を埋めてあるので、勝った鍵から番号を取り出せる
+            const uint winner = gsBestKey & 0x3FFu;
+            gsList[round] = winner;
+            gsSeen[winner >> 5u] &= ~(1u << (winner & 31u));
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
 
     // 配置は容量の上限で固定されている(実行時の容量では割らない)。
     // 容量は「1タイルに何個書くか」だけを決め、添字の作り方は一生変わらない

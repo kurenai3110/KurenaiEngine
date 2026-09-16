@@ -306,6 +306,8 @@ namespace Kurenai::Rendering
             MegaLightsDenoiseMomentPing[denoiseIndex] =
                 device.CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
         }
+        MegaLightsDenoiseTileGradient = device.CreateUAVTexture(
+            (width + 7u) / 8u, (height + 7u) / 8u, RHI::Format::R32_Float);
     }
 
     void RenderTargets::ResetSoftwareRasterOutputs()

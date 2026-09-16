@@ -97,6 +97,11 @@ namespace Kurenai
               m_RenderTargets.MegaLightsDenoiseMoments[denoiseHistoryIndex].get() },
             { "MegaLightsDenoiseMomentsPrev",
               m_RenderTargets.MegaLightsDenoiseMoments[denoiseHistoryIndex ^ 1u].get() },
+            // 履歴長の適応が「どこで、どれだけ撃ったか」を数値で読むための入口。
+            // タイル解像度(画面の1/8)で、値は 0〜1 の λ(1で履歴を捨てきる)。
+            // **絵で見ずにここを数える** ―― 静止での偽陽性率も、変化への追従も、
+            // 目視では「それらしく見える」だけで判定できない
+            { "MegaLightsDenoiseTileGradient", m_RenderTargets.MegaLightsDenoiseTileGradient.get() },
             // 影・Hi-Z
             { "ShadowCascadeArray", m_RenderTargets.ShadowCascadeArray.get() },
             { "HiZTexture", m_RenderTargets.HiZTexture.get() },
