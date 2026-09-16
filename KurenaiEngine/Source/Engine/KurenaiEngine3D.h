@@ -352,6 +352,11 @@ namespace Kurenai
         void SetMegaLightsDenoiseHistory4Tap(bool enabled);
         // カメラ移動を補正した前フレームの期待 ViewZ で履歴の深度を判定するか(0/1のみ)。
         void SetMegaLightsDenoiseMotionCompensatedDepth(int enabled);
+        // 時間累積の履歴長を適応させる。**どちらも0で従来の指数移動平均へ厳密に戻る**
+        void SetMegaLightsDenoiseGeometryFalloff(float falloff);
+        // 負のしきい値は「既定のまま」。強さ0で無効(陽性対照)
+        void SetMegaLightsDenoiseGradient(float strength, float relStart, float relFull);
+        void SetMegaLightsDenoiseGradientFastFrames(int frames);
         // 空間再利用の反復回数(負なら既定のまま)
         void SetMegaLightsSpatialIterations(int iterations);
         // 時間再利用の有無と、履歴のMの上限。負/0は既定のまま

@@ -287,6 +287,23 @@ namespace Kurenai
                 }
                 Core::Logger::Info("KurenaiEngine3D", "【検証】全ライトを消しました(ゴースト測定)");
             }
+            else if (m_Settings.MegaLights.PerturbMode == 3)
+            {
+                // 【局所的な変化を作る】1は画面全体が一斉に変わるので、タイル単位で変化を
+                // 探す時間勾配にとっては最も簡単な問題になる。1つおきに消すと、変化した領域と
+                // 変化していない領域が同じ絵の中に混在し、**8x8タイルの継ぎ目と見逃し**が
+                // そこに出る。検出力そのものを測るための入口
+                size_t disabled = 0;
+                for (size_t i = 1; i < m_Lights.size(); i += 2)
+                {
+                    m_Lights[i].Enabled = false;
+                    ++disabled;
+                }
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    "【検証】ライトを1つおきに消しました(局所的な変化。消した数: " +
+                        std::to_string(disabled) + " / " + std::to_string(m_Lights.size()) + ")");
+            }
             else if (m_Settings.MegaLights.PerturbMode == 2)
             {
                 // 実効プリ露出を+2段跳ばす。ライトの放射輝度は露出を掛け込んで作られるので、

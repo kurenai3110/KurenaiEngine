@@ -51,6 +51,8 @@ namespace Kurenai::Passes
         {
             // 走らなかったフレームを挟むと履歴が途切れる(中身が古い)
             m_MegaLightsDenoiseHistoryValid = false;
+            // タイル勾配も同じ。こちらは**走らなかった = 一度も書かれていない**こともある
+            m_MegaLightsDenoiseTileGradientValid = false;
         }
     }
 
@@ -192,6 +194,10 @@ namespace Kurenai::Passes
             RHI::ShaderDesc denoiseDesc;
             denoiseDesc.Stage = RHI::ShaderStage::Compute;
             denoiseDesc.FilePath = shaderDirectory + L"MegaLightsDenoise.kshader";
+            denoiseDesc.EntryPoint = "CSTileGradient";
+            m_MegaLightsDenoiseTileGradientShader = device.CreateShader(denoiseDesc);
+            m_MegaLightsDenoiseTileGradientPSO =
+                device.CreateComputePipelineState({ m_MegaLightsDenoiseTileGradientShader.get() });
             denoiseDesc.EntryPoint = "CSTemporalAccum";
             m_MegaLightsDenoiseTemporalShader = device.CreateShader(denoiseDesc);
             m_MegaLightsDenoiseTemporalPSO =
@@ -1069,9 +1075,18 @@ namespace Kurenai::Passes
                 denoiseGuideBuffer ? std::vector<RHI::IRHIBuffer*>{ denoiseGuideBuffer }
                                    : std::vector<RHI::IRHIBuffer*>{};
             const int atrousPasses = std::clamp(frame.Settings.MegaLights.DenoiseAtrousPasses, 0, 5);
+            const bool denoiseTileGradientRuns = megaLightsSettings.DenoiseGradientStrength > 0.0f;
+            // 【ラッチは「前フレームも走っていた」ときだけ】RHIにUAVのクリアが無いので、
+            // 一度も書いていないタイル勾配テクスチャには不定値が入っている。
+            // デノイズ履歴の有効性(denoiseHistoryValid)とは別物で、そちらを流用すると
+            // 「勾配を無効のまま履歴だけ溜めてから有効化する」経路で未初期化を読む
+            const bool denoiseTileGradientLatchUsable =
+                denoiseTileGradientRuns && m_MegaLightsDenoiseTileGradientValid;
+            // 次フレームのために、このフレームで書いたかどうかを残す
+            m_MegaLightsDenoiseTileGradientValid = denoiseTileGradientRuns;
 
             const auto updateDenoiseConstants =
-                [this, megaLightsSettings, denoiseGuideValid, denoiseHistoryValid, renderWidth, renderHeight](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
+                [this, megaLightsSettings, denoiseGuideValid, denoiseHistoryValid, denoiseTileGradientRuns, denoiseTileGradientLatchUsable, renderWidth, renderHeight](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
             {
                 Passes::MegaLightsDenoiseConstants denoiseConstants{};
                 denoiseConstants.Params0 = {
@@ -1112,6 +1127,23 @@ namespace Kurenai::Passes
                     0.0f,
                     0.0f
                 };
+                // 履歴長の適応。**4つとも0で従来の指数移動平均へ厳密に戻る**
+                // (陽性対照。根拠は MegaLightsConstants.h の Params5)
+                denoiseConstants.Params5 = {
+                    megaLightsSettings.DenoiseGeometryFalloff,
+                    megaLightsSettings.DenoiseGradientStrength,
+                    megaLightsSettings.DenoiseGradientRelStart,
+                    megaLightsSettings.DenoiseGradientRelFull
+                };
+                denoiseConstants.Params6 = {
+                    static_cast<float>(megaLightsSettings.DenoiseGradientFastFrames),
+                    denoiseTileGradientRuns ? 1.0f : 0.0f,
+                    // ラッチは前フレームの λ を読むので、使えないフレームでは 0(=ラッチ無効)
+                    denoiseTileGradientLatchUsable
+                        ? static_cast<float>(megaLightsSettings.DenoiseGradientLatchFrames)
+                        : 0.0f,
+                    0.0f
+                };
                 cmd->UpdateBuffer(
                     m_MegaLightsDenoiseConstantBuffer.get(), &denoiseConstants, sizeof(denoiseConstants));
             };
@@ -1140,6 +1172,36 @@ namespace Kurenai::Passes
             // 【履歴もここで書く】SVGFは1段目のa-trous出力を履歴にするが、こちらは時間累積の
             // 出力をそのまま履歴にしている。パスが1本減るぶん履歴のノイズは多いが、
             // 指数移動平均が均すので破綻はしない。差が問題になったら分ける
+            // タイルごとの勾配を先に書き、時間累積が線形補間してタイル境界を目立たなくする。
+            if (denoiseTileGradientRuns)
+            {
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "MegaLightsDenoiseTileGradient",
+                    .Reads =
+                    {
+                        targets->MegaLightsTexture.get(), targets->GBufferAlbedo.get(), targets->GBufferMaterial.get(),
+                        targets->GBufferDepth.get(), targets->GBufferVelocity.get(),
+                        targets->MegaLightsDenoiseHistory[denoiseRead].get(),
+                        targets->MegaLightsDenoiseMoments[denoiseRead].get(),
+                    },
+                    // 【自分で読んで自分で書く】ラッチが前フレームの λ を同じテクセルから読む。
+                    // 1タイル=1グループなので競合しないが、**契約としては読み手でもある**ので
+                    // Reads にも載せる(パスの一覧から依存が読めなくなるのを避ける)
+                    .Writes = { targets->MegaLightsDenoiseTileGradient.get() },
+                    .Execute = [this, targets, denoiseRead, updateDenoiseConstants, bindDenoiseCommon, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
+                    {
+                        updateDenoiseConstants(cmd, 0u, 1.0f);
+                        cmd->SetComputePipelineState(m_MegaLightsDenoiseTileGradientPSO.get());
+                        bindDenoiseCommon(cmd);
+                        cmd->SetComputeTexture(6, targets->MegaLightsTexture.get());
+                        cmd->SetComputeTexture(7, targets->MegaLightsDenoiseHistory[denoiseRead].get());
+                        cmd->SetComputeTexture(8, targets->MegaLightsDenoiseMoments[denoiseRead].get());
+                        cmd->SetComputeUnorderedAccessTexture(4, targets->MegaLightsDenoiseTileGradient.get());
+                        cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
+                    },
+                });
+            }
+
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "MegaLightsDenoiseTemporal",
                 .Reads =
@@ -1148,6 +1210,7 @@ namespace Kurenai::Passes
                     targets->GBufferMaterial.get(), targets->GBufferDepth.get(), targets->GBufferVelocity.get(),
                     targets->MegaLightsDenoiseHistory[denoiseRead].get(),
                     targets->MegaLightsDenoiseMoments[denoiseRead].get(),
+                    targets->MegaLightsDenoiseTileGradient.get(),
                 },
                 .Writes =
                 {
@@ -1168,6 +1231,8 @@ namespace Kurenai::Passes
                     // 同一フレーム内でのWARが生じない(RenderGraphはWARの辺を張らない)
                     cmd->SetComputeTexture(7, targets->MegaLightsDenoiseHistory[denoiseRead].get());
                     cmd->SetComputeTexture(8, targets->MegaLightsDenoiseMoments[denoiseRead].get());
+                    // 勾配パスを省略したフレームも宣言済みt9は必ず束縛する(DX12対策)。
+                    cmd->SetComputeTexture(9, targets->MegaLightsDenoiseTileGradient.get());
                     cmd->SetComputeUnorderedAccessTexture(0, targets->MegaLightsDenoisePing[0].get());
                     cmd->SetComputeUnorderedAccessTexture(1, targets->MegaLightsDenoiseMomentPing[0].get());
                     cmd->SetComputeUnorderedAccessTexture(2, targets->MegaLightsDenoiseHistory[denoiseWrite].get());

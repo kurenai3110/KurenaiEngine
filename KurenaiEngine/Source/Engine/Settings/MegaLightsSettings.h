@@ -55,12 +55,22 @@ namespace Kurenai
         float DenoiseFireflyClamp = Defaults::MegaLightsDenoiseFireflyClamp;
         bool DenoiseHistory4Tap = Defaults::MegaLightsDenoiseHistory4Tap;
         bool DenoiseMotionCompensatedDepth = Defaults::MegaLightsDenoiseMotionCompensatedDepth;
+        // --- 時間累積の履歴長を適応させる(根拠は EngineDefaults.h) ---
+        // **4つとも0にすると従来の指数移動平均へ厳密に戻る。**陽性対照はこれで取る
+        float DenoiseGeometryFalloff = Defaults::MegaLightsDenoiseGeometryFalloff;
+        float DenoiseGradientStrength = Defaults::MegaLightsDenoiseGradientStrength;
+        float DenoiseGradientRelStart = Defaults::MegaLightsDenoiseGradientRelStart;
+        float DenoiseGradientRelFull = Defaults::MegaLightsDenoiseGradientRelFull;
+        int32_t DenoiseGradientFastFrames = Defaults::MegaLightsDenoiseGradientFastFrames;
+        int32_t DenoiseGradientLatchFrames = Defaults::MegaLightsDenoiseGradientLatchFrames;
 
         bool TemporalEnabled = Defaults::MegaLightsTemporalEnabled;
         // 履歴のM(何個の候補から絞ったか)の上限。大きいほど収束は速いが、
         // 新しいサンプルが採用されにくくなり、灯を消しても明るさが残る(ゴースト)
         int32_t TemporalMClamp = Defaults::MegaLightsTemporalMClamp;
-        // 【検証専用】蓄積開始時に加える摂動(0=なし / 1=全ライトを消す / 2=露出を+2段跳ばす)。
+        // 【検証専用】蓄積開始時に加える摂動
+        // (0=なし / 1=全ライトを消す / 2=露出を+2段跳ばす / 3=ライトを1つおきに消す)。
+        // 3は局所的な変化で、**タイル単位で変化を探す時間勾配の見逃しを測るため**にある。
         // 静止した絵では測れない「追従」を測るための入口。SetMegaLightsPerturbのコメント参照
         int32_t PerturbMode = 0;
 

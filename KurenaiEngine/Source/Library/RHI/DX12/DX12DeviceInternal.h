@@ -70,7 +70,7 @@ namespace Kurenai::RHI::DX12Internal
     // 1スロット256バイトなので、32768段でもUPLOADヒープの消費は8MB。
     constexpr uint32_t kConstantBufferRingCapacity = 32768;
 
-    // コンピュートシェーダー用ルートシグネチャのSRV/UAVディスクリプタテーブルレイアウト(t0〜t16, u0〜u3)。
+    // コンピュートシェーダー用ルートシグネチャのSRV/UAVディスクリプタテーブルレイアウト(t0〜t17, u0〜u4)。
     // SRVが17必要なのはレイトレーシングのパス(RT反射)で、TLAS + G-Buffer(Albedo/Normal/Material/Depth) +
     // SceneColor + スカイボックス + シーンジオメトリ4本(頂点属性・インデックス・メッシュ情報・
     // マテリアル) + インスタンス情報 + bent normal(t16、34章) + メッシュレット表(t17、38章)

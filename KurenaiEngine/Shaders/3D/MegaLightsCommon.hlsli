@@ -343,6 +343,26 @@ void MegaLightsUnpackMaterial(uint packed, out float metallic, out float roughne
 // 履歴ガイドの1タップが現在のサーフェスと一致するか。
 // expectedPrevViewZ は、補正時には現在のワールド位置を前フレームのカメラから見た ViewZ、
 // 従来経路では現在の viewZ を渡す。しきい値の分母は現在の viewZ のまま変えない。
+// 同じ3つのしきい値に対する「不一致度」。各項をしきい値で割って正規化し、最大を返す
+// (1.0 がちょうどしきい値)。**判定そのものには使わないこと** ――
+// 判定は下の MegaLightsGuideMatchesSurface のまま残してある。割り算を挟むと境界が
+// 1ULPずれ、しきい値ちょうどの画素で従来と挙動が変わりうるため。
+// こちらは「しきい値の内側でどれだけ怪しいか」を連続量として使う側の入口
+float MegaLightsGuideMismatch(
+    float hViewZ, float3 hN, float2 hMaterial, float expectedPrevViewZ,
+    float viewZ, float3 N, float2 material)
+{
+    const float kMaxRelativeDepthDiff = 0.05f;
+    const float kMinNormalDot = 0.9f;
+    const float kMaxMaterialDiff = 0.1f;
+    const float dz = abs(hViewZ - expectedPrevViewZ) /
+                     max(kMaxRelativeDepthDiff * max(abs(viewZ), 1e-3f), 1e-12f);
+    const float dn = (1.0f - dot(N, hN)) / max(1.0f - kMinNormalDot, 1e-12f);
+    const float dm = max(abs(hMaterial.r - material.r), abs(hMaterial.g - material.g)) /
+                     kMaxMaterialDiff;
+    return max(dz, max(dn, dm));
+}
+
 bool MegaLightsGuideMatchesSurface(
     float hViewZ, float3 hN, float2 hMaterial, float expectedPrevViewZ,
     float viewZ, float3 N, float2 material)

@@ -207,6 +207,8 @@ namespace Kurenai::Rendering
         // à-trous のping-pong用。段ごとに入れ替える
         std::unique_ptr<RHI::IRHITexture> MegaLightsDenoisePing[2];
         std::unique_ptr<RHI::IRHITexture> MegaLightsDenoiseMomentPing[2];
+        // 時間勾配をタイル単位で保持し、本体側で線形補間してタイル境界を消す。
+        std::unique_ptr<RHI::IRHITexture> MegaLightsDenoiseTileGradient;
 
         // G-Buffer の生成は元の位置ごとに3つへ分ける。間に他のテクスチャ生成があるため、
         // 順序を変えるとDX12のディスクリプタ枠の割り当て順が変わり、意味の無い差分になる。

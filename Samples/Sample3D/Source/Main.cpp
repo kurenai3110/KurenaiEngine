@@ -918,8 +918,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -megalightstemporal <0|1> / -megalightstemporalmclamp <上限>。時間再利用
         const int megaLightsTemporal = ParseIntOption(L"-megalightstemporal", -1);
         const int megaLightsTemporalMClamp = ParseIntOption(L"-megalightstemporalmclamp", -1);
-        // -megalightsperturb <0|1|2>。【検証専用】蓄積開始時の摂動
-        // (1=全ライトを消す / 2=露出を+2段跳ばす)。時間再利用の追従を測るためのもの
+        // -megalightsperturb <0|1|2|3>。【検証専用】蓄積開始時の摂動
+        // (1=全ライトを消す / 2=露出を+2段跳ばす / 3=ライトを1つおきに消す)。
+        // 時間再利用の追従を測るためのもの。3は局所的な変化で、タイル単位で変化を探す
+        // 時間勾配の見逃しを測る
         const int megaLightsPerturb = ParseIntOption(L"-megalightsperturb", -1);
         // -megalightsdenoise <0|1> / -megalightsdenoiseatrous <段数> /
         // -megalightsdenoiseframes <上限>。デノイザ(時間累積 + a-trous)
@@ -950,6 +952,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -megalightsdenoisemotiondepth <0|1>。前フレームの期待 ViewZ をカメラ移動込みで求める。
         const int megaLightsDenoiseMotionDepth =
             ParseIntOption(L"-megalightsdenoisemotiondepth", -1);
+        // --- 時間累積の履歴長の適応。**どれも0にすると従来の指数移動平均へ厳密に戻る** ---
+        // -megalightsdenoisegeomfalloff <0..1>。幾何の不一致で履歴長を連続的に縮める強さ
+        const float megaLightsDenoiseGeomFalloff =
+            ParseFloatOption(L"-megalightsdenoisegeomfalloff", -1.0f);
+        // -megalightsdenoisegrad <0..1>。タイル内の時間勾配で履歴長を縮める強さ(0で無効=陽性対照)
+        const float megaLightsDenoiseGradient = ParseFloatOption(L"-megalightsdenoisegrad", -1.0f);
+        // -megalightsdenoisegradt0 / -megalightsdenoisegradt1。相対変化のしきい値(負で既定のまま)
+        const float megaLightsDenoiseGradT0 = ParseFloatOption(L"-megalightsdenoisegradt0", -1.0f);
+        const float megaLightsDenoiseGradT1 = ParseFloatOption(L"-megalightsdenoisegradt1", -1.0f);
+        // -megalightsdenoisegradfast <フレーム数>。速いEMAの長さ(0で無効。負で既定のまま)
+        const int megaLightsDenoiseGradFast = ParseIntOption(L"-megalightsdenoisegradfast", -1);
         // -perfdump <パス> / -perfdumpframes <枚数>。GPUの区間計測を平均してCSVへ書き出す。
         // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
         const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
@@ -1217,6 +1230,25 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (megaLightsDenoiseMotionDepth >= 0)
             {
                 engine.SetMegaLightsDenoiseMotionCompensatedDepth(megaLightsDenoiseMotionDepth);
+            }
+            if (megaLightsDenoiseGeomFalloff >= 0.0f)
+            {
+                engine.SetMegaLightsDenoiseGeometryFalloff(megaLightsDenoiseGeomFalloff);
+            }
+            // 【しきい値だけの指定も通す】強さを省いたときは現在の値を据え置く
+            if (megaLightsDenoiseGradFast >= 0)
+            {
+                engine.SetMegaLightsDenoiseGradientFastFrames(megaLightsDenoiseGradFast);
+            }
+            if (megaLightsDenoiseGradient >= 0.0f || megaLightsDenoiseGradT0 >= 0.0f ||
+                megaLightsDenoiseGradT1 >= 0.0f)
+            {
+                const float gradientStrength =
+                    (megaLightsDenoiseGradient >= 0.0f)
+                        ? megaLightsDenoiseGradient
+                        : engine.GetSettings().MegaLights.DenoiseGradientStrength;
+                engine.SetMegaLightsDenoiseGradient(
+                    gradientStrength, megaLightsDenoiseGradT0, megaLightsDenoiseGradT1);
             }
             if (megaLightsSpatialIterations > 0)
             {
