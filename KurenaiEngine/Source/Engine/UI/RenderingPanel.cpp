@@ -377,6 +377,58 @@ namespace Kurenai::UI
                     "捨てるのを防ぐ。法線・材質・相対深度しきい値は従来のまま。\n\n"
                     "【既定は無効】無効時は現在のViewZと履歴ViewZを直接比較する従来経路を使う");
 
+                // --- 履歴長の適応 ---
+                // 【ここも履歴を捨てない】上の4タップと同じ理由。履歴が持つ量の意味は
+                // 変わらないので、動かしながらのA/Bを汚さないために捨てない
+                SliderFloatEx(
+                    "幾何の部分減衰###MegaLightsDenoiseGeomFalloff",
+                    &m_Engine.GetSettings().MegaLights.DenoiseGeometryFalloff, 0.0f, 1.0f,
+                    Defaults::MegaLightsDenoiseGeometryFalloff, "%.2f", 0,
+                    "再投影先のタップは、しきい値の内側なら「通った」として同じ重みで長い履歴を"
+                    "主張する。しきい値で1になるよう正規化した不一致度に応じて、履歴長を連続的に"
+                    "縮める。通ったタップの被覆(バイリニア重みの和)も掛かる。\n\n"
+                    "【0で従来の二値のまま】0にすると乗じる係数が厳密に1.0になり、"
+                    "従来と画素単位で一致する(陽性対照)");
+                SliderFloatEx(
+                    "時間勾配で履歴を縮める###MegaLightsDenoiseGrad",
+                    &m_Engine.GetSettings().MegaLights.DenoiseGradientStrength, 0.0f, 1.0f,
+                    Defaults::MegaLightsDenoiseGradientStrength, "%.2f", 0,
+                    "8x8タイルの中で現フレームと履歴の平均を比べ、ノイズでは説明できない差が出た"
+                    "タイルだけ履歴を短くする。1画素の生入力は影レイ1本の1標本でノイズが支配的なので、"
+                    "画素単位では判定できない。\n\n"
+                    "【標準誤差で正規化する形は測って落とした】タイル内の画素の誤差は"
+                    "独立ではない(候補プールがタイルに1つ)ため、σ/√n では過小に見積もり、"
+                    "静止シーンでも撃ち続ける。明るさで割る相対変化に替えてある。\n\n"
+                    "狙いは「定常のノイズは長い窓のまま、変化への追従だけ速くする」こと。"
+                    "上限フレーム数を上げてもゴーストが伸びないなら、これが効いている。\n\n"
+                    "【0で無効。従来と画素単位で一致する(陽性対照)】");
+                SliderFloatEx(
+                    "相対変化のしきい値 T0###MegaLightsDenoiseGradT0",
+                    &m_Engine.GetSettings().MegaLights.DenoiseGradientRelStart, 0.0f, 1.0f,
+                    Defaults::MegaLightsDenoiseGradientRelStart, "%.2f", 0,
+                    "タイル平均の差を明るさで割った値がこれを超えたら疑い始める。\n\n"
+                    "【静止シーンの偽陽性率で決める値】むやみに下げると、何も変わっていない"
+                    "タイルが毎フレーム履歴を捨てて静止画のちらつきが増える");
+                SliderFloatEx(
+                    "相対変化の全リセット T1###MegaLightsDenoiseGradT1",
+                    &m_Engine.GetSettings().MegaLights.DenoiseGradientRelFull, 0.0f, 2.0f,
+                    Defaults::MegaLightsDenoiseGradientRelFull, "%.2f", 0,
+                    "ここまで来たら履歴を捨てきる。【追従の速さで決める値】");
+                // 【T0 < T1 を保つ】逆転させるとシェーダ側が T1 = T0 + 0.001 へ丸めるので、
+                // なめらかな減衰のつもりが段差になる。CLI のセッターは弾いているが、
+                // スライダは設定を直接書くので、ここで同じ不変条件を守る
+                if (m_Engine.GetSettings().MegaLights.DenoiseGradientRelFull <=
+                    m_Engine.GetSettings().MegaLights.DenoiseGradientRelStart)
+                {
+                    m_Engine.GetSettings().MegaLights.DenoiseGradientRelFull =
+                        m_Engine.GetSettings().MegaLights.DenoiseGradientRelStart + 0.05f;
+                }
+                SliderIntEx(
+                    "速いEMAの長さ###MegaLightsDenoiseGradFast",
+                    &m_Engine.GetSettings().MegaLights.DenoiseGradientFastFrames, 0, 32,
+                    Defaults::MegaLightsDenoiseGradientFastFrames,
+                    "相対変化を比べる前に現フレームの平均を均す長さ(フレーム数)。0で無効。"
+                    "1フレームの平均はまだノイジーで、そのまま比べると相対変化が揺れる");
             }
 
             if (megaLightsQuadUI)

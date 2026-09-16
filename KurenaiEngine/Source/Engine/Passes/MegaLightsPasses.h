@@ -79,7 +79,13 @@ namespace Kurenai
                 m_MegaLightsHistoryValid = false;
                 m_MegaLightsVisibleListValid = false;
             }
-            void InvalidateDenoiseHistory() { m_MegaLightsDenoiseHistoryValid = false; }
+            void InvalidateDenoiseHistory()
+            {
+                m_MegaLightsDenoiseHistoryValid = false;
+                // タイル勾配のラッチも一緒に捨てる。あちらは別のテクスチャなので、
+                // 履歴だけ捨てると「古い λ を持ち続ける」形で残る
+                m_MegaLightsDenoiseTileGradientValid = false;
+            }
             // 蓄積と書き出しを取り直す。解像度が変わったときに呼ぶ
             void ResetAccumulation();
             // 書き出し先。空なら書き出さない
@@ -117,6 +123,11 @@ namespace Kurenai
             // リザーバを混ぜる時間再利用とは独立に効く
             uint32_t m_MegaLightsDenoiseHistoryIndex = 0u;
             bool m_MegaLightsDenoiseHistoryValid = false;
+            // タイル勾配テクスチャの中身が信用できるか。**デノイズ履歴の有効性とは別物**。
+            // 【分けないと未初期化を読む】勾配を無効(既定)のまま履歴だけ溜めてから、
+            // UI や CLI で勾配を有効にすると、ラッチが**一度も書かれていない λ**を読む。
+            // RHI に UAV のクリアが無いので中身は不定値で、無効化→再有効化でも古い λ が残る
+            bool m_MegaLightsDenoiseTileGradientValid = false;
 
             // --- 蓄積平均(計測専用) ---
             // これまでに足したフレーム数。表示側はこれで割る
@@ -205,6 +216,8 @@ namespace Kurenai
             std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTemporalPipelineState;
 
             // デノイズ(時間累積 → a-trous → 再変調)
+            std::unique_ptr<RHI::IRHIShader> m_MegaLightsDenoiseTileGradientShader;
+            std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsDenoiseTileGradientPSO;
             std::unique_ptr<RHI::IRHIShader> m_MegaLightsDenoiseTemporalShader;
             std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsDenoiseTemporalPSO;
             std::unique_ptr<RHI::IRHIShader> m_MegaLightsDenoiseAtrousShader;

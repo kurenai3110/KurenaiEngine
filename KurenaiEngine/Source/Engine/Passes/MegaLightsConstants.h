@@ -143,6 +143,14 @@ namespace Kurenai::Passes
             // x=履歴深度のカメラ移動補正(0=従来の現在ViewZとの比較 / 1=前フレームの期待ViewZ)、
             // yzw=未使用
             DirectX::XMFLOAT4 Params4;
+            // 時間累積の履歴長を適応させるつまみ。**4つとも0で従来の式へ厳密に還元される**
+            // x=幾何の部分減衰の強さ(0=従来の二値のまま / 1でしきい値まで線形),
+            // y=時間勾配で履歴を縮める強さ(0=無効),
+            // z=相対変化のしきい値T0(ここから疑い始める), w=同T1(ここで履歴を捨てきる)
+            DirectX::XMFLOAT4 Params5;
+            // x=速いEMAの長さ(フレーム数。0で無効), y=タイル勾配テクスチャが使えるか,
+            // z=ラッチの長さ(フレーム数。撃ち始めたタイルが撃ち続ける長さ。0で無効), w=未使用
+            DirectX::XMFLOAT4 Params6;
         };
         // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
         // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
@@ -160,7 +168,12 @@ namespace Kurenai::Passes
         // Params4 はカメラ移動補正のスイッチを載せるために**意図して足した**。
         // 通すために期待値を書き換えたのではなく、追加したことの記録としてここを更新している
         static_assert(offsetof(MegaLightsDenoiseConstants, Params4) == 64, "Params4 のレイアウトが変わっている");
-        static_assert(sizeof(MegaLightsDenoiseConstants) == 80, "MegaLightsDenoiseConstants の総サイズが変わっている");
+        // Params5 は履歴長の適応(幾何の部分減衰と時間勾配)を載せるために**意図して足した**。
+        // 通すために期待値を書き換えたのではなく、追加したことの記録としてここを更新している
+        static_assert(offsetof(MegaLightsDenoiseConstants, Params5) == 80, "Params5 のレイアウトが変わっている");
+        // Params6 は速いEMAの長さを載せるために**意図して足した**
+        static_assert(offsetof(MegaLightsDenoiseConstants, Params6) == 96, "Params6 のレイアウトが変わっている");
+        static_assert(sizeof(MegaLightsDenoiseConstants) == 112, "MegaLightsDenoiseConstants の総サイズが変わっている");
 
         // MegaLightsReference.hlsl側のcbuffer MegaLightsConstantsと一致させる必要がある
         struct alignas(16) MegaLightsConstants

@@ -1733,6 +1733,70 @@ namespace Kurenai
                 (enabled != 0 ? "有効" : "無効(従来)"));
     }
 
+    void KurenaiEngine3D::SetMegaLightsDenoiseGeometryFalloff(float falloff)
+    {
+        if (!(falloff >= 0.0f) || falloff > 1.0f)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのデノイザの幾何の部分減衰は0〜1で指定します。既定のままにします: " +
+                    std::to_string(falloff));
+            return;
+        }
+        m_Settings.MegaLights.DenoiseGeometryFalloff = falloff;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "MegaLightsのデノイザの幾何の部分減衰を設定しました: " + std::to_string(falloff));
+    }
+
+    void KurenaiEngine3D::SetMegaLightsDenoiseGradient(float strength, float relStart, float relFull)
+    {
+        if (!(strength >= 0.0f) || strength > 1.0f)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのデノイザの時間勾配の強さは0〜1で指定します。既定のままにします: " +
+                    std::to_string(strength));
+            return;
+        }
+        // 負値は「既定のまま」。しきい値は T0 < T1 でなければ区間が潰れる
+        const float newStart =
+            (relStart >= 0.0f) ? relStart : m_Settings.MegaLights.DenoiseGradientRelStart;
+        const float newFull =
+            (relFull >= 0.0f) ? relFull : m_Settings.MegaLights.DenoiseGradientRelFull;
+        if (!(newStart >= 0.0f) || !(newFull > newStart))
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのデノイザの勾配しきい値は 0 <= T0 < T1 で指定します。既定のままにします: T0=" +
+                    std::to_string(newStart) + " T1=" + std::to_string(newFull));
+            return;
+        }
+        m_Settings.MegaLights.DenoiseGradientStrength = strength;
+        m_Settings.MegaLights.DenoiseGradientRelStart = newStart;
+        m_Settings.MegaLights.DenoiseGradientRelFull = newFull;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "MegaLightsのデノイザの時間勾配を設定しました: 強さ=" + std::to_string(strength) +
+                " T0=" + std::to_string(newStart) + " T1=" + std::to_string(newFull));
+    }
+
+    void KurenaiEngine3D::SetMegaLightsDenoiseGradientFastFrames(int frames)
+    {
+        if (frames < 0 || frames > 64)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのデノイザの速いEMAの長さは0〜64で指定します。既定のままにします: " +
+                    std::to_string(frames));
+            return;
+        }
+        m_Settings.MegaLights.DenoiseGradientFastFrames = frames;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "MegaLightsのデノイザの速いEMAの長さを設定しました: " + std::to_string(frames));
+    }
+
     void KurenaiEngine3D::SetMegaLightsDenoiseSigmaLuminance(float sigma)
     {
         if (!(sigma > 0.0f))
@@ -1784,11 +1848,11 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetMegaLightsPerturb(int mode)
     {
-        if (mode < 0 || mode > 2)
+        if (mode < 0 || mode > 3)
         {
             Core::Logger::Warning(
                 "KurenaiEngine3D",
-                "MegaLightsの摂動モードが範囲外のため無視します: " + std::to_string(mode) + " (0〜2)");
+                "MegaLightsの摂動モードが範囲外のため無視します: " + std::to_string(mode) + " (0〜3)");
             return;
         }
         m_Settings.MegaLights.PerturbMode = mode;
