@@ -1097,7 +1097,7 @@ namespace Kurenai::Passes
             m_MegaLightsDenoiseTileGradientValid = denoiseTileGradientRuns;
 
             const auto updateDenoiseConstants =
-                [this, megaLightsSettings, denoiseGuideValid, denoiseHistoryValid, denoiseTileGradientRuns, denoiseTileGradientLatchUsable, renderWidth, renderHeight](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth)
+                [this, megaLightsSettings, denoiseGuideValid, denoiseHistoryValid, denoiseTileGradientRuns, denoiseTileGradientLatchUsable, renderWidth, renderHeight](RHI::IRHICommandList* cmd, uint32_t pass, float stepWidth, bool isFinalPass = false)
             {
                 Passes::MegaLightsDenoiseConstants denoiseConstants{};
                 denoiseConstants.Params0 = {
@@ -1119,9 +1119,11 @@ namespace Kurenai::Passes
                 // 深度のエッジ停止(View空間Zに対する相対差なので無次元)と、
                 // ファイアフライの近傍クランプの強さ(近傍平均 + k・標準偏差で頭打ちにする)
                 // w は定数バッファのレイアウトを保つための未使用成分。
+                // w は「この à-trous が最終段か」。最終段は復調を掛け戻して
+                // MegaLightsDenoisedTexture へ直接書き、専用の Remodulate パスを1本消す
                 denoiseConstants.Params2 = {
                     0.02f, megaLightsSettings.DenoiseFireflyClamp, denoiseGuideValid ? 1.0f : 0.0f,
-                    0.0f
+                    isFinalPass ? 1.0f : 0.0f
                 };
                 // x は履歴の妥当性判定のタップ数。色は2x2を混ぜているのに妥当性は
                 // 1点でしか見ていなかった(根拠は MegaLightsConstants.h の Params3)
@@ -1253,11 +1255,26 @@ namespace Kurenai::Passes
             });
 
             // --- a-trous: 段ごとにステップ幅を倍にしてping-pong ---
+            // 【最終段は復調を掛け戻して最終出力へ直接書く】専用の Remodulate パスは
+            // フルスクリーンを1枚読んで1枚書くだけのパスで、掛ける値も式も à-trous の
+            // 末尾でやるのと同じ。融合すると読み書きとパス境界のリソース遷移が丸ごと消え、
+            // 最終段はモーメントテクスチャへの書き込み(59MB/frame)もやめる。
+            // 実測 -0.37ms(docs/ImplementationDetail.md 61.7z)。
+            // **段が0本のときは融合先が無い**ので、そのときだけ従来の Remodulate を積む
             for (int atrousPass = 0; atrousPass < atrousPasses; ++atrousPass)
             {
                 const int atrousSrc = atrousPass & 1;
                 const int atrousDst = atrousSrc ^ 1;
                 const float atrousStep = static_cast<float>(1 << atrousPass);
+                const bool atrousIsFinal = (atrousPass == atrousPasses - 1);
+                // 最終段の書き先は最終出力。モーメントは誰も読まないので、
+                // シェーダ側が書かないぶんの束縛はダミーとして自分の出力を重ねる
+                RHI::IRHITexture* const atrousColorDst =
+                    atrousIsFinal ? targets->MegaLightsDenoisedTexture.get()
+                                  : targets->MegaLightsDenoisePing[atrousDst].get();
+                RHI::IRHITexture* const atrousMomentDst =
+                    atrousIsFinal ? targets->MegaLightsDenoisedTexture.get()
+                                  : targets->MegaLightsDenoiseMomentPing[atrousDst].get();
                 graph.AddPass(Core::RenderGraphPassDesc{
                     .Name = "MegaLightsDenoiseAtrous",
                     .Reads =
@@ -1269,56 +1286,62 @@ namespace Kurenai::Passes
                     },
                     .Writes =
                     {
-                        targets->MegaLightsDenoisePing[atrousDst].get(),
-                        targets->MegaLightsDenoiseMomentPing[atrousDst].get(),
+                        atrousColorDst,
+                        atrousMomentDst,
                     },
-                    .Execute = [this, targets, atrousSrc, atrousDst, atrousPass, atrousStep, updateDenoiseConstants, bindDenoiseCommon, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
+                    .Execute = [this, atrousColorDst, atrousMomentDst, targets, atrousSrc, atrousPass, atrousStep, atrousIsFinal, updateDenoiseConstants, bindDenoiseCommon, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
                     {
-                        updateDenoiseConstants(cmd, static_cast<uint32_t>(atrousPass + 1), atrousStep);
+                        updateDenoiseConstants(
+                            cmd, static_cast<uint32_t>(atrousPass + 1), atrousStep, atrousIsFinal);
                         cmd->SetComputePipelineState(m_MegaLightsDenoiseAtrousPSO.get());
                         bindDenoiseCommon(cmd);
                         cmd->SetComputeTexture(6, targets->MegaLightsDenoisePing[atrousSrc].get());
                         // t7は使わないが、DX12は宣言したリソースを全部束縛しないと壊れる
                         cmd->SetComputeTexture(7, targets->MegaLightsDenoisePing[atrousSrc].get());
                         cmd->SetComputeTexture(8, targets->MegaLightsDenoiseMomentPing[atrousSrc].get());
-                        cmd->SetComputeUnorderedAccessTexture(0, targets->MegaLightsDenoisePing[atrousDst].get());
-                        cmd->SetComputeUnorderedAccessTexture(
-                            1, targets->MegaLightsDenoiseMomentPing[atrousDst].get());
-                        cmd->SetComputeUnorderedAccessTexture(2, targets->MegaLightsDenoisePing[atrousDst].get());
-                        cmd->SetComputeUnorderedAccessTexture(
-                            3, targets->MegaLightsDenoiseMomentPing[atrousDst].get());
+                        cmd->SetComputeUnorderedAccessTexture(0, atrousColorDst);
+                        cmd->SetComputeUnorderedAccessTexture(1, atrousMomentDst);
+                        cmd->SetComputeUnorderedAccessTexture(2, atrousColorDst);
+                        cmd->SetComputeUnorderedAccessTexture(3, atrousMomentDst);
                         cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
                     },
                 });
             }
 
-            // --- 復調を戻して最終出力にする ---
-            const int denoiseFinalSrc = atrousPasses & 1;
-            graph.AddPass(Core::RenderGraphPassDesc{
-                .Name = "MegaLightsDenoiseRemodulate",
-                .Reads =
-                {
-                    targets->MegaLightsDenoisePing[denoiseFinalSrc].get(),
-                    targets->MegaLightsDenoiseMomentPing[denoiseFinalSrc].get(),
-                    targets->GBufferAlbedo.get(), targets->GBufferMaterial.get(), targets->GBufferDepth.get(),
-                    targets->GBufferNormal.get(), targets->GBufferVelocity.get(),
-                },
-                .Writes = { targets->MegaLightsDenoisedTexture.get() },
-                .Execute = [this, targets, denoiseFinalSrc, updateDenoiseConstants, bindDenoiseCommon, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
-                {
-                    updateDenoiseConstants(cmd, 0u, 1.0f);
-                    cmd->SetComputePipelineState(m_MegaLightsDenoiseRemodulatePSO.get());
-                    bindDenoiseCommon(cmd);
-                    cmd->SetComputeTexture(6, targets->MegaLightsDenoisePing[denoiseFinalSrc].get());
-                    cmd->SetComputeTexture(7, targets->MegaLightsDenoisePing[denoiseFinalSrc].get());
-                    cmd->SetComputeTexture(8, targets->MegaLightsDenoiseMomentPing[denoiseFinalSrc].get());
-                    cmd->SetComputeUnorderedAccessTexture(0, targets->MegaLightsDenoisedTexture.get());
-                    cmd->SetComputeUnorderedAccessTexture(1, targets->MegaLightsDenoisedTexture.get());
-                    cmd->SetComputeUnorderedAccessTexture(2, targets->MegaLightsDenoisedTexture.get());
-                    cmd->SetComputeUnorderedAccessTexture(3, targets->MegaLightsDenoisedTexture.get());
-                    cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
-                },
-            });
+            // --- 復調を戻して最終出力にする(段が0本のときだけ) ---
+            // 【段が1本でもあれば最終段が掛け戻し済み】このパスはフルスクリーンを
+            // 1枚読んで1枚書くだけなので、融合できるときは積まない。
+            // 0段は「平均を動かさないことを優先する」ための正規の構成
+            // (docs/ImplementationDetail.md 61.7d.2)なので、経路ごと消してはいけない
+            if (atrousPasses == 0)
+            {
+                const int denoiseFinalSrc = 0;
+                graph.AddPass(Core::RenderGraphPassDesc{
+                    .Name = "MegaLightsDenoiseRemodulate",
+                    .Reads =
+                    {
+                        targets->MegaLightsDenoisePing[denoiseFinalSrc].get(),
+                        targets->MegaLightsDenoiseMomentPing[denoiseFinalSrc].get(),
+                        targets->GBufferAlbedo.get(), targets->GBufferMaterial.get(), targets->GBufferDepth.get(),
+                        targets->GBufferNormal.get(), targets->GBufferVelocity.get(),
+                    },
+                    .Writes = { targets->MegaLightsDenoisedTexture.get() },
+                    .Execute = [this, targets, denoiseFinalSrc, updateDenoiseConstants, bindDenoiseCommon, renderWidth, renderHeight](RHI::IRHICommandList* cmd)
+                    {
+                        updateDenoiseConstants(cmd, 0u, 1.0f);
+                        cmd->SetComputePipelineState(m_MegaLightsDenoiseRemodulatePSO.get());
+                        bindDenoiseCommon(cmd);
+                        cmd->SetComputeTexture(6, targets->MegaLightsDenoisePing[denoiseFinalSrc].get());
+                        cmd->SetComputeTexture(7, targets->MegaLightsDenoisePing[denoiseFinalSrc].get());
+                        cmd->SetComputeTexture(8, targets->MegaLightsDenoiseMomentPing[denoiseFinalSrc].get());
+                        cmd->SetComputeUnorderedAccessTexture(0, targets->MegaLightsDenoisedTexture.get());
+                        cmd->SetComputeUnorderedAccessTexture(1, targets->MegaLightsDenoisedTexture.get());
+                        cmd->SetComputeUnorderedAccessTexture(2, targets->MegaLightsDenoisedTexture.get());
+                        cmd->SetComputeUnorderedAccessTexture(3, targets->MegaLightsDenoisedTexture.get());
+                        cmd->Dispatch((renderWidth + 7) / 8, (renderHeight + 7) / 8, 1);
+                    },
+                });
+            }
         }
 
         // 計測が読む先。デノイザを通したフレームはその出力になる
