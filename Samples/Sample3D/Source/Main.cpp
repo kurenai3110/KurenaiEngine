@@ -898,6 +898,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -megalightsquadsamples <1〜16>。クアッド共有が1画素あたりに引く標本の数。
         // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
         const int megaLightsQuadSamples = ParseIntOption(L"-megalightsquadsamples", -1);
+        // -megalightsquadradius <1|2>。クアッド共有で標本を借りる範囲の半径。
+        // 1 = 2x2、2 = 4x4。項の数は (2*半径)^2 x 標本数なので、
+        // 半径を上げたぶん標本数を下げれば項の数を保ったまま Initial だけが軽くなる
+        const int megaLightsQuadShareRadius = ParseIntOption(L"-megalightsquadradius", -1);
         // -megalightspool <8〜512>。候補プールが1タイルあたりに抽出する灯の数(K)。
         // 1画素あたりの標本数では減らない「タイル間」のノイズがここで決まる
         const int megaLightsPoolCapacity = ParseIntOption(L"-megalightspool", -1);
@@ -1175,6 +1179,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (megaLightsQuadSamples >= 0)
             {
                 engine.SetMegaLightsQuadSamples(megaLightsQuadSamples);
+            }
+            if (megaLightsQuadShareRadius >= 0)
+            {
+                engine.SetMegaLightsQuadShareRadius(megaLightsQuadShareRadius);
             }
             if (megaLightsPoolCapacity >= 0)
             {

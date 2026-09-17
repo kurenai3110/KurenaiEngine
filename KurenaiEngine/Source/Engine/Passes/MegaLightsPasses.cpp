@@ -263,6 +263,10 @@ namespace Kurenai::Passes
         // 【述語の結果はフレームの写しから引く】判定そのものは Should* が唯一の実装で、
         // ここで作り直さない。ラムダへ値で渡すためローカルで受ける
         const int32_t megaLightsSamplesPerPixel = frame.MegaLightsSamplesPerPixel;
+        // クアッド共有で標本を借りる範囲の半径。手法3でしか意味を持たない
+        // (手法2の Resolve は走らない)ので、ここでは範囲だけ守る
+        const int32_t megaLightsQuadShareRadius = std::clamp(
+            frame.Settings.MegaLights.QuadShareRadius, 1, kMegaLightsMaxQuadShareRadius);
         const bool lightCullingRuns = frame.LightCullingRuns;
         const bool megaLightsRuns = frame.MegaLightsRuns;
 
@@ -593,7 +597,7 @@ namespace Kurenai::Passes
             // 2パスで同じ定数バッファを共有する。中身はグラフ構築のこの時点で確定しているので、
             // Initial側のExecuteで1回だけ更新すればよい
             const auto buildStochasticConstants =
-                [this, megaLightsSamplesPerPixel, megaLightsSettings, jitteredProj, megaLightsQuadShared, megaLightsTileCountX,
+                [this, megaLightsSamplesPerPixel, megaLightsQuadShareRadius, megaLightsSettings, jitteredProj, megaLightsQuadShared, megaLightsTileCountX,
                  megaLightsTileCountY, frameIndex, renderWidth, renderHeight,
                  visibleListMixBits](uint32_t spatialIteration)
             {
@@ -672,8 +676,15 @@ namespace Kurenai::Passes
                 // 1画素あたりの標本数。**リザーババッファの確保と必ず同じ値にすること** ――
                 // ずれると Initial が確保外へ書くか、Resolve が別画素の標本を読む
                 // (どちらも例外にならず、絵が「それらしく」出るので気付けない)
+                // y はクアッド共有で標本を借りる範囲の半径(1=2x2 / 2=4x4)。
+                // **Initial の層化と Resolve の収集範囲は必ず同じ値を見ること** ――
+                // 片方だけ広げると、層化が 4 層のまま 16 画素が同じスロット群を引く
+                // (絵は出たまま実効標本数だけが減るので気付けない)
                 stochasticConstants.Params5 = {
-                    static_cast<uint32_t>(megaLightsSamplesPerPixel), 0u, 0u, 0u
+                    static_cast<uint32_t>(megaLightsSamplesPerPixel),
+                    static_cast<uint32_t>(megaLightsQuadShared ? megaLightsQuadShareRadius : 1),
+                    0u,
+                    0u
                 };
                 // xy は未使用。z は候補プールのタイル数Yで、確率的バイリニア参照が
                 // 隣タイルの添字を画面内へクランプするのに使う。

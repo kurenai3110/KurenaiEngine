@@ -92,6 +92,7 @@ namespace Kurenai::UI
         virtual void ResetSceneDependentParams() = 0;
         virtual void SetMegaLightsNoiseMode(int mode) = 0;
         virtual void SetMegaLightsQuadSamples(int samples) = 0;
+        virtual void SetMegaLightsQuadShareRadius(int radius) = 0;
         virtual void SetMegaLightsTilePoolBilinear(int mode) = 0;
         virtual void SetMegaLightsTilePoolCapacity(int capacity) = 0;
         // 可視灯リスト(提案分布の第3成分)。enabled<0 / capacity<=0 / mix<0 は「既定のまま」

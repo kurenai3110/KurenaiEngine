@@ -275,6 +275,8 @@ void WriteAllReservoirs(uint base, uint count, MegaLightsReservoir value)
 MegaLightsReservoir DrawSample(
     uint sampleSlot, uint2 pixel, uint2 outputSize, MegaLightsPoolTile poolTiles[4],
     uint poolTileCount, uint ownTileSlot, uint bilinearMode,
+    // 共有ブロックの1辺の log2(1 = 2x2 / 2 = 4x4)。層化とタイル選択の粒度を決める
+    uint blockShift,
     uint sampleCount, uint blockedLight,
     float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo,
     float metallic, float roughness, float translucency, SpecularEnergyContext energy,
@@ -294,14 +296,17 @@ MegaLightsReservoir DrawSample(
     // 【白色乱数にしないこと】隣接画素で離れる配り方でないと、タイル境界を溶かした先が
     // また低周波になる。位相の次元は slotPhase(= sampleSlot)と衝突しないよう離す。
     // 【粒度】画素ごと(モード2)に選ぶとばらけるが、クアッド層化(Params4.w)は
-    // タイルのスロットを2x2の4画素へ割り振るので、4人が別のプールを引くと層化が壊れる。
-    // クアッドごと(モード1)なら層化は保たれ、相関の単位が16x16から2x2まで落ちる。
-    // **既定はクアッドごと** ―― どちらが良いかは実測で決める
+    // タイルのスロットを共有ブロックの画素へ割り振るので、ブロックの住人が別のプールを
+    // 引くと層化が壊れる。ブロックごと(モード1)なら層化は保たれ、
+    // 相関の単位が16x16からブロックの大きさまで落ちる。
+    // **既定はブロックごと** ―― どちらが良いかは実測で決める
+    // 【共有半径に追随させること】半径2(4x4)で >>1 のままにすると、
+    // 同じブロックの中で2種類のプールが引かれて層化が半分壊れる
     // 【標本ごとに引き直す】sampleSlot を次元に渡すので、N本が別のタイルを引いてさらにばらける
     uint selectedTile = ownTileSlot;
     if (poolTileCount > 1u)
     {
-        const uint2 phasePixel = (bilinearMode == 2u) ? pixel : (pixel >> 1u);
+        const uint2 phasePixel = (bilinearMode == 2u) ? pixel : (pixel >> blockShift);
         const float tileRandom =
             MegaLightsPixelPhaseMode(phasePixel, Params1.w, 64u + sampleSlot, Params7.z);
         float cdf = 0.0f;
@@ -327,18 +332,22 @@ MegaLightsReservoir DrawSample(
     // 背景タイルを選んだときに stratumCount が0になり、スロットの添字が確保外へ飛ぶ
     const uint poolCandidates = pool.ValidCandidates;
     const bool quadStratify = (Params4.w != 0u);
+    // 層の数は共有ブロックの画素数。半径1なら4層、半径2なら16層
+    const uint blockPixels = 1u << (2u * blockShift);
     uint stratumBase = 0u;
     uint stratumCount = poolCandidates;
-    if (quadStratify && poolCandidates >= 4u)
+    if (quadStratify && poolCandidates >= blockPixels)
     {
-        const uint2 quad = pixel >> 1u;
-        const uint lane = (pixel.x & 1u) | ((pixel.y & 1u) << 1u);
-        const uint rotation = HashUint(quad.x + quad.y * 0x9E3779B9u + Params1.w * 0x85EBCA6Bu) & 3u;
-        const uint stratum = (lane + rotation + sampleSlot) & 3u;
-        const uint width = poolCandidates >> 2u;
+        const uint2 quad = pixel >> blockShift;
+        const uint mask = (1u << blockShift) - 1u;
+        const uint lane = (pixel.x & mask) | ((pixel.y & mask) << blockShift);
+        const uint rotation =
+            HashUint(quad.x + quad.y * 0x9E3779B9u + Params1.w * 0x85EBCA6Bu) & (blockPixels - 1u);
+        const uint stratum = (lane + rotation + sampleSlot) & (blockPixels - 1u);
+        const uint width = poolCandidates / blockPixels;
         stratumBase = stratum * width;
         // 最後の層は端数を引き受け、候補の定義域を欠けさせない
-        stratumCount = (stratum == 3u) ? (poolCandidates - stratumBase) : width;
+        stratumCount = (stratum == blockPixels - 1u) ? (poolCandidates - stratumBase) : width;
     }
 
     float risWeightSum = 0.0f;
@@ -510,6 +519,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 【リザーバは1画素にN本、遮蔽キャッシュは1画素に1つ】キャッシュは
     // 「この画素からこの灯は見えない」という画素の性質で、標本ごとには持たない
     const uint samplesPerPixel = max(Params5.x, 1u);
+    // クアッド共有で標本を借りる範囲の半径(1=2x2 / 2=4x4)を、ブロック1辺の log2 にする。
+    // **Resolve の収集範囲と必ず同じ値を見ること**(片方だけ広げると層化が静かに壊れる)
+    const uint blockShift = clamp(Params5.y, 1u, 2u);
     const uint reservoirIndex = pixel.y * outputSize.x + pixel.x;
     const uint reservoirBase = reservoirIndex * samplesPerPixel;
 
@@ -702,7 +714,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         bool visible;
         const MegaLightsReservoir reservoir = DrawSample(
             sampleSlot, pixel, outputSize, poolTiles, poolTileCount, ownTileSlot, bilinearMode,
-            sampleCount,
+            blockShift, sampleCount,
             blockedLight, worldPos, N, V, NdotV, albedo, metallic, roughness, translucency, energy,
             selectedLightIndex, visible);
 

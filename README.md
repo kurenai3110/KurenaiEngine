@@ -743,6 +743,7 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-megalightsdenoiseframes <上限>` | デノイザの時間累積上限を指定する。根拠は docs/ImplementationDetail.md 61.7j.6節。 |
 | `-megalightsquadshare <0\|1>` | クアッド共有の有無を指定する。根拠は docs/ImplementationDetail.md 61.7j.3節。 |
 | `-megalightsquadsamples <1〜16>` | クアッド共有の画素あたり標本数を指定する。根拠は docs/ImplementationDetail.md 61.7l節。 |
+| `-megalightsquadradius <1\|2>` | クアッド共有で標本を借りる範囲の半径を指定する(`1` = 2x2、`2` = 4x4)。項の数は (2*半径)^2 x 標本数なので、**半径2・標本1は半径1・標本4と同じ16項のまま `MegaLightsInitial` だけが軽くなる**。**既定は1**。根拠は docs/ImplementationDetail.md 61.7y節。 |
 | `-megalightspool <8〜512>` | 候補プールのライト数を指定する。根拠は docs/ImplementationDetail.md 61.7m節。 |
 | `-megalightsquadsamples <1〜4>` | クアッド共有の画素あたり標本数を指定する。根拠は docs/ImplementationDetail.md 61.7l節。 |
 | `-megalightspool <8〜128>` | 候補プールのライト数を指定する。根拠は docs/ImplementationDetail.md 61.7m節。 |

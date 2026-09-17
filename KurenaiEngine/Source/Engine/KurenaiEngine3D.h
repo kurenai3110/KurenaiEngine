@@ -370,6 +370,7 @@ namespace Kurenai
         // クアッド共有(手法3)の1画素あたりの標本数。1〜kMegaLightsMaxSamplesPerPixel。
         // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
         void SetMegaLightsQuadSamples(int samples);
+        void SetMegaLightsQuadShareRadius(int radius);
         // 候補プールが1タイルあたりに抽出する灯の数(K)。
         // kMegaLightsTilePoolMinCapacity 〜 kMegaLightsTilePoolCapacity
         void SetMegaLightsTilePoolCapacity(int capacity);
@@ -621,8 +622,11 @@ namespace Kurenai
         // 1画素あたりの標本数の上限。リザーバ1本は16バイト x 画素数 x 標本数で、2560x1440では
         // 1標本あたり約59MB、上限16標本では約944MBになる。同サイズのリザーバは初期・空間再利用の
         // ping-pong・時間履歴の計5本を確保するため、実際の確保量はさらに大きい。
-        // クアッド層化は4層なので、4を超えると層の割り当てが一巡して効きが鈍る
+        // クアッド層化の層の数は共有ブロックの画素数 (2*QuadShareRadius)^2 なので、
+        // それを超えると層の割り当てが一巡して効きが鈍る(半径1なら4、半径2なら16)
         static constexpr int32_t kMegaLightsMaxSamplesPerPixel = Passes::kMegaLightsMaxSamplesPerPixel;
+        // クアッド共有で標本を借りる範囲の半径の上限(2 なら 4x4 ブロック)
+        static constexpr int32_t kMegaLightsMaxQuadShareRadius = Passes::kMegaLightsMaxQuadShareRadius;
 
         // 【publicにしてある】シーン読み込みが構築し、Passes::MegaLightsPasses が
         // 三角形の数とバッファを引くために読むだけ
