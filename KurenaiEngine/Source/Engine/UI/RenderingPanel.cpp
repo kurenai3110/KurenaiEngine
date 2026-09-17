@@ -472,11 +472,28 @@ namespace Kurenai::UI
                         "参照実装を影レイ1本と32本で比べると|相対誤差|のp90が0.37あった。\n\n"
                         "【UE5も1本ではない】r.MegaLights.NumSamplesPerPixel は 2/4/16 から選ぶ形で、"
                         "最小でも2である。\n\n"
-                        "【4を超えるときの注意】クアッド層化は4層のままなので層の割り当てが一巡する。"
+                        "【層の数を超えるときの注意】クアッド層化の層は共有ブロックの画素数"
+                        "(半径1なら4、半径2なら16)なので、それを超えると層の割り当てが一巡する。"
                         "リザーバは2560x1440で1標本あたり約59MB、同サイズを5本確保するので、"
                         "16標本では4GB級になる(確保サイズと超過警告は起動ログに出る)"))
                 {
                     m_Engine.SetMegaLightsQuadSamples(quadSamples);
+                }
+
+                int quadShareRadius = m_Engine.GetSettings().MegaLights.QuadShareRadius;
+                if (SliderIntEx(
+                        "共有する範囲の半径###MegaLightsQuadShareRadius", &quadShareRadius, 1,
+                        Passes::kMegaLightsMaxQuadShareRadius,
+                        Defaults::MegaLightsQuadShareRadius,
+                        "標本を借りる範囲。1 なら 2x2、2 なら 4x4 のブロックで共有する。\n\n"
+                        "【項の数は (2*半径)^2 x 標本数】半径2・標本1は半径1・標本4と同じ16項で、"
+                        "しかも Initial の候補評価と影レイが 1/4 になる。"
+                        "レイの発射点は4点から16点へ増えるので、球光源の可視性の分散にはむしろ有利。\n\n"
+                        "【代償は借りる距離】可視性を仲間のレイで代用する近似の誤差が、"
+                        "対角 sqrt(2) 画素から sqrt(18) 画素へ広がる。箱フィルタなので総和比には出ず、"
+                        "硬い影の縁の |相対誤差| にだけ出る"))
+                {
+                    m_Engine.SetMegaLightsQuadShareRadius(quadShareRadius);
                 }
 
                 CheckboxEx(

@@ -1954,6 +1954,36 @@ namespace Kurenai
                 " にしました(影レイの本数も同じ数になります)");
     }
 
+    void KurenaiEngine3D::SetMegaLightsQuadShareRadius(int radius)
+    {
+        // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
+        if (radius < 0)
+        {
+            return;
+        }
+        if (radius < 1 || radius > kMegaLightsMaxQuadShareRadius)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのクアッド共有半径が範囲外のため無視します: " + std::to_string(radius) +
+                    " (1〜" + std::to_string(kMegaLightsMaxQuadShareRadius) + ")");
+            return;
+        }
+        if (radius == m_Settings.MegaLights.QuadShareRadius)
+        {
+            return;
+        }
+        m_Settings.MegaLights.QuadShareRadius = radius;
+        // 【リザーバの確保は変わらない】標本数と違い、半径は「誰の標本を読むか」だけを
+        // 変える。確保量を決めるのは QuadSamplesPerPixel のほうなので作り直しは要らない
+        const int side = 2 * m_Settings.MegaLights.QuadShareRadius;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "MegaLightsのクアッド共有半径を " + std::to_string(m_Settings.MegaLights.QuadShareRadius) +
+                " にしました(" + std::to_string(side) + "x" + std::to_string(side) +
+                "ブロックで共有。項の数は " + std::to_string(side * side) + " x 標本数)");
+    }
+
     void KurenaiEngine3D::SetMegaLightsVisibleList(int enabled, int capacity, float mix)
     {
         // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束

@@ -25,8 +25,16 @@ namespace Kurenai::Passes
         // 1画素あたりの標本数の上限。リザーバ1本は16バイト x 画素数 x 標本数で、2560x1440では
         // 1標本あたり約59MB、上限16標本では約944MBになる。同サイズのリザーバは初期・空間再利用の
         // ping-pong・時間履歴の計5本を確保するため、実際の確保量はさらに大きい。
-        // クアッド層化は4層なので、4を超えると層の割り当てが一巡して効きが鈍る
+        // クアッド層化の層の数は共有ブロックの画素数 (2*QuadShareRadius)^2 なので、
+        // それを超えると層の割り当てが一巡して効きが鈍る(半径1なら4、半径2なら16)
         inline constexpr int32_t kMegaLightsMaxSamplesPerPixel = 16;
+        // クアッド共有で標本を借りる範囲の半径の上限。2 なら 4x4 ブロック。
+        // 【上限を2で止めている】層化は候補プールのK個を (2*半径)^2 層へ割るので、
+        // 半径3(36層)では既定の K=128 でも1層3スロットまで痩せる。
+        // 借りる距離も対角 sqrt(50) 画素まで伸びて、可視性を仲間のレイで代用する
+        // 近似(MegaLightsResolve.hlsl 冒頭)が成立しなくなる。根拠は
+        // docs/ImplementationDetail.md 61.7y
+        inline constexpr int32_t kMegaLightsMaxQuadShareRadius = 2;
 
         // タイルライトカリングのタイルサイズ(1辺のピクセル数)。
         // LightCulling.hlsl の kTileSize および numthreads と必ず一致させること

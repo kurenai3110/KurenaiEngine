@@ -142,6 +142,11 @@ float TraceLightVisibility(float3 rayOrigin, float3 L, float originBias, float d
 // 混合分布 q̄(y) = Σ_j b_j q_j(y) で割ること。q̄ > 0 は「4つのうち1つでも届く」で保証され、
 // **画素自身のタイルは必ず4つに含まれる**(バイリニアの定義から、しかも重み0.25以上)ので、
 // その画素に寄与しうる灯は必ず q̄ > 0 になる。
+// 1タイルぶんの可視灯リストのうち、レジスタへ載せる本数。
+// **kMegaLightsVisibleListCapacityMax 以下であること。** これを超える分は
+// 構造化バッファから読み直す(既定の容量8では溢れない)
+static const uint kMegaLightsPoolTileListCache = 8u;
+
 struct MegaLightsPoolTile
 {
     // 候補プールの先頭添字
@@ -157,7 +162,17 @@ struct MegaLightsPoolTile
     // 前フレームの可視灯リスト。**そのタイルのヘッダ[base+3]が指す先**を読む。
     // 再投影の式をこちらに書かないのは、どのリストを引いたかを決めたのが候補プールだから
     uint ListLength;
-    uint ListCache[kMegaLightsVisibleListCapacityMax];
+    // 可視灯リストの先頭 kMegaLightsPoolTileListCache 本だけをレジスタへ載せる。
+    // 【全部載せてはいけない】この構造体は poolTiles[4] で4つ抱えるので、
+    // 上限いっぱい(16)をキャッシュすると 64 uint がレジスタを占める。
+    // 実測でそれを 8 本へ半減させると MegaLightsInitial が -1.2ms 動いた
+    // (根拠は docs/ImplementationDetail.md 61.7aa)。
+    // **上限そのものは下げない** ―― 容量は CLI で 16 まで振れる余地として
+    // 意図的に残されている(EngineDefaults.h の MegaLightsVisibleListCapacity)。
+    // 溢れた分はバッファから読む。既定の容量8では1回も起きない
+    uint ListCache[kMegaLightsPoolTileListCache];
+    // 溢れた分を読みに行くための先頭添字(0xFFFFFFFF でリスト無し)
+    uint ListBase;
     // w_j(y) の再計算に要る。側面はタイル座標から、深度スラブはヘッダから作る
     TileFrustum Frustum;
     float3 AabbMin;
@@ -181,8 +196,9 @@ MegaLightsPoolTile MegaLightsLoadPoolTile(
     // 1画素あたり M*L 回の読み出しになる。載せ替えは1タイル1回で済む
     const uint listBase = TilePool[tile.Base + 3u];
     tile.ListLength = 0u;
+    tile.ListBase = listBase;
     [unroll]
-    for (uint li = 0u; li < kMegaLightsVisibleListCapacityMax; ++li)
+    for (uint li = 0u; li < kMegaLightsPoolTileListCache; ++li)
     {
         tile.ListCache[li] = kMegaLightsInvalidLight;
     }
@@ -191,7 +207,7 @@ MegaLightsPoolTile MegaLightsLoadPoolTile(
         // 書き手(候補プール)と同じ1つの関数を通す。実行時の容量でクランプしない
         tile.ListLength = MegaLightsVisibleListLength(VisibleLights, listBase);
         [unroll]
-        for (uint lj = 0u; lj < kMegaLightsVisibleListCapacityMax; ++lj)
+        for (uint lj = 0u; lj < kMegaLightsPoolTileListCache; ++lj)
         {
             if (lj < tile.ListLength)
             {
@@ -218,10 +234,22 @@ MegaLightsPoolTile MegaLightsLoadPoolTile(
 float MegaLightsTileListCount(MegaLightsPoolTile tile, uint lightIndex)
 {
     float count = 0.0f;
+    // レジスタに載っている先頭ぶん
     [unroll]
-    for (uint k = 0u; k < kMegaLightsVisibleListCapacityMax; ++k)
+    for (uint k = 0u; k < kMegaLightsPoolTileListCache; ++k)
     {
         if (k < tile.ListLength && tile.ListCache[k] == lightIndex)
+        {
+            count += 1.0f;
+        }
+    }
+    // 載りきらなかった分だけバッファから読む。**既定の容量8では1回も回らない。**
+    // 【足す順序を変えないこと】先頭から昇順に足しているので、
+    // 全部キャッシュしていた頃と浮動小数の加算順序が一致する
+    [loop]
+    for (uint k2 = kMegaLightsPoolTileListCache; k2 < tile.ListLength; ++k2)
+    {
+        if (VisibleLights[tile.ListBase + kMegaLightsVisibleListHeader + k2] == lightIndex)
         {
             count += 1.0f;
         }
@@ -275,6 +303,8 @@ void WriteAllReservoirs(uint base, uint count, MegaLightsReservoir value)
 MegaLightsReservoir DrawSample(
     uint sampleSlot, uint2 pixel, uint2 outputSize, MegaLightsPoolTile poolTiles[4],
     uint poolTileCount, uint ownTileSlot, uint bilinearMode,
+    // 共有ブロックの1辺の log2(1 = 2x2 / 2 = 4x4)。層化とタイル選択の粒度を決める
+    uint blockShift,
     uint sampleCount, uint blockedLight,
     float3 worldPos, float3 N, float3 V, float NdotV, float3 albedo,
     float metallic, float roughness, float translucency, SpecularEnergyContext energy,
@@ -294,14 +324,17 @@ MegaLightsReservoir DrawSample(
     // 【白色乱数にしないこと】隣接画素で離れる配り方でないと、タイル境界を溶かした先が
     // また低周波になる。位相の次元は slotPhase(= sampleSlot)と衝突しないよう離す。
     // 【粒度】画素ごと(モード2)に選ぶとばらけるが、クアッド層化(Params4.w)は
-    // タイルのスロットを2x2の4画素へ割り振るので、4人が別のプールを引くと層化が壊れる。
-    // クアッドごと(モード1)なら層化は保たれ、相関の単位が16x16から2x2まで落ちる。
-    // **既定はクアッドごと** ―― どちらが良いかは実測で決める
+    // タイルのスロットを共有ブロックの画素へ割り振るので、ブロックの住人が別のプールを
+    // 引くと層化が壊れる。ブロックごと(モード1)なら層化は保たれ、
+    // 相関の単位が16x16からブロックの大きさまで落ちる。
+    // **既定はブロックごと** ―― どちらが良いかは実測で決める
+    // 【共有半径に追随させること】半径2(4x4)で >>1 のままにすると、
+    // 同じブロックの中で2種類のプールが引かれて層化が半分壊れる
     // 【標本ごとに引き直す】sampleSlot を次元に渡すので、N本が別のタイルを引いてさらにばらける
     uint selectedTile = ownTileSlot;
     if (poolTileCount > 1u)
     {
-        const uint2 phasePixel = (bilinearMode == 2u) ? pixel : (pixel >> 1u);
+        const uint2 phasePixel = (bilinearMode == 2u) ? pixel : (pixel >> blockShift);
         const float tileRandom =
             MegaLightsPixelPhaseMode(phasePixel, Params1.w, 64u + sampleSlot, Params7.z);
         float cdf = 0.0f;
@@ -319,26 +352,51 @@ MegaLightsReservoir DrawSample(
         // picked が false のまま(浮動小数の丸めで最後まで超えなかった)なら
         // ownTileSlot が残る。重みが必ず0.25以上あるので、確率0のタイルへは落ちない
     }
-    const MegaLightsPoolTile pool = poolTiles[selectedTile];
+    // --- 選んだタイルから「両方の経路で要るスカラ」だけを取り出す ---
+    // 【構造体ごと動的添字で複製してはいけない】`poolTiles[selectedTile]` と書くと、
+    // DXC は配列を動的に添字できる形へ落とすため、**poolTiles 全体が
+    // スクラッチメモリへ追い出される**。中には ListCache[16] が4タイルぶん = 64 uint
+    // 入っており、実測で alloca [64 x i32] と [4 x *] x5、getelementptr 250 /
+    // store 168 / load 87 が立っていた(根拠は docs/ImplementationDetail.md 61.7aa)。
+    // 定数添字だけで書けば配列はレジスタに留まる。
+    // 【ListCache と ReachableCount と ListLength はここでは選ばない】
+    // それらを使うのは下の `poolTileCount == 1u` の枝だけで、その枝では
+    // poolTiles[1..3] は poolTiles[0] の複製かつ selectedTile == 0 なので
+    // poolTiles[0] を直接読めばよい(値は厳密に同じ)
+    uint poolBase = poolTiles[0].Base;
+    uint poolValidCandidates = poolTiles[0].ValidCandidates;
+    float poolSumW = poolTiles[0].SumW;
+    [unroll]
+    for (uint pj = 1u; pj < 4u; ++pj)
+    {
+        const bool hit = (pj == selectedTile);
+        poolBase = hit ? poolTiles[pj].Base : poolBase;
+        poolValidCandidates = hit ? poolTiles[pj].ValidCandidates : poolValidCandidates;
+        poolSumW = hit ? poolTiles[pj].SumW : poolSumW;
+    }
 
     // --- クアッド層化(手法3。Params4.w) ---
     // 2x2クアッドの4画素へ候補スロットを1/4ずつ割り当て、クアッド全体で列挙させる。
     // 【層化は「選んだタイル」の有効候補数で行う】自分のタイルの数で割ると、
     // 背景タイルを選んだときに stratumCount が0になり、スロットの添字が確保外へ飛ぶ
-    const uint poolCandidates = pool.ValidCandidates;
+    const uint poolCandidates = poolValidCandidates;
     const bool quadStratify = (Params4.w != 0u);
+    // 層の数は共有ブロックの画素数。半径1なら4層、半径2なら16層
+    const uint blockPixels = 1u << (2u * blockShift);
     uint stratumBase = 0u;
     uint stratumCount = poolCandidates;
-    if (quadStratify && poolCandidates >= 4u)
+    if (quadStratify && poolCandidates >= blockPixels)
     {
-        const uint2 quad = pixel >> 1u;
-        const uint lane = (pixel.x & 1u) | ((pixel.y & 1u) << 1u);
-        const uint rotation = HashUint(quad.x + quad.y * 0x9E3779B9u + Params1.w * 0x85EBCA6Bu) & 3u;
-        const uint stratum = (lane + rotation + sampleSlot) & 3u;
-        const uint width = poolCandidates >> 2u;
+        const uint2 quad = pixel >> blockShift;
+        const uint mask = (1u << blockShift) - 1u;
+        const uint lane = (pixel.x & mask) | ((pixel.y & mask) << blockShift);
+        const uint rotation =
+            HashUint(quad.x + quad.y * 0x9E3779B9u + Params1.w * 0x85EBCA6Bu) & (blockPixels - 1u);
+        const uint stratum = (lane + rotation + sampleSlot) & (blockPixels - 1u);
+        const uint width = poolCandidates / blockPixels;
         stratumBase = stratum * width;
         // 最後の層は端数を引き受け、候補の定義域を欠けさせない
-        stratumCount = (stratum == 3u) ? (poolCandidates - stratumBase) : width;
+        stratumCount = (stratum == blockPixels - 1u) ? (poolCandidates - stratumBase) : width;
     }
 
     float risWeightSum = 0.0f;
@@ -350,7 +408,7 @@ MegaLightsReservoir DrawSample(
     // 引き当てうる。その標本は「M個の候補を検討して全部外した」のと同じ扱いになり、
     // 下の棄却の枝が M = sampleCount のリザーバを書く(混合分布 q̄ は
     // そのタイルの寄与を0として数えているので、期待値は変わらない)
-    const bool poolUsable = (poolCandidates > 0u) && (pool.SumW > 0.0f);
+    const bool poolUsable = (poolCandidates > 0u) && (poolSumW > 0.0f);
 
     [loop]
     for (uint m = 0u; poolUsable && m < sampleCount; ++m)
@@ -358,8 +416,8 @@ MegaLightsReservoir DrawSample(
         const float slotRandom = MegaLightsLowDiscrepancy1D(m, slotPhase);
         const uint slot =
             stratumBase + min((uint)(slotRandom * float(stratumCount)), stratumCount - 1u);
-        const uint lightIndex = TilePool[pool.Base + kMegaLightsTilePoolHeader + 2u * slot + 0u];
-        const float candidateWeight = asfloat(TilePool[pool.Base + kMegaLightsTilePoolHeader + 2u * slot + 1u]);
+        const uint lightIndex = TilePool[poolBase + kMegaLightsTilePoolHeader + 2u * slot + 0u];
+        const float candidateWeight = asfloat(TilePool[poolBase + kMegaLightsTilePoolHeader + 2u * slot + 1u]);
         // 候補の中身にかかわらず採用判定の乱数を引き、画素ごとの列をずらさない
         const float acceptRandom = NextRandom(rngState);
 
@@ -398,14 +456,14 @@ MegaLightsReservoir DrawSample(
             // 可視灯リストの枝(c)も同じ形で足す。**重みはプールに書かれている値を
             // そのまま使う**(再計算しない)ので、c=0 かつバイリニア参照を切ったときの
             // 出力は従来とビット同一になる
-            const float listMix = (pool.ListLength > 0u) ? asfloat(Params7.x) : 0.0f;
+            const float listMix = (poolTiles[0].ListLength > 0u) ? asfloat(Params7.x) : 0.0f;
             const float listTerm =
-                (pool.ListLength > 0u)
-                    ? (listMix * MegaLightsTileListCount(pool, lightIndex) / float(pool.ListLength))
+                (poolTiles[0].ListLength > 0u)
+                    ? (listMix * MegaLightsTileListCount(poolTiles[0], lightIndex) / float(poolTiles[0].ListLength))
                     : 0.0f;
-            sourcePdf = kMegaLightsUniformMixFraction / float(max(pool.ReachableCount, 1u)) +
+            sourcePdf = kMegaLightsUniformMixFraction / float(max(poolTiles[0].ReachableCount, 1u)) +
                         (1.0f - kMegaLightsUniformMixFraction) *
-                            ((1.0f - listMix) * (candidateWeight / pool.SumW) + listTerm);
+                            ((1.0f - listMix) * (candidateWeight / poolTiles[0].SumW) + listTerm);
         }
         else
         {
@@ -510,6 +568,9 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     // 【リザーバは1画素にN本、遮蔽キャッシュは1画素に1つ】キャッシュは
     // 「この画素からこの灯は見えない」という画素の性質で、標本ごとには持たない
     const uint samplesPerPixel = max(Params5.x, 1u);
+    // クアッド共有で標本を借りる範囲の半径(1=2x2 / 2=4x4)を、ブロック1辺の log2 にする。
+    // **Resolve の収集範囲と必ず同じ値を見ること**(片方だけ広げると層化が静かに壊れる)
+    const uint blockShift = clamp(Params5.y, 1u, 2u);
     const uint reservoirIndex = pixel.y * outputSize.x + pixel.x;
     const uint reservoirBase = reservoirIndex * samplesPerPixel;
 
@@ -702,7 +763,7 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         bool visible;
         const MegaLightsReservoir reservoir = DrawSample(
             sampleSlot, pixel, outputSize, poolTiles, poolTileCount, ownTileSlot, bilinearMode,
-            sampleCount,
+            blockShift, sampleCount,
             blockedLight, worldPos, N, V, NdotV, albedo, metallic, roughness, translucency, energy,
             selectedLightIndex, visible);
 

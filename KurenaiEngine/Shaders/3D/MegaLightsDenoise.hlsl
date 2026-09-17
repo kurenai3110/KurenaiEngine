@@ -38,7 +38,7 @@ cbuffer MegaLightsDenoiseConstants : register(b1)
     float4 Params1;
     // x=深度のエッジ停止の強さ, y=ファイアフライのクランプ強さ(0で無効),
     // z=前フレームの幾何(履歴ガイド)が使えるか(0なら現フレームのG-Bufferで代用),
-    // w=未使用
+    // w=この à-trous が最終段か(0以外なら復調を掛け戻して最終出力へ書く)
     float4 Params2;
     // x=履歴の妥当性の判定タップ数(0=最近傍1タップ(従来) / 1=バイリニア2x2の4タップ),
     // yzw=未使用
@@ -726,10 +726,26 @@ void CSAtrous(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float depth = DepthTexture.SampleLevel(DataSampler, uv, 0).r;
     const float4 center = InputTexture.Load(int3(pixel, 0));
 
+    // 最終段は復調を掛け戻して最終出力(MegaLightsDenoisedTexture)へ直接書く。
+    // 【パスを1本消すためにやっている】以前は同じことを専用の CSRemodulate が
+    // フルスクリーンでもう一度読んで書いていた。消えるのはその読み書きと
+    // パス境界のリソース遷移で、実測 -0.37ms(docs/ImplementationDetail.md 61.7z)。
+    // 【ビット同一とは言えない】掛ける値も式も同じだが、融合前は filtered を一度
+    // テクスチャへ書いて読み直していた。その store/load が無くなると
+    // コンパイラの演算契約(FMA の畳み込みなど)が変わりうる。実測では差が
+    // 物差しのノイズ下限より小さい(同 61.7z.3)ことまでしか示せていない。
+    // 【段が0本のときは融合先が無い】そのときだけ C++ が従来どおり CSRemodulate を積む
+    const bool isFinalPass = (Params2.w != 0.0f);
+
     if (depth <= 0.0f)
     {
         OutputTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        OutputMomentsTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        // 最終段のモーメントは誰も読まない。**書き先も自分の出力が重ねて束縛されている**ので
+        // 書くと最終出力を壊す
+        if (!isFinalPass)
+        {
+            OutputMomentsTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
         return;
     }
 
@@ -828,6 +844,12 @@ void CSAtrous(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float3 filtered = (weightSum > 1e-6f) ? (sum / weightSum) : center.rgb;
     const float filteredVariance =
         (weightSum > 1e-6f) ? (varSum / (weightSum * weightSum)) : variance;
+    if (isFinalPass)
+    {
+        // 【復調に使ったのと同じ式で掛け戻す】CSRemodulate と同一の関数を同じ uv で呼ぶ
+        OutputTexture[pixel] = float4(filtered * DemodulationFactor(uv), 1.0f);
+        return;
+    }
     OutputTexture[pixel] = float4(filtered, center.a);
     // xyz(1次・2次モーメントと履歴の長さ)はそのまま、wだけ畳んだ分散に差し替えて次段へ渡す。
     // これで段が進むほど分散が小さくなり、輝度の門番が効き続ける

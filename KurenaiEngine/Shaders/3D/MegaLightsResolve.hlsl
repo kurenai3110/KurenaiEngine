@@ -1,5 +1,6 @@
-// MegaLights クアッド共有(手法3)の解決パス。2x2 クアッドの4画素がそれぞれ引いた標本を、
+// MegaLights クアッド共有(手法3)の解決パス。共有ブロックの各画素が引いた標本を、
 // **自分の面で評価し直して単純平均**する。レイは1本も撃たない。
+// ブロックの大きさは Params5.y(共有半径)で決まり、既定は 2x2、半径2で 4x4 になる。
 //
 // 【何を解こうとしているか】手法2(ReSTIR DI)は、厳密な不偏性を保ったまま近傍のサンプルを
 // 再利用するために可視レイとバイアス補正レイを撃つ。実測(BistroExteriorNight 107灯 /
@@ -11,7 +12,7 @@
 // 固定本数のレイ + 重要度サンプリング + 時間フィードバック + デノイザで解いている。
 // このパス自体は影レイを撃たない。可視性は Initial が撃ったレイの結果を使う。
 //
-// 【推定量】画素 x について、x を含む 2x2 クアッド Q の4標本 y_j を
+// 【推定量】画素 x について、x を含む共有ブロック Q の標本 y_j を
 //
 //     L(x) = (1/n) * sum_{j in Q, 幾何ゲート通過} f_x(y_j) * V_j * W_j
 //
@@ -21,15 +22,24 @@
 // 【なぜ不偏なのか】RIS の性質 E[g(y_j) * W_j] = sum_i g(i) は**任意の g** について成り立つ。
 // g = f_x * V(x, ・) と置けば各項が sum_i f_x(i) V(x,i) の不偏推定量になる。n は幾何だけで
 // 決まる(標本の中身に依存しない)ので平均も不偏。**Z も MIS も補正レイも要らない。**
-// 2x2 クアッドは16画素タイルを跨がないので4画素は同じ候補プールを見るが、跨いでも
+// 共有ブロックは16画素タイルを跨がないので住人は同じ候補プールを見るが、跨いでも
 // 各 W_j は自分のプールに対して厳密なので問題にならない。
 //
 // 【受け入れている偏り】V_j は本来 V(x, y_j) であるべきところを V(x_j, y_j) で代用している。
-// 影の境界がクアッドを横切る画素でだけ食い違い、硬い影の縁が最大1画素(対角 sqrt(2))
-// ぼける。これは 2x2 の箱フィルタと同じで、**箱フィルタは積分を保存するので総和比には出ず、
-// 影の縁の帯の |相対誤差| にだけ出る**。UE の DownsampleFactor=2 と同じ種類の近似である。
+// 影の境界がブロックを横切る画素でだけ食い違い、硬い影の縁がブロックの対角ぶん
+// (2x2 なら sqrt(2)、4x4 なら sqrt(18) 画素)ぼける。これは箱フィルタと同じで、
+// **箱フィルタは積分を保存するので総和比には出ず、影の縁の帯の |相対誤差| にだけ出る**。
+// UE の DownsampleFactor=2 と同じ種類の近似である。
 // 実測(MegaLightsNoiseCheck / 900枚 / デノイザOFF): 共有を入れても総和比は
 // 0.99927 → 0.99842 と -0.09% しか動かない。一方、影の縁の帯の中央値は平坦部の4倍になる。
+//
+// 【半径を広げるのは「項の数を保ったまま Initial を軽くする」ため】
+// 4x4 × 標本1 は 2x2 × 標本4 と同じ16項でありながら、RIS の候補評価と影レイが 1/4 になる。
+// レイの発射点は 4 点から 16 点へ増えるので、球光源の可視性の分散にはむしろ有利。
+// **ただし上の -0.09% は 4x4 では -0.31% になる**(BistroExteriorNight / 900枚 /
+// 参照実装を真値として)。`V` だけを広いブロックで均すと `f_x * V` の平均が下がるためで、
+// 箱フィルタが保存するのは平均する対象そのものであって、相関のある量を掛けた結果ではない。
+// 根拠と掃引は docs/ImplementationDetail.md 61.7y
 //
 // 【総和の欠損はこのパスではなくデノイザから来る】デノイザまで通した総和比は 0.98883 で、
 // 欠損のほぼ全部(約1.0%)は SVGF の輝度エッジ停止が 1/p の重い裾の明るいタップを
@@ -138,13 +148,19 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     guide.Material = MegaLightsPackMaterial(metallic, roughness);
     OutputGuide[index] = guide;
 
-    // --- クアッドの4標本を集めて平均する ---
-    // クアッドは2画素境界に整列している(16画素タイルを跨がない)
-    const uint2 quadBase = pixel & ~1u;
+    // --- 共有ブロックの標本を集めて平均する ---
+    // ブロックはその大きさの境界に整列している(半径1なら2x2で、16画素タイルを跨がない。
+    // 半径2の4x4でも跨がない)
+    // 【Initial の層化と必ず同じ半径を見ること】片方だけ広げると、層化が4層のまま
+    // 16画素が同じスロット群を引く ―― 絵は出たまま実効標本数だけが減るので気付けない
+    const uint blockShift = clamp(Params5.y, 1u, 2u);
+    const uint blockSide = 1u << blockShift;
+    const uint blockPixels = blockSide * blockSide;
+    const uint2 quadBase = pixel & ~(blockSide - 1u);
     const bool shareEnabled = (Params4.z != 0u);
 
     // 1画素あたりの標本数。Initial が同じ数だけリザーバを書いている。
-    // クアッドの項の数は 採用した仲間の数 × この数 になる
+    // ブロックの項の数は 採用した仲間の数 × この数 になる
     const uint samplesPerPixel = max(Params5.x, 1u);
 
     float3 sum = float3(0.0f, 0.0f, 0.0f);
@@ -156,10 +172,11 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     float lumSum = 0.0f;
     float lumSquaredSum = 0.0f;
 
-    [unroll]
-    for (uint j = 0u; j < 4u; ++j)
+    // 【[unroll] にしない】半径2では16反復になり、展開するとレジスタ圧で占有率が落ちる
+    [loop]
+    for (uint j = 0u; j < blockPixels; ++j)
     {
-        const uint2 mate = quadBase + uint2(j & 1u, j >> 1u);
+        const uint2 mate = quadBase + uint2(j & (blockSide - 1u), j >> blockShift);
         if (mate.x >= outputSize.x || mate.y >= outputSize.y)
         {
             continue;
