@@ -20,8 +20,8 @@
 //   - 不透明サーフェス(G-Buffer)のみ。半透明(Transparent.hlsl)と反射プローブの
 //     キャプチャ(ProbeCapture.hlsl)はカメラ視点の画面空間テクスチャを使えないため、
 //     RTシャドウ選択時もCSMを描き続けてそちらを使う
-//   - すべての三角形を不透明として扱う(RAY_FLAG_FORCE_OPAQUE)。アルファテスト付きの
-//     葉などは板ポリのまま影を落とす(RTReflection.hlslと同じ理由)
+//   - 半透明(BLEND)を非不透明ジオメトリとして除外する(RAY_FLAG_CULL_NON_OPAQUE)。
+//     アルファテスト付きの葉などは不透明登録なので板ポリのまま影を落とす
 //   - デノイザを持たないため、太陽を大きく(角半径を上げて)柔らかい影にするほど
 //     サンプル数を増やさないとノイズが出る
 //   - 太陽がほぼ真横から当たる面(NdotLが0に近い面)では可視率がピクセル単位で激しく
@@ -173,7 +173,8 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
         ray.TMax = kSunRayMaxDistance;
 
         // 遮蔽の有無だけが分かればよいので、最初のヒットで打ち切る
-        RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
+        // 半透明(BLEND)は非不透明として除外し、カットアウト(MASK)は遮蔽物として残す。
+        RayQuery<RAY_FLAG_CULL_NON_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
         query.TraceRayInline(SceneTLAS, RAY_FLAG_NONE, 0xFFu, ray);
         query.Proceed();
 

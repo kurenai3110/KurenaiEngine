@@ -39,6 +39,7 @@
 // RayQuery(SM 6.5)を使うため、DX12 かつ DXR Tier 1.1 のときだけ生成される
 // (KurenaiShaderPacker の kSkipDxbc50Files に登録済み)。
 #include "NormalEncoding.hlsli"
+// 影レイは半透明(BLEND)を非不透明ジオメトリとして除外し、カットアウト(MASK)は遮蔽物にする。
 #include "SpecularEnergy.hlsli"
 
 #include "MathConstants.hlsli"
@@ -130,7 +131,8 @@ float TraceLightVisibility(float3 rayOrigin, float3 L, float originBias, float d
     // 光源までの距離で打ち切る(省くと光源の向こう側のジオメトリが遮蔽物になる)
     ray.TMax = max(distanceToLight - originBias, originBias);
 
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
+    // 半透明(BLEND)は非不透明として除外し、カットアウト(MASK)は遮蔽物として残す。
+    RayQuery<RAY_FLAG_CULL_NON_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
     query.TraceRayInline(SceneTLAS, RAY_FLAG_NONE, 0xFFu, ray);
     query.Proceed();
 

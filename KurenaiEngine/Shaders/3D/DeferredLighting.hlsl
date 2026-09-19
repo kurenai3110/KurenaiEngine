@@ -196,23 +196,23 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     // ボリュームは1個しか持てず(22.10節)、無条件に差し替えると外側でも境界のプローブを
     // 外挿し続けてボリュームの外が「1部屋ぶんの間接光」で照らされる。insideWeightが0の点
     // (ボリューム外)はirradianceがSampleEnvironmentの返した値のまま残る
+    float ddgiWeight = 0.0f;
     if (DDGIParams0.w > 0.5f)
     {
         float3 ddgiIrradiance;
-        float ddgiInsideWeight;
         // DDGIParams4.y は「低解像度のDDGIResolveパスの結果を使うか」。
         // 定数バッファ由来のuniform分岐なので画素ごとに分かれることはない
         if (DDGIParams4.y > 0.5f)
         {
             const float4 resolved = UpsampleDDGI(uv, depth);
             ddgiIrradiance = resolved.rgb;
-            ddgiInsideWeight = resolved.a;
+            ddgiWeight = resolved.a;
         }
         else
         {
-            ddgiIrradiance = SampleDDGIIrradiance(worldPos, N, V, ddgiInsideWeight);
+            ddgiIrradiance = SampleDDGIIrradiance(worldPos, N, V, ddgiWeight);
         }
-        irradiance = lerp(irradiance, ddgiIrradiance, ddgiInsideWeight);
+        irradiance = lerp(irradiance, ddgiIrradiance, ddgiWeight);
     }
 
     // --- 拡散IBL ---
@@ -255,8 +255,20 @@ float3 EvaluateIBL(float3 N, float3 V, float3 worldPos, float3 albedo, float met
     const float3 diffuseOcclusion = (OcclusionParams.z > 0.5f)
         ? GTAOMultiBounce(diffuseAO, albedo)
         : float3(diffuseAO, diffuseAO, diffuseAO);
+    const float3 ssaoOnlyOcclusion = (OcclusionParams.z > 0.5f)
+        ? GTAOMultiBounce(ssao, albedo)
+        : float3(ssao, ssao, ssao);
+    // 【DDGIにベイク済み遮蔽を掛けない】DDGIのイラディアンスは「その位置に実際に来ている光」で、
+    // プローブが可視性を既に解いている。そこへbent normal/遮蔽マップ由来のベイク済み遮蔽を
+    // 重ねると同じ遮蔽を二重に数えることになる。閉じた小部屋の内面ではベイク側が0に焼かれて
+    // おり、DDGIが光を持っていても拡散が丸ごと0倍された(68章の実測)。
+    //
+    // 【まるごと外さずSSAOは残す】プローブのオクタヘドラルは低周波で接触遮蔽を表現できない。
+    // 小スケールの遮蔽まで外すと接地影が消えるため、外すのはベイク由来の大スケール分だけにする。
+    // DDGIが効かない画素(ddgiWeight = 0)は従来どおりグローバルIBL用の遮蔽のまま。
+    const float3 diffuseIBLOcclusion = lerp(diffuseOcclusion, ssaoOnlyOcclusion, ddgiWeight);
 
-    return diffuseIBL * diffuseOcclusion * ShadowParams.z * IBLParams.y
+    return diffuseIBL * diffuseIBLOcclusion * ShadowParams.z * IBLParams.y
          + prefiltered * specularWeight
          + irradiance * multiScatterWeight;
 }

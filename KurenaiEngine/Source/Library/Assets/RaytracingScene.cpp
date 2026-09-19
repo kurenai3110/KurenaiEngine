@@ -256,10 +256,10 @@ namespace Kurenai::Assets
                 geometry.VertexPositionOffsetInBytes = 0;
                 geometry.IndexBuffer = mesh.IndexBuffer.get();
                 geometry.IndexCount = mesh.IndexCount;
-                // アルファカットアウト・半透明のマテリアルは「当たっても抜ける可能性がある」ため
-                // 不透明として登録しない。レイ側がRAY_FLAG_CULL_NON_OPAQUEを付ければ丸ごと除外され、
-                // 付けなければ呼び出し側がRayQuery::Proceed()のループで抜き判定を行える
-                geometry.IsOpaque = (mesh.AlphaCutoff <= 0.0f) && !mesh.IsTransparent;
+                // 半透明(BLEND)だけを非不透明として登録し、影レイの遮蔽物から除外する。
+                // カットアウト(MASK)は従来どおり板ポリゴンとして影を落とす。この登録を維持する限り、
+                // 将来any-hitでカットアウトを正しく抜く際は、ここを非不透明登録へ戻す必要がある。
+                geometry.IsOpaque = !mesh.IsTransparent;
                 blasDesc.Geometries.push_back(geometry);
             }
 

@@ -68,9 +68,6 @@ namespace Kurenai
         {
             Opaque,
             Transparent,
-            // 落とさない。**シャドウパスだけがこれを使う** ―― 従来からBLENDのメッシュも
-            // 実体のまま影を落としており、ここでふるい分けると影の出方が変わってしまう
-            All,
         };
 
         struct GeometryDrawLoopDesc

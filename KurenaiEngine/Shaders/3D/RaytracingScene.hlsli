@@ -203,6 +203,14 @@ uint RTFindMeshlet(RTMeshInfo meshInfo, uint primitiveIndex)
     return low;
 }
 
+// 【TraceOcclusionRay と TraceShadowRay の使い分け】
+//   TraceOcclusionRay … 「そこに物があるか」を問う遮蔽レイ(AO・DDGIのプローブ)。
+//                        ガラスも遮蔽物として数える(RAY_FLAG_FORCE_OPAQUE)
+//   TraceShadowRay    … 「光が届くか」を問う影レイ(太陽・ローカルライト)。
+//                        半透明(BLEND)は遮蔽物にしない(RAY_FLAG_CULL_NON_OPAQUE)
+// **新しく影を求めるなら TraceShadowRay を呼ぶこと。** 間違えても絵は出るが、
+// ガラスの奥が理由なく真っ暗になる(Bistro屋外の店先で実際に起きた。実装詳細を参照)
+//
 // 遮蔽レイを1本撃ち、何かに当たれば true を返す。何に当たったかは問わないので
 // 最初のヒットで打ち切ってよい(ACCEPT_FIRST_HIT_AND_END_SEARCH)。
 // アルファテスト付きのジオメトリも不透明として扱う(RAY_FLAG_FORCE_OPAQUE)。
@@ -221,6 +229,23 @@ bool TraceOcclusionRay(RaytracingAccelerationStructure tlas, float3 origin, floa
     ray.TMax = tMax;
 
     RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
+    query.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFFu, ray);
+    query.Proceed();
+
+    return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
+}
+
+// 影レイを1本撃ち、何かに当たれば true を返す。半透明(BLEND)は遮蔽物にしないため、
+// 非不透明ジオメトリを除外する。カットアウト(MASK)はBLASで不透明登録しているので従来どおり遮る。
+bool TraceShadowRay(RaytracingAccelerationStructure tlas, float3 origin, float3 direction, float tMin, float tMax)
+{
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = tMin;
+    ray.TMax = tMax;
+
+    RayQuery<RAY_FLAG_CULL_NON_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
     query.TraceRayInline(tlas, RAY_FLAG_NONE, 0xFFu, ray);
     query.Proceed();
 
