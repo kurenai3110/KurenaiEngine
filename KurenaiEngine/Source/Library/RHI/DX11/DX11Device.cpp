@@ -1239,6 +1239,13 @@ namespace Kurenai::RHI
         return nullptr;
     }
 
+    std::unique_ptr<IRHIDLSSContext> DX11Device::CreateDLSSContext()
+    {
+        Core::Logger::Error(
+            "DX11", "CreateDLSSContext: DX11経路のDLSSは実装していません。SupportsDLSS()で分岐してください");
+        return nullptr;
+    }
+
     uint32_t DX11Device::RegisterBindless(IRHITexture* texture)
     {
         (void)texture;

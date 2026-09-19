@@ -102,7 +102,7 @@ namespace Kurenai::RHI
 
     void DX12ImGuiBackend::BindEngineDescriptorHeaps()
     {
-        ID3D12DescriptorHeap* heaps[] = { m_Device->GetShaderVisibleSrvHeap()->GetHeap(), m_Device->GetShaderVisibleSamplerHeap()->GetHeap() };
-        m_Device->GetCommandList()->SetDescriptorHeaps(2, heaps);
+        // ヒープの組み合わせはDX12Deviceが一箇所で決める(DLSSも同じ口から戻す)
+        m_Device->BindEngineDescriptorHeaps();
     }
 }

@@ -105,6 +105,13 @@ namespace Kurenai::RHI
         // cs_5_0固定で、必要な64bitアトミック(SM 6.6)もbindlessも原理的に持てない
         bool SupportsSoftwareRaster() const override { return false; }
 
+        // DLSSはNVIDIA NGXのDX12経路だけを実装している。NGXにはDX11経路もあるが、
+        // そちらはSuper Resolutionに限られ、実装と検証の量が倍になるため採っていない。
+        // 上位層はSupportsDLSS()を見てFSR1相当(EASU+RCAS)へフォールバックする設計のため、
+        // CreateDLSSContextは呼ばれないのが正常。呼ばれた場合はエラーログを残してnullptrを返す
+        bool SupportsDLSS() const override { return false; }
+        std::unique_ptr<IRHIDLSSContext> CreateDLSSContext() override;
+
     private:
         // CreateMippedUAVTextureCube(単一キューブ、SRVはTextureCube)と
         // CreateMippedUAVTextureCubeArray(配列、SRVはTextureCubeArray)の共通実装。

@@ -14,3 +14,7 @@
 [submodule "ThirdParty/meshoptimizer"]
 	path = ThirdParty/meshoptimizer
 	url = https://github.com/zeux/meshoptimizer.git
+[submodule "ThirdParty/DLSS"]
+	path = ThirdParty/DLSS
+	url = https://github.com/NVIDIA/DLSS.git
+	shallow = true

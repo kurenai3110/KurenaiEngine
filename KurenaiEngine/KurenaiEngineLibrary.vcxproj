@@ -51,12 +51,18 @@
       <ForcedIncludeFiles>pch.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <PreprocessorDefinitions>KURENAI_LIBRARY_EXPORTS;IMGUI_API=__declspec(dllexport);_DEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex;$(ProjectDir)..\ThirdParty\DirectXTex\Common;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex;$(ProjectDir)..\ThirdParty\DirectXTex\Common;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;$(ProjectDir)..\ThirdParty\DLSS\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalLibraryDirectories>$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex\Bin\Desktop_2022\x64\Debug;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;xaudio2.lib;DirectXTex.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex\Bin\Desktop_2022\x64\Debug;$(ProjectDir)..\ThirdParty\DLSS\lib\Windows_x86_64\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;xaudio2.lib;DirectXTex.lib;nvsdk_ngx_d_dbg.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>set DLSS_BIN=$(ProjectDir)..\ThirdParty\DLSS\lib\Windows_x86_64\rel
+if exist "%DLSS_BIN%\nvngx_dlss.dll" (xcopy /Y /D "%DLSS_BIN%\nvngx_dlss.dll" "$(OutDir)") else (echo [警告] nvngx_dlss.dll が "%DLSS_BIN%" に見つかりません。DLSSは無効になります^(ThirdParty/DLSS サブモジュールを初期化してください^))
+exit /b 0</Command>
+      <Message>DLSSランタイム(nvngx_dlss.dll)をOutDirへコピー</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -65,12 +71,18 @@
       <ForcedIncludeFiles>pch.h;%(ForcedIncludeFiles)</ForcedIncludeFiles>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <PreprocessorDefinitions>KURENAI_LIBRARY_EXPORTS;IMGUI_API=__declspec(dllexport);NDEBUG;UNICODE;_UNICODE;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex;$(ProjectDir)..\ThirdParty\DirectXTex\Common;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)Source;$(ProjectDir)Source\Library;$(ProjectDir)Source\Engine;$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex;$(ProjectDir)..\ThirdParty\DirectXTex\Common;$(ProjectDir)..\ThirdParty\imgui;$(ProjectDir)..\ThirdParty\imgui\backends;$(ProjectDir)..\ThirdParty\DLSS\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
-      <AdditionalLibraryDirectories>$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex\Bin\Desktop_2022\x64\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;xaudio2.lib;DirectXTex.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\ThirdParty\DirectXTex\DirectXTex\Bin\Desktop_2022\x64\Release;$(ProjectDir)..\ThirdParty\DLSS\lib\Windows_x86_64\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;d3dcompiler.lib;windowscodecs.lib;ole32.lib;shell32.lib;xaudio2.lib;DirectXTex.lib;nvsdk_ngx_d.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
+    <PostBuildEvent>
+      <Command>set DLSS_BIN=$(ProjectDir)..\ThirdParty\DLSS\lib\Windows_x86_64\rel
+if exist "%DLSS_BIN%\nvngx_dlss.dll" (xcopy /Y /D "%DLSS_BIN%\nvngx_dlss.dll" "$(OutDir)") else (echo [警告] nvngx_dlss.dll が "%DLSS_BIN%" に見つかりません。DLSSは無効になります^(ThirdParty/DLSS サブモジュールを初期化してください^))
+exit /b 0</Command>
+      <Message>DLSSランタイム(nvngx_dlss.dll)をOutDirへコピー</Message>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <!-- 【dxcランタイムはもうここへ置かない】シェーダーは KurenaiShaderPacker がビルド時に
        .kshader へ焼くようになったため、dxcompiler.dll / dxil.dll が要るのはそのツールだけになった。
@@ -124,6 +136,7 @@
     <ClInclude Include="Source\Library\RHI\IRHISwapChain.h" />
     <ClInclude Include="Source\Library\RHI\IRHICommandList.h" />
     <ClInclude Include="Source\Library\RHI\IRHIDevice.h" />
+    <ClInclude Include="Source\Library\RHI\IRHIDLSSContext.h" />
     <ClInclude Include="Source\Library\RHI\IRHIImGuiBackend.h" />
     <ClInclude Include="Source\Library\RHI\ImGuiContextSetup.h" />
     <ClInclude Include="Source\Library\RHI\IRHIGPUProfiler.h" />
@@ -153,6 +166,7 @@
     <ClInclude Include="Source\Library\RHI\DX12\DX12SwapChain.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12CommandList.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Device.h" />
+    <ClInclude Include="Source\Library\RHI\DX12\DX12DLSSContext.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12ImGuiBackend.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12GPUProfiler.h" />
     <ClInclude Include="Source\Library\RHI\DX12\DX12Texture.h" />
@@ -256,6 +270,7 @@
     <ClCompile Include="Source\Library\RHI\DX12\DX12DeviceTiles.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12DeviceCapabilities.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12DeviceRaytracing.cpp" />
+    <ClCompile Include="Source\Library\RHI\DX12\DX12DLSSContext.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12ImGuiBackend.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12GPUProfiler.cpp" />
     <ClCompile Include="Source\Library\RHI\DX12\DX12Texture.cpp" />
