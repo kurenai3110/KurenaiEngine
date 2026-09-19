@@ -515,6 +515,15 @@ G-Bufferの深度バッファはReverse-Z(浮動小数点フォーマットD32_F
 <section id="shadow">
 <h2>4. カスケードシャドウマップ(CSM)とPCSS</h2>
 <p>
+半透明(<code>alphaMode=BLEND</code>)のメッシュはシャドウマップへ描かず、影を落とさない。
+シャドウパスは頂点シェーダー経路とメッシュレット経路の2つを持ち、前者は
+<code>GeometryMeshFilter::Opaque</code>、後者はモデル単位の1ドローなので
+<code>ObjectConstants</code>の<code>rejectMask</code>で半透明を除外する。
+<strong>この2経路は同じ結果にしなければならない</strong> ―― 片方だけ直すと、
+メッシュレット経路に乗るモデル(=G-Bufferを1ドローで描けるモデル)でだけ影が変わる。
+アルファカットアウト(<code>alphaMode=MASK</code>)は従来どおり描画する。
+</p>
+<p>
 カメラ視錐台を<code>kCascadeCount</code>(既定4)個の深度範囲に分割し、それぞれに専用の
 2048x2048シャドウマップとライト正射影を持たせるカスケードシャドウマップ(CSM)方式です。
 カメラに近いカスケードほど狭い範囲を高いテクセル密度でカバーし、遠いカスケードほど広い範囲を
@@ -2149,6 +2158,9 @@ White Furnace Testの設定、拡散イラディアンスを最終ミップで�
 
 <section id="transparent">
 <h2>15. 半透明描画(フォワードパス)</h2>
+<p>
+<code>alphaMode=BLEND</code>の半透明マテリアルは影を落とさない。
+</p>
 <p>
 Deferred Shadingは1ピクセルに1つのマテリアルしか保持できない(G-BufferのAlbedoは常に
 <code>alpha=1.0</code>で書き込まれる。<code>GBuffer.hlsl</code>)ため、複数の半透明サーフェスが
@@ -4900,6 +4912,18 @@ SSRと同じくラフネスでフェードしてプローブ/IBLへ戻す。
 
 <section id="rtshadow">
 <h2>29. レイトレーシングシャドウ</h2>
+<p>
+影レイは<code>RAY_FLAG_CULL_NON_OPAQUE</code>を使い、半透明(<code>BLEND</code>)を遮蔽物にしない。アルファカットアウト(<code>MASK</code>)はBLASへ不透明として登録してあるため、従来どおり板ポリゴンのまま影を落とす。
+</p>
+<p>
+<strong>半透明を遮蔽物から外すのは「影レイ」だけである。</strong>
+RT反射の<em>反射レイ</em>・RTAOの<em>遮蔽レイ</em>・DDGIの<em>プローブレイ</em>は従来どおり
+<code>RAY_FLAG_FORCE_OPAQUE</code>で、半透明も不透明として扱う(ガラスは反射にも映るし、AOも落とす)。
+一方、RT反射が<em>反射先の点に落ちる太陽の影</em>を求めるために撃つレイ
+(<code>RTReflection.hlsl</code>の<code>TraceShadowRay</code>)は影レイなので、こちらは半透明を外す。
+<strong>直接見たときと反射に映ったときで影の出方を食い違わせないため</strong>であり、
+揃えないと「鏡には窓の奥が真っ暗に映るのに、直接見ると見える」という破綻になる。
+</p>
 <p>
 28章の反射に続く2つ目のレイトレーシングパス。カスケードシャドウマップ(CSM、9章)の代わりに
 太陽の可視率を求め、単チャンネルのテクスチャへ書き出す。<code>Shaders/3D/RTShadow.hlsl</code>
