@@ -110,6 +110,10 @@ namespace Kurenai::RHI
             WaitForGPUIdle();
         }
 
+        // NGXはID3D12Deviceを握っているため、m_Deviceを手放す前に終了させる。
+        // GPUアイドルを待った後である必要もある(DLSSのフィーチャはコンテキスト側で既に解放済み)
+        ShutdownNGX();
+
         if (m_FenceEvent)
         {
             CloseHandle(m_FenceEvent);
@@ -248,6 +252,9 @@ namespace Kurenai::RHI
         // 自前ラスタライザは頂点/インデックスをbindlessで引くため、bindlessの判定より後で行う
         DetectSoftwareRasterSupport();
         DetectTiledResourcesSupport();
+        // DLSSはNGXの初期化(ドライバ側のNGXコアとnvngx_dlss.dllの読み込み)を伴うため最後に行う。
+        // 他の判定と違いD3D12の機能ビットではなくベンダーSDKの可否を見ている
+        DetectDLSSSupport();
     }
 
     // ディスクリプタヒープ一式と、そこへ最初に置く既定サンプラー・nullディスクリプタ。
@@ -360,8 +367,7 @@ namespace Kurenai::RHI
         CreateDispatchCommandSignature();
         CreateDispatchMeshCommandSignature();
 
-        ID3D12DescriptorHeap* heaps[] = { m_ShaderVisibleSrvHeap->GetHeap(), m_ShaderVisibleSamplerHeap->GetHeap() };
-        m_CommandList->SetDescriptorHeaps(2, heaps);
+        BindEngineDescriptorHeaps();
 
         m_ImmediateCommandList = std::make_unique<DX12CommandList>(this);
     }
@@ -443,14 +449,19 @@ namespace Kurenai::RHI
         ThrowIfFailed(m_UploadCommandList->Reset(m_UploadCommandAllocator.Get(), nullptr), "アップロード用コマンドリストのリセットに失敗しました");
     }
 
+    void DX12Device::BindEngineDescriptorHeaps()
+    {
+        ID3D12DescriptorHeap* heaps[] = { m_ShaderVisibleSrvHeap->GetHeap(), m_ShaderVisibleSamplerHeap->GetHeap() };
+        m_CommandList->SetDescriptorHeaps(2, heaps);
+    }
+
     void DX12Device::ResetCommandList()
     {
         auto& allocator = m_CommandAllocators[m_FrameIndex];
         ThrowIfFailed(allocator->Reset(), "コマンドアロケータのリセットに失敗しました");
         ThrowIfFailed(m_CommandList->Reset(allocator.Get(), nullptr), "コマンドリストのリセットに失敗しました");
 
-        ID3D12DescriptorHeap* heaps[] = { m_ShaderVisibleSrvHeap->GetHeap(), m_ShaderVisibleSamplerHeap->GetHeap() };
-        m_CommandList->SetDescriptorHeaps(2, heaps);
+        BindEngineDescriptorHeaps();
 
         // m_NextSrvTableIndexはフレームをまたいで巻き戻さない(kFrameCountフレーム分の容量を
         // 持つリングとして扱う)ため、ここではリセットしない。1フレームあたりの払い出し数の

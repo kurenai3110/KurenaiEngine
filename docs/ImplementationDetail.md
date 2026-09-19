@@ -12606,3 +12606,33 @@ fxc の `D3D_COMPILE_STANDARD_FILE_INCLUDE` は入れ子のインクルードを
 `FullscreenTriangle.hlsli`(`VSMain` を持つ)を `Common.hlsli` に混ぜると、
 `ReconstructWorldPos` だけが要るコンピュートシェーダーにも `VSMain` が付いて回り、
 焼かれるエントリが増える。**関数だけのヘッダーとエントリを持つヘッダーは混ぜないこと。**
+
+---
+
+## 67. DLSS Super Resolution / DLAA — 入力規約と解像度の根拠
+
+### 67.1 モーションベクターの符号
+
+`GBufferVelocity`は画面UV単位で、`current - previous`、YはUV系で下が正、かつジッター除去済みである。DLSSが期待するのは「現在位置へ足すと前フレームの位置になる」レンダー解像度ピクセル単位のベクトルなので、渡す値は`InMVScale = (-renderWidth, -renderHeight)`となる。
+
+開発機 RTX 4070 Ti / DX12 / Release、`MegaLightsMotionCheck`(Bistro屋外、`-megalights 0`)、Dolly(前進)、`-fixedstep 0.0166667`、フレーム240の`TonemapTexture`を`-dumptex`で書き出し、ネイティブ1920x1080(DLSS無し・TAA無し)との差を`Tools/texdump_inspect.py diff`で比較した。Rチャンネルの平均絶対差(0〜1正規化)は次のとおりだった。
+
+| `InMVScale` | 平均絶対差 |
+|---|---:|
+| `(-renderWidth, -renderHeight)` | 0.019243 |
+| `(+renderWidth, +renderHeight)` | 0.024663 |
+| `(0, 0)` | 0.024196 |
+
+符号を逆にすると、モーションベクターを渡さない陽性対照と同程度まで悪化する。上の規約からの導出と実測は一致した。
+
+### 67.2 ジッターの巡回周期
+
+TAAだけのときはHalton(2,3)の8位相を使う。DLSSでは出力解像度の画素数がレンダー解像度に対して倍率の二乗だけ増えるため、位相数を`8 × (出力/レンダーの倍率)^2`、上限128へ増やす。`m_History.FrameIndex`はMegaLightsのタイル格子ジッターと共有しているため変えず、巡回周期だけを変える。
+
+### 67.3 推奨レンダー解像度と丸め
+
+DLSSのレンダー解像度は自前の倍率表ではなく`NGX_DLSS_GET_OPTIMAL_SETTINGS`の推奨値を使う。その後、既存の内部解像度と同じく8の倍数へ切り捨てる。LightCullのタイル、Hi-Zのミップ連鎖、Bloomのピラミッドなどが2の冪で割るためである。切り捨て後にNGXの許容下限`RenderMin`を割る場合だけは、下限まで切り上げる。
+
+### 67.4 NGXライブラリとCRT
+
+Releaseは`nvsdk_ngx_d.lib`、Debugは`nvsdk_ngx_d_dbg.lib`をリンクする。`_s`系は静的CRT(LIBCMT)を要求するが、プロジェクトの`RuntimeLibrary`は既定の`/MD` / `/MDd`のままであるため選ばない。

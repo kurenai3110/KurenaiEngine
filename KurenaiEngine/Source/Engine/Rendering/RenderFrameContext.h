@@ -92,6 +92,20 @@ namespace Kurenai::Rendering
         // 走らせず、その判断は Blackboard の UpscaleActive が持つ
         bool UpscaleAvailable = false;
 
+        // DLSSを走らせられる状態か(設定が有効で、手法がDLSSで、コンテキストと出力が確保済み)。
+        // UpscaleAvailableとは**排他**で、両方trueになることはない(手法が1つしか選べないため)。
+        // UpscaleAvailableと同じく、デバッグ表示中に実際に走らせるかは別の判断
+        bool DLSSAvailable = false;
+        // DLSSの評価コンテキスト。**エンジンが持ったままで、ここにはポインタだけ載せる**
+        RHI::IRHIDLSSContext* DLSSContext = nullptr;
+        // DLSSのフィーチャ生成条件。品質モードはRHI側の列挙へ写してから載せる
+        // (エンジンの列挙とNGXの列挙は並びが違うため、変換はKurenaiEngine3D.cppの1箇所だけ)
+        RHI::DLSSQuality DLSSQuality = RHI::DLSSQuality::Quality;
+        // DLSSの出力解像度(= 確保済みのDLSSOutputTextureの実寸)。
+        // AutoExposure / Bloom / Tonemap / Present がこの解像度で走る
+        uint32_t DLSSOutputWidth = 0;
+        uint32_t DLSSOutputHeight = 0;
+
         // このフレームで空として使うキューブマップ(手続き空か .kscene の DDS か)。
         // **Reads 宣言と実際のバインドの両方でこれを使うこと。**
         // ActiveSkyTexture() を都度呼ぶと両者が食い違って依存解決が壊れる
@@ -191,6 +205,10 @@ namespace Kurenai::Rendering
 
         // このフレームのTAAジッタ量[UV]
         DirectX::XMFLOAT2 JitterUv{ 0.0f, 0.0f };
+        // 同じジッタ量の**ピクセル単位**表現(レンダー解像度基準、y反転なし)。
+        // DLSSはUVではなくピクセルで受け取るため、換算前の値をそのまま持っておく
+        // (UVから掛け戻すと、解像度の取り違えが静かに入り込む)
+        DirectX::XMFLOAT2 JitterPixels{ 0.0f, 0.0f };
 
         // 内部レンダー解像度のビューポート。
         // **ラムダへは値で渡すこと** ―― 登録関数を抜けたあとにExecuteが走る

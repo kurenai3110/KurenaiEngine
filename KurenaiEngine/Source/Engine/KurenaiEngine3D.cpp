@@ -34,6 +34,7 @@
 #include "Passes/PresentPass.h"
 #include "Rendering/ExposureMath.h"
 #include "Rendering/CubeFaceMath.h"
+#include "Rendering/DLSSQualityMap.h"
 #include "Rendering/CloudTransmittance.h"
 #include "Rendering/GPULight.h"
 #include "Rendering/GPULightBuild.h"
@@ -78,6 +79,7 @@ namespace Kurenai
         using Rendering::kTAAJitterSampleCount;
         using Rendering::MakeGPULight;
         using Rendering::RadicalInverse;
+        using Rendering::ToRHIDLSSQuality;
         using Rendering::ExtractFrustumPlanes;
         using Rendering::IsAABBVisible;
         using Rendering::IsMeshVisibleWithStats;
@@ -617,6 +619,27 @@ namespace Kurenai
         m_RenderCapabilities.IndirectDispatchMeshAvailable = m_Device->SupportsIndirectDispatchMesh();
         // bindless区画の容量も同じ理由でここへ控える(使用数はフレームごとに更新する)
         m_RenderStats.BindlessCapacity = m_Device->GetBindlessCapacity();
+
+        // DLSS(NGX)の可否。NGXの初期化自体はデバイスの機能判定で済んでいるので、ここでは
+        // 結果を控えて評価コンテキストを作るだけ。非対応環境ではコンテキストを作らず、
+        // 超解像の手法はFSR1相当のままになる
+        m_RenderCapabilities.DLSSAvailable = m_Device->SupportsDLSS();
+        if (m_RenderCapabilities.DLSSAvailable)
+        {
+            m_DLSSContext = m_Device->CreateDLSSContext();
+            if (!m_DLSSContext)
+            {
+                // 能力判定は通ったのにコンテキストが作れないのは想定外。
+                // 能力値を偽へ倒しておかないと、UIがDLSSを選べるのに走らないという食い違いが残る
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "DLSSは対応と報告されましたが評価コンテキストを作れませんでした。DLSSを無効として扱います");
+                m_RenderCapabilities.DLSSAvailable = false;
+            }
+        }
+        // 【ここで手法を上書きしない】DLSSが使える環境でも既定はFSR1相当のままにする
+        // (理由はPostProcessSettings::DefaultUpscaleTechniqueのコメント)。
+        // DLSSはコマンドラインかUIで明示的に選んだときだけ有効になる
 
         // メッシュレットカリングの統計(Stage 5-2)。増幅シェーダーがカウンタへ数え上げ、
         // それを数フレーム遅れでCPUへ読み戻してPerfログへ出す。
@@ -1425,8 +1448,34 @@ namespace Kurenai
     void KurenaiEngine3D::SetUpscaleEnabled(bool enabled)
     {
         // UI と同じく、現在の品質モードと出力解像度を保ったまま有効状態だけを変える。
-        RequestUpscaleSettings(enabled, m_Settings.PostProcess.UpscaleQuality, m_Settings.PostProcess.UpscaleOutputWidth, m_Settings.PostProcess.UpscaleOutputHeight);
+        RequestUpscaleSettings(
+            enabled, m_Settings.PostProcess.UpscaleTech, m_Settings.PostProcess.UpscaleQuality,
+            m_Settings.PostProcess.UpscaleOutputWidth, m_Settings.PostProcess.UpscaleOutputHeight);
         Core::Logger::Info("KurenaiEngine3D", std::string("超解像を設定しました: ") + (enabled ? "有効" : "無効"));
+    }
+
+    void KurenaiEngine3D::SetUpscaleTechnique(int technique)
+    {
+        if (technique != static_cast<int>(UpscaleTechnique::FSR1) &&
+            technique != static_cast<int>(UpscaleTechnique::DLSS))
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "SetUpscaleTechnique: 不正な値です: " + std::to_string(technique) +
+                    "(0 = FSR1相当、1 = DLSS)");
+            return;
+        }
+
+        // UIと同じく、有効状態・品質モード・出力解像度は保ったまま手法だけを変える。
+        // 非対応環境へDLSSを要求した場合の縮退はRequestUpscaleSettingsが理由付きで行う
+        RequestUpscaleSettings(
+            m_Settings.PostProcess.UpscaleEnabled, static_cast<UpscaleTechnique>(technique),
+            m_Settings.PostProcess.UpscaleQuality, m_Settings.PostProcess.UpscaleOutputWidth,
+            m_Settings.PostProcess.UpscaleOutputHeight);
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("超解像の手法を設定しました: ") +
+                (m_Settings.PostProcess.UpscaleTech == UpscaleTechnique::DLSS ? "DLSS" : "FSR1相当"));
     }
 
     void KurenaiEngine3D::SetFixedTimeStep(float seconds)
@@ -2502,7 +2551,12 @@ namespace Kurenai
                 // 別の出力先を用意して測ってから決めること
                 m_RenderTargets.CreateMegaLightsOutput(*m_Device, width, height);
             }
-            m_RenderTargets.CreateTonemap(*m_Device, width, height);
+            // 【TonemapとブルームはDLSSより後ろ】DLSSが有効なフレームでは出力解像度で走るため、
+            // ここもその解像度で作る。DLSSが無効なら内部レンダー解像度そのままで、従来と同じ。
+            // GetPostProcessWidth/Heightの意味はKurenaiEngine3D.hの宣言参照
+            const uint32_t postWidth = GetPostProcessWidth();
+            const uint32_t postHeight = GetPostProcessHeight();
+            m_RenderTargets.CreateTonemap(*m_Device, postWidth, postHeight);
 
             m_RenderTargets.CreateGBufferVelocity(*m_Device, width, height);
 
@@ -2604,7 +2658,10 @@ namespace Kurenai
             // 1x1まで落とさず段数を固定しているのは、これ以上小さくしても裾の広がりが
             // 見た目に寄与しないため(解像度が低いと逆にアップサンプル時のちらつき源になる)。
             // レベルごとに独立したテクスチャにしている理由はBloom.hlsl冒頭を参照
-            m_RenderTargets.CreateBloomPyramid(*m_Device, width, height, kBloomLevelCount);
+            // 解像度がTonemapと同じ(=DLSSが有効なら出力解像度)なのは、ブルームがDLSSの出力を
+            // 読んでTonemapへ渡す位置にいるため。内部解像度で作るとピラミッドの段が
+            // Tonemapの走る解像度と食い違う
+            m_RenderTargets.CreateBloomPyramid(*m_Device, postWidth, postHeight, kBloomLevelCount);
 
             // 自前ソフトウェアラスタライザ(46章)の解像度依存リソース。
             //
@@ -2661,6 +2718,9 @@ namespace Kurenai
         // ブレンド率を0にするだけでは足りず「サンプルそのものを行わない」必要がある(TAA.hlsl参照)
         m_History.HistoryValid = false;
         m_History.HistoryIndex = 0;
+        // DLSSの履歴も同じ理由で捨てる。解像度が変わればフィーチャごと作り直されるが、
+        // バッファ精度の変更のように解像度が変わらない作り直しでも中身は別物になる
+        m_History.DLSSHistoryValid.store(false, std::memory_order_relaxed);
 
         // ポインタが作り直されたので、グラフィックスデバッガ向けの名前を焼き直す
         m_DumpService.MarkDebugNamesDirty();
@@ -2737,13 +2797,19 @@ namespace Kurenai
 
     float KurenaiEngine3D::GetUpscaleRatio(UpscaleQualityMode mode)
     {
-        // FSR1が定義している4段。倍率は「出力の一辺 ÷ 入力の一辺」
+        // FSR1が定義している4段に、DLSS側の2段(DLAA = 等倍、UltraPerformance = 3倍)を足したもの。
+        // 倍率は「出力の一辺 ÷ 入力の一辺」。
+        //
+        // 【DLSSはこの表を使わない】DLSSのレンダー解像度はNGX_DLSS_GET_OPTIMAL_SETTINGSが返す
+        // 推奨値で決まる。この表を使うのはFSR1相当の経路と、UIに倍率を表示するときだけ
         switch (mode)
         {
-        case UpscaleQualityMode::UltraQuality: return 1.3f;
-        case UpscaleQualityMode::Quality:      return 1.5f;
-        case UpscaleQualityMode::Balanced:     return 1.7f;
-        case UpscaleQualityMode::Performance:  return 2.0f;
+        case UpscaleQualityMode::DLAA:             return 1.0f;
+        case UpscaleQualityMode::UltraQuality:     return 1.3f;
+        case UpscaleQualityMode::Quality:          return 1.5f;
+        case UpscaleQualityMode::Balanced:         return 1.7f;
+        case UpscaleQualityMode::Performance:      return 2.0f;
+        case UpscaleQualityMode::UltraPerformance: return 3.0f;
         default:
             Core::Logger::Error(
                 "KurenaiEngine3D",
@@ -2754,9 +2820,47 @@ namespace Kurenai
     }
 
     void KurenaiEngine3D::ComputeUpscaleRenderResolution(
-        uint32_t outputWidth, uint32_t outputHeight, UpscaleQualityMode mode,
+        uint32_t outputWidth, uint32_t outputHeight, UpscaleTechnique technique, UpscaleQualityMode mode,
         uint32_t& outRenderWidth, uint32_t& outRenderHeight)
     {
+        // --- DLSS: レンダー解像度はNGXが決める ---
+        //
+        // 【自前の倍率表を使ってはいけない】推奨値はDLSSのバージョンと品質モードで決まる。
+        // 1.5倍などと決め打ちすると、NGXが許容しない解像度でフィーチャを作ることになる。
+        // 問い合わせに失敗した場合(その品質モードが非対応など)は下のFSR1と同じ表へ落ちる
+        if (technique == UpscaleTechnique::DLSS && m_DLSSContext)
+        {
+            RHI::DLSSOptimalSettings optimal{};
+            if (m_DLSSContext->QueryOptimalSettings(outputWidth, outputHeight, ToRHIDLSSQuality(mode), optimal))
+            {
+                // 8の倍数への切り捨てはDLSSでも要る(理由は下のコメントと同じ。エンジン側の都合)。
+                // ただし切り捨てるとNGXの許容下限を割りうるので、割ったら下限側へ切り上げる
+                uint32_t width = optimal.RenderWidth & ~7u;
+                uint32_t height = optimal.RenderHeight & ~7u;
+                if (optimal.MinRenderWidth > 0 && width < optimal.MinRenderWidth)
+                {
+                    width = optimal.MinRenderWidth;
+                }
+                if (optimal.MinRenderHeight > 0 && height < optimal.MinRenderHeight)
+                {
+                    height = optimal.MinRenderHeight;
+                }
+                outRenderWidth = std::max(1u, width);
+                outRenderHeight = std::max(1u, height);
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    "DLSSの推奨レンダー解像度: " + std::to_string(optimal.RenderWidth) + "x" +
+                        std::to_string(optimal.RenderHeight) + " → 実際に使う解像度 " +
+                        std::to_string(outRenderWidth) + "x" + std::to_string(outRenderHeight) + "(出力 " +
+                        std::to_string(outputWidth) + "x" + std::to_string(outputHeight) + ")");
+                return;
+            }
+
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "DLSSの推奨レンダー解像度を取得できなかったため、品質モードの倍率表へ落とします");
+        }
+
         const float ratio = GetUpscaleRatio(mode);
 
         // 8の倍数へ切り捨てる。LightCullのタイル・Hi-Zのミップ連鎖・Bloomのピラミッド・
@@ -2774,7 +2878,8 @@ namespace Kurenai
     }
 
     void KurenaiEngine3D::RequestUpscaleSettings(
-        bool enabled, UpscaleQualityMode mode, uint32_t outputWidth, uint32_t outputHeight)
+        bool enabled, UpscaleTechnique technique, UpscaleQualityMode mode, uint32_t outputWidth,
+        uint32_t outputHeight)
     {
         if (outputWidth == 0 || outputHeight == 0)
         {
@@ -2785,7 +2890,36 @@ namespace Kurenai
             return;
         }
 
+        // DLSSが使えない環境でDLSSを要求されたら、理由を残してFSR1相当へ落とす。
+        // 【黙って落としてはいけない】-upscaletech dlss を渡したのに絵が変わらない、という
+        // 形でしか気づけなくなる
+        if (technique == UpscaleTechnique::DLSS && !m_RenderCapabilities.DLSSAvailable)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "DLSSが要求されましたがこの環境では利用できません(DX11・非対応GPU・古いドライバ)。"
+                "FSR1相当へ切り替えます");
+            technique = PostProcessSettings::UpscaleTechniqueForCapability(false);
+        }
+        // FSR1相当にはDLSS専用の品質モードが無い。等倍(DLAA)はEASUを恒等倍で走らせるだけで
+        // 意味が無く、3倍(UltraPerformance)はFSR1の想定外なのでQualityへ落とす
+        if (technique == UpscaleTechnique::FSR1 &&
+            (mode == UpscaleQualityMode::DLAA || mode == UpscaleQualityMode::UltraPerformance))
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "品質モード" + std::to_string(static_cast<int>(mode)) +
+                    "はDLSS専用です。FSR1相当ではQuality(1.5倍)として扱います");
+            mode = PostProcessSettings::kDefaultUpscaleQualityMode;
+        }
+
+        // 手法が変わると、DLSSより後ろのパスが走る解像度(GetPostProcessWidth)と、
+        // 確保すべき出力解像度テクスチャの種類が両方変わる。レンダー解像度が偶然同じでも
+        // 作り直しが要るため、ここで必ずdirtyを立てる
+        const bool techniqueChanged = m_Settings.PostProcess.UpscaleTech != technique;
+
         m_Settings.PostProcess.UpscaleEnabled = enabled;
+        m_Settings.PostProcess.UpscaleTech = technique;
         m_Settings.PostProcess.UpscaleQuality = mode;
         m_Settings.PostProcess.UpscaleOutputWidth = outputWidth;
         m_Settings.PostProcess.UpscaleOutputHeight = outputHeight;
@@ -2794,10 +2928,17 @@ namespace Kurenai
         {
             uint32_t renderWidth = 0;
             uint32_t renderHeight = 0;
-            ComputeUpscaleRenderResolution(outputWidth, outputHeight, mode, renderWidth, renderHeight);
+            ComputeUpscaleRenderResolution(outputWidth, outputHeight, technique, mode, renderWidth, renderHeight);
             RequestRenderResolution(renderWidth, renderHeight);
-            // 出力解像度用のテクスチャがまだ無い、またはサイズが変わったときだけ作り直す
-            if (m_RenderTargets.UpscaleTargetWidth != outputWidth || m_RenderTargets.UpscaleTargetHeight != outputHeight)
+            // 出力解像度用のテクスチャがまだ無い、サイズが変わった、または手法が変わったときだけ作り直す
+            // (手法が変わると確保するテクスチャそのものが入れ替わる。FSR1相当のLDR2枚 ⇔ DLSSのHDR1枚)
+            const uint32_t activeTargetWidth = technique == UpscaleTechnique::DLSS
+                                                   ? m_RenderTargets.DLSSTargetWidth
+                                                   : m_RenderTargets.UpscaleTargetWidth;
+            const uint32_t activeTargetHeight = technique == UpscaleTechnique::DLSS
+                                                    ? m_RenderTargets.DLSSTargetHeight
+                                                    : m_RenderTargets.UpscaleTargetHeight;
+            if (techniqueChanged || activeTargetWidth != outputWidth || activeTargetHeight != outputHeight)
             {
                 m_UpscaleTargetsDirty = true;
             }
@@ -2807,8 +2948,9 @@ namespace Kurenai
             // 無効化したときは内部解像度を出力解像度と同じに戻す。こうしないと
             // 「超解像を切ったのに低解像度のまま」という状態が残る
             RequestRenderResolution(outputWidth, outputHeight);
-            // 使わなくなったテクスチャは解放する(1080pで約8MBが2枚)
-            if (m_RenderTargets.UpscaleTargetWidth != 0 || m_RenderTargets.UpscaleTargetHeight != 0)
+            // 使わなくなったテクスチャは解放する(1080pでFSR1相当が約8MBを2枚、DLSSが約16MBを1枚)
+            if (m_RenderTargets.UpscaleTargetWidth != 0 || m_RenderTargets.UpscaleTargetHeight != 0 ||
+                m_RenderTargets.DLSSTargetWidth != 0 || m_RenderTargets.DLSSTargetHeight != 0)
             {
                 m_UpscaleTargetsDirty = true;
             }
@@ -2817,22 +2959,67 @@ namespace Kurenai
 
     void KurenaiEngine3D::CreateUpscaleTargets(uint32_t width, uint32_t height)
     {
-        // 無効化された場合は解放だけして戻る
+        // 無効化された場合は両方とも解放して戻る
         if (!m_Settings.PostProcess.UpscaleEnabled)
         {
             m_RenderTargets.ResetUpscale();
+            m_RenderTargets.ResetDLSSOutput();
             return;
         }
 
-        m_RenderTargets.CreateUpscale(*m_Device, width, height);
+        // 手法は排他。使わない側は必ず解放する ―― 残しておくとVRAMを無駄に抱えるうえ、
+        // IsUpscaleActive()/IsDLSSActive()がどちらもtrueになりうる状態を作ってしまう
+        if (m_Settings.PostProcess.UpscaleTech == UpscaleTechnique::DLSS)
+        {
+            m_RenderTargets.ResetUpscale();
+            m_RenderTargets.CreateDLSSOutput(*m_Device, width, height);
+        }
+        else
+        {
+            m_RenderTargets.ResetDLSSOutput();
+            m_RenderTargets.CreateUpscale(*m_Device, width, height);
+        }
     }
 
     bool KurenaiEngine3D::IsUpscaleActive() const
     {
         // テクスチャの確保に失敗している場合にパスを登録すると、バインドするリソースが無いまま
         // Dispatchすることになるため、確保済みであることまで条件に入れる
-        return m_Settings.PostProcess.UpscaleEnabled && m_RenderTargets.UpscaleTexture && m_RenderTargets.UpscaleSharpTexture &&
-               m_RenderTargets.UpscaleTargetWidth > 0 && m_RenderTargets.UpscaleTargetHeight > 0;
+        return m_Settings.PostProcess.UpscaleEnabled &&
+               m_Settings.PostProcess.UpscaleTech == UpscaleTechnique::FSR1 && m_RenderTargets.UpscaleTexture &&
+               m_RenderTargets.UpscaleSharpTexture && m_RenderTargets.UpscaleTargetWidth > 0 &&
+               m_RenderTargets.UpscaleTargetHeight > 0;
+    }
+
+    bool KurenaiEngine3D::IsDLSSActive() const
+    {
+        return m_Settings.PostProcess.UpscaleEnabled &&
+               m_Settings.PostProcess.UpscaleTech == UpscaleTechnique::DLSS && m_DLSSContext != nullptr &&
+               m_RenderTargets.DLSSOutputTexture && m_RenderTargets.DLSSTargetWidth > 0 &&
+               m_RenderTargets.DLSSTargetHeight > 0;
+    }
+
+    bool KurenaiEngine3D::IsDLSSSelected() const
+    {
+        return m_Settings.PostProcess.UpscaleEnabled &&
+               m_Settings.PostProcess.UpscaleTech == UpscaleTechnique::DLSS && m_RenderCapabilities.DLSSAvailable;
+    }
+
+    bool KurenaiEngine3D::ShouldRunDLSS() const
+    {
+        // デバッグ表示中はDLSSパスを登録しない(中間バッファを内部解像度のまま等倍で見たいため)。
+        // FSR1相当のEASU/RCASを登録しないのとまったく同じ判断で、判定もここ1箇所に集める
+        return IsDLSSActive() && m_Settings.DebugView.View == DebugView::Final;
+    }
+
+    uint32_t KurenaiEngine3D::GetPostProcessWidth() const
+    {
+        return IsDLSSSelected() ? m_Settings.PostProcess.UpscaleOutputWidth : m_RenderWidth;
+    }
+
+    uint32_t KurenaiEngine3D::GetPostProcessHeight() const
+    {
+        return IsDLSSSelected() ? m_Settings.PostProcess.UpscaleOutputHeight : m_RenderHeight;
     }
 
     void KurenaiEngine3D::RequestPlanarReflectionResolutionScale(float scale)

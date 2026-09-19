@@ -142,6 +142,16 @@ namespace Kurenai::Rendering
         uint32_t UpscaleTargetWidth = 0;
         uint32_t UpscaleTargetHeight = 0;
 
+        // DLSSの出力1枚。**出力解像度**のUAVで、上のFSR1相当の2枚とは排他に使う。
+        // フォーマットがHDR(fp16)なのは、DLSSがTonemapより**前**に入るため
+        // ―― 入力のSceneColorと同じプリ露出済みHDR値を出力する。
+        // 【なぜここが持つか】書くのはPostProcessPassesだが、後段のAutoExposure/Bloom/Tonemapが
+        // これをHDRシーン色として読み、PresentPassも実寸を読む
+        std::unique_ptr<RHI::IRHITexture> DLSSOutputTexture;
+        // 実際に確保済みのサイズ。0なら未確保(DLSSが無効)
+        uint32_t DLSSTargetWidth = 0;
+        uint32_t DLSSTargetHeight = 0;
+
         // タイルライトカリングのライトグリッド(BufferUsage::StructuredRW)。コンピュートがUAVで書き、
         // 直接光パスのピクセルシェーダがSRVで読む。タイル数は解像度に依存する。
         // 【なぜここが持つか】書くのはMegaLightsPassesだが、LightingPassesが直接光で読み、
@@ -239,6 +249,10 @@ namespace Kurenai::Rendering
         void CreateUpscale(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         // 上を解放し、実寸を0(未確保)に戻す
         void ResetUpscale();
+        // DLSSの出力1枚を出力解像度で作り、実寸を記録する
+        void CreateDLSSOutput(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+        // 上を解放し、実寸を0(未確保)に戻す
+        void ResetDLSSOutput();
         // ライトグリッドを作り直す。タイル数は解像度から切り上げで決まり、ここで記録する。
         // strideは1タイルあたりのuint数(KurenaiEngine3D::kLightTileStride)
         void CreateLightTiles(

@@ -946,7 +946,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int meshLights = ParseIntOption(L"-meshlights", -1);
         // -emissiveintensity <倍率>。シーン全体の自発光の強度(ImGuiの同名スライダと同じ値)。
         // glTFのemissiveFactorは[0,1]に収まるため、既定の1.0では小さな器具が1階調に届かない
-        const float emissiveIntensity = ParseFloatOption(L"-emissiveintensity", -1.0f);        // -megalightsdenoisesigma <値>。輝度のエッジ停止の強さ(SVGFのσ_l)
+        const float emissiveIntensity = ParseFloatOption(L"-emissiveintensity", -1.0f);
+        // -upscaletech <fsr1|dlss>。超解像の手法。「超解像を出すか」は -upscale が持つので、
+        // DLSSを使うには -upscale 1 と併せて指定する。DLSSはDX12かつNGXが対応と答えた環境のみ
+        const std::wstring upscaleTechnique = ParseStringOption(L"-upscaletech");        // -megalightsdenoisesigma <値>。輝度のエッジ停止の強さ(SVGFのσ_l)
         const float megaLightsDenoiseSigma = ParseFloatOption(L"-megalightsdenoisesigma", -1.0f);
         // -megalightsfirefly <k>。ファイアフライの近傍クランプの強さ(0で無効)
         const float megaLightsFireflyClamp = ParseFloatOption(L"-megalightsfirefly", -1.0f);
@@ -1115,6 +1118,27 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             if (taa >= 0)
             {
                 engine.SetTAAEnabled(taa != 0);
+            }
+            // 【-upscale より後に適用すること】どちらもRequestUpscaleSettingsを通るので、
+            // 先に手法を決めても後の -upscale が現在の手法を引き継いで上書きし直す。
+            // 順序をこちらにしておけば、最後に効くのが手法の指定になる
+            if (!upscaleTechnique.empty())
+            {
+                if (upscaleTechnique == L"fsr1")
+                {
+                    engine.SetUpscaleTechnique(0);
+                }
+                else if (upscaleTechnique == L"dlss")
+                {
+                    engine.SetUpscaleTechnique(1);
+                }
+                else
+                {
+                    Kurenai::Core::Logger::Error(
+                        "Main",
+                        "-upscaletech の値が不正です: " + Kurenai::Core::WideToUtf8(upscaleTechnique) +
+                            "(fsr1 または dlss)");
+                }
             }
             // 【開始フレームを先に設定すること】SelectCameraPath が「開始フレーム」を
             // ログへ出すので、後に回すと出る値と実際に効く値が食い違う

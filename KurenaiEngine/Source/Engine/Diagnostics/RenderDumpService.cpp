@@ -123,6 +123,9 @@ namespace Kurenai
             { "TonemapTexture", m_RenderTargets.TonemapTexture.get() },
             { "UpscaleTexture", m_RenderTargets.UpscaleTexture.get() },
             { "UpscaleSharpTexture", m_RenderTargets.UpscaleSharpTexture.get() },
+            // DLSSの出力(出力解像度・プリ露出済みHDR)。Tonemapより前の段なので
+            // TonemapTextureとは値域が違う(あちらは表示レンジのLDR)
+            { "DLSSOutputTexture", m_RenderTargets.DLSSOutputTexture.get() },
             { "ExposureTexture", m_RenderTargets.ExposureTexture.get() },
             // TAAの履歴。今フレームの書き込み先が m_History.HistoryIndex なので、
             // 「前フレームの履歴」を見たいときは Prev のほうを指定する

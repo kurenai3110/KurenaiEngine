@@ -24,6 +24,15 @@ namespace Kurenai::Rendering
         // 落とすのは (1)履歴バッファ作成直後(初回・バッファ精度変更) (2)シーン切り替え
         // (3)TAAのON/OFFトグル。(2)はUpdateスレッドのLoadSceneから書くためatomicにする
         std::atomic<bool> HistoryValid{ false };
+        // DLSSが内部に持つ履歴が信用できるか。falseの間はNGXへInReset=1を渡す。
+        //
+        // 【上のHistoryValidと共有してはいけない】あちらはTAAが無効な間、毎フレームfalseへ
+        // 落とされる(TAAを再度有効にしたとき古い絵が混ざらないようにするため)。
+        // 共有するとDLSSのInResetが毎フレーム1になり、時間方向の蓄積が一切効かなくなる。
+        // これは「モーションベクターを渡しても渡さなくても絵が変わらない」という形で現れ、
+        // 陽性対照(MVスケールを0にして差が出るか)を取らないと気づけない。
+        // 落とすのはHistoryValidと同じ (1)レンダーターゲット作成直後 (2)シーン切り替え
+        std::atomic<bool> DLSSHistoryValid{ false };
         // ジッターのサンプル列を進めるフレーム番号(Halton列の添字に使う)
         uint32_t FrameIndex = 0;
         // 前フレームのビュー射影行列(ジッター済み・転置済み=シェーダへ渡す形のまま)。

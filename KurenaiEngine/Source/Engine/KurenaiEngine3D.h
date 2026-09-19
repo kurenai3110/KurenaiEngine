@@ -277,6 +277,9 @@ namespace Kurenai
         void SetDDGIHalfResolutionEnabled(bool enabled);
         void SetProbeUpdateMode(int mode);
         void SetUpscaleEnabled(bool enabled);
+        // 超解像の手法を切り替える(0 = FSR1相当、1 = DLSS)。
+        // DLSSが使えない環境で1を渡した場合は、理由をログへ残してFSR1相当のままにする
+        void SetUpscaleTechnique(int technique);
         void SetFixedTimeStep(float seconds);
 
         // 【計測専用】.ksceneの[CameraPath]を名前で1本選んで再生する。
@@ -440,7 +443,8 @@ namespace Kurenai
         // 超解像の設定をまとめて要求する(SystemPanel = Renderスレッドから呼ばれる)。
         // 内部でRequestRenderResolution()を呼ぶだけで、レンダーターゲットの作り直しはしない
         void RequestUpscaleSettings(
-            bool enabled, UpscaleQualityMode mode, uint32_t outputWidth, uint32_t outputHeight);
+            bool enabled, UpscaleTechnique technique, UpscaleQualityMode mode, uint32_t outputWidth,
+            uint32_t outputHeight);
         // このフレームでMegaLightsパスを実行するか。上のShouldRunRaytraced*と同じ作法で1か所に集約している。
         // これがfalseのときDirectLighting.hlslは従来のライトループへ戻る ―― 「パスを積むか」と
         // 「ライトループを止めるか」がずれると、ライトが二重に加算されるか、逆に全部消える
@@ -495,6 +499,7 @@ namespace Kurenai
         // std::atomicは呼び出し側が使っているメモリオーダーの書き方(.load/.store)を
         // そのまま維持できるよう、値ではなくatomicへの参照を返す
         std::atomic<bool>& GetTAAHistoryValid() { return m_History.HistoryValid; }
+        std::atomic<bool>& GetDLSSHistoryValid() override { return m_History.DLSSHistoryValid; }
         std::atomic<uint32_t>& GetSceneLoadProgressLoaded() { return m_SceneLoad.ProgressLoaded; }
         std::atomic<uint32_t>& GetSceneLoadProgressTotal() { return m_SceneLoad.ProgressTotal; }
 
@@ -1075,19 +1080,49 @@ namespace Kurenai
         // 出力解像度と品質モードから内部レンダー解像度を求める。
         // 8の倍数へ切り捨てるのは、LightCullのタイル・Hi-Zのミップ連鎖・Bloomのピラミッド・
         // SkyCloud/DDGIResolveの1/2解像度がいずれも2の冪で割っていくため。下限は320x180
-        static void ComputeUpscaleRenderResolution(
-            uint32_t outputWidth, uint32_t outputHeight, UpscaleQualityMode mode,
+        //
+        // 【DLSSでは倍率表を使わない】NGXが返す推奨レンダー解像度を使い、そのうえで8の倍数へ
+        // 切り捨ててからNGXの許容下限(RenderMin)でクランプする。NGXへ問い合わせるため
+        // staticにはできない(m_DLSSContextが要る)
+        void ComputeUpscaleRenderResolution(
+            uint32_t outputWidth, uint32_t outputHeight, UpscaleTechnique technique, UpscaleQualityMode mode,
             uint32_t& outRenderWidth, uint32_t& outRenderHeight);
 
         // 出力解像度のテクスチャを作り直す。GPUがそれらを参照していない状態で呼ぶこと
         void CreateUpscaleTargets(uint32_t width, uint32_t height);
-        // このフレームで超解像パスを走らせるか(有効かつテクスチャが確保済み)
+        // このフレームでFSR1相当(EASU/RCAS)のパスを走らせるか
+        // (有効かつ手法がFSR1かつテクスチャが確保済み)。DLSSを選んでいる間は常にfalse
         bool IsUpscaleActive() const;
+        // このフレームでDLSSパスを走らせるか(有効かつ手法がDLSSかつコンテキストと出力が確保済み)。
+        // **パスを登録するかの判定はこちら**
+        bool IsDLSSActive() const;
+        // 設定としてDLSSが選ばれているか(確保済みかどうかは見ない)。
+        //
+        // 【リソースを作る側はこちらを見る】IsDLSSActive()はDLSSの出力テクスチャが
+        // 確保済みであることを条件に含むため、「これから作る」場面では必ずfalseになる。
+        // CreateRenderTargetsがTonemapとブルームの解像度を決めるのに使うのがこちら
+        bool IsDLSSSelected() const;
+        // このフレームで実際にDLSSパスが走るか。IsDLSSActive()にデバッグ表示の条件を足したもの。
+        // 【ジッターと履歴もこれに合わせること】パスが走らないフレームでジッターだけ残すと
+        // 画面が振動し、履歴だけ有効のままにすると次に走ったとき古い絵から再投影してしまう
+        bool ShouldRunDLSS() const;
+        // DLSSより後ろのパス(AutoExposure / Bloom / Tonemap / Present)が走る解像度。
+        // DLSSが有効なときだけ出力解像度になり、それ以外は内部レンダー解像度そのまま。
+        // 【ここに出てくる「出力解像度」はこの4パスだけの話】G-Buffer以降の他のバッファは
+        // すべて内部レンダー解像度のままである(41.23節の仕分けを増やさないため)
+        uint32_t GetPostProcessWidth() const;
+        uint32_t GetPostProcessHeight() const;
 
         // ImGuiでBufferPrecisionが変更されたことをRender()へ伝えるフラグ。レンダーターゲットの
         // 作り直しはGPUがそれらを参照していない状態で行う必要があるため、UI関数の中では実行せず
         // Render()の先頭(RenderGraphの構築より前)でm_Device->WaitForGPUIdle()を挟んで処理する
         bool m_BufferPrecisionDirty = false;
+
+        // DLSSの評価コンテキスト。DLSS非対応環境ではnullptrのまま
+        // (m_RenderCapabilities.DLSSAvailableと必ず一致する)。
+        // 【デバイスより先に壊れること】KurenaiEngine3Dのメンバなので、基底のm_Deviceより
+        // 先に破棄される。NGXのフィーチャはコンテキストのデストラクタで解放される
+        std::unique_ptr<RHI::IRHIDLSSContext> m_DLSSContext;
 
         // --- インスタンシング(Stage 7) ------------------------------------------------------
         //
@@ -1211,7 +1246,9 @@ namespace Kurenai
         // --- Diagnostics::IRecreationTarget ---
         void RequestUpscaleSettings(bool enabled, uint32_t outputWidth, uint32_t outputHeight) override
         {
-            RequestUpscaleSettings(enabled, m_Settings.PostProcess.UpscaleQuality, outputWidth, outputHeight);
+            RequestUpscaleSettings(
+                enabled, m_Settings.PostProcess.UpscaleTech, m_Settings.PostProcess.UpscaleQuality, outputWidth,
+                outputHeight);
         }
         void RequestBufferPrecision(BufferPrecision precision) override
         {

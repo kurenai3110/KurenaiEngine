@@ -25,12 +25,20 @@ DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジンで�
 | ライト | ポイント・スポット(カンデラ / ルクス) / タイルベースのライトカリング / MegaLights / 自発光メッシュの光源化 |
 | ジオメトリ | メッシュレット描画(増幅シェーダー + Hi-Zオクルージョンカリング) / bindless / モデルLOD / インスタンシング / モデル・テクスチャのストリーミング |
 | 空と大気 | 手続き生成する空 / 雲 / 月光 / 昼夜サイクル(IBLの動的再ベイク) / 大気遠近 / 星空 / ドローンショー |
-| ポスト | トーンマッピング(AgX / ACES / Reinhard) / 自動露出 / ブルーム / TAA |
+| ポスト | トーンマッピング(AgX / ACES / Reinhard) / 自動露出 / ブルーム / TAA / FSR1相当 / NVIDIA DLSS Super Resolution・DLAA(DX12のみ) |
 
 **環境によって使えないものがあります。** レイトレーシング系(RT反射 / RTシャドウ / RTAO・RTGI)は
 **DX12 かつ DXR Tier 1.1 対応環境**、メッシュレット描画と bindless は
 **DX12 かつメッシュシェーダー Tier 1・シェーダーモデル6.6 対応環境**でのみ有効になります。
 非対応の環境では、UIに理由が表示されて従来の経路へ落ちます。
+
+### NVIDIA DLSS Super Resolution / DLAA
+
+DLSSは**DX12かつ対応GPU**でのみ選べます。超解像を有効にしたうえで、`-upscale 1 -upscaletech dlss`を指定してください。DLAAはDLSSの品質モードとして選べる等倍の経路です。既定の手法は、対応GPUでもFSR1相当のままです。
+
+NVIDIA DLSS SDKは`ThirdParty/DLSS`のGit submoduleです。通常のsubmodule取得手順で取得され、ビルド時に`nvngx_dlss.dll`が`KurenaiEngineLibrary`の出力先へ自動コピーされ、Sample3Dへも伝播します。SDKには数百MBのDLLが含まれるため`shallow = true`を指定しており、取得されるのは最新の1コミットだけです。
+
+利用時は[ThirdParty/DLSS/LICENSE.txt](ThirdParty/DLSS/LICENSE.txt)のNVIDIA DLSS SDKライセンスに従ってください。アプリを配布する場合は、NVIDIAが定めるアトリビューション表示要件も満たす必要があります。
 
 `.gltf` / `.fbx` / `.obj` 等のソースモデルは、付属のオフラインツール **KurenaiPacker.exe** で
 `.kmodel` へ事前変換してから使います(「[5. アセットの準備(KurenaiPacker)](#5-アセットの準備kurenaipacker)」)。
@@ -780,6 +788,7 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-ddgilod <段数>` | DDGIのクリップマップLODの段数を`.kscene`の指定より優先して上書きする。正の整数でなければ警告を出して`.kscene`の指定のままにする。 |
 | `-ddgifollow` | DDGIの各LODの原点をカメラへ追従させる(`.kscene`の`FollowCamera`と同じ)。 |
 | `-upscale <0\|1>` | 超解像の有無を指定する。 |
+| `-upscaletech <fsr1\|dlss>` | 超解像の手法を指定する。DLSSを使うには`-upscale 1 -upscaletech dlss`の両方を指定する。 |
 | `-fixedstep <秒>` | 1フレームの時間を固定する。実時間に依らず同じフレームで同じ状態を作るためのもので、`-dumpframe`と組で使う。0以下や非有限値はエラーにして既定のまま続行する。 |
 | `-camerapath <名前>` | `.kscene`の`[CameraPath]`を1本選んで再生する。フレーム番号だけから姿勢が決まり、**再生中は視点の入力操作を受け付けない**。カメラを動かしたときの品質を測るには同じ軌跡を再現する必要があるが、通常の操作は移動量がΔtに比例し視点回転はPostMessageから駆動できないため、この口が要る。`-fixedstep`の指定が無ければ 1/60 を警告つきで自動設定する。根拠は docs/ImplementationDetail.md 61.7o節。 経路は検証用シーン`Scenes/MegaLightsMotionCheck.kscene`にあります。 |
 | `-camerapathstart <N>` | 経路の再生を始めるフレーム。それまでは先頭キーの姿勢で静止して整定を待つ。既定は`-dumpframe`の既定と同じ 180。根拠は docs/ImplementationDetail.md 61.7o.2節。 |

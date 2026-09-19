@@ -116,6 +116,10 @@ namespace Kurenai::RHI
         D3D12_CPU_DESCRIPTOR_HANDLE GetNullSrvCpuHandle() const { return m_RenderSrvCpuHeap->GetCpuHandle(m_NullSrvIndex); }
         D3D12_CPU_DESCRIPTOR_HANDLE GetNullUavCpuHandle() const { return m_RenderSrvCpuHeap->GetCpuHandle(m_NullUavIndex); }
 
+        // エンジンのシェーダ可視ヒープ(SRV/UAV + サンプラー)をコマンドリストへ束ねる。
+        // ImGuiやNGX(DLSS)のように自前のヒープへ差し替える外部コードを呼んだ後、元へ戻すのに使う
+        void BindEngineDescriptorHeaps();
+
         // GPUリソースの破棄を、コマンドリストのシャドウへ伝える(DX12CommandList参照)
         void OnGPUResourceDestroyed();
         // 保留中の破棄通知をRenderスレッドでシャドウへ反映する。
@@ -172,6 +176,8 @@ namespace Kurenai::RHI
         }
         bool SupportsMeshShader() const override { return m_SupportsMeshShader; }
         bool SupportsSoftwareRaster() const override { return m_SupportsSoftwareRaster; }
+        bool SupportsDLSS() const override { return m_SupportsDLSS; }
+        std::unique_ptr<IRHIDLSSContext> CreateDLSSContext() override;
 
         // DX12Texture/DX12Bufferがデストラクタでbindless番号を返却するのに使う。
         // bindless非対応の場合はnullptrを返す
@@ -225,6 +231,15 @@ namespace Kurenai::RHI
         // D3D12_FEATURE_DATA_D3D12_OPTIONS::TiledResourcesTier を引く。
         // Tier 1 は未マップタイルの読み出しが未定義なので採らず、0扱いにする
         void DetectTiledResourcesSupport();
+        // NGX(DLSS)を初期化して、このアダプタでDLSS Super Resolutionが使えるかを
+        // m_SupportsDLSSへ記録する。判定結果と失敗理由は必ずログへ残す
+        // (非対応環境では上位層が黙ってFSR1相当へフォールバックするため、ログが唯一の手がかり)。
+        // 成功した場合はNGXの初期化状態をプロセスに残すため、デストラクタでShutdown1する
+        void DetectDLSSSupport();
+        // NGXを終了する(初期化に成功していたときだけ)。
+        // 【デバイスを壊す前・GPUアイドル後に呼ぶこと】NGXはID3D12Deviceを握っている。
+        // 実装はDX12DLSSContext.cpp(NGXのヘッダをこの翻訳単位へ持ち込まないため)
+        void ShutdownNGX();
 
         void CreateRootSignature();
         void CreateComputeRootSignature();
@@ -347,6 +362,10 @@ namespace Kurenai::RHI
         // 加えてRayQueryを含むシェーダーはSM 6.5でしかコンパイルできないため、
         // dxcが使えない/シェーダーモデルが6.5未満の環境でもfalseにする
         bool m_SupportsRaytracing = false;
+        // DLSS Super Resolution / DLAA が使えるか(DetectDLSSSupportが決める)
+        bool m_SupportsDLSS = false;
+        // NVSDK_NGX_D3D12_Initが成功したか。成功していないままShutdownを呼んではいけない
+        bool m_NGXInitialized = false;
         // HLSLのResourceDescriptorHeap(SM 6.6)が使えるか。シェーダーモデル・dxcのバージョン・
         // リソースバインディングTier 3のすべてを満たしたときだけtrue(DetectBindlessSupport)
         bool m_SupportsBindless = false;

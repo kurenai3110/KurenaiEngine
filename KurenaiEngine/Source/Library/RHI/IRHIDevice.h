@@ -8,6 +8,7 @@
 #include "IRHIAccelerationStructure.h"
 #include "IRHIBuffer.h"
 #include "IRHICommandList.h"
+#include "IRHIDLSSContext.h"
 #include "IRHIGPUProfiler.h"
 #include "IRHIImGuiBackend.h"
 #include "IRHIPipelineState.h"
@@ -361,6 +362,20 @@ namespace Kurenai::RHI
         // desc.Instancesの各要素が指すBLASは、TLASより長く生存させること。
         // 非対応環境・構築失敗時はログを出してnullptrを返す
         virtual std::unique_ptr<IRHIAccelerationStructure> CreateTopLevelAS(const TopLevelASDesc& desc) = 0;
+
+        // --- DLSS(NVIDIA NGX) --------------------------------------------------------------
+
+        // DLSS Super Resolution / DLAA が使えるか。DX11はNGXのDX11経路を実装していないため常にfalse。
+        // DX12でも、NGXの初期化に失敗する(ドライバが古い・nvngx_dlss.dllが無い)か、
+        // アダプタがDLSS非対応(GeForce RTX以外)ならfalseになる。
+        //
+        // 上位層は超解像の手法にDLSSを選ぶ前に必ずこれを確認し、falseなら
+        // 既存のFSR1相当(EASU+RCAS)へフォールバックすること(SupportsRaytracing()と同じ扱い方)
+        virtual bool SupportsDLSS() const = 0;
+
+        // DLSSの評価コンテキストを作る。非対応環境では理由をログへ出してnullptrを返す(例外は投げない)。
+        // ImGuiバックエンド・GPUプロファイラと同じく、外部依存をバックエンド実装側へ閉じ込めるための口
+        virtual std::unique_ptr<IRHIDLSSContext> CreateDLSSContext() = 0;
     };
 
     KURENAI_LIB_API std::unique_ptr<IRHIDevice> CreateDX11Device();

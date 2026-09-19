@@ -157,6 +157,23 @@ namespace Kurenai::Rendering
         UpscaleTargetHeight = 0;
     }
 
+    void RenderTargets::CreateDLSSOutput(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        // SceneColorと同じHDR(fp16)。DLSSはTonemapの前に入るため、出すのも表示レンジではなく
+        // プリ露出済みのHDR値になる。Legacy8bit構成でもここはHDRのままにする
+        // (LDRへ落とすのはこの後のTonemapパスの仕事)
+        DLSSOutputTexture = device.CreateUAVTexture(width, height, RHI::Format::R16G16B16A16_Float);
+        DLSSTargetWidth = width;
+        DLSSTargetHeight = height;
+    }
+
+    void RenderTargets::ResetDLSSOutput()
+    {
+        DLSSOutputTexture.reset();
+        DLSSTargetWidth = 0;
+        DLSSTargetHeight = 0;
+    }
+
     void RenderTargets::CreateLightTiles(
         RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t tileSize, uint32_t stride)
     {
