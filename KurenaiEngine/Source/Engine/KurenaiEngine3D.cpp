@@ -34,6 +34,7 @@
 #include "Passes/PresentPass.h"
 #include "Rendering/ExposureMath.h"
 #include "Rendering/CubeFaceMath.h"
+#include "Rendering/DLSSQualityMap.h"
 #include "Rendering/CloudTransmittance.h"
 #include "Rendering/GPULight.h"
 #include "Rendering/GPULightBuild.h"
@@ -58,6 +59,17 @@ namespace Kurenai
         using Core::GetModuleDirectory;
         using Core::WideToUtf8;
 
+        // カメラ経路の検算で「回転由来の見かけ速度[px/frame]」を出すときの基準の画面高さ。
+        //
+        // 【実際の内部解像度を使わない理由】2つある。
+        //   1. m_RenderHeight を書くのはRenderスレッドで、経路を解決するUpdateスレッドから
+        //      読むと競合になる(m_RenderAspect がわざわざ atomic にしてあるのと同じ事情)
+        //   2. 実解像度に依存させると、**同じ経路が解像度によって合格したり拒否されたり**する。
+        //      経路が動いているかどうかは経路そのものの性質であって、窓の大きさの話ではない
+        // したがってこの値は「1080p 相当の目安」であり、実際の画面速度の確認は
+        // -dumptex GBufferVelocity の実測で行う
+        constexpr uint32_t kCameraPathNominalHeight = 1080u;
+
         // 視錐台カリングの一式は Rendering/GeometryDrawLoop.h へ移した。
         // 描画パスの共通ループ(ForEachGeometryDraw)と同じ場所にある必要がある
         using Rendering::FrustumPlanes;
@@ -67,6 +79,7 @@ namespace Kurenai
         using Rendering::kTAAJitterSampleCount;
         using Rendering::MakeGPULight;
         using Rendering::RadicalInverse;
+        using Rendering::ToRHIDLSSQuality;
         using Rendering::ExtractFrustumPlanes;
         using Rendering::IsAABBVisible;
         using Rendering::IsMeshVisibleWithStats;
@@ -607,6 +620,27 @@ namespace Kurenai
         // bindless区画の容量も同じ理由でここへ控える(使用数はフレームごとに更新する)
         m_RenderStats.BindlessCapacity = m_Device->GetBindlessCapacity();
 
+        // DLSS(NGX)の可否。NGXの初期化自体はデバイスの機能判定で済んでいるので、ここでは
+        // 結果を控えて評価コンテキストを作るだけ。非対応環境ではコンテキストを作らず、
+        // 超解像の手法はFSR1相当のままになる
+        m_RenderCapabilities.DLSSAvailable = m_Device->SupportsDLSS();
+        if (m_RenderCapabilities.DLSSAvailable)
+        {
+            m_DLSSContext = m_Device->CreateDLSSContext();
+            if (!m_DLSSContext)
+            {
+                // 能力判定は通ったのにコンテキストが作れないのは想定外。
+                // 能力値を偽へ倒しておかないと、UIがDLSSを選べるのに走らないという食い違いが残る
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "DLSSは対応と報告されましたが評価コンテキストを作れませんでした。DLSSを無効として扱います");
+                m_RenderCapabilities.DLSSAvailable = false;
+            }
+        }
+        // 【ここで手法を上書きしない】DLSSが使える環境でも既定はFSR1相当のままにする
+        // (理由はPostProcessSettings::DefaultUpscaleTechniqueのコメント)。
+        // DLSSはコマンドラインかUIで明示的に選んだときだけ有効になる
+
         // メッシュレットカリングの統計(Stage 5-2)。増幅シェーダーがカウンタへ数え上げ、
         // それを数フレーム遅れでCPUへ読み戻してPerfログへ出す。
         // 増幅シェーダーが走らない環境では一切使わないので、そもそも作らない
@@ -1086,7 +1120,9 @@ namespace Kurenai
         {
             return m_MegaLightsPasses->HasCommonPipelineStates() && m_MegaLightsPasses->HasShadePipelineState() &&
                    m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
-                   m_RenderTargets.MegaLightsReservoirBuffer != nullptr;
+                   m_RenderTargets.MegaLightsReservoirBuffer != nullptr &&
+                   m_RenderTargets.MegaLightsHistoryGuide[0] != nullptr &&
+                   m_RenderTargets.GBufferVelocity != nullptr;
         }
         if (m_Settings.MegaLights.Mode == MegaLightsMode::QuadShared)
         {
@@ -1095,6 +1131,7 @@ namespace Kurenai
             return m_MegaLightsPasses->HasCommonPipelineStates() && m_MegaLightsPasses->HasResolvePipelineState() &&
                    m_RenderTargets.MegaLightsTilePoolBuffer != nullptr &&
                    m_RenderTargets.MegaLightsReservoirBuffer != nullptr &&
+                   m_RenderTargets.GBufferVelocity != nullptr &&
                    m_RenderTargets.MegaLightsHistoryGuide[0] != nullptr;
         }
         return m_MegaLightsPasses->HasReferencePipelineState();
@@ -1411,8 +1448,34 @@ namespace Kurenai
     void KurenaiEngine3D::SetUpscaleEnabled(bool enabled)
     {
         // UI と同じく、現在の品質モードと出力解像度を保ったまま有効状態だけを変える。
-        RequestUpscaleSettings(enabled, m_Settings.PostProcess.UpscaleQuality, m_Settings.PostProcess.UpscaleOutputWidth, m_Settings.PostProcess.UpscaleOutputHeight);
+        RequestUpscaleSettings(
+            enabled, m_Settings.PostProcess.UpscaleTech, m_Settings.PostProcess.UpscaleQuality,
+            m_Settings.PostProcess.UpscaleOutputWidth, m_Settings.PostProcess.UpscaleOutputHeight);
         Core::Logger::Info("KurenaiEngine3D", std::string("超解像を設定しました: ") + (enabled ? "有効" : "無効"));
+    }
+
+    void KurenaiEngine3D::SetUpscaleTechnique(int technique)
+    {
+        if (technique != static_cast<int>(UpscaleTechnique::FSR1) &&
+            technique != static_cast<int>(UpscaleTechnique::DLSS))
+        {
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "SetUpscaleTechnique: 不正な値です: " + std::to_string(technique) +
+                    "(0 = FSR1相当、1 = DLSS)");
+            return;
+        }
+
+        // UIと同じく、有効状態・品質モード・出力解像度は保ったまま手法だけを変える。
+        // 非対応環境へDLSSを要求した場合の縮退はRequestUpscaleSettingsが理由付きで行う
+        RequestUpscaleSettings(
+            m_Settings.PostProcess.UpscaleEnabled, static_cast<UpscaleTechnique>(technique),
+            m_Settings.PostProcess.UpscaleQuality, m_Settings.PostProcess.UpscaleOutputWidth,
+            m_Settings.PostProcess.UpscaleOutputHeight);
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("超解像の手法を設定しました: ") +
+                (m_Settings.PostProcess.UpscaleTech == UpscaleTechnique::DLSS ? "DLSS" : "FSR1相当"));
     }
 
     void KurenaiEngine3D::SetFixedTimeStep(float seconds)
@@ -1425,6 +1488,208 @@ namespace Kurenai
         m_FixedTimeStep = seconds;
         Core::Logger::Info("KurenaiEngine3D", "固定タイムステップを設定しました: " + std::to_string(seconds) + " 秒");
     }
+
+    void KurenaiEngine3D::SelectCameraPath(const wchar_t* name)
+    {
+        if (name == nullptr || name[0] == L'\0')
+        {
+            m_RequestedCameraPathName.clear();
+            m_CameraPathNeedsResolve.store(true, std::memory_order_relaxed);
+            Core::Logger::Info("KurenaiEngine3D", "カメラ経路の再生を解除しました");
+            return;
+        }
+
+        m_RequestedCameraPathName = name;
+        m_CameraPathNeedsResolve.store(true, std::memory_order_relaxed);
+
+        // 【ここでは成否を返さない】シーンの適用よりオプションの指定が先になることがあり、
+        // その時点では一覧が空で「見つからない」としか言えない。実際の解決とErrorログは
+        // ResolveCameraPath が行う
+        Core::Logger::Info(
+            "KurenaiEngine3D", "カメラ経路を要求しました: \"" + Core::WideToUtf8(m_RequestedCameraPathName) + "\"");
+
+        // 【固定タイムステップが無いと軌跡は再現しない】移動量はΔtに比例するので、
+        // 実時間で進めると同じフレーム番号でも別の姿勢になる。黙って変えず、警告してから入れる
+        if (m_FixedTimeStep <= 0.0f)
+        {
+            constexpr float kDefaultFixedStep = 1.0f / 60.0f;
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "カメラ経路の再生には固定タイムステップが要ります。-fixedstep の指定が無いため "
+                + std::to_string(kDefaultFixedStep) + " 秒を自動で設定します");
+            SetFixedTimeStep(kDefaultFixedStep);
+        }
+    }
+
+    void KurenaiEngine3D::SetCameraPathStartFrame(int frame)
+    {
+        m_CameraPathStartFrame = frame;
+        const uint32_t effective = (frame >= 0)
+            ? static_cast<uint32_t>(frame)
+            : static_cast<uint32_t>(Passes::kMegaLightsAccumWarmup);
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "カメラ経路の開始フレームを設定しました: " + std::to_string(effective)
+            + (frame >= 0 ? "" : " (既定)"));
+    }
+
+    void KurenaiEngine3D::SetCameraPathValidate(bool enabled)
+    {
+        m_CameraPathValidateRequested = enabled;
+        // シーンが既に適用済みならこの場で出したいので、解決の要求も立てる
+        m_CameraPathNeedsResolve.store(true, std::memory_order_relaxed);
+    }
+
+    uint32_t KurenaiEngine3D::GetCameraPathStartFrame() const
+    {
+        return (m_CameraPathStartFrame >= 0)
+            ? static_cast<uint32_t>(m_CameraPathStartFrame)
+            : static_cast<uint32_t>(Passes::kMegaLightsAccumWarmup);
+    }
+
+    void KurenaiEngine3D::LogCameraPathMotionStats(
+        const Assets::CameraPath& path, const Assets::CameraPathMotionStats& stats)
+    {
+        const std::string name = Core::WideToUtf8(path.GetName());
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "カメラ経路 \"" + name + "\" 検算: " + std::to_string(stats.FrameCount) + "フレーム"
+            + " / 位置[m/frame] 最小 " + std::to_string(stats.MinMetersPerFrame)
+            + " 中央 " + std::to_string(stats.MedianMetersPerFrame)
+            + " 最大 " + std::to_string(stats.MaxMetersPerFrame)
+            + " / 視線[deg/frame] 最小 " + std::to_string(stats.MinDegreesPerFrame)
+            + " 中央 " + std::to_string(stats.MedianDegreesPerFrame)
+            + " 最大 " + std::to_string(stats.MaxDegreesPerFrame)
+            + " / 回転由来の見かけ速度[px/frame] 最小 " + std::to_string(stats.MinPixelsPerFrame)
+            + " 中央 " + std::to_string(stats.MedianPixelsPerFrame)
+            + " 最大 " + std::to_string(stats.MaxPixelsPerFrame));
+
+        // 【px/frame は下界である】位置の移動による見かけ速度は被写体までの距離に依存し、
+        // ジオメトリを知らないここでは出せない。実際の画面速度の確認は
+        // -dumptex GBufferVelocity の実測で行うこと
+        if (stats.StillFrameCount > 0u)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "カメラ経路 \"" + name + "\" には位置も向きもほぼ動かないフレームが "
+                + std::to_string(stats.StillFrameCount) + " / " + std::to_string(stats.FrameCount)
+                + " あります。その区間は静止カメラの測定になります");
+        }
+    }
+
+    void KurenaiEngine3D::ResolveCameraPath()
+    {
+        m_CameraPathNeedsResolve.store(false, std::memory_order_relaxed);
+
+        std::vector<Assets::CameraPath> paths;
+        {
+            std::lock_guard<std::mutex> lock(m_AppliedSceneMutex);
+            paths = m_AppliedSceneCameraPaths;
+        }
+
+        // -camerapathvalidate。シーンが適用されてから全経路ぶん出す
+        if (m_CameraPathValidateRequested && !paths.empty())
+        {
+            m_CameraPathValidateRequested = false;
+            for (const Assets::CameraPath& path : paths)
+            {
+                Assets::CameraPathMotionStats stats;
+                if (path.ComputeMotionStats(m_Camera.GetFovY(), kCameraPathNominalHeight, stats))
+                {
+                    LogCameraPathMotionStats(path, stats);
+                }
+                else
+                {
+                    Core::Logger::Error(
+                        "KurenaiEngine3D",
+                        "カメラ経路 \"" + Core::WideToUtf8(path.GetName()) + "\" の検算に失敗しました");
+                }
+            }
+        }
+
+        if (m_RequestedCameraPathName.empty())
+        {
+            m_CameraPathActive = false;
+            m_CameraPath = Assets::CameraPath{};
+            return;
+        }
+
+        if (paths.empty())
+        {
+            // まだシーンが適用されていないだけかもしれないので、ここではまだ諦めない。
+            // シーンが適用されると ApplyLoadedScene が再解決を要求する
+            m_CameraPathActive = false;
+            return;
+        }
+
+        const auto found = std::find_if(
+            paths.begin(), paths.end(),
+            [this](const Assets::CameraPath& path) { return path.GetName() == m_RequestedCameraPathName; });
+
+        if (found == paths.end())
+        {
+            // 【黙って落とさず、黙って再生もしない】指定したのに再生されない理由が
+            // 分からないのがいちばん困るので、選べる名前を添えて出す
+            std::string available;
+            for (const Assets::CameraPath& path : paths)
+            {
+                if (!available.empty()) available += ", ";
+                available += "\"" + Core::WideToUtf8(path.GetName()) + "\"";
+            }
+            Core::Logger::Error(
+                "KurenaiEngine3D",
+                "カメラ経路 \"" + Core::WideToUtf8(m_RequestedCameraPathName)
+                + "\" がこのシーンに見つかりません。再生せず、従来の入力操作のまま続行します。"
+                + " このシーンにある経路: " + (available.empty() ? "(無し)" : available));
+            m_CameraPathActive = false;
+            m_CameraPath = Assets::CameraPath{};
+            return;
+        }
+
+        // 【動いていない経路は拒否する】静止カメラのまま測ると、測りたかったものが
+        // 1つも測れていないのに数値だけは出てしまう。着手前にここで落とす
+        Assets::CameraPathMotionStats stats;
+        const bool hasStats = found->ComputeMotionStats(
+            m_Camera.GetFovY(), kCameraPathNominalHeight, stats);
+        if (hasStats)
+        {
+            LogCameraPathMotionStats(*found, stats);
+            if (stats.StillFrameCount + 1u >= stats.FrameCount)
+            {
+                Core::Logger::Error(
+                    "KurenaiEngine3D",
+                    "カメラ経路 \"" + Core::WideToUtf8(found->GetName())
+                    + "\" は全フレームで静止しています。これで測ると静止カメラの測定になるため再生を拒否します");
+                m_CameraPathActive = false;
+                m_CameraPath = Assets::CameraPath{};
+                return;
+            }
+        }
+
+        m_CameraPath = *found;
+        m_CameraPathActive = true;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "カメラ経路を再生します: \"" + Core::WideToUtf8(m_CameraPath.GetName())
+            + "\" (" + std::to_string(m_CameraPath.FrameCount()) + "フレーム、開始フレーム "
+            + std::to_string(GetCameraPathStartFrame()) + ")。再生中は視点の入力操作を受け付けません");
+    }
+
+    void KurenaiEngine3D::UpdateCameraPath()
+    {
+        const uint32_t startFrame = GetCameraPathStartFrame();
+        // 開始フレームまでは先頭キーの姿勢で静止し、履歴・リザーバ・ストリーミング・
+        // 内部解像度が整定するのを待つ。0を渡すと EvaluatePose が先頭キーを返す
+        const uint32_t pathFrame = (m_UpdateFrameIndex >= startFrame) ? (m_UpdateFrameIndex - startFrame) : 0u;
+
+        const Assets::CameraPathPose pose = m_CameraPath.EvaluatePose(pathFrame);
+
+        // 【絶対値で置くこと】Camera::Move / Rotate は累積するので使わない。
+        // 累積するとΔtや呼ばれた回数に依存し、同じフレーム番号で同じ姿勢にならなくなる
+        m_Camera.SetPosition(pose.Position);
+        m_Camera.SetYawPitch(pose.YawRadians, pose.PitchRadians);
+    }
+
 
     void KurenaiEngine3D::SetPerfDump(const wchar_t* path, int frames)
     {
@@ -1491,6 +1756,96 @@ namespace Kurenai
             "MegaLightsのファイアフライのクランプを設定しました: " + std::to_string(k));
     }
 
+    void KurenaiEngine3D::SetMegaLightsDenoiseHistory4Tap(bool enabled)
+    {
+        m_Settings.MegaLights.DenoiseHistory4Tap = enabled;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("MegaLightsのデノイザの履歴の妥当性判定を設定しました: ") +
+                (enabled ? "バイリニア2x2の4タップ" : "最近傍1タップ(従来)"));
+    }
+
+    void KurenaiEngine3D::SetMegaLightsDenoiseMotionCompensatedDepth(int enabled)
+    {
+        if (enabled != 0 && enabled != 1)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsの履歴深度のカメラ移動補正は0または1で指定します。既定のままにします: " +
+                    std::to_string(enabled));
+            return;
+        }
+        m_Settings.MegaLights.DenoiseMotionCompensatedDepth = (enabled != 0);
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("MegaLightsの履歴深度のカメラ移動補正を設定しました: ") +
+                (enabled != 0 ? "有効" : "無効(従来)"));
+    }
+
+    void KurenaiEngine3D::SetMegaLightsDenoiseGeometryFalloff(float falloff)
+    {
+        if (!(falloff >= 0.0f) || falloff > 1.0f)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのデノイザの幾何の部分減衰は0〜1で指定します。既定のままにします: " +
+                    std::to_string(falloff));
+            return;
+        }
+        m_Settings.MegaLights.DenoiseGeometryFalloff = falloff;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "MegaLightsのデノイザの幾何の部分減衰を設定しました: " + std::to_string(falloff));
+    }
+
+    void KurenaiEngine3D::SetMegaLightsDenoiseGradient(float strength, float relStart, float relFull)
+    {
+        if (!(strength >= 0.0f) || strength > 1.0f)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのデノイザの時間勾配の強さは0〜1で指定します。既定のままにします: " +
+                    std::to_string(strength));
+            return;
+        }
+        // 負値は「既定のまま」。しきい値は T0 < T1 でなければ区間が潰れる
+        const float newStart =
+            (relStart >= 0.0f) ? relStart : m_Settings.MegaLights.DenoiseGradientRelStart;
+        const float newFull =
+            (relFull >= 0.0f) ? relFull : m_Settings.MegaLights.DenoiseGradientRelFull;
+        if (!(newStart >= 0.0f) || !(newFull > newStart))
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのデノイザの勾配しきい値は 0 <= T0 < T1 で指定します。既定のままにします: T0=" +
+                    std::to_string(newStart) + " T1=" + std::to_string(newFull));
+            return;
+        }
+        m_Settings.MegaLights.DenoiseGradientStrength = strength;
+        m_Settings.MegaLights.DenoiseGradientRelStart = newStart;
+        m_Settings.MegaLights.DenoiseGradientRelFull = newFull;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "MegaLightsのデノイザの時間勾配を設定しました: 強さ=" + std::to_string(strength) +
+                " T0=" + std::to_string(newStart) + " T1=" + std::to_string(newFull));
+    }
+
+    void KurenaiEngine3D::SetMegaLightsDenoiseGradientFastFrames(int frames)
+    {
+        if (frames < 0 || frames > 64)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのデノイザの速いEMAの長さは0〜64で指定します。既定のままにします: " +
+                    std::to_string(frames));
+            return;
+        }
+        m_Settings.MegaLights.DenoiseGradientFastFrames = frames;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "MegaLightsのデノイザの速いEMAの長さを設定しました: " + std::to_string(frames));
+    }
+
     void KurenaiEngine3D::SetMegaLightsDenoiseSigmaLuminance(float sigma)
     {
         if (!(sigma > 0.0f))
@@ -1542,11 +1897,11 @@ namespace Kurenai
 
     void KurenaiEngine3D::SetMegaLightsPerturb(int mode)
     {
-        if (mode < 0 || mode > 2)
+        if (mode < 0 || mode > 3)
         {
             Core::Logger::Warning(
                 "KurenaiEngine3D",
-                "MegaLightsの摂動モードが範囲外のため無視します: " + std::to_string(mode) + " (0〜2)");
+                "MegaLightsの摂動モードが範囲外のため無視します: " + std::to_string(mode) + " (0〜3)");
             return;
         }
         m_Settings.MegaLights.PerturbMode = mode;
@@ -1648,6 +2003,79 @@ namespace Kurenai
                 " にしました(影レイの本数も同じ数になります)");
     }
 
+    void KurenaiEngine3D::SetMegaLightsQuadShareRadius(int radius)
+    {
+        // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
+        if (radius < 0)
+        {
+            return;
+        }
+        if (radius < 1 || radius > kMegaLightsMaxQuadShareRadius)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "MegaLightsのクアッド共有半径が範囲外のため無視します: " + std::to_string(radius) +
+                    " (1〜" + std::to_string(kMegaLightsMaxQuadShareRadius) + ")");
+            return;
+        }
+        if (radius == m_Settings.MegaLights.QuadShareRadius)
+        {
+            return;
+        }
+        m_Settings.MegaLights.QuadShareRadius = radius;
+        // 【リザーバの確保は変わらない】標本数と違い、半径は「誰の標本を読むか」だけを
+        // 変える。確保量を決めるのは QuadSamplesPerPixel のほうなので作り直しは要らない
+        const int side = 2 * m_Settings.MegaLights.QuadShareRadius;
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            "MegaLightsのクアッド共有半径を " + std::to_string(m_Settings.MegaLights.QuadShareRadius) +
+                " にしました(" + std::to_string(side) + "x" + std::to_string(side) +
+                "ブロックで共有。項の数は " + std::to_string(side * side) + " x 標本数)");
+    }
+
+    void KurenaiEngine3D::SetMegaLightsVisibleList(int enabled, int capacity, float mix)
+    {
+        // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
+        if (enabled >= 0)
+        {
+            m_Settings.MegaLights.VisibleListEnabled = (enabled != 0);
+        }
+        if (capacity > 0)
+        {
+            if (capacity > static_cast<int>(kMegaLightsVisibleListCapacityMax))
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "MegaLightsの可視灯リストの容量が範囲外のため無視します: " + std::to_string(capacity) +
+                        " (1〜" + std::to_string(kMegaLightsVisibleListCapacityMax) + ")");
+            }
+            else
+            {
+                m_Settings.MegaLights.VisibleListCapacity = capacity;
+            }
+        }
+        if (mix >= 0.0f)
+        {
+            if (mix > 1.0f)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "MegaLightsの可視灯リストの混合率が範囲外のため無視します: " + std::to_string(mix) +
+                        " (0.0〜1.0)");
+            }
+            else
+            {
+                m_Settings.MegaLights.VisibleListMix = mix;
+            }
+        }
+        Core::Logger::Info(
+            "KurenaiEngine3D",
+            std::string("MegaLightsの可視灯リスト: ") +
+                (m_Settings.MegaLights.VisibleListEnabled ? "有効" : "無効") + " / 容量 " +
+                std::to_string(m_Settings.MegaLights.VisibleListCapacity) + " / 混合率 " +
+                std::to_string(m_Settings.MegaLights.VisibleListMix));
+    }
+
     void KurenaiEngine3D::SetMegaLightsTilePoolCapacity(int capacity)
     {
         // 負の値は「既定のまま」。他のMegaLightsオプションと同じ約束
@@ -1676,7 +2104,7 @@ namespace Kurenai
                 " にしました");
     }
 
-    void KurenaiEngine3D::SetMegaLightsTileJitter(int mode)
+    void KurenaiEngine3D::SetMegaLightsNoiseMode(int mode)
     {
         // 負の値は「既定のまま」。未指定時も現在値を起動ログへ残すためreturnしない
         if (mode >= 0)
@@ -1685,29 +2113,65 @@ namespace Kurenai
             {
                 Core::Logger::Warning(
                     "KurenaiEngine3D",
-                    "MegaLightsのタイル格子ジッターのモードが範囲外のため無視します: " +
+                    "MegaLightsの乱数位相の配り方が範囲外のため無視します: " + std::to_string(mode) +
+                        " (0〜2)");
+            }
+            else
+            {
+                m_Settings.MegaLights.NoiseMode = mode;
+            }
+        }
+
+        if (m_Settings.MegaLights.NoiseMode == 1)
+        {
+            Core::Logger::Info("KurenaiEngine3D", "MegaLightsの乱数位相: 白色ハッシュ (等方だが低周波を含む)");
+        }
+        else if (m_Settings.MegaLights.NoiseMode == 2)
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D", "MegaLightsの乱数位相: ブルーノイズマスク 64x64 (等方かつ高周波)");
+        }
+        else
+        {
+            Core::Logger::Info(
+                "KurenaiEngine3D", "MegaLightsの乱数位相: Interleaved Gradient Noise (斜め方向へ偏る)");
+        }
+    }
+
+    void KurenaiEngine3D::SetMegaLightsTilePoolBilinear(int mode)
+    {
+        // 負の値は「既定のまま」。未指定時も現在値を起動ログへ残すためreturnしない
+        if (mode >= 0)
+        {
+            if (mode > 2)
+            {
+                Core::Logger::Warning(
+                    "KurenaiEngine3D",
+                    "MegaLightsの候補プールの確率的バイリニア参照のモードが範囲外のため無視します: " +
                         std::to_string(mode) + " (0〜2)");
             }
             else
             {
-                m_Settings.MegaLights.TileJitterMode = mode;
+                m_Settings.MegaLights.TilePoolBilinearMode = mode;
             }
         }
 
-        if (m_Settings.MegaLights.TileJitterMode == 1)
+        if (m_Settings.MegaLights.TilePoolBilinearMode == 1)
         {
             Core::Logger::Info(
                 "KurenaiEngine3D",
-                "MegaLightsのタイル格子ジッター: 有効 (m_History.FrameIndexのHalton(2,3)を16段階へ量子化)");
+                "MegaLightsの候補プールの確率的バイリニア参照: 有効 (2x2クアッドごとに1タイル)");
         }
-        else if (m_Settings.MegaLights.TileJitterMode == 2)
+        else if (m_Settings.MegaLights.TilePoolBilinearMode == 2)
         {
             Core::Logger::Info(
-                "KurenaiEngine3D", "MegaLightsのタイル格子ジッター: 有効 (検証用オフセット(0,0)固定)");
+                "KurenaiEngine3D",
+                "MegaLightsの候補プールの確率的バイリニア参照: 有効 (画素ごとに1タイル)");
         }
         else
         {
-            Core::Logger::Info("KurenaiEngine3D", "MegaLightsのタイル格子ジッター: 無効");
+            Core::Logger::Info(
+                "KurenaiEngine3D", "MegaLightsの候補プールの確率的バイリニア参照: 無効 (自分のタイル固定)");
         }
     }
 
@@ -2087,7 +2551,12 @@ namespace Kurenai
                 // 別の出力先を用意して測ってから決めること
                 m_RenderTargets.CreateMegaLightsOutput(*m_Device, width, height);
             }
-            m_RenderTargets.CreateTonemap(*m_Device, width, height);
+            // 【TonemapとブルームはDLSSより後ろ】DLSSが有効なフレームでは出力解像度で走るため、
+            // ここもその解像度で作る。DLSSが無効なら内部レンダー解像度そのままで、従来と同じ。
+            // GetPostProcessWidth/Heightの意味はKurenaiEngine3D.hの宣言参照
+            const uint32_t postWidth = GetPostProcessWidth();
+            const uint32_t postHeight = GetPostProcessHeight();
+            m_RenderTargets.CreateTonemap(*m_Device, postWidth, postHeight);
 
             m_RenderTargets.CreateGBufferVelocity(*m_Device, width, height);
 
@@ -2112,6 +2581,31 @@ namespace Kurenai
             if (m_RenderCapabilities.RaytracingAvailable)
             {
                 m_RenderTargets.CreateMegaLightsTilePool(*m_Device, kMegaLightsTilePoolStride);
+
+                // 可視灯リスト(提案分布の第3成分)。候補プールと同じ格子で、
+                // **容量は設定で変わるので常に上限ぶんを確保する** ―― 実行中に容量を
+                // 変えるたびにGPUを待って確保し直すのを避けるため。ストライドも上限で固定し、
+                // シェーダーは実行時の容量で先頭から使う
+                m_RenderTargets.CreateMegaLightsVisibleLists(*m_Device, kMegaLightsVisibleListStride);
+                if (m_RenderTargets.MegaLightsVisibleLists[0])
+                {
+                    const uint64_t visibleListBytes =
+                        static_cast<uint64_t>(sizeof(uint32_t)) * kMegaLightsVisibleListStride *
+                        m_RenderTargets.LightTileCountX * m_RenderTargets.LightTileCountY;
+                    Core::Logger::Info(
+                        "KurenaiEngine3D",
+                        "MegaLights 可視灯リスト: タイル " +
+                        std::to_string(m_RenderTargets.LightTileCountX) + "x" +
+                        std::to_string(m_RenderTargets.LightTileCountY) + " / 容量上限 " +
+                        std::to_string(kMegaLightsVisibleListCapacityMax) + " / " +
+                        std::to_string(visibleListBytes * 2u / 1024u) + " KB (ping-pong 2本)");
+                }
+                else
+                {
+                    Core::Logger::Warning(
+                        "KurenaiEngine3D",
+                        "MegaLights 可視灯リストの確保に失敗した。可視灯リストは無効のまま動作する");
+                }
 
                 // 1画素につきN本のリザーバ(1本16バイト)。MegaLightsCommon.hlsli の
                 // MegaLightsReservoir と**ストライドを一致させること**。
@@ -2164,7 +2658,10 @@ namespace Kurenai
             // 1x1まで落とさず段数を固定しているのは、これ以上小さくしても裾の広がりが
             // 見た目に寄与しないため(解像度が低いと逆にアップサンプル時のちらつき源になる)。
             // レベルごとに独立したテクスチャにしている理由はBloom.hlsl冒頭を参照
-            m_RenderTargets.CreateBloomPyramid(*m_Device, width, height, kBloomLevelCount);
+            // 解像度がTonemapと同じ(=DLSSが有効なら出力解像度)なのは、ブルームがDLSSの出力を
+            // 読んでTonemapへ渡す位置にいるため。内部解像度で作るとピラミッドの段が
+            // Tonemapの走る解像度と食い違う
+            m_RenderTargets.CreateBloomPyramid(*m_Device, postWidth, postHeight, kBloomLevelCount);
 
             // 自前ソフトウェアラスタライザ(46章)の解像度依存リソース。
             //
@@ -2221,6 +2718,9 @@ namespace Kurenai
         // ブレンド率を0にするだけでは足りず「サンプルそのものを行わない」必要がある(TAA.hlsl参照)
         m_History.HistoryValid = false;
         m_History.HistoryIndex = 0;
+        // DLSSの履歴も同じ理由で捨てる。解像度が変わればフィーチャごと作り直されるが、
+        // バッファ精度の変更のように解像度が変わらない作り直しでも中身は別物になる
+        m_History.DLSSHistoryValid.store(false, std::memory_order_relaxed);
 
         // ポインタが作り直されたので、グラフィックスデバッガ向けの名前を焼き直す
         m_DumpService.MarkDebugNamesDirty();
@@ -2297,13 +2797,19 @@ namespace Kurenai
 
     float KurenaiEngine3D::GetUpscaleRatio(UpscaleQualityMode mode)
     {
-        // FSR1が定義している4段。倍率は「出力の一辺 ÷ 入力の一辺」
+        // FSR1が定義している4段に、DLSS側の2段(DLAA = 等倍、UltraPerformance = 3倍)を足したもの。
+        // 倍率は「出力の一辺 ÷ 入力の一辺」。
+        //
+        // 【DLSSはこの表を使わない】DLSSのレンダー解像度はNGX_DLSS_GET_OPTIMAL_SETTINGSが返す
+        // 推奨値で決まる。この表を使うのはFSR1相当の経路と、UIに倍率を表示するときだけ
         switch (mode)
         {
-        case UpscaleQualityMode::UltraQuality: return 1.3f;
-        case UpscaleQualityMode::Quality:      return 1.5f;
-        case UpscaleQualityMode::Balanced:     return 1.7f;
-        case UpscaleQualityMode::Performance:  return 2.0f;
+        case UpscaleQualityMode::DLAA:             return 1.0f;
+        case UpscaleQualityMode::UltraQuality:     return 1.3f;
+        case UpscaleQualityMode::Quality:          return 1.5f;
+        case UpscaleQualityMode::Balanced:         return 1.7f;
+        case UpscaleQualityMode::Performance:      return 2.0f;
+        case UpscaleQualityMode::UltraPerformance: return 3.0f;
         default:
             Core::Logger::Error(
                 "KurenaiEngine3D",
@@ -2314,9 +2820,47 @@ namespace Kurenai
     }
 
     void KurenaiEngine3D::ComputeUpscaleRenderResolution(
-        uint32_t outputWidth, uint32_t outputHeight, UpscaleQualityMode mode,
+        uint32_t outputWidth, uint32_t outputHeight, UpscaleTechnique technique, UpscaleQualityMode mode,
         uint32_t& outRenderWidth, uint32_t& outRenderHeight)
     {
+        // --- DLSS: レンダー解像度はNGXが決める ---
+        //
+        // 【自前の倍率表を使ってはいけない】推奨値はDLSSのバージョンと品質モードで決まる。
+        // 1.5倍などと決め打ちすると、NGXが許容しない解像度でフィーチャを作ることになる。
+        // 問い合わせに失敗した場合(その品質モードが非対応など)は下のFSR1と同じ表へ落ちる
+        if (technique == UpscaleTechnique::DLSS && m_DLSSContext)
+        {
+            RHI::DLSSOptimalSettings optimal{};
+            if (m_DLSSContext->QueryOptimalSettings(outputWidth, outputHeight, ToRHIDLSSQuality(mode), optimal))
+            {
+                // 8の倍数への切り捨てはDLSSでも要る(理由は下のコメントと同じ。エンジン側の都合)。
+                // ただし切り捨てるとNGXの許容下限を割りうるので、割ったら下限側へ切り上げる
+                uint32_t width = optimal.RenderWidth & ~7u;
+                uint32_t height = optimal.RenderHeight & ~7u;
+                if (optimal.MinRenderWidth > 0 && width < optimal.MinRenderWidth)
+                {
+                    width = optimal.MinRenderWidth;
+                }
+                if (optimal.MinRenderHeight > 0 && height < optimal.MinRenderHeight)
+                {
+                    height = optimal.MinRenderHeight;
+                }
+                outRenderWidth = std::max(1u, width);
+                outRenderHeight = std::max(1u, height);
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    "DLSSの推奨レンダー解像度: " + std::to_string(optimal.RenderWidth) + "x" +
+                        std::to_string(optimal.RenderHeight) + " → 実際に使う解像度 " +
+                        std::to_string(outRenderWidth) + "x" + std::to_string(outRenderHeight) + "(出力 " +
+                        std::to_string(outputWidth) + "x" + std::to_string(outputHeight) + ")");
+                return;
+            }
+
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "DLSSの推奨レンダー解像度を取得できなかったため、品質モードの倍率表へ落とします");
+        }
+
         const float ratio = GetUpscaleRatio(mode);
 
         // 8の倍数へ切り捨てる。LightCullのタイル・Hi-Zのミップ連鎖・Bloomのピラミッド・
@@ -2334,7 +2878,8 @@ namespace Kurenai
     }
 
     void KurenaiEngine3D::RequestUpscaleSettings(
-        bool enabled, UpscaleQualityMode mode, uint32_t outputWidth, uint32_t outputHeight)
+        bool enabled, UpscaleTechnique technique, UpscaleQualityMode mode, uint32_t outputWidth,
+        uint32_t outputHeight)
     {
         if (outputWidth == 0 || outputHeight == 0)
         {
@@ -2345,7 +2890,36 @@ namespace Kurenai
             return;
         }
 
+        // DLSSが使えない環境でDLSSを要求されたら、理由を残してFSR1相当へ落とす。
+        // 【黙って落としてはいけない】-upscaletech dlss を渡したのに絵が変わらない、という
+        // 形でしか気づけなくなる
+        if (technique == UpscaleTechnique::DLSS && !m_RenderCapabilities.DLSSAvailable)
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "DLSSが要求されましたがこの環境では利用できません(DX11・非対応GPU・古いドライバ)。"
+                "FSR1相当へ切り替えます");
+            technique = PostProcessSettings::UpscaleTechniqueForCapability(false);
+        }
+        // FSR1相当にはDLSS専用の品質モードが無い。等倍(DLAA)はEASUを恒等倍で走らせるだけで
+        // 意味が無く、3倍(UltraPerformance)はFSR1の想定外なのでQualityへ落とす
+        if (technique == UpscaleTechnique::FSR1 &&
+            (mode == UpscaleQualityMode::DLAA || mode == UpscaleQualityMode::UltraPerformance))
+        {
+            Core::Logger::Warning(
+                "KurenaiEngine3D",
+                "品質モード" + std::to_string(static_cast<int>(mode)) +
+                    "はDLSS専用です。FSR1相当ではQuality(1.5倍)として扱います");
+            mode = PostProcessSettings::kDefaultUpscaleQualityMode;
+        }
+
+        // 手法が変わると、DLSSより後ろのパスが走る解像度(GetPostProcessWidth)と、
+        // 確保すべき出力解像度テクスチャの種類が両方変わる。レンダー解像度が偶然同じでも
+        // 作り直しが要るため、ここで必ずdirtyを立てる
+        const bool techniqueChanged = m_Settings.PostProcess.UpscaleTech != technique;
+
         m_Settings.PostProcess.UpscaleEnabled = enabled;
+        m_Settings.PostProcess.UpscaleTech = technique;
         m_Settings.PostProcess.UpscaleQuality = mode;
         m_Settings.PostProcess.UpscaleOutputWidth = outputWidth;
         m_Settings.PostProcess.UpscaleOutputHeight = outputHeight;
@@ -2354,10 +2928,17 @@ namespace Kurenai
         {
             uint32_t renderWidth = 0;
             uint32_t renderHeight = 0;
-            ComputeUpscaleRenderResolution(outputWidth, outputHeight, mode, renderWidth, renderHeight);
+            ComputeUpscaleRenderResolution(outputWidth, outputHeight, technique, mode, renderWidth, renderHeight);
             RequestRenderResolution(renderWidth, renderHeight);
-            // 出力解像度用のテクスチャがまだ無い、またはサイズが変わったときだけ作り直す
-            if (m_RenderTargets.UpscaleTargetWidth != outputWidth || m_RenderTargets.UpscaleTargetHeight != outputHeight)
+            // 出力解像度用のテクスチャがまだ無い、サイズが変わった、または手法が変わったときだけ作り直す
+            // (手法が変わると確保するテクスチャそのものが入れ替わる。FSR1相当のLDR2枚 ⇔ DLSSのHDR1枚)
+            const uint32_t activeTargetWidth = technique == UpscaleTechnique::DLSS
+                                                   ? m_RenderTargets.DLSSTargetWidth
+                                                   : m_RenderTargets.UpscaleTargetWidth;
+            const uint32_t activeTargetHeight = technique == UpscaleTechnique::DLSS
+                                                    ? m_RenderTargets.DLSSTargetHeight
+                                                    : m_RenderTargets.UpscaleTargetHeight;
+            if (techniqueChanged || activeTargetWidth != outputWidth || activeTargetHeight != outputHeight)
             {
                 m_UpscaleTargetsDirty = true;
             }
@@ -2367,8 +2948,9 @@ namespace Kurenai
             // 無効化したときは内部解像度を出力解像度と同じに戻す。こうしないと
             // 「超解像を切ったのに低解像度のまま」という状態が残る
             RequestRenderResolution(outputWidth, outputHeight);
-            // 使わなくなったテクスチャは解放する(1080pで約8MBが2枚)
-            if (m_RenderTargets.UpscaleTargetWidth != 0 || m_RenderTargets.UpscaleTargetHeight != 0)
+            // 使わなくなったテクスチャは解放する(1080pでFSR1相当が約8MBを2枚、DLSSが約16MBを1枚)
+            if (m_RenderTargets.UpscaleTargetWidth != 0 || m_RenderTargets.UpscaleTargetHeight != 0 ||
+                m_RenderTargets.DLSSTargetWidth != 0 || m_RenderTargets.DLSSTargetHeight != 0)
             {
                 m_UpscaleTargetsDirty = true;
             }
@@ -2377,22 +2959,67 @@ namespace Kurenai
 
     void KurenaiEngine3D::CreateUpscaleTargets(uint32_t width, uint32_t height)
     {
-        // 無効化された場合は解放だけして戻る
+        // 無効化された場合は両方とも解放して戻る
         if (!m_Settings.PostProcess.UpscaleEnabled)
         {
             m_RenderTargets.ResetUpscale();
+            m_RenderTargets.ResetDLSSOutput();
             return;
         }
 
-        m_RenderTargets.CreateUpscale(*m_Device, width, height);
+        // 手法は排他。使わない側は必ず解放する ―― 残しておくとVRAMを無駄に抱えるうえ、
+        // IsUpscaleActive()/IsDLSSActive()がどちらもtrueになりうる状態を作ってしまう
+        if (m_Settings.PostProcess.UpscaleTech == UpscaleTechnique::DLSS)
+        {
+            m_RenderTargets.ResetUpscale();
+            m_RenderTargets.CreateDLSSOutput(*m_Device, width, height);
+        }
+        else
+        {
+            m_RenderTargets.ResetDLSSOutput();
+            m_RenderTargets.CreateUpscale(*m_Device, width, height);
+        }
     }
 
     bool KurenaiEngine3D::IsUpscaleActive() const
     {
         // テクスチャの確保に失敗している場合にパスを登録すると、バインドするリソースが無いまま
         // Dispatchすることになるため、確保済みであることまで条件に入れる
-        return m_Settings.PostProcess.UpscaleEnabled && m_RenderTargets.UpscaleTexture && m_RenderTargets.UpscaleSharpTexture &&
-               m_RenderTargets.UpscaleTargetWidth > 0 && m_RenderTargets.UpscaleTargetHeight > 0;
+        return m_Settings.PostProcess.UpscaleEnabled &&
+               m_Settings.PostProcess.UpscaleTech == UpscaleTechnique::FSR1 && m_RenderTargets.UpscaleTexture &&
+               m_RenderTargets.UpscaleSharpTexture && m_RenderTargets.UpscaleTargetWidth > 0 &&
+               m_RenderTargets.UpscaleTargetHeight > 0;
+    }
+
+    bool KurenaiEngine3D::IsDLSSActive() const
+    {
+        return m_Settings.PostProcess.UpscaleEnabled &&
+               m_Settings.PostProcess.UpscaleTech == UpscaleTechnique::DLSS && m_DLSSContext != nullptr &&
+               m_RenderTargets.DLSSOutputTexture && m_RenderTargets.DLSSTargetWidth > 0 &&
+               m_RenderTargets.DLSSTargetHeight > 0;
+    }
+
+    bool KurenaiEngine3D::IsDLSSSelected() const
+    {
+        return m_Settings.PostProcess.UpscaleEnabled &&
+               m_Settings.PostProcess.UpscaleTech == UpscaleTechnique::DLSS && m_RenderCapabilities.DLSSAvailable;
+    }
+
+    bool KurenaiEngine3D::ShouldRunDLSS() const
+    {
+        // デバッグ表示中はDLSSパスを登録しない(中間バッファを内部解像度のまま等倍で見たいため)。
+        // FSR1相当のEASU/RCASを登録しないのとまったく同じ判断で、判定もここ1箇所に集める
+        return IsDLSSActive() && m_Settings.DebugView.View == DebugView::Final;
+    }
+
+    uint32_t KurenaiEngine3D::GetPostProcessWidth() const
+    {
+        return IsDLSSSelected() ? m_Settings.PostProcess.UpscaleOutputWidth : m_RenderWidth;
+    }
+
+    uint32_t KurenaiEngine3D::GetPostProcessHeight() const
+    {
+        return IsDLSSSelected() ? m_Settings.PostProcess.UpscaleOutputHeight : m_RenderHeight;
     }
 
     void KurenaiEngine3D::RequestPlanarReflectionResolutionScale(float scale)
@@ -2789,6 +3416,11 @@ namespace Kurenai
 
         // 同じフレーム番号でも実時間が異なると、アニメーションが進んで描画結果を比較できない。
         const float deltaTime = m_FixedTimeStep > 0.0f ? m_FixedTimeStep : realDeltaTime;
+
+        // 【Updateより前に前進させること】Renderスレッドの m_History.FrameIndex も
+        // DecideFrameJitterAndCamera の最初の実行文で前進し、最初のフレームが1になる。
+        // ここを後ろへ下げると経路が1フレームずれ、乱数の種・ジッターと食い違う
+        ++m_UpdateFrameIndex;
         Update(deltaTime);
 
         // m_CameraはUpdateスレッド(UpdateMouseLook/UpdateMovement/UpdateAppliedSceneHandoff)
@@ -2797,6 +3429,7 @@ namespace Kurenai
         FrameState newFrameState;
         newFrameState.Camera = m_Camera;
         newFrameState.ImGuiVisible = m_ImGuiVisible;
+        newFrameState.PathFrameIndex = m_UpdateFrameIndex;
 
         // Renderスレッドが直前フレーム分を取り込み終えるまで待つ(キュー深度1)。
         // 取り込み自体はスナップショットのコピーだけなので即座に完了し、その後の重いGPU発行は
@@ -3122,12 +3755,25 @@ namespace Kurenai
         // (m_RenderAspectの宣言のコメント参照)。同じ値なら再設定しても副作用は無いので毎フレーム呼ぶ
         m_Camera.SetAspectRatio(m_RenderAspect.load(std::memory_order_relaxed));
 
-        UpdateMouseLook(imguiWantsMouse);
-
-        // ライト名のInputTextを編集中にWASDがカメラ移動として解釈されるのを防ぐ
-        if (!imguiWantsKeyboard)
+        // 【計測専用】決定的カメラ経路。名前の解決はシーンの適用と指定のどちらが先でも
+        // 起きうるので、要求が立っていればここで解決する
+        if (m_CameraPathNeedsResolve.load(std::memory_order_relaxed))
         {
-            UpdateMovement(deltaTime);
+            ResolveCameraPath();
+        }
+
+        // 経路の再生中は視点の入力操作を受け付けない。
+        // 【回転は元から入力で駆動できない】UpdateMouseLookはGetAsyncKeyState(VK_RBUTTON)を
+        // 見ており、PostMessageでは発火しない。だから経路は入力ではなくここで直接与える
+        if (!m_CameraPathActive)
+        {
+            UpdateMouseLook(imguiWantsMouse);
+
+            // ライト名のInputTextを編集中にWASDがカメラ移動として解釈されるのを防ぐ
+            if (!imguiWantsKeyboard)
+            {
+                UpdateMovement(deltaTime);
+            }
         }
 
 
@@ -3138,6 +3784,14 @@ namespace Kurenai
         UpdateImGuiToggle();
         // 新しいシーンが反映されていれば、その初期カメラとウィンドウタイトルをここで取り込む
         UpdateAppliedSceneHandoff();
+
+        // 【ハンドオフより後に置くこと】先に置くと、シーンが切り替わったフレームだけ
+        // 経路の姿勢が.ksceneの[Camera]に上書きされ、そのフレームだけ絵が飛ぶ。
+        // ここで無条件に上書きすることで、経路が常に勝つ
+        if (m_CameraPathActive)
+        {
+            UpdateCameraPath();
+        }
         // 昼夜サイクルの自動進行(m_Settings.Sky.TimeOfDay)はRenderThreadMain側で行う(RenderThreadMain参照)
     }
 

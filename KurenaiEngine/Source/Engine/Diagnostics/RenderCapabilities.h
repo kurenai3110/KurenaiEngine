@@ -35,5 +35,10 @@ namespace Kurenai
         // (IRHIDevice::SupportsIndirectDispatchMesh()の写し)。DX11とメッシュシェーダー
         // 非対応環境では偽で、モデルカリングは従来のCPUループへ縮退する
         bool IndirectDispatchMeshAvailable = false;
+
+        // DLSS Super Resolution / DLAA が使える環境か(IRHIDevice::SupportsDLSS()の写し)。
+        // DX11・非NVIDIA GPU・古いドライバでは偽で、超解像の手法はFSR1相当へ縮退する。
+        // UIは偽のときDLSSを選択肢に出さない(RaytracingAvailableと同じ扱い方)
+        bool DLSSAvailable = false;
     };
 }

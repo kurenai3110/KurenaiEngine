@@ -277,7 +277,30 @@ namespace Kurenai
         void SetDDGIHalfResolutionEnabled(bool enabled);
         void SetProbeUpdateMode(int mode);
         void SetUpscaleEnabled(bool enabled);
+        // 超解像の手法を切り替える(0 = FSR1相当、1 = DLSS)。
+        // DLSSが使えない環境で1を渡した場合は、理由をログへ残してFSR1相当のままにする
+        void SetUpscaleTechnique(int technique);
         void SetFixedTimeStep(float seconds);
+
+        // 【計測専用】.ksceneの[CameraPath]を名前で1本選んで再生する。
+        //
+        // 【何のためにあるか】「カメラを動かしたときのノイズと遅れ」を測るには同じ軌跡を
+        // 何度でも再現できる必要があるが、通常の操作経路は移動量がΔtに比例し、視点回転は
+        // GetAsyncKeyState(VK_RBUTTON)を見るのでPostMessageからは駆動できない
+        // (UpdateMouseLookのコメント参照。これは実カーソルを守るための意図した設計)。
+        // 再生中は視点の入力操作を一切受け付けず、フレーム番号だけから姿勢が決まる。
+        //
+        // 名前が見つからない場合はErrorログを出し、**従来の入力操作のまま続行する**
+        // (黙って落とさず、黙って再生もしない)。nullptrや空文字列を渡すと再生を止める
+        void SelectCameraPath(const wchar_t* name);
+        // 経路の再生を開始するフレーム番号。それまでは先頭キーの姿勢で静止し、
+        // 履歴・リザーバ・ストリーミング・内部解像度が整定するのを待つ。
+        // 負を渡すと既定(Passes::kMegaLightsAccumWarmup = -dumpframe の既定と同じ定数)になる
+        void SetCameraPathStartFrame(int frame);
+        // シーンが持つ[CameraPath]すべてについて「本当に画面が動くか」の検算ログを出す。
+        // 【シーンの適用を待ってから出す】起動オプションの適用時点ではまだシーンが
+        // 読み終わっていないことがあるので、ここでは要求を立てるだけにする
+        void SetCameraPathValidate(bool enabled);
 
         // 【計測専用】GPUの区間計測をウォームアップ後に指定枚数ぶん集計し、
         // パス名ごとの平均[ms]をCSVへ書き出して終了する。
@@ -295,6 +318,10 @@ namespace Kurenai
         void AddTextureDump(const wchar_t* name, const wchar_t* path, int mipLevel, int arraySlice, int frames, int stride)
         {
             m_DumpService.AddTextureDump(name, path, mipLevel, arraySlice, frames, stride);
+        }
+        void AddBufferDump(const wchar_t* name, const wchar_t* path)
+        {
+            m_DumpService.AddBufferDump(name, path);
         }
 
         // 何フレーム目のものを書き出すか。負なら既定(Passes::kMegaLightsAccumWarmup)。
@@ -323,6 +350,16 @@ namespace Kurenai
         void SetMegaLightsDenoiseSigmaLuminance(float sigma);
         // ファイアフライの近傍クランプの強さ(0で無効。負なら既定のまま)
         void SetMegaLightsDenoiseFireflyClamp(float k);
+        // 履歴の妥当性を2x2の4タップで判定するか(既定は最近傍1タップ)。
+        // 根拠は EngineDefaults.h の MegaLightsDenoiseHistory4Tap
+        void SetMegaLightsDenoiseHistory4Tap(bool enabled);
+        // カメラ移動を補正した前フレームの期待 ViewZ で履歴の深度を判定するか(0/1のみ)。
+        void SetMegaLightsDenoiseMotionCompensatedDepth(int enabled);
+        // 時間累積の履歴長を適応させる。**どちらも0で従来の指数移動平均へ厳密に戻る**
+        void SetMegaLightsDenoiseGeometryFalloff(float falloff);
+        // 負のしきい値は「既定のまま」。強さ0で無効(陽性対照)
+        void SetMegaLightsDenoiseGradient(float strength, float relStart, float relFull);
+        void SetMegaLightsDenoiseGradientFastFrames(int frames);
         // 空間再利用の反復回数(負なら既定のまま)
         void SetMegaLightsSpatialIterations(int iterations);
         // 時間再利用の有無と、履歴のMの上限。負/0は既定のまま
@@ -336,13 +373,17 @@ namespace Kurenai
         // クアッド共有(手法3)の1画素あたりの標本数。1〜kMegaLightsMaxSamplesPerPixel。
         // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
         void SetMegaLightsQuadSamples(int samples);
+        void SetMegaLightsQuadShareRadius(int radius);
         // 候補プールが1タイルあたりに抽出する灯の数(K)。
         // kMegaLightsTilePoolMinCapacity 〜 kMegaLightsTilePoolCapacity
         void SetMegaLightsTilePoolCapacity(int capacity);
-        // 候補プールのタイル格子を画素単位でずらすモード。
-        // 0=無効(従来とビット同一)、1=Halton(2,3)、2=有効だが検証用にオフセット0固定。
-        // 範囲外はログを出して無視し、負の値では既定値の状態をログへ残す
-        void SetMegaLightsTileJitter(int mode);
+        // 可視灯リスト(提案分布の第3成分)。enabled<0 / capacity<=0 / mix<0 は「既定のまま」。
+        // mix は一様枝(0.25)を除いた残りのうちリスト枝へ回す割合で、**値に依らず不偏**
+        void SetMegaLightsVisibleList(int enabled, int capacity, float mix);
+        // 候補プールの参照を確率的バイリニアにする(0=自分のタイル固定、1=クアッドごと、2=画素ごと)
+        void SetMegaLightsTilePoolBilinear(int mode);
+        // 画素ごとの乱数位相の配り方(0=IGN、1=白色ハッシュ、2=ブルーノイズ)。負の値は「既定のまま」
+        void SetMegaLightsNoiseMode(int mode);
 
         // 【検証専用】蓄積が始まった瞬間にシーンへ摂動を加える。時間再利用の「追従」を測る入口。
         //   0 = 何もしない(既定)
@@ -402,7 +443,8 @@ namespace Kurenai
         // 超解像の設定をまとめて要求する(SystemPanel = Renderスレッドから呼ばれる)。
         // 内部でRequestRenderResolution()を呼ぶだけで、レンダーターゲットの作り直しはしない
         void RequestUpscaleSettings(
-            bool enabled, UpscaleQualityMode mode, uint32_t outputWidth, uint32_t outputHeight);
+            bool enabled, UpscaleTechnique technique, UpscaleQualityMode mode, uint32_t outputWidth,
+            uint32_t outputHeight);
         // このフレームでMegaLightsパスを実行するか。上のShouldRunRaytraced*と同じ作法で1か所に集約している。
         // これがfalseのときDirectLighting.hlslは従来のライトループへ戻る ―― 「パスを積むか」と
         // 「ライトループを止めるか」がずれると、ライトが二重に加算されるか、逆に全部消える
@@ -457,6 +499,7 @@ namespace Kurenai
         // std::atomicは呼び出し側が使っているメモリオーダーの書き方(.load/.store)を
         // そのまま維持できるよう、値ではなくatomicへの参照を返す
         std::atomic<bool>& GetTAAHistoryValid() { return m_History.HistoryValid; }
+        std::atomic<bool>& GetDLSSHistoryValid() override { return m_History.DLSSHistoryValid; }
         std::atomic<uint32_t>& GetSceneLoadProgressLoaded() { return m_SceneLoad.ProgressLoaded; }
         std::atomic<uint32_t>& GetSceneLoadProgressTotal() { return m_SceneLoad.ProgressTotal; }
 
@@ -581,10 +624,14 @@ namespace Kurenai
         // Kの下限。これを下回るとタイルに届く灯を代表できない。
         static constexpr int32_t kMegaLightsTilePoolMinCapacity = Passes::kMegaLightsTilePoolMinCapacity;
 
-        // 1画素あたりの標本数の上限。リザーババッファはこの倍数まで太る
-        //(16バイト x 画素数 x 標本数。2560x1440・4本で236MB)ので、際限なく上げさせない。
-        // クアッド層化は4層なので、4を超えると層の割り当てが一巡して効きが鈍る
+        // 1画素あたりの標本数の上限。リザーバ1本は16バイト x 画素数 x 標本数で、2560x1440では
+        // 1標本あたり約59MB、上限16標本では約944MBになる。同サイズのリザーバは初期・空間再利用の
+        // ping-pong・時間履歴の計5本を確保するため、実際の確保量はさらに大きい。
+        // クアッド層化の層の数は共有ブロックの画素数 (2*QuadShareRadius)^2 なので、
+        // それを超えると層の割り当てが一巡して効きが鈍る(半径1なら4、半径2なら16)
         static constexpr int32_t kMegaLightsMaxSamplesPerPixel = Passes::kMegaLightsMaxSamplesPerPixel;
+        // クアッド共有で標本を借りる範囲の半径の上限(2 なら 4x4 ブロック)
+        static constexpr int32_t kMegaLightsMaxQuadShareRadius = Passes::kMegaLightsMaxQuadShareRadius;
 
         // 【publicにしてある】シーン読み込みが構築し、Passes::MegaLightsPasses が
         // 三角形の数とバッファを引くために読むだけ
@@ -608,6 +655,11 @@ namespace Kurenai
         {
             Core::Camera Camera;
             bool ImGuiVisible = true;
+            // Updateスレッド側のフレーム番号。Renderスレッドの m_History.FrameIndex と
+            // 一致するはず ―― という**推測**を、DecideFrameJitterAndCamera で実際に比べて潰す。
+            // 一致しないと「経路のフレーム番号」と「乱数の種・ジッターのフレーム番号」が
+            // ずれ、測定そのものが成立しない
+            uint32_t PathFrameIndex = 0;
         };
 
         void CreateSceneResources();
@@ -775,6 +827,17 @@ namespace Kurenai
         void UpdateMouseLook(bool imguiWantsMouse);
         void UpdateMovement(float deltaTime);
         void UpdateImGuiToggle();
+        // 決定的カメラ経路。**UpdateAppliedSceneHandoffより後に呼ぶこと** ――
+        // 先に呼ぶと、シーンが切り替わったフレームだけ経路が.ksceneの[Camera]に上書きされる
+        void UpdateCameraPath();
+        // -camerapath で指定された名前を、いま適用されているシーンの[CameraPath]から解決する。
+        // シーンの適用とオプションの指定はどちらが先でも起きうるので、両方の契機から呼ぶ
+        void ResolveCameraPath();
+        // 経路の開始フレーム。負が入っていれば既定(kMegaLightsAccumWarmup)へ落とす
+        uint32_t GetCameraPathStartFrame() const;
+        // 検算結果をログへ1本ぶん書き出す
+        static void LogCameraPathMotionStats(
+            const Assets::CameraPath& path, const Assets::CameraPathMotionStats& stats);
         // ApplyLoadedScene(Renderスレッド)が公開した初期カメラ・ウィンドウタイトルを、
         // まだ適用していなければ適用する。m_Cameraの書き込み手をUpdateスレッド1つに保ち、
         // ウィンドウタイトルの変更もウィンドウを所有するこのスレッドから行うためのハンドオフ
@@ -1017,19 +1080,49 @@ namespace Kurenai
         // 出力解像度と品質モードから内部レンダー解像度を求める。
         // 8の倍数へ切り捨てるのは、LightCullのタイル・Hi-Zのミップ連鎖・Bloomのピラミッド・
         // SkyCloud/DDGIResolveの1/2解像度がいずれも2の冪で割っていくため。下限は320x180
-        static void ComputeUpscaleRenderResolution(
-            uint32_t outputWidth, uint32_t outputHeight, UpscaleQualityMode mode,
+        //
+        // 【DLSSでは倍率表を使わない】NGXが返す推奨レンダー解像度を使い、そのうえで8の倍数へ
+        // 切り捨ててからNGXの許容下限(RenderMin)でクランプする。NGXへ問い合わせるため
+        // staticにはできない(m_DLSSContextが要る)
+        void ComputeUpscaleRenderResolution(
+            uint32_t outputWidth, uint32_t outputHeight, UpscaleTechnique technique, UpscaleQualityMode mode,
             uint32_t& outRenderWidth, uint32_t& outRenderHeight);
 
         // 出力解像度のテクスチャを作り直す。GPUがそれらを参照していない状態で呼ぶこと
         void CreateUpscaleTargets(uint32_t width, uint32_t height);
-        // このフレームで超解像パスを走らせるか(有効かつテクスチャが確保済み)
+        // このフレームでFSR1相当(EASU/RCAS)のパスを走らせるか
+        // (有効かつ手法がFSR1かつテクスチャが確保済み)。DLSSを選んでいる間は常にfalse
         bool IsUpscaleActive() const;
+        // このフレームでDLSSパスを走らせるか(有効かつ手法がDLSSかつコンテキストと出力が確保済み)。
+        // **パスを登録するかの判定はこちら**
+        bool IsDLSSActive() const;
+        // 設定としてDLSSが選ばれているか(確保済みかどうかは見ない)。
+        //
+        // 【リソースを作る側はこちらを見る】IsDLSSActive()はDLSSの出力テクスチャが
+        // 確保済みであることを条件に含むため、「これから作る」場面では必ずfalseになる。
+        // CreateRenderTargetsがTonemapとブルームの解像度を決めるのに使うのがこちら
+        bool IsDLSSSelected() const;
+        // このフレームで実際にDLSSパスが走るか。IsDLSSActive()にデバッグ表示の条件を足したもの。
+        // 【ジッターと履歴もこれに合わせること】パスが走らないフレームでジッターだけ残すと
+        // 画面が振動し、履歴だけ有効のままにすると次に走ったとき古い絵から再投影してしまう
+        bool ShouldRunDLSS() const;
+        // DLSSより後ろのパス(AutoExposure / Bloom / Tonemap / Present)が走る解像度。
+        // DLSSが有効なときだけ出力解像度になり、それ以外は内部レンダー解像度そのまま。
+        // 【ここに出てくる「出力解像度」はこの4パスだけの話】G-Buffer以降の他のバッファは
+        // すべて内部レンダー解像度のままである(41.23節の仕分けを増やさないため)
+        uint32_t GetPostProcessWidth() const;
+        uint32_t GetPostProcessHeight() const;
 
         // ImGuiでBufferPrecisionが変更されたことをRender()へ伝えるフラグ。レンダーターゲットの
         // 作り直しはGPUがそれらを参照していない状態で行う必要があるため、UI関数の中では実行せず
         // Render()の先頭(RenderGraphの構築より前)でm_Device->WaitForGPUIdle()を挟んで処理する
         bool m_BufferPrecisionDirty = false;
+
+        // DLSSの評価コンテキスト。DLSS非対応環境ではnullptrのまま
+        // (m_RenderCapabilities.DLSSAvailableと必ず一致する)。
+        // 【デバイスより先に壊れること】KurenaiEngine3Dのメンバなので、基底のm_Deviceより
+        // 先に破棄される。NGXのフィーチャはコンテキストのデストラクタで解放される
+        std::unique_ptr<RHI::IRHIDLSSContext> m_DLSSContext;
 
         // --- インスタンシング(Stage 7) ------------------------------------------------------
         //
@@ -1138,9 +1231,11 @@ namespace Kurenai
         // 名前 -> テクスチャ の対応表。CreateRenderTargetsでテクスチャを増やしたら
         // BuildDumpableTextureTableにも足すこと(表の実体はそちらのコメントを参照)
         using DumpableTexture = Diagnostics::DumpableTexture;
+        using DumpableBuffer = Diagnostics::DumpableBuffer;
         // 【毎回作り直す】レンダーターゲットはリサイズやバッファ精度の切り替えで
         // ポインタごと作り直される。キャッシュすると解放済みのテクスチャを指す
         std::vector<DumpableTexture> BuildDumpableTextureTable() const;
+        std::vector<DumpableBuffer> BuildDumpableBufferTable() const;
 
         // ダンプとパスマニフェストの状態と処理。**表は毎回作り直して渡すこと**
         // (理由は Diagnostics/RenderDumpServiceState.h)
@@ -1151,7 +1246,9 @@ namespace Kurenai
         // --- Diagnostics::IRecreationTarget ---
         void RequestUpscaleSettings(bool enabled, uint32_t outputWidth, uint32_t outputHeight) override
         {
-            RequestUpscaleSettings(enabled, m_Settings.PostProcess.UpscaleQuality, outputWidth, outputHeight);
+            RequestUpscaleSettings(
+                enabled, m_Settings.PostProcess.UpscaleTech, m_Settings.PostProcess.UpscaleQuality, outputWidth,
+                outputHeight);
         }
         void RequestBufferPrecision(BufferPrecision precision) override
         {
@@ -1390,6 +1487,15 @@ namespace Kurenai
         // 以降は候補1つにつき2個(ライト番号と重み)。MegaLightsTilePool.hlsl 冒頭のレイアウトと一致させること
         static constexpr uint32_t kMegaLightsTilePoolStride = 6 + 2 * kMegaLightsTilePoolCapacity;
 
+        // 可視灯リスト1タイルぶんの要素数。先頭2個がヘッダ(格納した灯数 / 打ち切る前の相異なる灯数)、
+        // 以降が容量ぶんのライト番号。MegaLightsCommon.hlsli のレイアウトと一致させること。
+        // **容量の上限で確保する** ―― 設定で容量を変えるたびに確保し直さずに済むよう、
+        // 常に上限ぶんを取ってシェーダーは先頭から使う
+        static constexpr uint32_t kMegaLightsVisibleListCapacityMax =
+            Passes::kMegaLightsVisibleListCapacityMax;
+        static constexpr uint32_t kMegaLightsVisibleListStride =
+            Passes::kMegaLightsVisibleListHeader + kMegaLightsVisibleListCapacityMax;
+
         // タイル容量の超過"条件"(シーンのライト数が容量を超えている)を検出した最初のフレームだけ
         // 警告ログを出すためのフラグ(m_LightOverflowLoggedと同じ作法)。
         // 実際に超過したかはGPU側にしか無いため、確認はDebugView::LightTilesのマゼンタで行う
@@ -1506,6 +1612,10 @@ namespace Kurenai
         bool m_AppliedSceneApplyCamera = true;
         Core::Camera m_AppliedSceneCamera;
         std::wstring m_AppliedSceneTitle;
+        // そのシーンが持つ[CameraPath]の一覧。**consumeせずに持ち続ける**のがポイントで、
+        // -camerapath がシーンの適用より後に呼ばれても名前を解決できるようにするため
+        // (起動オプションの適用順に依存させない)
+        std::vector<Assets::CameraPath> m_AppliedSceneCameraPaths;
 
         // Loaderスレッド専有。「今どのスカイボックスを読み込み済みか」の真実。
         // スカイボックスを読むのがこのスレッドだけなので、ここで持つのが最も素直になる
@@ -1560,6 +1670,28 @@ namespace Kurenai
         // (m_Settings.Sky.TimeOfDayと同じ扱い)
         float m_RenderDeltaTime = 0.0f;
         float m_FixedTimeStep = 0.0f;
+
+        // --- 決定的カメラ経路(計測専用) -------------------------------------------------
+        //
+        // 【スレッドの持ち分】m_CameraPath / m_CameraPathActive / m_UpdateFrameIndex は
+        // **Updateスレッド専有**(m_Cameraと同じ)。m_RequestedCameraPathName と
+        // m_CameraPathStartFrame は Run() より前に起動オプションから設定される想定で、
+        // 再解決の要求だけを atomic で受け渡す
+        std::wstring m_RequestedCameraPathName;
+        // 次のUpdateで名前を解決し直す。シーンが適用されたときと、名前が指定されたときに立つ
+        std::atomic<bool> m_CameraPathNeedsResolve{ false };
+        Assets::CameraPath m_CameraPath;
+        bool m_CameraPathActive = false;
+        // 負なら Passes::kMegaLightsAccumWarmup を使う(-dumpframe の既定と同じ定数を共有する。
+        // 値が2つに割れると片方だけ直す事故が起きるので、新しい定数は作らない)
+        int m_CameraPathStartFrame = -1;
+        // -camerapathvalidate。シーンが適用された時点で全経路の検算ログを出す
+        bool m_CameraPathValidateRequested = false;
+        // Updateスレッド側のフレーム番号。TickFrameの冒頭で前進させ、Renderの
+        // m_History.FrameIndex と一致することを DecideFrameJitterAndCamera で検算する
+        uint32_t m_UpdateFrameIndex = 0;
+        // フレーム番号の食い違いは1回だけログに出す(毎フレーム出すとログが埋まる)
+        bool m_PathFrameMismatchLogged = false;
 
         // 集計状態はすべてRenderスレッドのみが読み書きするため追加の排他制御は不要
         Diagnostics::FrameStatsLogger m_FrameStats;

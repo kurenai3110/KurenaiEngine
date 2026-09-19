@@ -497,6 +497,39 @@ namespace
         return dumps;
     }
 
+    struct BufferDumpArg
+    {
+        std::wstring Name;
+        std::wstring Path;
+    };
+
+    // -dumpbuf は -dumptex と同じく名前と出力パスを対で受け取り、複数回指定できる。
+    std::vector<BufferDumpArg> ParseBufferDumps()
+    {
+        std::vector<BufferDumpArg> dumps;
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        if (!argv)
+        {
+            Kurenai::Core::Logger::Error("Main", "-dumpbuf のコマンドラインを取得できませんでした");
+            return dumps;
+        }
+        for (int i = 1; i < argc; ++i)
+        {
+            if (_wcsicmp(argv[i], L"-dumpbuf") != 0) continue;
+            if (i + 2 >= argc)
+            {
+                Kurenai::Core::Logger::Warning(
+                    "Main", "-dumpbuf は「-dumpbuf <バッファ名> <出力パス>」の形で指定します。無視します");
+                break;
+            }
+            dumps.push_back(BufferDumpArg{ argv[i + 1], argv[i + 2] });
+            i += 2;
+        }
+        LocalFree(argv);
+        return dumps;
+    }
+
     // -recreate <フレーム> <指示> を全部拾う。ベースライン採取だけでは通らない解像度・精度・
     // シーン切り替え時のGPUリソース作り直し経路を、無人の採取スクリプトから検証するために使う。
     std::vector<Kurenai::ScheduledRecreation> ParseScheduledRecreations()
@@ -862,19 +895,37 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int megaLightsQuadShare = ParseIntOption(L"-megalightsquadshare", -1);
         const int megaLightsQuadStratify = ParseIntOption(L"-megalightsquadstratify", -1);
         const int megaLightsBlockedCache = ParseIntOption(L"-megalightsblockedcache", -1);
-        // -megalightsquadsamples <1〜4>。クアッド共有が1画素あたりに引く標本の数。
+        // -megalightsquadsamples <1〜16>。クアッド共有が1画素あたりに引く標本の数。
         // 影レイの本数がそのままこの数になるので、コストはほぼ比例して増える
         const int megaLightsQuadSamples = ParseIntOption(L"-megalightsquadsamples", -1);
-        // -megalightspool <8〜128>。候補プールが1タイルあたりに抽出する灯の数(K)。
+        // -megalightsquadradius <1|2>。クアッド共有で標本を借りる範囲の半径。
+        // 1 = 2x2、2 = 4x4。項の数は (2*半径)^2 x 標本数なので、
+        // 半径を上げたぶん標本数を下げれば項の数を保ったまま Initial だけが軽くなる
+        const int megaLightsQuadShareRadius = ParseIntOption(L"-megalightsquadradius", -1);
+        // -megalightspool <8〜512>。候補プールが1タイルあたりに抽出する灯の数(K)。
         // 1画素あたりの標本数では減らない「タイル間」のノイズがここで決まる
         const int megaLightsPoolCapacity = ParseIntOption(L"-megalightspool", -1);
-        // -megalightstilejitter <0|1|2>。1=Halton(2,3)で格子をずらす、2=有効だがオフセット0固定
-        const int megaLightsTileJitter = ParseIntOption(L"-megalightstilejitter", -1);
+        // -megalightspoolbilinear <0|1|2>。候補プールの確率的バイリニア参照。
+        // 0=自分のタイル固定(従来)、1=2x2クアッドごとに1タイル、2=画素ごとに1タイル
+        const int megaLightsPoolBilinear = ParseIntOption(L"-megalightspoolbilinear", -1);
+        // -megalightsnoise <0|1|2>。画素ごとの乱数位相の配り方。
+        // 0=Interleaved Gradient Noise(従来)、1=白色ハッシュ、2=ブルーノイズマスク
+        const int megaLightsNoiseMode = ParseIntOption(L"-megalightsnoise", -1);
+        // -megalightsvisiblelist <0|1> / -megalightsvisiblelistcapacity <1〜16> /
+        // -megalightsvisiblelistmix <0.0〜1.0>。前フレームの可視灯リストを提案分布へ混ぜる。
+        // mix は「一様枝(0.25)を除いた残りのうち、リスト枝へ回す割合 c」。
+        // **c をいくつにしても不偏**(一様枝を削らないので、届くどの灯にも正の下限確率が残る)
+        const int megaLightsVisibleList = ParseIntOption(L"-megalightsvisiblelist", -1);
+        const int megaLightsVisibleListCapacity =
+            ParseIntOption(L"-megalightsvisiblelistcapacity", -1);
+        const float megaLightsVisibleListMix = ParseFloatOption(L"-megalightsvisiblelistmix", -1.0f);
         // -megalightstemporal <0|1> / -megalightstemporalmclamp <上限>。時間再利用
         const int megaLightsTemporal = ParseIntOption(L"-megalightstemporal", -1);
         const int megaLightsTemporalMClamp = ParseIntOption(L"-megalightstemporalmclamp", -1);
-        // -megalightsperturb <0|1|2>。【検証専用】蓄積開始時の摂動
-        // (1=全ライトを消す / 2=露出を+2段跳ばす)。時間再利用の追従を測るためのもの
+        // -megalightsperturb <0|1|2|3>。【検証専用】蓄積開始時の摂動
+        // (1=全ライトを消す / 2=露出を+2段跳ばす / 3=ライトを1つおきに消す)。
+        // 時間再利用の追従を測るためのもの。3は局所的な変化で、タイル単位で変化を探す
+        // 時間勾配の見逃しを測る
         const int megaLightsPerturb = ParseIntOption(L"-megalightsperturb", -1);
         // -megalightsdenoise <0|1> / -megalightsdenoiseatrous <段数> /
         // -megalightsdenoiseframes <上限>。デノイザ(時間累積 + a-trous)
@@ -895,10 +946,30 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const int meshLights = ParseIntOption(L"-meshlights", -1);
         // -emissiveintensity <倍率>。シーン全体の自発光の強度(ImGuiの同名スライダと同じ値)。
         // glTFのemissiveFactorは[0,1]に収まるため、既定の1.0では小さな器具が1階調に届かない
-        const float emissiveIntensity = ParseFloatOption(L"-emissiveintensity", -1.0f);        // -megalightsdenoisesigma <値>。輝度のエッジ停止の強さ(SVGFのσ_l)
+        const float emissiveIntensity = ParseFloatOption(L"-emissiveintensity", -1.0f);
+        // -upscaletech <fsr1|dlss>。超解像の手法。「超解像を出すか」は -upscale が持つので、
+        // DLSSを使うには -upscale 1 と併せて指定する。DLSSはDX12かつNGXが対応と答えた環境のみ
+        const std::wstring upscaleTechnique = ParseStringOption(L"-upscaletech");        // -megalightsdenoisesigma <値>。輝度のエッジ停止の強さ(SVGFのσ_l)
         const float megaLightsDenoiseSigma = ParseFloatOption(L"-megalightsdenoisesigma", -1.0f);
         // -megalightsfirefly <k>。ファイアフライの近傍クランプの強さ(0で無効)
         const float megaLightsFireflyClamp = ParseFloatOption(L"-megalightsfirefly", -1.0f);
+        // -megalightsdenoise4tap <0|1>。履歴の妥当性を2x2の4タップで判定するか。
+        // 従来は最近傍1点だけで見ており、1点がシルエットの向こう側だと履歴全体を棄却していた
+        const int megaLightsDenoise4Tap = ParseIntOption(L"-megalightsdenoise4tap", -1);
+        // -megalightsdenoisemotiondepth <0|1>。前フレームの期待 ViewZ をカメラ移動込みで求める。
+        const int megaLightsDenoiseMotionDepth =
+            ParseIntOption(L"-megalightsdenoisemotiondepth", -1);
+        // --- 時間累積の履歴長の適応。**どれも0にすると従来の指数移動平均へ厳密に戻る** ---
+        // -megalightsdenoisegeomfalloff <0..1>。幾何の不一致で履歴長を連続的に縮める強さ
+        const float megaLightsDenoiseGeomFalloff =
+            ParseFloatOption(L"-megalightsdenoisegeomfalloff", -1.0f);
+        // -megalightsdenoisegrad <0..1>。タイル内の時間勾配で履歴長を縮める強さ(0で無効=陽性対照)
+        const float megaLightsDenoiseGradient = ParseFloatOption(L"-megalightsdenoisegrad", -1.0f);
+        // -megalightsdenoisegradt0 / -megalightsdenoisegradt1。相対変化のしきい値(負で既定のまま)
+        const float megaLightsDenoiseGradT0 = ParseFloatOption(L"-megalightsdenoisegradt0", -1.0f);
+        const float megaLightsDenoiseGradT1 = ParseFloatOption(L"-megalightsdenoisegradt1", -1.0f);
+        // -megalightsdenoisegradfast <フレーム数>。速いEMAの長さ(0で無効。負で既定のまま)
+        const int megaLightsDenoiseGradFast = ParseIntOption(L"-megalightsdenoisegradfast", -1);
         // -perfdump <パス> / -perfdumpframes <枚数>。GPUの区間計測を平均してCSVへ書き出す。
         // Perfログは0.05ms未満を落とし1フレームの代表値しか出さないので、性能測定には使えない
         const std::wstring perfDumpPath = ParseStringOption(L"-perfdump");
@@ -915,6 +986,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         // -dumpframe <N> / -exitafterdump。中間レンダーターゲットを線形の生値で書き出す。
         // 「コンパイルは通るが絵が違う」を、8bitのスクリーンショットではなく数値で切り分けるための経路
         const std::vector<TextureDumpArg> textureDumps = ParseTextureDumps();
+        const std::vector<BufferDumpArg> bufferDumps = ParseBufferDumps();
         // -recreate <フレーム> <renderres=<幅>x<高さ>|upscale=<幅>x<高さ>|precision=hdr|precision=legacy8bit|scene=<名前>>
         // (繰り返し可)。GPUリソースの作り直し経路を指定フレームで無人検証する。
         const std::vector<Kurenai::ScheduledRecreation> scheduledRecreations = ParseScheduledRecreations();
@@ -942,6 +1014,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
         const float fixedTimeStep = ParseFloatOption(L"-fixedstep", kMissingFixedTimeStep);
         // -taa 0|1。TAAは時間方向に蓄積するため、画素単位の一致を測るときは切る
         const int taa = ParseIntOption(L"-taa", -1);
+        // -camerapath <名前>。.ksceneの[CameraPath]を1本選んで再生する。
+        // 【計測専用】カメラを動かしたときのノイズと遅れを測るには同じ軌跡を再現する必要があるが、
+        // 通常の操作は移動量がΔtに比例し、視点回転はPostMessageから駆動できない。
+        // 再生中は視点の入力操作を受け付けず、フレーム番号だけから姿勢が決まる。
+        // -fixedstep の指定が無ければ 1/60 が自動で入る(警告を出したうえで)
+        const std::wstring cameraPathName = ParseStringOption(L"-camerapath");
+        // -camerapathstart <N>。経路の再生を始めるフレーム。既定は整定待ちの180
+        // (-dumpframe の既定と同じ定数を共有する)
+        const int cameraPathStart = ParseIntOption(L"-camerapathstart", -1);
+        // -camerapathvalidate。経路が本当に画面を動かすかの検算ログだけを出す
+        const bool cameraPathValidate = HasFlagOption(L"-camerapathvalidate");
         // -meshlet 0|1。メッシュレット描画の有無。切ると従来の頂点シェーダー経路へ落ち、
         // メッシュレット単位のカリングが一切かからない。**両経路の絵は一致するのが正しい**
         // ので、これが「増幅シェーダーが何か落としていないか」を見るときの基準になる
@@ -1036,6 +1119,41 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetTAAEnabled(taa != 0);
             }
+            // 【-upscale より後に適用すること】どちらもRequestUpscaleSettingsを通るので、
+            // 先に手法を決めても後の -upscale が現在の手法を引き継いで上書きし直す。
+            // 順序をこちらにしておけば、最後に効くのが手法の指定になる
+            if (!upscaleTechnique.empty())
+            {
+                if (upscaleTechnique == L"fsr1")
+                {
+                    engine.SetUpscaleTechnique(0);
+                }
+                else if (upscaleTechnique == L"dlss")
+                {
+                    engine.SetUpscaleTechnique(1);
+                }
+                else
+                {
+                    Kurenai::Core::Logger::Error(
+                        "Main",
+                        "-upscaletech の値が不正です: " + Kurenai::Core::WideToUtf8(upscaleTechnique) +
+                            "(fsr1 または dlss)");
+                }
+            }
+            // 【開始フレームを先に設定すること】SelectCameraPath が「開始フレーム」を
+            // ログへ出すので、後に回すと出る値と実際に効く値が食い違う
+            if (cameraPathStart >= 0)
+            {
+                engine.SetCameraPathStartFrame(cameraPathStart);
+            }
+            if (cameraPathValidate)
+            {
+                engine.SetCameraPathValidate(true);
+            }
+            if (!cameraPathName.empty())
+            {
+                engine.SelectCameraPath(cameraPathName.c_str());
+            }
             if (meshlet >= 0)
             {
                 engine.SetMeshletRenderingEnabled(meshlet != 0);
@@ -1086,12 +1204,22 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetMegaLightsQuadSamples(megaLightsQuadSamples);
             }
+            if (megaLightsQuadShareRadius >= 0)
+            {
+                engine.SetMegaLightsQuadShareRadius(megaLightsQuadShareRadius);
+            }
             if (megaLightsPoolCapacity >= 0)
             {
                 engine.SetMegaLightsTilePoolCapacity(megaLightsPoolCapacity);
             }
-            // 未指定時も呼び、既定の無効状態を起動ログへ1行残す
-            engine.SetMegaLightsTileJitter(megaLightsTileJitter);
+            engine.SetMegaLightsTilePoolBilinear(megaLightsPoolBilinear);
+            engine.SetMegaLightsNoiseMode(megaLightsNoiseMode);
+            if (megaLightsVisibleList >= 0 || megaLightsVisibleListCapacity > 0 ||
+                megaLightsVisibleListMix >= 0.0f)
+            {
+                engine.SetMegaLightsVisibleList(
+                    megaLightsVisibleList, megaLightsVisibleListCapacity, megaLightsVisibleListMix);
+            }
             if (megaLightsTemporal >= 0 || megaLightsTemporalMClamp > 0)
             {
                 engine.SetMegaLightsTemporal(megaLightsTemporal, megaLightsTemporalMClamp);
@@ -1127,6 +1255,33 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
             {
                 engine.SetMegaLightsDenoiseFireflyClamp(megaLightsFireflyClamp);
             }
+            if (megaLightsDenoise4Tap >= 0)
+            {
+                engine.SetMegaLightsDenoiseHistory4Tap(megaLightsDenoise4Tap != 0);
+            }
+            if (megaLightsDenoiseMotionDepth >= 0)
+            {
+                engine.SetMegaLightsDenoiseMotionCompensatedDepth(megaLightsDenoiseMotionDepth);
+            }
+            if (megaLightsDenoiseGeomFalloff >= 0.0f)
+            {
+                engine.SetMegaLightsDenoiseGeometryFalloff(megaLightsDenoiseGeomFalloff);
+            }
+            // 【しきい値だけの指定も通す】強さを省いたときは現在の値を据え置く
+            if (megaLightsDenoiseGradFast >= 0)
+            {
+                engine.SetMegaLightsDenoiseGradientFastFrames(megaLightsDenoiseGradFast);
+            }
+            if (megaLightsDenoiseGradient >= 0.0f || megaLightsDenoiseGradT0 >= 0.0f ||
+                megaLightsDenoiseGradT1 >= 0.0f)
+            {
+                const float gradientStrength =
+                    (megaLightsDenoiseGradient >= 0.0f)
+                        ? megaLightsDenoiseGradient
+                        : engine.GetSettings().MegaLights.DenoiseGradientStrength;
+                engine.SetMegaLightsDenoiseGradient(
+                    gradientStrength, megaLightsDenoiseGradT0, megaLightsDenoiseGradT1);
+            }
             if (megaLightsSpatialIterations > 0)
             {
                 engine.SetMegaLightsSpatialIterations(megaLightsSpatialIterations);
@@ -1146,15 +1301,19 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int)
                 engine.AddTextureDump(
                     dump.Name.c_str(), dump.Path.c_str(), dump.MipLevel, dump.ArraySlice, dump.Frames, dump.Stride);
             }
+            for (const BufferDumpArg& dump : bufferDumps)
+            {
+                engine.AddBufferDump(dump.Name.c_str(), dump.Path.c_str());
+            }
             for (const Kurenai::ScheduledRecreation& recreation : scheduledRecreations)
             {
                 engine.AddScheduledRecreation(recreation);
             }
-            if (!textureDumps.empty() || (!passManifestPath.empty() && passManifestFrames == 1))
+            if (!textureDumps.empty() || !bufferDumps.empty() || (!passManifestPath.empty() && passManifestFrames == 1))
             {
                 engine.SetTextureDumpFrame(textureDumpFrame);
             }
-            if (!textureDumps.empty())
+            if (!textureDumps.empty() || !bufferDumps.empty())
             {
                 engine.SetExitAfterDump(exitAfterDump);
             }

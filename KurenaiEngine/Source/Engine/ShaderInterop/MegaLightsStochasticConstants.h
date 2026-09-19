@@ -20,7 +20,7 @@ namespace Kurenai::ShaderInterop
     {
         // x=出力幅, y=出力高, z=1ピクセルあたりの初期候補数M, w=影レイを撃つか(0で撃たない)
         DirectX::XMUINT4 Params0;
-        // x=候補プールの有効タイル数X(格子ジッター有効時だけ+1)、
+        // x=候補プールのタイル数X、
         // y=タイルの1辺のピクセル数, z=1タイルあたりの候補数K, w=フレーム番号
         DirectX::XMUINT4 Params1;
         // x=借りる近傍の数, y=探す半径(ピクセル),
@@ -44,9 +44,25 @@ namespace Kurenai::ShaderInterop
         // 「1画素1リザーバ」を前提に添字を組み立てているため。
         // yzw=未使用
         DirectX::XMUINT4 Params5;
-        // xy=候補プールのタイル格子オフセット(画素、各0〜15)、zw=未使用。
-        // 書き手と全読み手で同じ値を使わないと、別タイルの候補を静かに読む
+        // xy=未使用。
+        // z=候補プールのタイル数Y(Params1.x のY版。
+        //   確率的バイリニア参照が隣タイルの添字を画面内へクランプするのに使う)、
+        // w=候補プールの確率的バイリニア参照(0=自分のタイル固定、1=クアッドごと、
+        //   2=画素ごと。Initialが読む)
         DirectX::XMUINT4 Params6;
+        // x=asuint(可視灯リストを提案分布へ混ぜた割合 c。0で従来どおり。
+        //   Initialが割り戻しに使う。**候補プール側 MegaLightsTilePoolConstants の
+        //   VisibleListParams.z と必ず同じ値にすること** ―― 抽出した確率と
+        //   割り戻す確率が食い違うと、絵は出たまま静かに偏る)、
+        // y=Temporalの履歴深度のカメラ移動補正(0=従来 / 1=前フレームの期待ViewZ)、
+        // z=画素ごとの位相の配り方(0=IGN / 1=白色ハッシュ / 2=ブルーノイズマスク。
+        //   MegaLightsCommon.hlsli の MegaLightsPixelPhaseMode が読む)、w=未使用
+        //
+        // 【枠を1つ増やす代償を承知で足している】このcbufferは MegaLights の5本が
+        // 共有しており、宣言を1つ増やすだけで5本すべてのDXILが変わる。機能を切っていても
+        // 浮動小数の丸めが動いて出力がビット同一でなくなる(実測値は 61.7u)。
+        // **それでも足したのは、既存の意味へ相乗りさせるほうが後から読む人には危険なため。**
+        DirectX::XMUINT4 Params7;
     };
 
     // 【レイアウトを固定する本体】HLSL側は宣言順でオフセットが決まる。
@@ -60,5 +76,8 @@ namespace Kurenai::ShaderInterop
     static_assert(offsetof(MegaLightsStochasticConstants, Params4) == 64, "MegaLightsStochasticConstants.hlsli の Params4 と位置が食い違っている");
     static_assert(offsetof(MegaLightsStochasticConstants, Params5) == 80, "MegaLightsStochasticConstants.hlsli の Params5 と位置が食い違っている");
     static_assert(offsetof(MegaLightsStochasticConstants, Params6) == 96, "MegaLightsStochasticConstants.hlsli の Params6 と位置が食い違っている");
-    static_assert(sizeof(MegaLightsStochasticConstants) == 112, "MegaLightsStochasticConstants の総サイズが変わっている");
+    // Params7 は可視灯リストの混合率と履歴深度のカメラ移動補正を載せるために**意図して足した**。
+    // 通すために期待値を書き換えたのではなく、追加したことの記録としてここを更新している
+    static_assert(offsetof(MegaLightsStochasticConstants, Params7) == 112, "MegaLightsStochasticConstants.hlsli の Params7 と位置が食い違っている");
+    static_assert(sizeof(MegaLightsStochasticConstants) == 128, "MegaLightsStochasticConstants の総サイズが変わっている");
 }

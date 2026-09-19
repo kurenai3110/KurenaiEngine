@@ -269,6 +269,19 @@ namespace Kurenai::Passes
         //     SceneColorを拾ってしまうため、ここも合わせて直す ---
         RHI::IRHITexture* const taaInputColor = fogPassRuns ? targets->AerialPerspectiveTexture.get() : reflectionOutput;
 
+        // --- このフレームでDLSSを走らせるか ---
+        //
+        // デバッグ表示中は走らせない。中間バッファは内部レンダー解像度のまま等倍で見たいためで、
+        // FSR1相当(EASU/RCAS)を登録しないのとまったく同じ判断である。
+        //
+        // 【TAAとは排他】DLSSはTAAの置き換えで、同じ位置に入って同じ入力を読む。
+        // 両方走らせると、TAAで蓄積してぼかした絵をさらにDLSSが蓄積することになる
+        const bool dlssActive = frame.DLSSAvailable && debugViewSettings.View == DebugView::Final;
+        const bool taaPassEnabled = postProcessSettings.TAAEnabled && !dlssActive;
+        bb.DLSSActive = dlssActive;
+        bb.DLSSOutputWidth = dlssActive ? frame.DLSSOutputWidth : 0;
+        bb.DLSSOutputHeight = dlssActive ? frame.DLSSOutputHeight : 0;
+
         // --- ドローンショーパス: 夜空の機体を発光ビルボードとして加算合成で描く ---
         //
         // 【なぜここなのか(大気遠近より後・TAAより前)】
@@ -327,7 +340,7 @@ namespace Kurenai::Passes
             });
         }
 
-        if (frame.Settings.PostProcess.TAAEnabled)
+        if (taaPassEnabled)
         {
             // 今フレームの書き込み先と、前フレームの結果(履歴)。Render()の末尾で役割が入れ替わる
             const uint32_t historyWriteIndex = frame.TAAHistoryIndex;
@@ -390,18 +403,117 @@ namespace Kurenai::Passes
             });
         }
 
+        // --- DLSSパス: TAAとまったく同じ位置(Tonemapの前・HDR)で、レンダー解像度の絵を
+        //     出力解像度へ再構成する。TAAの履歴の代わりにNGXが内部で履歴を持つ ---
+        //
+        // 【なぜTonemapの前なのか】DLSSは線形HDRを前提に学習されている。FSR1相当(EASU/RCAS)を
+        // Tonemapの後に置いているのは、あちらが表示レンジ[0,1]を式に埋め込んでいるからで、
+        // 理由が正反対である(41.23節)。
+        //
+        // 【このパスより後ろは出力解像度】AutoExposure / Bloom / Tonemap / Present の4つが
+        // 出力解像度で走る。それ以外のバッファは従来どおり内部レンダー解像度のまま
+        if (dlssActive)
+        {
+            RHI::IRHIDLSSContext* const dlssContext = frame.DLSSContext;
+            const RHI::DLSSQuality dlssQuality = frame.DLSSQuality;
+            const uint32_t dlssOutputWidth = frame.DLSSOutputWidth;
+            const uint32_t dlssOutputHeight = frame.DLSSOutputHeight;
+            const DirectX::XMFLOAT2 jitterPixels = frame.JitterPixels;
+
+            graph.AddPass(Core::RenderGraphPassDesc{
+                .Name = "DLSS",
+                // 実際にバインドするのはNGXだが、RenderGraphの依存はここで宣言する
+                // (宣言しないとDroneShow/大気遠近より前へ並べ替えられうる)
+                .Reads = { taaInputColor, targets->GBufferDepth.get(), targets->GBufferVelocity.get() },
+                .Writes = { targets->DLSSOutputTexture.get() },
+                .Execute = [this, targets, dlssContext, dlssQuality, dlssOutputWidth, dlssOutputHeight,
+                            jitterPixels, taaInputColor, renderWidth, renderHeight, effectiveExposure](
+                               RHI::IRHICommandList* cmd)
+                {
+                    RHI::DLSSFeatureDesc featureDesc{};
+                    featureDesc.RenderWidth = renderWidth;
+                    featureDesc.RenderHeight = renderHeight;
+                    featureDesc.OutputWidth = dlssOutputWidth;
+                    featureDesc.OutputHeight = dlssOutputHeight;
+                    featureDesc.Quality = dlssQuality;
+                    // このエンジンの深度は常にReverse-Z(近平面がz=1.0、遠平面がz=0.0)
+                    featureDesc.DepthInverted = true;
+                    // 【NGXに露出を推定させる】エンジンのHDRバッファはプリ露出済みで、
+                    // 自動露出パスはDLSSより**後ろ**にある。つまり「今フレームの露出テクスチャ」を
+                    // 渡せない(あるのは前フレームの値で、しかもEV100でありDLSSが期待する
+                    // 線形倍率ではない)。プリ露出の倍率だけInPreExposureで伝える
+                    featureDesc.AutoExposure = true;
+                    // GBufferVelocityはレンダー解像度
+                    featureDesc.MotionVectorsAtRenderResolution = true;
+                    if (!dlssContext->EnsureFeature(cmd, featureDesc))
+                    {
+                        // 作れなければ評価もできない。ログはEnsureFeatureが出している
+                        return;
+                    }
+
+                    RHI::DLSSEvaluateDesc evalDesc{};
+                    evalDesc.Color = taaInputColor;
+                    evalDesc.Depth = targets->GBufferDepth.get();
+                    evalDesc.MotionVectors = targets->GBufferVelocity.get();
+                    evalDesc.Output = targets->DLSSOutputTexture.get();
+                    // ジッターはピクセル単位で渡す(UVでもNDCでもない)。
+                    // frameContext.JitterPixelsはy反転前の値で、DLSSが期待するのもそれ
+                    evalDesc.JitterOffsetX = jitterPixels.x;
+                    evalDesc.JitterOffsetY = jitterPixels.y;
+                    // 【符号に注意】GBufferVelocityは「画面UV単位・current - previous」
+                    // (Shaders/3D/GBuffer.hlsl)で、消費側は historyUv = uv - velocity と引く。
+                    // DLSSは「現在位置へ足すと前フレームの位置になる」ベクトルをレンダー解像度の
+                    // ピクセルで期待するので、-レンダー解像度を掛けて符号を反転させる。
+                    //
+                    // 【実測で確かめてある】Bistro屋外・Dolly経路(前進)・フレーム240で、
+                    // ネイティブ1080pとの平均絶対差(R)は 負=0.0192 / 正=0.0247 / スケール0=0.0242。
+                    // **符号を逆にすると、モーションベクターを渡さないのと同じ程度まで悪化する**
+                    // (履歴が再投影に失敗して棄却されるため)。手順は
+                    // docs/ImplementationDetail.md 参照
+                    evalDesc.MotionVectorScaleX = -static_cast<float>(renderWidth);
+                    evalDesc.MotionVectorScaleY = -static_cast<float>(renderHeight);
+                    evalDesc.PreExposure = effectiveExposure;
+                    // 【TAAのフラグを流用しないこと】TAAが無効な間、あちらは毎フレームfalseになる。
+                    // 流用するとInResetが毎フレーム1になり、DLSSが一切蓄積しなくなる
+                    // (FrameHistoryState.h の DLSSHistoryValid のコメント参照)
+                    evalDesc.ResetHistory = !m_Engine.GetDLSSHistoryValid().load(std::memory_order_relaxed);
+                    evalDesc.RenderWidth = renderWidth;
+                    evalDesc.RenderHeight = renderHeight;
+                    dlssContext->Evaluate(cmd, evalDesc);
+                },
+            });
+        }
+
         // --- Tonemapパス: HDRのSceneColor(反射パス有効時はその出力、TAA有効時はさらにTAA適用後)を
         //     LDRへ変換する。反射等のHDR演算がすべて完了した後、Present直前の独立したステージとして
         //     常に実行する ---
         // この行はTAAパスのAddPassより後に置くこと。ラムダは値キャプチャなので、先に差し替えると
         // TAAが自分の出力を入力として読む形になる(RenderGraphが循環を検出して例外を投げる)
-        RHI::IRHITexture* hdrSceneColor = frame.Settings.PostProcess.TAAEnabled ? targets->TAAHistory[frame.TAAHistoryIndex].get() : taaInputColor;
+        RHI::IRHITexture* hdrSceneColor = dlssActive
+                                              ? targets->DLSSOutputTexture.get()
+                                              : (taaPassEnabled ? targets->TAAHistory[frame.TAAHistoryIndex].get()
+                                                                : taaInputColor);
         // 【TAAパスの登録より後で確定させること】上のコメントの理由がそのまま効くため、
         // ブラックボードへ載せるのもこの位置にする
         bb.HdrSceneColor = hdrSceneColor;
 
+        // 【ここから後ろの4パスが走る解像度】DLSSが走ったフレームだけ出力解像度になる。
+        // hdrSceneColorの実寸と必ず一致していること ―― 食い違うとブルームの段の寸法と
+        // Tonemapのビューポートがずれ、クラッシュせずに絵の一部だけが出る
+        const uint32_t postWidth = dlssActive ? frame.DLSSOutputWidth : renderWidth;
+        const uint32_t postHeight = dlssActive ? frame.DLSSOutputHeight : renderHeight;
+        const RHI::Viewport postViewport{ 0.0f, 0.0f, static_cast<float>(postWidth),
+                                          static_cast<float>(postHeight), 0.0f, 1.0f };
+
         // --- 自動露出パス: SceneColorの輝度ヒストグラムから目標EV100を求め、時間方向に順応させる。
         //     結果はRenderTargets::ExposureTextureへ書かれ、後段のTonemapパスが読む(AutoExposure.hlsl参照) ---
+        //
+        // 【DLSSが走ってもここはレンダー解像度のまま】測光は色と深度を**同じ整数座標**で引く
+        // (AutoExposure.hlsl の DepthTexture[dispatchThreadID.xy])。深度はレンダー解像度の
+        // ままなので、色だけ出力解像度にすると空を外す判定が画面の一部にしか当たらなくなる。
+        // 測光に使うぶんにはDLSS前の絵で十分(分位で切ったヒストグラムなので、ジッターや
+        // エイリアスは結果をほとんど動かさない)
+        RHI::IRHITexture* const autoExposureInput = dlssActive ? taaInputColor : hdrSceneColor;
         if (frame.Settings.PostProcess.AutoExposureEnabled)
         {
             // シーン切り替え直後の1回だけ順応を飛ばす。パスを積んだ時点で消費しておくことで、
@@ -411,9 +523,9 @@ namespace Kurenai::Passes
 
             graph.AddPass(Core::RenderGraphPassDesc{
                 .Name = "AutoExposure",
-                .Reads = { hdrSceneColor, targets->GBufferDepth.get() },
+                .Reads = { autoExposureInput, targets->GBufferDepth.get() },
                 .Writes = { targets->ExposureTexture.get() },
-                .Execute = [this, targets, effectiveExposureEV100, postProcessSettings, hdrSceneColor, keyReferenceEV100, usingProceduralSky, resetAdaptation, deltaTime, renderWidth, renderHeight](
+                .Execute = [this, targets, effectiveExposureEV100, postProcessSettings, autoExposureInput, keyReferenceEV100, usingProceduralSky, resetAdaptation, deltaTime, renderWidth, renderHeight](
                     RHI::IRHICommandList* cmd)
                 {
                     AutoExposureConstants autoExposureConstants{};
@@ -460,7 +572,7 @@ namespace Kurenai::Passes
                     //    (UAVはDispatch直後に解除されるため毎回バインドし直す。IRHICommandList.h参照)
                     cmd->SetComputePipelineState(m_AutoExposureHistogramPipelineState.get());
                     cmd->SetComputeConstantBuffer(1, m_AutoExposureConstantBuffer.get());
-                    cmd->SetComputeTexture(0, hdrSceneColor);
+                    cmd->SetComputeTexture(0, autoExposureInput);
                     // 空(背景)を測光から外すために深度を読む(AutoExposure.hlsl参照)
                     cmd->SetComputeTexture(1, targets->GBufferDepth.get());
                     cmd->SetComputeUnorderedAccessBuffer(0, m_ExposureHistogramBuffer.get());
@@ -495,7 +607,7 @@ namespace Kurenai::Passes
                 .Name = "Bloom",
                 .Reads = { hdrSceneColor, targets->ExposureTexture.get() },
                 .Writes = std::move(bloomWrites),
-                .Execute = [this, targets, effectiveExposureEV100, postProcessSettings, hdrSceneColor, manualExposureScale, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+                .Execute = [this, targets, effectiveExposureEV100, postProcessSettings, hdrSceneColor, manualExposureScale, postWidth, postHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
                 {
                     const uint32_t levelCount = static_cast<uint32_t>(targets->BloomDownTextures.size());
 
@@ -516,8 +628,9 @@ namespace Kurenai::Passes
                     {
                         const bool isFirst = (level == 0);
                         RHI::IRHITexture* source = isFirst ? hdrSceneColor : targets->BloomDownTextures[level - 1].get();
+                        // 第0段の入力はhdrSceneColor。DLSSが走ったフレームでは出力解像度になる
                         const DirectX::XMUINT2 srcSize = isFirst
-                            ? DirectX::XMUINT2{ renderWidth, renderHeight }
+                            ? DirectX::XMUINT2{ postWidth, postHeight }
                             : targets->BloomLevelSizes[level - 1];
                         const DirectX::XMUINT2 dstSize = targets->BloomLevelSizes[level];
 
@@ -575,11 +688,19 @@ namespace Kurenai::Passes
         const bool upscaleActive = frame.UpscaleAvailable && debugViewSettings.View == DebugView::Final;
         bb.UpscaleActive = upscaleActive;
 
+        // Tonemapでシャープ化するか。蓄積でぼけた高域を戻すためのものなので、
+        // 蓄積する段(TAAかDLSS)が走ったフレームだけ掛ける。
+        //
+        // 【FSR1相当が有効なときは掛けない】あちらは内部解像度で掛けた高域をEASUで引き伸ばして
+        // 太い縁取りにしてしまうため、シャープ化を出力解像度のRCASへ一本化してある(41.23節)。
+        // DLSSのときはTonemap自体が出力解像度で走るのでこの問題が起きず、掛けてよい
+        const bool sharpenInTonemap = !upscaleActive && (taaPassEnabled || dlssActive);
+
         graph.AddPass(Core::RenderGraphPassDesc{
             .Name = "Tonemap",
             .Reads = { hdrSceneColor, targets->ExposureTexture.get(), bloomResultTexture },
             .RenderTargets = { targets->TonemapTexture.get() },
-            .Execute = [this, targets, effectiveExposureEV100, postProcessSettings, gbufferViewport, hdrSceneColor, bloomResultTexture, manualExposureScale, keyReferenceEV100, upscaleActive, renderWidth, renderHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
+            .Execute = [this, targets, effectiveExposureEV100, postProcessSettings, postViewport, hdrSceneColor, bloomResultTexture, manualExposureScale, keyReferenceEV100, sharpenInTonemap, postWidth, postHeight, screenSpaceSamplers](RHI::IRHICommandList* cmd)
             {
                 TonemapConstants tonemapConstants{};
                 tonemapConstants.Curve = static_cast<int32_t>(postProcessSettings.Curve);
@@ -602,13 +723,15 @@ namespace Kurenai::Passes
                 // その後EASUで拡大すると、戻した高域もオーバーシュートの縁も一緒に引き伸ばされて
                 // 太い縁取りになる。超解像時のシャープ化は出力解像度で効くRCASへ一本化し、
                 // ここは素直なトーンマップ出力をEASUへ渡すことに徹する
-                tonemapConstants.Sharpness = (postProcessSettings.TAAEnabled && !upscaleActive) ? postProcessSettings.TAASharpness : 0.0f;
-                tonemapConstants.InvRenderWidth = 1.0f / static_cast<float>(renderWidth);
-                tonemapConstants.InvRenderHeight = 1.0f / static_cast<float>(renderHeight);
+                tonemapConstants.Sharpness = sharpenInTonemap ? postProcessSettings.TAASharpness : 0.0f;
+                // シャープネスのタップ間隔は「このパスが走る解像度」の1画素。
+                // DLSSが走ったフレームでは出力解像度になる
+                tonemapConstants.InvRenderWidth = 1.0f / static_cast<float>(postWidth);
+                tonemapConstants.InvRenderHeight = 1.0f / static_cast<float>(postHeight);
                 tonemapConstants.BlackPoint = postProcessSettings.TonemapBlackPoint;
                 cmd->UpdateBuffer(m_TonemapConstantBuffer.get(), &tonemapConstants, sizeof(tonemapConstants));
 
-                cmd->SetViewport(gbufferViewport);
+                cmd->SetViewport(postViewport);
                 cmd->SetPipelineState(m_TonemapPipelineState.get());
                 cmd->SetConstantBuffer(1, m_TonemapConstantBuffer.get());
                 cmd->SetSamplerSet(screenSpaceSamplers);

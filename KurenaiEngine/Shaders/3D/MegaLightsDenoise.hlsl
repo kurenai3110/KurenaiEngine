@@ -10,7 +10,7 @@
 // するので、ノイズを「正当な信号の広がり」と解釈して履歴を毎フレーム棄却する ――
 // ノイズもAAも両方失う。だからノイズはTAAへ渡す前にここで落とす。
 // 逆にここで長く累積しすぎるとTAAのゴーストと重なって二重に尾を引くので、
-// 時間累積は上限32フレーム(TAAより短く)で止める。
+// 時間累積の上限は手法ごとに持つ(既定は手法2で32・手法3で64。EngineDefaults.h)。
 //
 // 【アルベド復調】フィルタの前に「その画素の反射率」で割り、後で掛け戻す。
 // 割らずにぼかすと、明るい面と暗い面の境界で色が滲む(テクスチャの模様が影へ漏れる)。
@@ -37,8 +37,23 @@ cbuffer MegaLightsDenoiseConstants : register(b1)
     // z=輝度のエッジ停止の強さ, w=法線のエッジ停止の指数
     float4 Params1;
     // x=深度のエッジ停止の強さ, y=ファイアフライのクランプ強さ(0で無効),
-    // z=前フレームの幾何(履歴ガイド)が使えるか(0なら現フレームのG-Bufferで代用), w=未使用
+    // z=前フレームの幾何(履歴ガイド)が使えるか(0なら現フレームのG-Bufferで代用),
+    // w=この à-trous が最終段か(0以外なら復調を掛け戻して最終出力へ書く)
     float4 Params2;
+    // x=履歴の妥当性の判定タップ数(0=最近傍1タップ(従来) / 1=バイリニア2x2の4タップ),
+    // yzw=未使用
+    float4 Params3;
+    // x=履歴深度のカメラ移動補正(0=従来 / 1=前フレームの期待ViewZ)、yzw=未使用
+    float4 Params4;
+    // 時間累積の履歴長を適応させるつまみ。**x と y が0で従来の式へ厳密に還元される**
+    // (陽性対照。x=0で conf=1、y=0で lambda=0 となり、乗じる係数が 1.0f になる)。
+    // x=幾何の部分減衰の強さ(0=従来の二値のまま / 1でしきい値まで線形に効く),
+    // y=時間勾配で履歴を縮める強さ(0=無効),
+    // z=相対変化のしきい値T0(ここから疑い始める), w=同T1(ここで履歴を捨てきる)
+    float4 Params5;
+    // x=速いEMAの長さ(フレーム数。0で無効=現フレームの生値をそのまま使う),
+    // y=タイル勾配テクスチャが使えるか, zw=未使用
+    float4 Params6;
 };
 
 // 前フレームの幾何。時間再利用(MegaLightsTemporal)が毎フレーム全画素へ書いている。
@@ -59,6 +74,8 @@ Texture2D HistoryTexture : register(t7);
 // 【.w の分散は à-trous が段ごとにフィルタして次段へ渡す】時間累積が最初の値を作り、
 // 各段が重みの二乗で畳んで書き戻す(本家SVGFの構成)
 Texture2D HistoryMomentsTexture : register(t8);
+// タイルごとの時間勾配。本体は線形補間して8x8境界を目立たなくする。
+Texture2D TileGradientTexture : register(t9);
 
 RWTexture2D<float4> OutputTexture : register(u0);
 RWTexture2D<float4> OutputMomentsTexture : register(u1);
@@ -71,12 +88,7 @@ RWTexture2D<float4> OutputMomentsTexture : register(u1);
 // à-trous / Remodulate では書かない(C++はダミーとして自分の出力を重ねて束縛する)
 RWTexture2D<float4> HistoryOutTexture : register(u2);
 RWTexture2D<float4> HistoryMomentsOutTexture : register(u3);
-
-// 履歴を採用する条件。時空間再利用(MegaLightsTemporal/Spatial)と同じ3つを同じしきい値で。
-// **深度はView空間の線形値で比べること**(Reverse-Zの生値で比べてはいけない)
-static const float kMaxRelativeDepthDiff = 0.05f;
-static const float kMinNormalDot = 0.9f;
-static const float kMaxMaterialDiff = 0.1f;
+RWTexture2D<float> TileGradientOut : register(u4);
 
 // 復調に使う反射率の下限。0で割ると黒い面で発散する
 static const float kMinDemodulation = 0.05f;
@@ -109,30 +121,104 @@ float TileViewZ(float2 uv, float depth)
 // ---------------------------------------------------------------------------
 // 段1: 時間累積。速度ベクトルで再投影し、指数移動平均で混ぜる
 // ---------------------------------------------------------------------------
-[numthreads(8, 8, 1)]
-void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
+// 7x7 の輝度の (平均, 二乗平均)。タップの復調は中心の係数で代用する
+// (反射率は7x7の窓では大きく変わらない)。
+// 【計算の順序を変えないこと】短履歴の分散フォールバックはこの結果をそのまま使う。
+// 足す順・割る順を変えると OFF 時のバイト同一が崩れる
+float2 SpatialLuminanceMoments(uint2 pixel, uint2 outputSize, float3 demod)
 {
-    const uint2 pixel = dispatchThreadID.xy;
-    const uint2 outputSize = Params0.xy;
-    if (pixel.x >= outputSize.x || pixel.y >= outputSize.y)
+    const float invDemodLum = 1.0f / max(Luminance(demod), 1e-6f);
+    float sm1 = 0.0f;
+    float sm2 = 0.0f;
+    float count = 0.0f;
+    [unroll]
+    for (int dy = -3; dy <= 3; ++dy)
     {
-        return;
+        [unroll]
+        for (int dx = -3; dx <= 3; ++dx)
+        {
+            const int2 p = clamp(int2(pixel) + int2(dx, dy), int2(0, 0), int2(outputSize) - 1);
+            const float l = Luminance(InputTexture.Load(int3(p, 0)).rgb) * invDemodLum;
+            sm1 += l;
+            sm2 += l * l;
+            count += 1.0f;
+        }
+    }
+    sm1 /= count;
+    sm2 /= count;
+    return float2(sm1, sm2);
+}
+
+// 履歴の1タップが「今の画素と同じ面か」を判定する。しきい値は従来と同一
+// (kMaxRelativeDepthDiff / kMinNormalDot / kMaxMaterialDiff)。**緩める方向へは一切動かさない。**
+bool HistoryTapValid(
+    int2 tapPixel, uint2 outputSize, float expectedPrevViewZ,
+    float viewZ, float3 N, float2 material, out float mismatch)
+{
+    // 【判定に通らなかったタップの不一致度は使わない】1.0を超えた値がそのまま出るので、
+    // 呼び出し側で捨てること。ここで0や1へ丸めると「通らなかった」と区別できなくなる
+    mismatch = 1e30f;
+    float hViewZ;
+    float3 hN;
+    float2 hMaterial;
+    bool hValid;
+
+    const int2 clamped = clamp(tapPixel, int2(0, 0), int2(outputSize) - 1);
+    if (Params2.z != 0.0f)
+    {
+        const MegaLightsHistoryGuide guide = HistoryGuide[clamped.y * outputSize.x + clamped.x];
+        hViewZ = guide.ViewZ;
+        hN = OctDecode(MegaLightsUnpackNormalOct(guide.NormalOct));
+        MegaLightsUnpackMaterial(guide.Material, hMaterial.x, hMaterial.y);
+        hValid = (guide.ViewZ != 0.0f);
+    }
+    else
+    {
+        // ガイドが無いときは従来どおり現フレームのG-Bufferで代用する。
+        // 【ここも4タップに揃える】片方だけ1タップのままにすると、
+        // 「ガイドの有無で挙動が変わる」条件がもう1つ増えて切り分けが利かなくなる
+        const float2 tapUv = (float2(clamped) + 0.5f) / float2(outputSize);
+        const float hDepth = DepthTexture.SampleLevel(DataSampler, tapUv, 0).r;
+        hViewZ = (hDepth > 0.0f) ? TileViewZ(tapUv, hDepth) : 0.0f;
+        hN = OctDecode(NormalTexture.SampleLevel(DataSampler, tapUv, 0).xy);
+        hMaterial = MaterialTexture.SampleLevel(DataSampler, tapUv, 0).rg;
+        hValid = (hDepth > 0.0f);
     }
 
-    const float2 uv = (float2(pixel) + 0.5f) / float2(outputSize);
-    const float depth = DepthTexture.SampleLevel(DataSampler, uv, 0).r;
-    const float3 raw = InputTexture.Load(int3(pixel, 0)).rgb;
-
-    if (depth <= 0.0f)
+    if (!hValid)
     {
-        // 背景。【必ず書くこと】RHIにUAVのクリアが無く、書かずにreturnすると前フレームが残る
-        OutputTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        OutputMomentsTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        HistoryOutTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        HistoryMomentsOutTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        return;
+        return false;
     }
+    mismatch = MegaLightsGuideMismatch(
+        hViewZ, hN, hMaterial, expectedPrevViewZ, viewZ, N, material);
+    // 【判定は従来の関数のまま】不一致度で `<= 1` を判定し直すと、割り算を挟むぶん
+    // 境界が1ULPずれる。しきい値ちょうどの画素で挙動が変わるのを避ける
+    return MegaLightsGuideMatchesSurface(
+        hViewZ, hN, hMaterial, expectedPrevViewZ, viewZ, N, material);
+}
 
+// 時間累積の入力。復調・ファイアフライ抑制・再投影までをまとめて返す。
+// 【関数へ切り出した理由】このあとタイル内のリダクション(GroupMemoryBarrierWithGroupSync)を
+// 行うので、**カーネル側で早期returnできなくなった**。背景や範囲外のスレッドもバリアを
+// 通す必要があるため、重い計算だけを呼び分ける形にしてある。中身は移しただけで、
+// 式も加算の順序も変えていない(従来とバイト同一であることが陽性対照)
+struct TemporalAccumInputs
+{
+    float3 Demod;
+    float3 Current;
+    float Lum;
+    float3 HistoryColor;
+    float2 HistoryMoments;
+    float HistoryLength;
+    // 前フレームの「速いEMA」。履歴テクスチャのアルファに載せて持ち回る
+    float HistoryFast;
+    float GeomConf;
+    bool HistoryValid;
+};
+
+TemporalAccumInputs ComputeTemporalAccumInputs(
+    uint2 pixel, uint2 outputSize, float2 uv, float depth, float3 raw)
+{
     // --- 復調してから混ぜる ---
     const float3 demod = DemodulationFactor(uv);
     float3 current = raw / demod;
@@ -208,9 +294,98 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
     float3 historyColor = float3(0.0f, 0.0f, 0.0f);
     float2 historyMoments = float2(0.0f, 0.0f);
     float historyLength = 0.0f;
+    float historyFast = 0.0f;
+    // 幾何の不一致による履歴長の減衰。**1.0 が従来と同じ**
+    float geomConf = 1.0f;
     bool historyValid = false;
 
-    if (Params0.z != 0u && all(historyUv >= 0.0f) && all(historyUv <= 1.0f))
+    if (Params0.z != 0u && all(historyUv >= 0.0f) && all(historyUv <= 1.0f) && Params3.x != 0.0f)
+    {
+        // --- 4タップ判定 ---
+        // 履歴の**色**はバイリニアで2x2を混ぜているのに、その4タップが妥当かどうかを
+        // 最近傍1点でしか見ていなかった。帰結は2つとも実害で、
+        //   (1) 1点だけがシルエットの向こう側だと履歴全体を棄却する(本当は妥当なのに捨てる)
+        //   (2) 1点が通れば残り3タップが別の面でも 3/4 の重みで色が入る
+        // ここでは4点それぞれを同じしきい値で判定し、**通ったタップだけを
+        // バイリニア重みで加重平均する**。時間再利用(MegaLightsTemporal)は
+        // 元から2x2を走査しており、デノイザだけが片肺だった。
+        //
+        const float2 historyPixelF = historyUv * float2(outputSize) - 0.5f;
+        const float2 baseF = floor(historyPixelF);
+        const float2 frac2 = historyPixelF - baseF;
+        const int2 baseI = int2(baseF);
+
+        // InvViewProj から現在のワールド位置を復元し、前フレームのカメラから見た
+        // 期待 ViewZ を求める。無効時と履歴ガイドを使えない代用経路では行列積を実行せず、
+        // 従来の比較値をそのまま使う。
+        float expectedPrevViewZ = viewZ;
+        [branch]
+        if (Params4.x != 0.0f && Params2.z != 0.0f)
+        {
+            const float3 worldPos = ReconstructWorldPos(uv, depth);
+            expectedPrevViewZ = mul(float4(worldPos, 1.0f), PrevViewProj).w;
+        }
+
+        const float tapWeights[4] = {
+            (1.0f - frac2.x) * (1.0f - frac2.y),
+            frac2.x * (1.0f - frac2.y),
+            (1.0f - frac2.x) * frac2.y,
+            frac2.x * frac2.y,
+        };
+        const int2 tapOffsets[4] = { int2(0, 0), int2(1, 0), int2(0, 1), int2(1, 1) };
+
+        float weightSum = 0.0f;
+        float confSum = 0.0f;
+        float fastSum = 0.0f;
+        float3 colorSum = float3(0.0f, 0.0f, 0.0f);
+        float2 momentSum = float2(0.0f, 0.0f);
+        // 【履歴長は加重平均ではなく通ったタップの最小値を採る】平均だと、片方だけ長い履歴を
+        // 持つタップに引きずられて α が過小になり、別の面の色が長く残る。保守側へ倒す
+        float minLength = 1e30f;
+        [unroll]
+        for (uint tap = 0u; tap < 4u; ++tap)
+        {
+            const int2 tapPixel = baseI + tapOffsets[tap];
+            if (tapWeights[tap] <= 0.0f)
+            {
+                continue;
+            }
+            float tapMismatch;
+            if (!HistoryTapValid(
+                    tapPixel, outputSize, expectedPrevViewZ, viewZ, N, material, tapMismatch))
+            {
+                continue;
+            }
+            // 【しきい値の内側でも、怪しいほど履歴を短くする】二値だと、境界の内側ぎりぎりで
+            // 通ったタップが「まったく疑わしくないタップ」と同じ重みで長い履歴を主張する。
+            // Params5.x=0 なら 1.0 のままで従来と一致する
+            confSum += saturate(1.0f - Params5.x * tapMismatch) * tapWeights[tap];
+            const int2 clamped = clamp(tapPixel, int2(0, 0), int2(outputSize) - 1);
+            const float4 h = HistoryTexture.Load(int3(clamped, 0));
+            const float4 hm = HistoryMomentsTexture.Load(int3(clamped, 0));
+            colorSum += h.rgb * tapWeights[tap];
+            // 速いEMAはアルファに載っている。色と同じ重みで混ぜる
+            fastSum += h.a * tapWeights[tap];
+            momentSum += hm.xy * tapWeights[tap];
+            minLength = min(minLength, hm.z);
+            weightSum += tapWeights[tap];
+        }
+
+        if (weightSum > 1e-5f)
+        {
+            historyColor = colorSum / weightSum;
+            historyMoments = momentSum / weightSum;
+            historyLength = minLength;
+            historyFast = fastSum / weightSum;
+            historyValid = true;
+            // 【被覆も信頼度に入れる】4タップ中1つしか通らなかった再投影は、色としては
+            // 通っているが指している位置がずれている。weightSum はバイリニア重みの和なので
+            // 全部通れば厳密に1。Params5.x=0 のとき lerp(1, weightSum, 0) は 1.0f なので、
+            // geomConf は 1.0f のまま(乗じても値が変わらない)
+            geomConf = (confSum / weightSum) * lerp(1.0f, weightSum, Params5.x);
+        }
+    }
+    else if (Params0.z != 0u && all(historyUv >= 0.0f) && all(historyUv <= 1.0f))
     {
         // --- 再投影先の幾何を引く ---
         // 【前フレームの幾何そのものを見る】以前は現フレームのG-Bufferを再投影先で
@@ -248,26 +423,253 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
 
         if (hValid)
         {
-            if (abs(hViewZ - viewZ) <= kMaxRelativeDepthDiff * max(abs(viewZ), 1e-3f) &&
-                dot(N, hN) >= kMinNormalDot &&
-                abs(hMaterial.r - material.r) <= kMaxMaterialDiff &&
-                abs(hMaterial.g - material.g) <= kMaxMaterialDiff)
+            float expectedPrevViewZ = viewZ;
+            [branch]
+            if (Params4.x != 0.0f && Params2.z != 0.0f)
             {
-                const float4 h = HistoryTexture.SampleLevel(ColorSampler, historyUv, 0);
+                const float3 worldPos = ReconstructWorldPos(uv, depth);
+                expectedPrevViewZ = mul(float4(worldPos, 1.0f), PrevViewProj).w;
+            }
+            if (MegaLightsGuideMatchesSurface(
+                    hViewZ, hN, hMaterial, expectedPrevViewZ, viewZ, N, material))
+            {
+                const float4 hc = HistoryTexture.SampleLevel(ColorSampler, historyUv, 0);
+                historyColor = hc.rgb;
+                historyFast = hc.a;
                 const float4 hm = HistoryMomentsTexture.SampleLevel(ColorSampler, historyUv, 0);
-                historyColor = h.rgb;
                 historyMoments = hm.xy;
                 historyLength = hm.z;
                 historyValid = true;
+                // 部分減衰は1タップ側にも掛ける。被覆の項は無い(タップが1つしかない)
+                geomConf = saturate(
+                    1.0f - Params5.x * MegaLightsGuideMismatch(
+                                           hViewZ, hN, hMaterial, expectedPrevViewZ, viewZ, N, material));
             }
         }
     }
 
+    TemporalAccumInputs result;
+    result.Demod = demod;
+    result.Current = current;
+    result.Lum = lum;
+    result.HistoryColor = historyColor;
+    result.HistoryMoments = historyMoments;
+    result.HistoryLength = historyLength;
+    result.HistoryFast = historyFast;
+    result.GeomConf = geomConf;
+    result.HistoryValid = historyValid;
+    return result;
+}
+
+// --- 時間勾配: タイル内平均の「相対変化」で、変わった場所だけ履歴を短くする ---
+//
+// 【画素単位では判定できない】1画素の生入力は影レイ1本の1標本でノイズが支配的なので、
+// 現フレームと履歴の差はほぼ全部ノイズである。そこへしきい値を置くと定常状態でも
+// 常時発火し、時間累積が事実上無効になる ―― それは検定ではなく、ただのしきい値。
+//
+// 【タイルで平均してから比べる】numthreads が 8x8 = ちょうど64画素なので、
+// groupshared のツリーリダクションでタイル内平均を取る。**追加のパスもレイもテクスチャの
+// 読み足しも要らない** ―― 足しているのは各スレッドが既に持っている値である。
+//
+// 【標準誤差で正規化してはいけない ―― 測って落とした】最初は
+//   z = |平均の差| / (タイル内の空間分散から作った標準誤差)
+// で検定する形にした。**完全に静止したシーンで履歴長の中央値が 128 → 75.9 まで落ち、
+// 画素の時間stdが 1.215 → 2.472 と倍になった**(上限128 / MegaLightsNoiseCheck / 2560x1440)。
+// 原因は σ/√n という正規化そのもので、**タイル内の画素の誤差が独立ではない**こと。
+// 候補プールはタイル(16x16)に1つで、タイル内の全画素が同じK個から引くため、
+// 誤差の大半はタイル共通のオフセットとして乗り、平均しても消えない
+// (docs/ImplementationDetail.md 61.7m / 61.7s)。実測でもタイル平均の時間std 0.875 に対し
+// 画素の残差の時間std 0.856 ―― 独立なら 0.856/16 ≒ 0.05 になるはずのものが16倍ある。
+//
+// 【採ったのは相対変化】σ で割るのをやめ、明るさそのもので割る。
+//   rel = |meanFast − meanHist| / max(meanFast, meanHist)
+// これは 61.7p が4つめの設計として通した統計量で、静止の誤発火 0.236〜0.282% の実測がある
+// (あちらは 7x7 のギャザーで平均を作り、そのぶん MegaLightsDenoiseTemporal が
+//  約2倍・全パス合計 +11% になっていた。こちらは groupshared なので読み足しが無い)。
+//
+// 【速いEMAが要る】1フレームの平均はまだノイジーで、そのまま比べると相対変化が揺れる。
+// 短いEMA(既定4フレーム)で均してから比べる。**履歴テクスチャのアルファに載せて持ち回る**
+// ―― a-trous はアルファを素通しするだけで計算に使っていないので、枠が空いている。
+//
+// 【タイル単位の判定をそのまま使うと 8x8 の継ぎ目になる】タイルが「変わった」と言った中で、
+// どの画素が変わったのかは画素自身の残差で配る。定常状態では k=0 なので
+// この項は一切効かず、偽陽性を増やさない。
+// タイルが「変わった」と言ったとき、どの画素が変わったのかを自分の標準偏差の何倍で配るか
+// これ未満の画素数しか履歴を持たないタイルでは、平均が信用できないので何も言わない
+static const float kGradMinPixels = 8.0f;
+
+// 現フレームの「速いEMA」。履歴が無い画素では現フレームの値そのもの
+float ComputeFastEma(TemporalAccumInputs inputs, bool isScene)
+{
+    if (!isScene)
+    {
+        return 0.0f;
+    }
+    const float fastFrames = max(Params6.x, 1.0f);
+    if (!inputs.HistoryValid || Params6.x <= 0.0f)
+    {
+        return inputs.Lum;
+    }
+    return lerp(inputs.HistoryFast, inputs.Lum, 1.0f / fastFrames);
+}
+
+groupshared float gsSumFast[64];
+groupshared float gsSumHist[64];
+groupshared float gsCount[64];
+
+// 1グループが1タイルの平均を作る。全スレッドが同じ回数バリアを通るため早期returnしない。
+[numthreads(8, 8, 1)]
+void CSTileGradient(uint3 dispatchThreadID : SV_DispatchThreadID, uint3 groupID : SV_GroupID, uint groupIndex : SV_GroupIndex)
+{
+    const uint2 pixel = dispatchThreadID.xy;
+    const uint2 outputSize = Params0.xy;
+    const bool inBounds = pixel.x < outputSize.x && pixel.y < outputSize.y;
+    const uint2 safePixel = min(pixel, outputSize - uint2(1u, 1u));
+    const float2 uv = (float2(safePixel) + 0.5f) / float2(outputSize);
+    const float depth = inBounds ? DepthTexture.SampleLevel(DataSampler, uv, 0).r : 0.0f;
+    const bool isScene = inBounds && depth > 0.0f;
+    const float3 demod = isScene ? DemodulationFactor(uv) : float3(1.0f, 1.0f, 1.0f);
+    // ファイアフライのクランプは既定で無効なので、速いEMAとの通常時の一致を保つため行わない。
+    const float lum = isScene ? Luminance(InputTexture.Load(int3(safePixel, 0)).rgb / demod) : 0.0f;
+    const float2 historyUv = uv - VelocityTexture.SampleLevel(DataSampler, uv, 0).rg;
+    const bool hasHist = isScene && Params0.z != 0u && all(historyUv >= 0.0f) && all(historyUv <= 1.0f);
+    float fastPrev = 0.0f;
+    float histMean = 0.0f;
+    if (hasHist)
+    {
+        // タイル平均では外れタップは平均に埋もれるため、ここではタップごとの幾何判定を行わない。
+        fastPrev = HistoryTexture.SampleLevel(DataSampler, historyUv, 0).a;
+        histMean = HistoryMomentsTexture.SampleLevel(DataSampler, historyUv, 0).x;
+    }
+    const float fast = (Params6.x > 0.0f) ? lerp(fastPrev, lum, 1.0f / max(Params6.x, 1.0f)) : lum;
+    gsSumFast[groupIndex] = hasHist ? fast : 0.0f;
+    gsSumHist[groupIndex] = hasHist ? histMean : 0.0f;
+    gsCount[groupIndex] = hasHist ? 1.0f : 0.0f;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint stride = 32u; stride > 0u; stride >>= 1u)
+    {
+        if (groupIndex < stride)
+        {
+            gsSumFast[groupIndex] += gsSumFast[groupIndex + stride];
+            gsSumHist[groupIndex] += gsSumHist[groupIndex + stride];
+            gsCount[groupIndex] += gsCount[groupIndex + stride];
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    if (groupIndex == 0u)
+    {
+        float lambda = 0.0f;
+        if (gsCount[0] >= kGradMinPixels)
+        {
+            const float invCount = 1.0f / gsCount[0];
+            const float meanFast = gsSumFast[0] * invCount;
+            const float meanHist = gsSumHist[0] * invCount;
+            const float rel = abs(meanFast - meanHist) / max(max(meanFast, meanHist), 1e-6f);
+            const float t0 = Params5.z;
+            const float t1 = max(Params5.w, t0 + 1e-3f);
+            lambda = smoothstep(t0, t1, rel);
+        }
+
+        // --- 撃ち始めたタイルは、しばらく撃ち続ける(ラッチ) ---
+        // 【無いと「まだら」になる】部分的にしか撃てなかったタイルは、履歴が中途半端に
+        // 暗くなった時点で相対変化が T0 を下回り、**それ以上撃たなくなる**。
+        // 自分で自分を止める罠で、取り残された領域が前の明るさのまま残る
+        // ―― 全消灯の直後に、前の照明の形がまだらに残って見えた原因がこれだった
+        // (実測: 消灯2フレーム後の λ は中央値 0.96 だが p1 は 0.67、最小 0.077)。
+        // 直前の λ から 1/Params6.z ずつ減らした値を下限にすることで、
+        // 一度撃ったタイルは収束しきるまで撃ち続ける。
+        // 【同じテクセルしか触らないので読み書きしてよい】1タイル = 1グループで、
+        // 他のグループはこのテクセルに触れない。ping-pong は要らない。
+        // 【履歴が使えないフレームでは読まない】RHIにUAVのクリアが無く、
+        // 起動直後は前フレームの残骸(不定値)が入っている
+        if (Params0.z != 0u && Params6.z > 0.0f)
+        {
+            const float decayed = TileGradientOut[groupID.xy] - 1.0f / max(Params6.z, 1.0f);
+            lambda = max(lambda, saturate(decayed));
+        }
+
+        // UAVクリアが無いため、無効なタイルを含めて全タイルへ必ず値を書き込む。
+        TileGradientOut[groupID.xy] = lambda;
+    }
+}
+
+[numthreads(8, 8, 1)]
+void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
+{
+    const uint2 pixel = dispatchThreadID.xy;
+    const uint2 outputSize = Params0.xy;
+    // 【ここで早期returnしない】下の時間勾配がタイル内リダクションを行い、
+    // **グループ内の全スレッドが同じ回数バリアを通る**必要がある。範囲外や背景の
+    // スレッドが先に return すると、バリアが分岐の中に入って未定義動作になる
+    // (コンパイルは通り、警告も出ない)。書き出しの抑止はリダクションの後で行う
+    const bool inBounds = (pixel.x < outputSize.x && pixel.y < outputSize.y);
+    // 範囲外スレッドのサンプリング先。読み値は使わないが、範囲外を読ませない
+    const uint2 safePixel = min(pixel, outputSize - uint2(1u, 1u));
+
+    const float2 uv = (float2(safePixel) + 0.5f) / float2(outputSize);
+    const float depth = inBounds ? DepthTexture.SampleLevel(DataSampler, uv, 0).r : 0.0f;
+    const float3 raw =
+        inBounds ? InputTexture.Load(int3(safePixel, 0)).rgb : float3(0.0f, 0.0f, 0.0f);
+    const bool isScene = inBounds && (depth > 0.0f);
+
+    TemporalAccumInputs inputs;
+    inputs.Demod = float3(1.0f, 1.0f, 1.0f);
+    inputs.Current = float3(0.0f, 0.0f, 0.0f);
+    inputs.Lum = 0.0f;
+    inputs.HistoryColor = float3(0.0f, 0.0f, 0.0f);
+    inputs.HistoryMoments = float2(0.0f, 0.0f);
+    inputs.HistoryLength = 0.0f;
+    inputs.HistoryFast = 0.0f;
+    inputs.GeomConf = 1.0f;
+    inputs.HistoryValid = false;
+    [branch]
+    if (isScene)
+    {
+        inputs = ComputeTemporalAccumInputs(safePixel, outputSize, uv, depth, raw);
+    }
+
+    const float fast = ComputeFastEma(inputs, isScene);
+    const uint2 tileCount = (Params0.xy + 7u) / 8u;
+    const float2 tileUv = ((float2(pixel) + 0.5f) / 8.0f) / float2(tileCount);
+    const float lambdaPixel = (Params6.y != 0.0f)
+                                  ? Params5.y * TileGradientTexture.SampleLevel(ColorSampler, tileUv, 0).r
+                                  : 0.0f;
+
+    // --- ここから先はバリアが無いので、書き出さないスレッドを落としてよい ---
+    if (!inBounds)
+    {
+        return;
+    }
+    if (!isScene)
+    {
+        // 背景。【必ず書くこと】RHIにUAVのクリアが無く、書かずにreturnすると前フレームが残る
+        OutputTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        OutputMomentsTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        HistoryOutTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        HistoryMomentsOutTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        return;
+    }
+
+    const float3 demod = inputs.Demod;
+    const float3 current = inputs.Current;
+    const float lum = inputs.Lum;
+    const float3 historyColor = inputs.HistoryColor;
+    const float2 historyMoments = inputs.HistoryMoments;
+    const float historyLength = inputs.HistoryLength;
+    const bool historyValid = inputs.HistoryValid;
+
     // --- 混ぜる ---
     // α = 1/min(履歴の長さ+1, 上限)。上限で止めるのは、止めないと動く物に追従できなくなるため。
-    // 上限をTAAより短くするのは冒頭の「二重に掛けない」の通り
+    // 上限をTAAより短くするのは冒頭の「二重に掛けない」の通り。
+    //
+    // 【二値ではなく長さを縮める】幾何の不一致(geomConf)と時間勾配(lambdaPixel)を、
+    // 履歴長の減衰として掛ける。縮んだ長さがそのまま次フレームの状態になるので、
+    // 1フレームで棄却しきれない変化は数フレームかけて追いつく。
+    // **どちらのつまみも0なら乗じる係数が 1.0f になり、従来の式へ厳密に還元される**
+    // (1.0f 倍と 1.0f-0.0f はIEEEで厳密。これが陽性対照の根拠)
     const float maxFrames = max(Params1.y, 1.0f);
-    const float newLength = historyValid ? min(historyLength + 1.0f, maxFrames) : 1.0f;
+    const float effLength = historyLength * inputs.GeomConf * (1.0f - lambdaPixel);
+    const float newLength = historyValid ? min(effLength + 1.0f, maxFrames) : 1.0f;
     const float alpha = 1.0f / newLength;
 
     const float3 blended = historyValid ? lerp(historyColor, current, alpha) : current;
@@ -286,34 +688,20 @@ void CSTemporalAccum(uint3 dispatchThreadID : SV_DispatchThreadID)
         // 【履歴が短い画素は時間分散を信用しない】その場の7x7で代用する。
         // これをやらないと、遮蔽が外れた直後(disocclusion)の画素が
         // 「分散0 = 信用できる」と誤判定され、ノイズがそのまま残る。
-        // タップの復調は中心の係数で代用する(反射率は7x7の窓では大きく変わらない)
-        const float invDemodLum = 1.0f / max(Luminance(demod), 1e-6f);
-        float sm1 = 0.0f;
-        float sm2 = 0.0f;
-        float count = 0.0f;
-        [unroll]
-        for (int dy = -3; dy <= 3; ++dy)
-        {
-            [unroll]
-            for (int dx = -3; dx <= 3; ++dx)
-            {
-                const int2 p = clamp(int2(pixel) + int2(dx, dy), int2(0, 0), int2(outputSize) - 1);
-                const float l = Luminance(InputTexture.Load(int3(p, 0)).rgb) * invDemodLum;
-                sm1 += l;
-                sm2 += l * l;
-                count += 1.0f;
-            }
-        }
-        sm1 /= count;
-        sm2 /= count;
-        variance = max(sm2 - sm1 * sm1, 0.0f);
+        // 【ここでだけ計算する】この位置と加算順を変えると丸めの順序が変わる。
+        const float2 spatialMoments = SpatialLuminanceMoments(pixel, outputSize, demod);
+        variance = max(spatialMoments.y - spatialMoments.x * spatialMoments.x, 0.0f);
     }
 
     OutputTexture[pixel] = float4(blended, 1.0f);
     OutputMomentsTexture[pixel] = float4(moments, newLength, variance);
     // 翌フレームの履歴。pingはà-trousが上書きするので独立に残す。
-    // .wは翌フレームの時間累積では読まない(分散はそのフレームで作り直す)
-    HistoryOutTexture[pixel] = float4(blended, 1.0f);
+    // 【アルファに速いEMAを載せる】a-trousはアルファを素通しするだけなので枠が空いている。
+    // ping(u0)側は 1.0 のままにする ―― あちらの意味を変えると後段の読み手を巻き込む。
+    // **陽性対照でこのテクスチャを従来版と比べるときはRGBだけを見ること** ――
+    // アルファは従来 1.0 固定だったので、適応を切ってもここだけは一致しない
+    // .wは翌フレームの時間累積では読まない。分散を ping と同じ値で残す。
+    HistoryOutTexture[pixel] = float4(blended, fast);
     HistoryMomentsOutTexture[pixel] = float4(moments, newLength, variance);
 }
 
@@ -338,10 +726,26 @@ void CSAtrous(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float depth = DepthTexture.SampleLevel(DataSampler, uv, 0).r;
     const float4 center = InputTexture.Load(int3(pixel, 0));
 
+    // 最終段は復調を掛け戻して最終出力(MegaLightsDenoisedTexture)へ直接書く。
+    // 【パスを1本消すためにやっている】以前は同じことを専用の CSRemodulate が
+    // フルスクリーンでもう一度読んで書いていた。消えるのはその読み書きと
+    // パス境界のリソース遷移で、実測 -0.37ms(docs/ImplementationDetail.md 61.7z)。
+    // 【ビット同一とは言えない】掛ける値も式も同じだが、融合前は filtered を一度
+    // テクスチャへ書いて読み直していた。その store/load が無くなると
+    // コンパイラの演算契約(FMA の畳み込みなど)が変わりうる。実測では差が
+    // 物差しのノイズ下限より小さい(同 61.7z.3)ことまでしか示せていない。
+    // 【段が0本のときは融合先が無い】そのときだけ C++ が従来どおり CSRemodulate を積む
+    const bool isFinalPass = (Params2.w != 0.0f);
+
     if (depth <= 0.0f)
     {
         OutputTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
-        OutputMomentsTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        // 最終段のモーメントは誰も読まない。**書き先も自分の出力が重ねて束縛されている**ので
+        // 書くと最終出力を壊す
+        if (!isFinalPass)
+        {
+            OutputMomentsTexture[pixel] = float4(0.0f, 0.0f, 0.0f, 0.0f);
+        }
         return;
     }
 
@@ -440,6 +844,12 @@ void CSAtrous(uint3 dispatchThreadID : SV_DispatchThreadID)
     const float3 filtered = (weightSum > 1e-6f) ? (sum / weightSum) : center.rgb;
     const float filteredVariance =
         (weightSum > 1e-6f) ? (varSum / (weightSum * weightSum)) : variance;
+    if (isFinalPass)
+    {
+        // 【復調に使ったのと同じ式で掛け戻す】CSRemodulate と同一の関数を同じ uv で呼ぶ
+        OutputTexture[pixel] = float4(filtered * DemodulationFactor(uv), 1.0f);
+        return;
+    }
     OutputTexture[pixel] = float4(filtered, center.a);
     // xyz(1次・2次モーメントと履歴の長さ)はそのまま、wだけ畳んだ分散に差し替えて次段へ渡す。
     // これで段が進むほど分散が小さくなり、輝度の門番が効き続ける

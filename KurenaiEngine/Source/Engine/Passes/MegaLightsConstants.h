@@ -17,14 +17,24 @@
 namespace Kurenai::Passes
 {
         // 【実行時に振れる。ここは確保の上限】1タイルの抽出数Kは設定が持ち、シェーダへは
-        // 定数バッファで渡している。バッファの確保だけがコンパイル時の上限を要る
-        inline constexpr uint32_t kMegaLightsTilePoolCapacity = 128;
+        // 定数バッファで渡している。確保は1タイルあたり(6 + 2K) uintで、Kはレイの本数を増やさず
+        // 出力バッファの容量だけを増やす
+        inline constexpr uint32_t kMegaLightsTilePoolCapacity = 512;
         // Kの下限。これを下回るとタイルに届く灯を代表できない
         inline constexpr int32_t kMegaLightsTilePoolMinCapacity = 8;
-        // 1画素あたりの標本数の上限。リザーババッファはこの倍数まで太る
-        //(16バイト x 画素数 x 標本数。2560x1440・4本で236MB)ので、際限なく上げさせない。
-        // クアッド層化は4層なので、4を超えると層の割り当てが一巡して効きが鈍る
-        inline constexpr int32_t kMegaLightsMaxSamplesPerPixel = 4;
+        // 1画素あたりの標本数の上限。リザーバ1本は16バイト x 画素数 x 標本数で、2560x1440では
+        // 1標本あたり約59MB、上限16標本では約944MBになる。同サイズのリザーバは初期・空間再利用の
+        // ping-pong・時間履歴の計5本を確保するため、実際の確保量はさらに大きい。
+        // クアッド層化の層の数は共有ブロックの画素数 (2*QuadShareRadius)^2 なので、
+        // それを超えると層の割り当てが一巡して効きが鈍る(半径1なら4、半径2なら16)
+        inline constexpr int32_t kMegaLightsMaxSamplesPerPixel = 16;
+        // クアッド共有で標本を借りる範囲の半径の上限。2 なら 4x4 ブロック。
+        // 【上限を2で止めている】層化は候補プールのK個を (2*半径)^2 層へ割るので、
+        // 半径3(36層)では既定の K=128 でも1層3スロットまで痩せる。
+        // 借りる距離も対角 sqrt(50) 画素まで伸びて、可視性を仲間のレイで代用する
+        // 近似(MegaLightsResolve.hlsl 冒頭)が成立しなくなる。根拠は
+        // docs/ImplementationDetail.md 61.7y
+        inline constexpr int32_t kMegaLightsMaxQuadShareRadius = 2;
 
         // タイルライトカリングのタイルサイズ(1辺のピクセル数)。
         // LightCulling.hlsl の kTileSize および numthreads と必ず一致させること
@@ -49,16 +59,20 @@ namespace Kurenai::Passes
         struct alignas(16) MegaLightsTilePoolConstants
         {
             DirectX::XMFLOAT4X4 View;
-            // xy=候補プールの有効タイル数(格子ジッター有効時だけ通常のタイル数+1)、
-            // z=有効ライト数, w=1タイルあたりの候補数K
+            // xy=候補プールのタイル数、z=有効ライト数, w=1タイルあたりの候補数K
             DirectX::XMUINT4 TileParams;
             // x=レンダー解像度の幅, y=同 高さ, zw=未使用
             DirectX::XMUINT4 RenderSize;
             // x=射影行列の(0,0)成分, y=同(1,1)成分、z=深度リニアライズ定数a, w=同b
             DirectX::XMFLOAT4 ProjParams;
-            // x=フレーム番号(候補を毎フレーム引き直すための乱数の種)、
-            // yz=タイル格子の画素オフセット(各0〜15)、w=未使用
+            // x=フレーム番号(候補を毎フレーム引き直すための乱数の種)、yzw=未使用
             DirectX::XMUINT4 PoolParams;
+            // 可視灯リスト(提案分布の第3成分)。
+            // x=リストの容量(0なら機能そのものが無効)、y=前フレームのリストが使えるか、
+            // z=asuint(リスト枝へ回す混合率 c)、w=未使用。
+            // **z は MegaLightsStochasticConstants.Params7.x と必ず同じ値にすること**
+            // (抽出した確率と割り戻す確率が食い違うと、絵は出たまま静かに偏る)
+            DirectX::XMUINT4 VisibleListParams;
         };
         // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
         // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
@@ -72,7 +86,27 @@ namespace Kurenai::Passes
         static_assert(offsetof(MegaLightsTilePoolConstants, RenderSize) == 80, "RenderSize のレイアウトが変わっている");
         static_assert(offsetof(MegaLightsTilePoolConstants, ProjParams) == 96, "ProjParams のレイアウトが変わっている");
         static_assert(offsetof(MegaLightsTilePoolConstants, PoolParams) == 112, "PoolParams のレイアウトが変わっている");
-        static_assert(sizeof(MegaLightsTilePoolConstants) == 128, "MegaLightsTilePoolConstants の総サイズが変わっている");
+        static_assert(offsetof(MegaLightsTilePoolConstants, VisibleListParams) == 128, "VisibleListParams のレイアウトが変わっている");
+        static_assert(sizeof(MegaLightsTilePoolConstants) == 144, "MegaLightsTilePoolConstants の総サイズが変わっている");
+
+        // MegaLightsVisibleLights.hlsl側のcbuffer MegaLightsVisibleListConstantsと並びを一致させること
+        struct alignas(16) MegaLightsVisibleListConstants
+        {
+            // x=タイル数X, y=同Y, z=1タイルあたりのリスト容量, w=1画素あたりの標本数
+            DirectX::XMUINT4 ListParams;
+            // x=レンダー解像度の幅, y=同 高さ, zw=未使用
+            DirectX::XMUINT4 ListSize;
+        };
+        static_assert(offsetof(MegaLightsVisibleListConstants, ListParams) == 0, "ListParams のレイアウトが変わっている");
+        static_assert(offsetof(MegaLightsVisibleListConstants, ListSize) == 16, "ListSize のレイアウトが変わっている");
+        static_assert(sizeof(MegaLightsVisibleListConstants) == 32, "MegaLightsVisibleListConstants の総サイズが変わっている");
+
+        // 可視灯リストの1タイルぶんのヘッダ長と容量の上限。
+        // **MegaLightsCommon.hlsli の kMegaLightsVisibleListHeader /
+        //   kMegaLightsVisibleListCapacityMax と必ず一致させること**
+        // (片方だけ直すと無関係な位置を候補として読む。絵は出るので気付けない)
+        inline constexpr uint32_t kMegaLightsVisibleListHeader = 2u;
+        inline constexpr uint32_t kMegaLightsVisibleListCapacityMax = 16u;
 
         // MegaLightsAccum.hlsl側のcbuffer MegaLightsAccumConstantsと一致させる必要がある
         struct alignas(16) MegaLightsAccumConstants
@@ -98,8 +132,33 @@ namespace Kurenai::Passes
             // x=à-trousのステップ幅, y=時間累積の上限フレーム数,
             // z=輝度のエッジ停止の強さ, w=法線のエッジ停止の指数
             DirectX::XMFLOAT4 Params1;
-            // x=深度のエッジ停止の強さ, yzw=未使用
+            // x=深度のエッジ停止の強さ, y=ファイアフライのクランプ強さ(0で無効),
+            // z=前フレームの幾何(履歴ガイド)が使えるか(0なら現フレームのG-Bufferで代用),
+            // w=未使用
+            //
+            // 【この行はかつて「yzw=未使用」と嘘を書いていた】y と z は実際には使われており、
+            // HLSL側の宣言だけが正しかった。コメントを契約として使うコードベースなので、
+            // ここがずれていると次の改修が空き枠だと思って y や z を潰す
             DirectX::XMFLOAT4 Params2;
+            // x=履歴の妥当性を何タップで判定するか(0=最近傍1タップ(従来) / 1=バイリニア2x2の4タップ),
+            // yzw=未使用
+            //
+            // 【なぜ足したか】履歴の**色**はバイリニアで4タップ混ぜるのに、その4タップが
+            // 妥当かどうかは最近傍1点でしか見ていなかった。帰結は2つとも実害で、
+            // (1)1点だけがシルエットの向こう側だと履歴全体を棄却する(本当は妥当なのに捨てる)
+            // (2)1点が通れば残り3タップが別の面でも 3/4 の重みで色が入る
+            DirectX::XMFLOAT4 Params3;
+            // x=履歴深度のカメラ移動補正(0=従来の現在ViewZとの比較 / 1=前フレームの期待ViewZ)、
+            // yzw=未使用
+            DirectX::XMFLOAT4 Params4;
+            // 時間累積の履歴長を適応させるつまみ。**4つとも0で従来の式へ厳密に還元される**
+            // x=幾何の部分減衰の強さ(0=従来の二値のまま / 1でしきい値まで線形),
+            // y=時間勾配で履歴を縮める強さ(0=無効),
+            // z=相対変化のしきい値T0(ここから疑い始める), w=同T1(ここで履歴を捨てきる)
+            DirectX::XMFLOAT4 Params5;
+            // x=速いEMAの長さ(フレーム数。0で無効), y=タイル勾配テクスチャが使えるか,
+            // z=ラッチの長さ(フレーム数。撃ち始めたタイルが撃ち続ける長さ。0で無効), w=未使用
+            DirectX::XMFLOAT4 Params6;
         };
         // 【HLSL側の宣言とレイアウトを揃えたまま保つための固定】cbuffer(と構造化バッファ)は
         // 宣言順でオフセットが決まるので、ここで並べ替え・挿入・型変更が起きると、
@@ -111,7 +170,18 @@ namespace Kurenai::Passes
         static_assert(offsetof(MegaLightsDenoiseConstants, Params0) == 0, "Params0 のレイアウトが変わっている");
         static_assert(offsetof(MegaLightsDenoiseConstants, Params1) == 16, "Params1 のレイアウトが変わっている");
         static_assert(offsetof(MegaLightsDenoiseConstants, Params2) == 32, "Params2 のレイアウトが変わっている");
-        static_assert(sizeof(MegaLightsDenoiseConstants) == 48, "MegaLightsDenoiseConstants の総サイズが変わっている");
+        // Params3 は履歴の妥当性判定のタップ数を載せるために**意図して足した**。
+        // 通すために期待値を書き換えたのではなく、動かしたことの記録としてここを更新している
+        static_assert(offsetof(MegaLightsDenoiseConstants, Params3) == 48, "Params3 のレイアウトが変わっている");
+        // Params4 はカメラ移動補正のスイッチを載せるために**意図して足した**。
+        // 通すために期待値を書き換えたのではなく、追加したことの記録としてここを更新している
+        static_assert(offsetof(MegaLightsDenoiseConstants, Params4) == 64, "Params4 のレイアウトが変わっている");
+        // Params5 は履歴長の適応(幾何の部分減衰と時間勾配)を載せるために**意図して足した**。
+        // 通すために期待値を書き換えたのではなく、追加したことの記録としてここを更新している
+        static_assert(offsetof(MegaLightsDenoiseConstants, Params5) == 80, "Params5 のレイアウトが変わっている");
+        // Params6 は速いEMAの長さを載せるために**意図して足した**
+        static_assert(offsetof(MegaLightsDenoiseConstants, Params6) == 96, "Params6 のレイアウトが変わっている");
+        static_assert(sizeof(MegaLightsDenoiseConstants) == 112, "MegaLightsDenoiseConstants の総サイズが変わっている");
 
         // MegaLightsReference.hlsl側のcbuffer MegaLightsConstantsと一致させる必要がある
         struct alignas(16) MegaLightsConstants

@@ -671,7 +671,8 @@ namespace Kurenai
             // 超解像が無効ならRequestUpscaleSettingsは中でRequestRenderResolutionを呼ぶだけなので、
             // 従来とまったく同じ動作になる
             RequestUpscaleSettings(
-                m_Settings.PostProcess.UpscaleEnabled, m_Settings.PostProcess.UpscaleQuality, m_Scene.RenderWidth, m_Scene.RenderHeight);
+                m_Settings.PostProcess.UpscaleEnabled, m_Settings.PostProcess.UpscaleTech,
+                m_Settings.PostProcess.UpscaleQuality, m_Scene.RenderWidth, m_Scene.RenderHeight);
         }
         // トーンマップのカーブと空の彩度(アート指定)をシーンから受け取る。
         // Source/LibraryはSource/Engineに依存できないため、Scene側は同じ並びの独立した列挙を持つ。
@@ -944,6 +945,8 @@ namespace Kurenai
         // ApplyLoadedSceneはRenderスレッドから呼ばれるため、m_Cameraは直接書けないがatomicなら書ける
         // (Renderスレッドが読む。カメラ自体はこの後m_AppliedSceneCamera経由でUpdateスレッドへ渡す)
         m_History.HistoryValid.store(false, std::memory_order_relaxed);
+        // DLSSが内部に持つ履歴も同じ理由で捨てる(NGXへInReset=1を渡す)
+        m_History.DLSSHistoryValid.store(false, std::memory_order_relaxed);
 
         // Hi-Zにも前のシーンの深度が入っている。カメラが新シーンの初期位置へ飛ぶ以上、
         // それで遮蔽を判定すると見えているものを消しうる。TAAの履歴と同じ理由で捨てる
@@ -976,7 +979,13 @@ namespace Kurenai
             m_AppliedSceneApplyCamera = !(m_Settings.System.SceneReloadKeepsCamera && isSameSceneReload);
             m_AppliedSceneCamera = loaded.Camera;
             m_AppliedSceneTitle = std::wstring(L"Kurenai Engine [") + apiName + L"] - " + m_Scene.Name;
+            // 決定的カメラ経路(計測専用)。**カメラ本体と違ってconsumeせず持ち続ける** ――
+            // -camerapath の指定がシーンの適用より後になることがあり、そのとき名前を
+            // 解決できなくなるため(起動オプションの適用順に依存させない)
+            m_AppliedSceneCameraPaths = m_Scene.CameraPaths;
         }
         m_AppliedScenePending.store(true, std::memory_order_release);
+        // シーンが変われば経路の実体も変わる。Updateスレッドに解決し直させる
+        m_CameraPathNeedsResolve.store(true, std::memory_order_relaxed);
     }
 }

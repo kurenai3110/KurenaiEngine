@@ -1,6 +1,9 @@
 #include "Rendering/RenderTargets.h"
 
 #include <algorithm>
+#include <string>
+
+#include "Core/Logger.h"
 
 namespace Kurenai::Rendering
 {
@@ -154,6 +157,23 @@ namespace Kurenai::Rendering
         UpscaleTargetHeight = 0;
     }
 
+    void RenderTargets::CreateDLSSOutput(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
+    {
+        // SceneColorと同じHDR(fp16)。DLSSはTonemapの前に入るため、出すのも表示レンジではなく
+        // プリ露出済みのHDR値になる。Legacy8bit構成でもここはHDRのままにする
+        // (LDRへ落とすのはこの後のTonemapパスの仕事)
+        DLSSOutputTexture = device.CreateUAVTexture(width, height, RHI::Format::R16G16B16A16_Float);
+        DLSSTargetWidth = width;
+        DLSSTargetHeight = height;
+    }
+
+    void RenderTargets::ResetDLSSOutput()
+    {
+        DLSSOutputTexture.reset();
+        DLSSTargetWidth = 0;
+        DLSSTargetHeight = 0;
+    }
+
     void RenderTargets::CreateLightTiles(
         RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t tileSize, uint32_t stride)
     {
@@ -172,12 +192,33 @@ namespace Kurenai::Rendering
     {
         RHI::BufferDesc tilePoolBufferDesc;
         tilePoolBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
-        // ジッター有効時は右端・下端のタイル座標が1つ増える。トグル変更でGPUを
-        // 待って再確保しなくて済むよう、無効時も常に+1ぶんを確保しておく
         tilePoolBufferDesc.SizeInBytes =
-            static_cast<uint32_t>(sizeof(uint32_t)) * stride * (LightTileCountX + 1u) * (LightTileCountY + 1u);
+            static_cast<uint32_t>(sizeof(uint32_t)) * stride * LightTileCountX * LightTileCountY;
         tilePoolBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
         MegaLightsTilePoolBuffer = device.CreateBuffer(tilePoolBufferDesc);
+        if (!MegaLightsTilePoolBuffer)
+        {
+            Core::Logger::Error("RenderTargets", "MegaLightsの候補プールバッファの確保に失敗しました");
+            return;
+        }
+
+        constexpr double kBytesPerMegabyte = 1000.0 * 1000.0;
+        const double tilePoolMegabytes = static_cast<double>(tilePoolBufferDesc.SizeInBytes) / kBytesPerMegabyte;
+        Core::Logger::Info(
+            "RenderTargets", "MegaLightsの候補プールバッファを確保しました: " + std::to_string(tilePoolMegabytes) + " MB");
+    }
+
+    void RenderTargets::CreateMegaLightsVisibleLists(RHI::IRHIDevice& device, uint32_t stride)
+    {
+        RHI::BufferDesc visibleListBufferDesc;
+        visibleListBufferDesc.Usage = RHI::BufferUsage::StructuredRW;
+        visibleListBufferDesc.SizeInBytes =
+            static_cast<uint32_t>(sizeof(uint32_t)) * stride * LightTileCountX * LightTileCountY;
+        visibleListBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
+        for (auto& buffer : MegaLightsVisibleLists)
+        {
+            buffer = device.CreateBuffer(visibleListBufferDesc);
+        }
     }
 
     void RenderTargets::CreateMegaLightsOutput(RHI::IRHIDevice& device, uint32_t width, uint32_t height)
@@ -217,6 +258,7 @@ namespace Kurenai::Rendering
         blockedBufferDesc.SizeInBytes = static_cast<uint32_t>(sizeof(uint32_t)) * width * height;
         blockedBufferDesc.StrideInBytes = static_cast<uint32_t>(sizeof(uint32_t));
         MegaLightsBlockedLightBuffer = device.CreateBuffer(blockedBufferDesc);
+
         // 空間再利用の出力先。近傍を読むので入力と同じバッファへは書けない。
         // 2回以上回すときは2本を ping-pong する
         MegaLightsReservoirSpatialBuffer = device.CreateBuffer(reservoirBufferDesc);
@@ -230,6 +272,27 @@ namespace Kurenai::Rendering
         for (auto& buffer : MegaLightsReservoirHistory)
         {
             buffer = device.CreateBuffer(reservoirBufferDesc);
+        }
+
+        if (!MegaLightsReservoirBuffer || !MegaLightsReservoirSpatialBuffer || !MegaLightsReservoirSpatialBuffer2 ||
+            !MegaLightsReservoirHistory[0] || !MegaLightsReservoirHistory[1] || !MegaLightsBlockedLightBuffer)
+        {
+            Core::Logger::Error("RenderTargets", "MegaLightsのリザーバ系バッファの確保に失敗しました");
+            return;
+        }
+
+        constexpr uint64_t kReservoirBufferCount = 5u;
+        constexpr uint64_t kAuxiliaryBufferCount = 1u;
+        constexpr double kBytesPerMegabyte = 1000.0 * 1000.0;
+        const uint64_t reservoirBytes = static_cast<uint64_t>(reservoirBufferDesc.SizeInBytes) * kReservoirBufferCount +
+            static_cast<uint64_t>(blockedBufferDesc.SizeInBytes) * kAuxiliaryBufferCount;
+        const double reservoirMegabytes = static_cast<double>(reservoirBytes) / kBytesPerMegabyte;
+        Core::Logger::Info(
+            "RenderTargets", "MegaLightsのリザーバ系バッファを確保しました: " + std::to_string(reservoirMegabytes) + " MB");
+        if (reservoirMegabytes > 2048.0)
+        {
+            Core::Logger::Warning(
+                "RenderTargets", "MegaLightsのリザーバ系バッファが2048MBを超えています。標本数を下げるかレンダー解像度を下げてください");
         }
     }
 
@@ -260,6 +323,8 @@ namespace Kurenai::Rendering
             MegaLightsDenoiseMomentPing[denoiseIndex] =
                 device.CreateUAVTexture(width, height, RHI::Format::R32G32B32A32_Float);
         }
+        MegaLightsDenoiseTileGradient = device.CreateUAVTexture(
+            (width + 7u) / 8u, (height + 7u) / 8u, RHI::Format::R32_Float);
     }
 
     void RenderTargets::ResetSoftwareRasterOutputs()

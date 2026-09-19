@@ -78,6 +78,17 @@ namespace Kurenai::RHI
         m_HasLastDraw = false;
     }
 
+    void DX12CommandList::RestoreBindingsAfterExternalCommands()
+    {
+        // ディスクリプタヒープを戻す。これを忘れると、以降のSetGraphicsRootDescriptorTableが
+        // 「バインド中のヒープに属さないGPUハンドル」を渡す仕様違反になる
+        m_Device->BindEngineDescriptorHeaps();
+
+        // SRVテーブルの使い回しキャッシュは捨てる。外部コードがルートシグネチャを
+        // 差し替えているため、直前の描画と同じテクスチャでもルート引数は生きていない
+        m_HasLastDraw = false;
+    }
+
     void DX12CommandList::UnbindSrvSlotsBoundTo(IRHITexture* texture)
     {
         auto* dx12Texture = static_cast<DX12Texture*>(texture);

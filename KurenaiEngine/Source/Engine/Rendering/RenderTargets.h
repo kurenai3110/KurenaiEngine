@@ -142,6 +142,16 @@ namespace Kurenai::Rendering
         uint32_t UpscaleTargetWidth = 0;
         uint32_t UpscaleTargetHeight = 0;
 
+        // DLSSの出力1枚。**出力解像度**のUAVで、上のFSR1相当の2枚とは排他に使う。
+        // フォーマットがHDR(fp16)なのは、DLSSがTonemapより**前**に入るため
+        // ―― 入力のSceneColorと同じプリ露出済みHDR値を出力する。
+        // 【なぜここが持つか】書くのはPostProcessPassesだが、後段のAutoExposure/Bloom/Tonemapが
+        // これをHDRシーン色として読み、PresentPassも実寸を読む
+        std::unique_ptr<RHI::IRHITexture> DLSSOutputTexture;
+        // 実際に確保済みのサイズ。0なら未確保(DLSSが無効)
+        uint32_t DLSSTargetWidth = 0;
+        uint32_t DLSSTargetHeight = 0;
+
         // タイルライトカリングのライトグリッド(BufferUsage::StructuredRW)。コンピュートがUAVで書き、
         // 直接光パスのピクセルシェーダがSRVで読む。タイル数は解像度に依存する。
         // 【なぜここが持つか】書くのはMegaLightsPassesだが、LightingPassesが直接光で読み、
@@ -152,6 +162,12 @@ namespace Kurenai::Rendering
         // MegaLightsの候補プール。タイルの切り方はライトグリッドと同じで、1タイルあたりの
         // 要素数だけが違う。非対応環境ではパス自体が走らないので確保しない(nullptrのまま)
         std::unique_ptr<RHI::IRHIBuffer> MegaLightsTilePoolBuffer;
+        // 可視灯リスト(提案分布の第3成分)。タイルの切り方は候補プールと同じ。
+        // **2本のping-pongにするのは、RenderGraphがWARの辺を張らないため** ――
+        // 候補プールは前フレームが書いた側を読み、構築パスはもう片方へ書く。
+        // 1本で済ませると「今フレームのプールが読んだ直後に同じバッファへ書く」形になり、
+        // 条件分岐でパスが1つ消えた瞬間に静かに壊れる(リザーバの履歴と同じ事情)
+        std::unique_ptr<RHI::IRHIBuffer> MegaLightsVisibleLists[2];
 
         // MegaLightsの生出力。R32G32B32A32_Floatで確保する ―― 物差し自体が系統的に
         // 暗い側へ寄っていると、確率的サンプリングのバイアス検査が汚染されるため
@@ -201,6 +217,8 @@ namespace Kurenai::Rendering
         // à-trous のping-pong用。段ごとに入れ替える
         std::unique_ptr<RHI::IRHITexture> MegaLightsDenoisePing[2];
         std::unique_ptr<RHI::IRHITexture> MegaLightsDenoiseMomentPing[2];
+        // 時間勾配をタイル単位で保持し、本体側で線形補間してタイル境界を消す。
+        std::unique_ptr<RHI::IRHITexture> MegaLightsDenoiseTileGradient;
 
         // G-Buffer の生成は元の位置ごとに3つへ分ける。間に他のテクスチャ生成があるため、
         // 順序を変えるとDX12のディスクリプタ枠の割り当て順が変わり、意味の無い差分になる。
@@ -231,15 +249,20 @@ namespace Kurenai::Rendering
         void CreateUpscale(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         // 上を解放し、実寸を0(未確保)に戻す
         void ResetUpscale();
+        // DLSSの出力1枚を出力解像度で作り、実寸を記録する
+        void CreateDLSSOutput(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
+        // 上を解放し、実寸を0(未確保)に戻す
+        void ResetDLSSOutput();
         // ライトグリッドを作り直す。タイル数は解像度から切り上げで決まり、ここで記録する。
         // strideは1タイルあたりのuint数(KurenaiEngine3D::kLightTileStride)
         void CreateLightTiles(
             RHI::IRHIDevice& device, uint32_t width, uint32_t height, uint32_t tileSize, uint32_t stride);
         // MegaLightsの候補プールを作り直す。**CreateLightTilesの後に呼ぶこと**
         // (上で記録したタイル数から大きさが決まる)。
-        // ジッター有効時は右端・下端のタイル座標が1つ増える。トグル変更でGPUを待って
-        // 再確保しなくて済むよう、無効時も常に+1ぶんを確保しておく
         void CreateMegaLightsTilePool(RHI::IRHIDevice& device, uint32_t stride);
+        // MegaLightsの可視灯リストを作り直す。**CreateLightTilesの後に呼ぶこと**
+        // (候補プールと同じタイル数から大きさが決まる)。stride はヘッダ長+容量
+        void CreateMegaLightsVisibleLists(RHI::IRHIDevice& device, uint32_t stride);
         // MegaLightsの生出力。呼び出し元のtry内から、元の行位置で呼ぶこと
         void CreateMegaLightsOutput(RHI::IRHIDevice& device, uint32_t width, uint32_t height);
         // デノイズ後の最終出力。デノイザ用の履歴を作る位置で呼ぶ

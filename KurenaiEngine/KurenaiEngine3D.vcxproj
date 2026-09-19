@@ -139,6 +139,7 @@
     <ClInclude Include="Source\Engine\Passes\ReflectionPasses.h" />
     <ClInclude Include="Source\Engine\Passes\ReflectionProbePasses.h" />
     <ClInclude Include="Source\Engine\Rendering\CubeFaceMath.h" />
+    <ClInclude Include="Source\Engine\Rendering\DLSSQualityMap.h" />
     <ClInclude Include="Source\Engine\Passes\ShadowPasses.h" />
     <ClInclude Include="Source\Engine\Rendering\ObjectConstants.h" />
     <ClInclude Include="Source\Engine\Rendering\ExposureMath.h" />

@@ -72,6 +72,9 @@
     <ClInclude Include="Source\Library\Assets\ModelPackage.h">
       <Filter>Source\Library\Assets</Filter>
     </ClInclude>
+    <ClInclude Include="Source\Library\Assets\CameraPath.h">
+      <Filter>Source\Library\Assets</Filter>
+    </ClInclude>
     <ClInclude Include="Source\Library\Assets\Scene.h">
       <Filter>Source\Library\Assets</Filter>
     </ClInclude>
@@ -322,6 +325,9 @@
       <Filter>Source\Library\Assets</Filter>
     </ClCompile>
     <ClCompile Include="Source\Library\Assets\RaytracingScene.cpp">
+      <Filter>Source\Library\Assets</Filter>
+    </ClCompile>
+    <ClCompile Include="Source\Library\Assets\CameraPath.cpp">
       <Filter>Source\Library\Assets</Filter>
     </ClCompile>
     <ClCompile Include="Source\Library\Assets\SceneLoader.cpp">

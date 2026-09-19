@@ -146,6 +146,15 @@ namespace Kurenai::Passes
                 presentSourceWidth = targets->UpscaleTargetWidth;
                 presentSourceHeight = targets->UpscaleTargetHeight;
             }
+            else if (bb.DLSSActive)
+            {
+                // DLSSはTonemapより**前**に入るため、読む先はFSR1相当と違ってTonemapの出力
+                // そのままである(拡大はもう済んでいる)。変わるのは実寸だけ ――
+                // Tonemapが出力解像度で走っているので、レターボックスの基準もそちらにする
+                presentSourceTexture = targets->TonemapTexture.get();
+                presentSourceWidth = bb.DLSSOutputWidth;
+                presentSourceHeight = bb.DLSSOutputHeight;
+            }
             else
             {
                 presentSourceTexture = targets->TonemapTexture.get();
@@ -451,10 +460,7 @@ namespace Kurenai::Passes
             presentUsesTilePool ? targets->MegaLightsTilePoolBuffer.get() : targets->LightTileBuffer.get();
         const uint32_t presentTileCapacity =
             presentUsesTilePool ? static_cast<uint32_t>(frame.Settings.MegaLights.TilePoolCapacity) : Passes::kLightTileCapacity;
-        // Mode 21だけは候補プールを書いた有効タイル幅を使う。Mode 11は従来のライトグリッドなので
-        // LightTileCountXのままにし、デバッグ表示が実データと別の添字を読まないようにする
-        const uint32_t presentTileCountX =
-            presentUsesTilePool ? frame.MegaLightsEffectiveTilesX : targets->LightTileCountX;
+        const uint32_t presentTileCountX = targets->LightTileCountX;
 
         PresentConstants presentConstants{};
         presentConstants.Mode = presentMode;
@@ -471,8 +477,8 @@ namespace Kurenai::Passes
         {
             static_cast<float>(renderWidth),
             static_cast<float>(renderHeight),
-            presentUsesTilePool ? static_cast<float>(frame.MegaLightsTileOffset.x) : 0.0f,
-            presentUsesTilePool ? static_cast<float>(frame.MegaLightsTileOffset.y) : 0.0f,
+            0.0f,
+            0.0f,
         };
         // Mode 22(蓄積平均)が割る数。0で割らないよう下限1
         presentConstants.AccumParams =

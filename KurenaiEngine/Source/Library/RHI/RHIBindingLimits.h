@@ -54,8 +54,15 @@ namespace Kurenai::RHI::RHIBindingLimits
     // bent normal(t16、34章)とメッシュレット表(t17、38章)を1回のディスパッチで同時に読むため
     inline constexpr uint32_t kComputeSrvSlotCount = 18;
 
-    // コンピュートシェーダーのUAVスロット数(u0〜u3)
-    inline constexpr uint32_t kComputeUavSlotCount = 4;
+    // コンピュートシェーダーのUAVスロット数(u0〜u4)。
+    // 5本目は MegaLights デノイザのタイル勾配(MegaLightsDenoise.hlsl の CSTileGradient)が
+    // 使う。あちらは時間累積が使う u0〜u3 とは別のパスだが、**同じ .hlsl の中で宣言が
+    // 重なる**ため、同じ register を別の型で二重宣言することができない。
+    // 【足りないと PSO の生成が E_INVALIDARG で落ちる】シェーダが宣言した register が
+    // ルートシグネチャの範囲を超えるため。**DX11 側の null クリアと DX12 の
+    // ルートシグネチャ(DX12DevicePipelines.cpp の ranges[1])はこの定数から作られる**ので、
+    // 直すのはここ1か所でよい
+    inline constexpr uint32_t kComputeUavSlotCount = 5;
 
     // 1つのサンプラーセット(=1つのディスクリプタテーブル)が持つスロット数。
     // s0 = MaterialSampler、s1 = ColorSampler、s2 = DataSampler、s3 = VolumeSampler

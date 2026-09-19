@@ -143,8 +143,20 @@ namespace Kurenai
         //
         // ここはApplyPendingResizeの後、かつこのフレームでm_RenderWidth/m_RenderHeightを
         // 読み始めるより前(最初の読み取りはTAAジッター)なので、解像度をまとめて差し替えてよい
+        // DLSSの有効/無効・手法の切り替えで、Tonemapとブルームが走る解像度が変わる。
+        //
+        // 【dirtyフラグだけに頼れない】この解像度は「DLSSが選ばれているか」で決まるので、
+        // レンダー解像度が変わらないまま変化しうる(FSR1⇔DLSSでNGXの推奨値が偶然一致した場合や、
+        // DLAA = 等倍の場合)。確保済みのTonemapの実寸と比べて食い違いを自力で直す ――
+        // 食い違ったままだとTonemapが自分の書き先と違う解像度のビューポートで描き、
+        // クラッシュせずに絵の一部だけが出る
+        const bool postProcessResolutionMismatched =
+            m_RenderTargets.TonemapTexture != nullptr &&
+            (m_RenderTargets.TonemapTexture->GetWidth() != GetPostProcessWidth() ||
+             m_RenderTargets.TonemapTexture->GetHeight() != GetPostProcessHeight());
+
         if (m_BufferPrecisionDirty || m_RenderResolutionDirty || m_PlanarReflectionResolutionDirty ||
-            m_UpscaleTargetsDirty || m_MegaLightsReservoirDirty)
+            m_UpscaleTargetsDirty || m_MegaLightsReservoirDirty || postProcessResolutionMismatched)
         {
             const bool precisionChanged = m_BufferPrecisionDirty;
             m_BufferPrecisionDirty = false;
@@ -286,6 +298,23 @@ namespace Kurenai
                     light.Enabled = false;
                 }
                 Core::Logger::Info("KurenaiEngine3D", "【検証】全ライトを消しました(ゴースト測定)");
+            }
+            else if (m_Settings.MegaLights.PerturbMode == 3)
+            {
+                // 【局所的な変化を作る】1は画面全体が一斉に変わるので、タイル単位で変化を
+                // 探す時間勾配にとっては最も簡単な問題になる。1つおきに消すと、変化した領域と
+                // 変化していない領域が同じ絵の中に混在し、**8x8タイルの継ぎ目と見逃し**が
+                // そこに出る。検出力そのものを測るための入口
+                size_t disabled = 0;
+                for (size_t i = 1; i < m_Lights.size(); i += 2)
+                {
+                    m_Lights[i].Enabled = false;
+                    ++disabled;
+                }
+                Core::Logger::Info(
+                    "KurenaiEngine3D",
+                    "【検証】ライトを1つおきに消しました(局所的な変化。消した数: " +
+                        std::to_string(disabled) + " / " + std::to_string(m_Lights.size()) + ")");
             }
             else if (m_Settings.MegaLights.PerturbMode == 2)
             {
@@ -555,5 +584,10 @@ namespace Kurenai
             // 無効の間は履歴を更新していないので、再度有効化されたときに古い絵が混ざらないよう落としておく
             m_History.HistoryValid.store(false, std::memory_order_relaxed);
         }
+
+        // DLSSは履歴を自前で持つのでTAAHistoryのping-pongは要らない。記録するのは
+        // 「次のフレームが履歴を使ってよいか」だけで、走らなかったフレームの後は必ず落とす
+        // (デバッグ表示へ切り替えている間に絵が進むので、戻ったときに古い履歴から再投影しない)
+        m_History.DLSSHistoryValid.store(ShouldRunDLSS(), std::memory_order_relaxed);
     }
 }

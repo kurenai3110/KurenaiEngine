@@ -6,22 +6,45 @@
 
 namespace Kurenai
 {
-    // --- 超解像(FSR1相当のEASU+RCAS。41.23節) ---
+    // --- 超解像(FSR1相当のEASU+RCAS = 41.23節 / DLSS Super Resolution・DLAA) ---
     //
     // 【m_RenderWidth/m_RenderHeightの意味は変えていない】ここで足したのは
-    // 「出力解像度」という一段外側の概念だけで、上のm_RenderWidth/m_RenderHeightは
+    // 「出力解像度」という一段外側の概念だけで、m_RenderWidth/m_RenderHeightは
     // 従来どおり「G-Buffer以降すべての中間バッファの解像度」のままである。
     // 超解像が有効なとき、出力解像度を品質モードの倍率で割った値を
     // RequestRenderResolution()へ流し込む、という関係になっている。
     // こうしてあるのは、Render()の各所に散らばるm_RenderWidth/m_RenderHeightの参照を
     // 「レンダー解像度」と「出力解像度」へ仕分ける必要をなくすため。
-    // 追加のパスはTonemapの後ろに2本足すだけで済んでいる
+    //
+    // 【手法によって入る位置が違う】FSR1相当はTonemapの後ろ(LDR)に2本足すだけで済む。
+    // DLSSは時間的アップスケーラなのでTAAと同じ位置(Tonemapの前・HDR)へ入り、
+    // その後段のAutoExposure / Bloom / Tonemap / Presentが出力解像度で走ることになる。
+    // 出力解像度を意識するのはこの4パスだけで、それ以外は従来どおりレンダー解像度のまま
+    // 超解像の手法。「超解像を出すか」はUpscaleEnabledが単独で持ち、この列挙は手法だけを表す
+    // (ReflectionSettingsの教訓。1つの既定値関数に2つの問いを兼ねさせない)
+    enum class UpscaleTechnique : int32_t
+    {
+        // FSR1相当(EASU + RCAS)。Tonemapの後・LDRで働く空間フィルタ。全バックエンドで動く
+        FSR1 = 0,
+        // DLSS Super Resolution / DLAA。Tonemapの前・HDRで働く時間的アップスケーラ。
+        // DX12かつNGXがDLSSを使えると答えた環境でしか選べない
+        DLSS = 1,
+    };
+
+    // 品質モード(= 出力解像度に対するレンダー解像度の倍率)。
+    //
+    // 【倍率の出所が手法で違う】FSR1はここに書いた固定倍率をそのまま使う。
+    // DLSSはNGX_DLSS_GET_OPTIMAL_SETTINGSが返す推奨解像度を使い、この倍率は参照しない
+    // (DLSSのバージョンと品質モードで決まる値なので、エンジン側で決め打ちにできない)。
+    // DLAAとUltraPerformanceはDLSS専用で、FSR1で選ぶとQualityへ落ちる
     enum class UpscaleQualityMode
     {
-        UltraQuality, // 1.3倍
-        Quality,      // 1.5倍
-        Balanced,     // 1.7倍
-        Performance,  // 2.0倍
+        DLAA,            // 1.0倍(アップスケールしない。DLSSのAAだけを使う)
+        UltraQuality,    // 1.3倍
+        Quality,         // 1.5倍
+        Balanced,        // 1.7倍
+        Performance,     // 2.0倍
+        UltraPerformance,// 3.0倍
     };
 
     // 近傍クリップの方式。TAA.hlsl側のclipModeと値を一致させること
@@ -48,7 +71,27 @@ namespace Kurenai
         // EngineDefaults.hの原則自体は守る
         static constexpr UpscaleQualityMode kDefaultUpscaleQualityMode = UpscaleQualityMode::Quality;
 
+        // **DLSSを使うと決まったあとで**、環境が許すかを見て手法を確定する。
+        // 使えなければFSR1相当へ落ちる。「超解像を出すか」はここでは決めない
+        static constexpr UpscaleTechnique UpscaleTechniqueForCapability(bool dlssAvailable)
+        {
+            return dlssAvailable ? UpscaleTechnique::DLSS : UpscaleTechnique::FSR1;
+        }
+        // 何も指定が無いときの既定の手法。
+        //
+        // 【DLSSが使える環境でも既定はFSR1相当のまま】反射(ReflectionModeForCapability)は
+        // 「使えるなら常に良いほうへ」という作りだが、超解像で同じことをすると
+        // **`-upscale 1` の意味が機体によって変わる**。41.23節以降の性能・画質の記録は
+        // すべてFSR1相当で取られており、既定を動かすと同じ指定の過去の数値と比べられなくなる。
+        // DLSSは `-upscaletech dlss` かシステムパネルの「手法」で明示的に選ぶ
+        static constexpr UpscaleTechnique DefaultUpscaleTechnique()
+        {
+            return UpscaleTechnique::FSR1;
+        }
+
         bool UpscaleEnabled = Defaults::UpscaleEnabled;
+        // 現在の手法。DLSSはSupportsDLSS()がtrueの環境でしか選べない(UI側で選択肢に出さない)
+        UpscaleTechnique UpscaleTech = DefaultUpscaleTechnique();
         UpscaleQualityMode UpscaleQuality = kDefaultUpscaleQualityMode;
         // RCASのシャープネス(0〜1)。UIの見た目の値で、シェーダーへ渡す前に
         // ComputeRcasSharpnessScale()で参照実装のスケールへ変換する

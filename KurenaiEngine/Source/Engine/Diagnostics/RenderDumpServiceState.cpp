@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -106,6 +108,22 @@ namespace Kurenai::Diagnostics
             "テクスチャを書き出すフレームを設定しました: " +
                 (frame < 0 ? std::string("既定(") + std::to_string(Passes::kMegaLightsAccumWarmup) + ")"
                            : std::to_string(frame)));
+    }
+
+    void RenderDumpService::AddBufferDump(const wchar_t* name, const wchar_t* path)
+    {
+        if (name == nullptr || path == nullptr || name[0] == L'\0' || path[0] == L'\0')
+        {
+            Core::Logger::Error("KurenaiEngine3D", "AddBufferDump: バッファ名か出力先が空です");
+            return;
+        }
+
+        BufferDumpRequest request;
+        request.Name = Core::WideToUtf8(name);
+        request.Path = path;
+        m_BufferDumps.push_back(std::move(request));
+        Core::Logger::Info("KurenaiEngine3D", "バッファの書き出しを登録しました: " +
+            m_BufferDumps.back().Name + " -> " + Core::WideToUtf8(path));
     }
 
     void RenderDumpService::SetExitAfterDump(bool enabled)
@@ -316,9 +334,104 @@ namespace Kurenai::Diagnostics
         });
     }
 
+    void RenderDumpService::IssueBufferDumps(
+        Core::RenderGraph& graph, const std::vector<DumpableBuffer>& table,
+        uint32_t frameIndex, RHI::IRHIDevice& device)
+    {
+        if (m_BufferDumps.empty()) return;
+        const uint32_t targetFrame =
+            m_TextureDumpFrame >= 0 ? static_cast<uint32_t>(m_TextureDumpFrame) : Passes::kMegaLightsAccumWarmup;
+        if (frameIndex < targetFrame) return;
+
+        struct PendingCopy { size_t RequestIndex; RHI::IRHIBuffer* Source; uint32_t SizeInBytes; };
+        std::vector<PendingCopy> pending;
+        std::vector<RHI::IRHIBuffer*> reads;
+        for (size_t i = 0; i < m_BufferDumps.size(); ++i)
+        {
+            BufferDumpRequest& request = m_BufferDumps[i];
+            if (request.Done || request.Issued) continue;
+            const DumpableBuffer* found = nullptr;
+            for (const DumpableBuffer& entry : table)
+            {
+                if (_stricmp(entry.Name, request.Name.c_str()) == 0) { found = &entry; break; }
+            }
+            if (found == nullptr)
+            {
+                std::string names;
+                for (const DumpableBuffer& entry : table)
+                {
+                    if (!names.empty()) names += ", ";
+                    names += entry.Name;
+                }
+                Core::Logger::Error("KurenaiEngine3D", "バッファの書き出し: 名前が見つかりません: " +
+                    request.Name + " / 指定できる名前: " + names);
+                request.Done = true;
+                continue;
+            }
+            if (found->Buffer == nullptr)
+            {
+                Core::Logger::Error("KurenaiEngine3D", "バッファの書き出し: " + request.Name +
+                    " は今このフレームでは作られていません(機能が無効か、非対応の環境)。書き出しを中止します");
+                request.Done = true;
+                continue;
+            }
+            const uint64_t bytes64 = static_cast<uint64_t>(found->ElementCount) * found->StrideInBytes;
+            if (found->ElementCount == 0 || found->StrideInBytes == 0 || bytes64 > std::numeric_limits<uint32_t>::max())
+            {
+                Core::Logger::Error("KurenaiEngine3D", "バッファの書き出し: 要素数またはサイズが不正です: " + request.Name);
+                request.Done = true;
+                continue;
+            }
+            try
+            {
+                RHI::BufferDesc desc;
+                desc.Usage = RHI::BufferUsage::Readback;
+                desc.SizeInBytes = static_cast<uint32_t>(bytes64);
+                desc.StrideInBytes = found->StrideInBytes;
+                request.Readback = device.CreateBuffer(desc);
+            }
+            catch (const std::exception& e)
+            {
+                Core::Logger::Error("KurenaiEngine3D", "バッファの書き出し: readback バッファを作れませんでした: " +
+                    request.Name + " / " + e.what());
+                request.Done = true;
+                continue;
+            }
+            if (!request.Readback)
+            {
+                Core::Logger::Error("KurenaiEngine3D", "バッファの書き出し: readback バッファを作れませんでした: " + request.Name);
+                request.Done = true;
+                continue;
+            }
+            request.ElementCount = found->ElementCount;
+            request.StrideInBytes = found->StrideInBytes;
+            request.CopyFrame = frameIndex;
+            request.Issued = true;
+            pending.push_back({ i, found->Buffer, static_cast<uint32_t>(bytes64) });
+            reads.push_back(found->Buffer);
+        }
+        if (pending.empty()) return;
+        graph.AddPass(Core::RenderGraphPassDesc{
+            .Name = "BufferDump", .BufferReads = std::move(reads),
+            .Execute = [this, pending](RHI::IRHICommandList* cmd)
+            {
+                for (const PendingCopy& copy : pending)
+                {
+                    BufferDumpRequest& request = m_BufferDumps[copy.RequestIndex];
+                    if (!request.Readback)
+                    {
+                        Core::Logger::Error("KurenaiEngine3D", "バッファの書き出し: コピー先が無効です: " + request.Name);
+                        continue;
+                    }
+                    cmd->CopyBufferToReadback(request.Readback.get(), copy.Source, copy.SizeInBytes);
+                }
+            },
+        });
+    }
+
     void RenderDumpService::ResolveTextureDumps(uint32_t frameIndex, Core::Window* window, bool isDX12)
     {
-        if (m_TextureDumps.empty())
+        if (m_TextureDumps.empty() && m_BufferDumps.empty())
         {
             return;
         }
@@ -422,6 +535,34 @@ namespace Kurenai::Diagnostics
             }
         }
 
+        for (BufferDumpRequest& request : m_BufferDumps)
+        {
+            if (request.Done) continue;
+            if (!request.Issued || frameIndex - request.CopyFrame < kTextureDumpReadDelayFrames)
+            {
+                allDone = false;
+                continue;
+            }
+            const uint64_t bytes64 = static_cast<uint64_t>(request.ElementCount) * request.StrideInBytes;
+            std::vector<uint8_t> bytes(static_cast<size_t>(bytes64));
+            if (!request.Readback || !request.Readback->ReadbackData(bytes.data(), static_cast<uint32_t>(bytes64)))
+            {
+                ++request.FailedFrames;
+                if (request.FailedFrames >= kTextureDumpMaxFailedFrames)
+                {
+                    Core::Logger::Error("KurenaiEngine3D", "バッファの書き出し: " +
+                        std::to_string(kTextureDumpMaxFailedFrames) + "フレーム続けて読み戻せませんでした。中止します: " + request.Name);
+                    request.Readback.reset();
+                    request.Done = true;
+                }
+                else allDone = false;
+                continue;
+            }
+            WriteBufferDumpFile(request, bytes);
+            request.Readback.reset();
+            request.Done = true;
+        }
+
         if (allDone && m_ExitAfterDump && !m_ExitAfterDumpRequested)
         {
             m_ExitAfterDumpRequested = true;
@@ -442,6 +583,35 @@ namespace Kurenai::Diagnostics
                     "KurenaiEngine3D", "書き出し後の自動終了: ウィンドウが無いため終了要求を出せません");
             }
         }
+    }
+
+    bool RenderDumpService::WriteBufferDumpFile(
+        const BufferDumpRequest& request, const std::vector<uint8_t>& bytes) const
+    {
+        // ファイル形式: 16バイトのヘッダに続けて生バイト列を置く。
+        // off 0: 'K','B','U','F', off 4: uint32 version (=1), off 8: uint32 要素数, off 12: uint32 ストライド(バイト)。
+        std::ofstream file(request.Path, std::ios::binary | std::ios::trunc);
+        if (!file)
+        {
+            Core::Logger::Error("KurenaiEngine3D", "バッファの書き出し: ファイルを開けませんでした: " +
+                Core::WideToUtf8(request.Path));
+            return false;
+        }
+        const char magic[4] = { 'K', 'B', 'U', 'F' };
+        const uint32_t header[3] = { 1u, request.ElementCount, request.StrideInBytes };
+        file.write(magic, sizeof(magic));
+        file.write(reinterpret_cast<const char*>(header), sizeof(header));
+        file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        if (!file)
+        {
+            Core::Logger::Error("KurenaiEngine3D", "バッファの書き出し: ファイルへ書き込めませんでした: " +
+                Core::WideToUtf8(request.Path));
+            return false;
+        }
+        Core::Logger::Info("KurenaiEngine3D", "バッファを書き出しました: " + Core::WideToUtf8(request.Path) +
+            " (" + request.Name + ", elements=" + std::to_string(request.ElementCount) +
+            ", stride=" + std::to_string(request.StrideInBytes) + ")");
+        return true;
     }
 
     bool RenderDumpService::WriteTextureDumpFile(

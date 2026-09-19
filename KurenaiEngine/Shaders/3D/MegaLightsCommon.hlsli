@@ -15,6 +15,8 @@
 #ifndef KURENAI_MEGALIGHTS_COMMON_HLSLI
 #define KURENAI_MEGALIGHTS_COMMON_HLSLI
 
+#include "MegaLightsBlueNoise.hlsli"
+
 // 無効なライト番号。リザーバが空であることを表す
 // 番号は30bit。bit30 をメッシュライトの印、bit31 を可視フラグに使う。
 //
@@ -57,15 +59,74 @@ static const float kMegaLightsUniformMixFraction = 0.25f;
 // 相関のある列を渡すと選択確率が狂う。判定が1回しかない場所(候補が2つの時間再利用)は
 // 独立性を使わないので安全。候補が3つ以上の空間再利用では白色のままにすること。
 
-// Interleaved Gradient Noise。隣接画素で値が大きく離れる(ブルーノイズ的な配り方)
-float MegaLightsPixelPhase(uint2 pixel, uint frameIndex, uint dimension)
+// 【位相の配り方は3通りから選べる】Params7.z が選ぶ。既定は 0(従来の IGN)。
+//
+//   0 = Interleaved Gradient Noise
+//   1 = 白色ハッシュ(等方だが低周波を含む。0 の縞が消えることを見るための対照)
+//   2 = void-and-cluster のブルーノイズマスク(等方かつ高周波)
+//
+// 【IGN の位相の場は等方ではない】満たしているのは「隣接画素の値が離れる」ことだけ。
+// frac(52.98 * (0.0671x + 0.00584y)) の等値線は直線で、格子上へ折り返した基本波は
+// (-0.4443, 0.3093) cycle/画素(縞は55度・間隔1.85画素)。周期4〜32画素の帯で
+// 角度エネルギーを5度ビンに分けた最大ビンは、等方 0.028 に対して
+//   IGN 0.36 / 白色ハッシュ 0.031 / ブルーノイズマスク 0.051。
+//
+// 【出力に出るのは初期候補数 M が小さいときだけ】候補スロットの列は位相ただ1つで決まるが、
+// **そこからどれを採るかは白色の採用判定が決める**(MegaLightsInitialSample.hlsl)。
+// M が大きいとそちらに洗い流される。実測(SceneColor・デノイザ切・平らな壁・順位変換後):
+//   M=1: IGN 0.069〜0.075(ピーク27.5度) / 白色 0.031〜0.034 / ブルー 0.030〜0.034
+//   M=8: 位相64ビンの相関比 eta^2 = 0.00002。画素ハッシュの陰性対照 0.00004 と差が無い
+// **M=8 で測って「効かない」と結論しかけた。再現条件を外すと指標は嘘になる。**
+//
+// 【デノイザを通すと向きは消えるが、残る量に差がある】a-trous 後はどの配り方でも
+// ピーク角が0〜5度へ移り、斜めの筋は見えなくなる。精度(参照実装との誤差中央値)の差も
+// 同一構成2回のばらつき(±0.85%)の内側。差が出るのは**ちらつき**で、下限 ±0.22% に対し
+//   白色 +5.4% / ブルーノイズ -7.4%(いずれも IGN 比)。
+// 白色が悪いのは等方でも低周波を含むからで、a-trous が落としきれない。
+// **時間累積の上限を下げると目視でも差が出る**(上限64のままでは見えない)。
+// 数値と測定条件は docs/ImplementationDetail.md 61.7x
+uint MegaLightsHashUint(uint x)
 {
-    const float2 p = float2(pixel) + float2(float(dimension) * 5.0f, float(dimension) * 11.0f);
-    float phase = frac(52.9829189f * frac(0.06711056f * p.x + 0.00583715f * p.y));
+    x ^= x >> 16;
+    x *= 0x7FEB352Du;
+    x ^= x >> 15;
+    x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float MegaLightsPixelPhaseMode(uint2 pixel, uint frameIndex, uint dimension, uint mode)
+{
+    float phase;
+    if (mode == 2u)
+    {
+        // 【マスクは回すだけで次元とフレームを分ける】値へ定数を足しても
+        // 空間の並び(どの画素が近い値を持つか)は境目を除いて保たれるので、
+        // ブルーノイズ性を壊さずに独立な列を取り出せる。周辺分布も一様のまま
+        phase = MegaLightsBlueNoiseValue(pixel);
+        phase = frac(phase + float(dimension) * 0.7548776662f);
+    }
+    else if (mode == 1u)
+    {
+        // 対照用。等方だが低周波を含むので、a-trous で落としきれない粒が残る
+        const uint seed = MegaLightsHashUint(pixel.x * 0x9E3779B9u + pixel.y * 0x85EBCA6Bu +
+                                             dimension * 0xC2B2AE35u);
+        phase = float(seed >> 8u) * (1.0f / 16777216.0f);
+    }
+    else
+    {
+        const float2 p = float2(pixel) + float2(float(dimension) * 5.0f, float(dimension) * 11.0f);
+        phase = frac(52.9829189f * frac(0.06711056f * p.x + 0.00583715f * p.y));
+    }
     // 【フレームごとに回す】回さないと新しい情報が入らず、ちらつかないまま永遠に収束しない。
     // 黄金比で回すのは、どのフレーム数で切っても偏りが小さいため
-    phase = frac(phase + float(frameIndex) * 0.61803398875f);
-    return phase;
+    return frac(phase + float(frameIndex) * 0.61803398875f);
+}
+
+// 従来どおりの呼び出し口(IGN 固定)。配り方を選べない場所はこちらを使う
+float MegaLightsPixelPhase(uint2 pixel, uint frameIndex, uint dimension)
+{
+    return MegaLightsPixelPhaseMode(pixel, frameIndex, dimension, 0u);
 }
 
 // 1次元の低食い違い量列(Kronecker列。a = 1/plastic number = 0.7548776662)。
@@ -95,6 +156,77 @@ static const uint kMegaLightsTilePoolHeader = 6u;
 uint MegaLightsTilePoolBase(uint2 tileCoord, uint tileCountX, uint candidateCount)
 {
     return (tileCoord.y * tileCountX + tileCoord.x) * (kMegaLightsTilePoolHeader + 2u * candidateCount);
+}
+
+// --- 可視灯リスト(MegaLightsVisibleLights.hlsl が書き、TilePool と Initial が読む) ---
+//
+// 【何のためにあるか】候補プールの重みは距離減衰だけで決まり、**可視性を一切見ていない**。
+// 影の縁では目標関数を支配する灯が自分からは遮蔽されていることがあり、RIS は毎フレーム
+// その灯を選んでは殺される(デノイズ前の暗黒点の主因)。前フレームに「実際に可視だった」灯を
+// タイルごとに覚えておき、提案分布の第3成分として混ぜると、標本が届く灯へ寄る。
+//
+//   [base + 0]     = L(実際に格納した灯数。0〜容量)
+//   [base + 1]     = 打ち切る前に観測された相異なる灯の数。
+//                    **提案分布には使わない**(容量を実測で決めるための計測専用)
+//   [base + 2 + n] = n番目のライト番号
+//
+// 【重複を許す ―― 除去は効率の話であって正しさの要件ではない】groupshared への追記は
+// スレッド間で競合しうるので、完全な重複除去は保証できない。読み手が
+// MegaLightsVisibleListCount() で**出現回数を数える**ようにしてあるので、競合がどう転んでも
+// 提案確率 count/L は厳密に正しい。除去できたぶんだけ枠が有効に使われる、というだけ。
+//
+// 【リストには「そのタイルへ届く灯」しか載らない ―― 定義域を広げてはいけない】
+// 書き手(TilePool のリスト枝)は重みが0の灯を無効スロットとして捨てる。空間再利用の
+// MIS 重み(MegaLightsSpatial.hlsl の LightInTileDomain)は**二値の定義域判定**であって
+// 提案密度そのものではないため、定義域さえ変えなければ第3成分を足しても Spatial は
+// 無改造で不偏のままでいられる。ここを広げると Spatial の MIS が静かに近似になる。
+//
+// **C++側 kMegaLightsVisibleListHeader と必ず一致させること。**
+static const uint kMegaLightsVisibleListHeader = 2u;
+
+// リスト容量の上限。実行時の容量はこれ以下で、設定から変えられる。
+// 【上限を定数で持つ理由】読み手(InitialSample)はリストを**レジスタへ載せてから**数える。
+// RIS の M 回の抽選のたびにバッファを L 回読み直すと、1画素あたり M*L 回の読み出しになる。
+// 展開するにはループ上限がコンパイル時定数である必要がある。
+// **C++側 kMegaLightsVisibleListCapacityMax と必ず一致させること。**
+static const uint kMegaLightsVisibleListCapacityMax = 16u;
+
+// 【ストライドは常に容量の*上限*で固定する ―― 実行時の容量では割らない】
+// 容量は設定で途中から変えられる。ストライドを実行時の容量から作ると、
+// **容量を変えた瞬間に「前のフレームが別の配置で書いたバッファ」を新しい配置として読む**。
+// 添字が全部ずれるので、絵は出たまま無関係な灯を可視灯として提案することになる。
+// C++側の確保も上限で取ってある(kMegaLightsVisibleListStride)ので、ここを固定にすれば
+// 容量の変更は「1タイルに何個書くか」だけの話に閉じ、配置は一生変わらない
+uint MegaLightsVisibleListBase(uint2 tileCoord, uint tileCountX)
+{
+    return (tileCoord.y * tileCountX + tileCoord.x) *
+           (kMegaLightsVisibleListHeader + kMegaLightsVisibleListCapacityMax);
+}
+
+// リスト長の読み出し。**書き手と読み手が必ずこれを通すこと。**
+// 実行時の容量でクランプしてはいけない ―― 容量を下げた直後は
+// 「前の容量で書かれた長さ」が入っており、片方だけが切り詰めると
+// 提案確率の分母 L が食い違って静かに偏る。長さの上限は配置の上限だけで決まる
+uint MegaLightsVisibleListLength(StructuredBuffer<uint> list, uint base)
+{
+    return min(list[base + 0u], kMegaLightsVisibleListCapacityMax);
+}
+
+// リスト内での lightIndex の出現回数。提案分布の第3成分 count/L はこれで決まる。
+// **書き手と読み手が必ずこの1つの関数を通ること**(片方が重複を1回と数えると割り戻しが
+// 実際の抽出確率と食い違い、静かにバイアスが乗る)
+uint MegaLightsVisibleListCount(StructuredBuffer<uint> list, uint base, uint listLength, uint lightIndex)
+{
+    uint found = 0u;
+    [loop]
+    for (uint i = 0u; i < listLength; ++i)
+    {
+        if (list[base + kMegaLightsVisibleListHeader + i] == lightIndex)
+        {
+            ++found;
+        }
+    }
+    return found;
 }
 
 // 1画素ぶんのリザーバ。**C++側の確保(16バイト/画素)と一致させること。**
@@ -206,6 +338,42 @@ void MegaLightsUnpackMaterial(uint packed, out float metallic, out float roughne
 {
     metallic = float(packed & 0xFFu) / 255.0f;
     roughness = float((packed >> 8u) & 0xFFu) / 255.0f;
+}
+
+// 履歴ガイドの1タップが現在のサーフェスと一致するか。
+// expectedPrevViewZ は、補正時には現在のワールド位置を前フレームのカメラから見た ViewZ、
+// 従来経路では現在の viewZ を渡す。しきい値の分母は現在の viewZ のまま変えない。
+// 同じ3つのしきい値に対する「不一致度」。各項をしきい値で割って正規化し、最大を返す
+// (1.0 がちょうどしきい値)。**判定そのものには使わないこと** ――
+// 判定は下の MegaLightsGuideMatchesSurface のまま残してある。割り算を挟むと境界が
+// 1ULPずれ、しきい値ちょうどの画素で従来と挙動が変わりうるため。
+// こちらは「しきい値の内側でどれだけ怪しいか」を連続量として使う側の入口
+float MegaLightsGuideMismatch(
+    float hViewZ, float3 hN, float2 hMaterial, float expectedPrevViewZ,
+    float viewZ, float3 N, float2 material)
+{
+    const float kMaxRelativeDepthDiff = 0.05f;
+    const float kMinNormalDot = 0.9f;
+    const float kMaxMaterialDiff = 0.1f;
+    const float dz = abs(hViewZ - expectedPrevViewZ) /
+                     max(kMaxRelativeDepthDiff * max(abs(viewZ), 1e-3f), 1e-12f);
+    const float dn = (1.0f - dot(N, hN)) / max(1.0f - kMinNormalDot, 1e-12f);
+    const float dm = max(abs(hMaterial.r - material.r), abs(hMaterial.g - material.g)) /
+                     kMaxMaterialDiff;
+    return max(dz, max(dn, dm));
+}
+
+bool MegaLightsGuideMatchesSurface(
+    float hViewZ, float3 hN, float2 hMaterial, float expectedPrevViewZ,
+    float viewZ, float3 N, float2 material)
+{
+    const float kMaxRelativeDepthDiff = 0.05f;
+    const float kMinNormalDot = 0.9f;
+    const float kMaxMaterialDiff = 0.1f;
+    return abs(hViewZ - expectedPrevViewZ) <= kMaxRelativeDepthDiff * max(abs(viewZ), 1e-3f) &&
+           dot(N, hN) >= kMinNormalDot &&
+           abs(hMaterial.r - material.r) <= kMaxMaterialDiff &&
+           abs(hMaterial.g - material.g) <= kMaxMaterialDiff;
 }
 
 // --- 球光源のサンプリング(段階6) ---

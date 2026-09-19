@@ -71,8 +71,21 @@ namespace Kurenai
             void AdvanceDenoiseHistory(bool denoiseRan);
             // 解像度が変わると添字の意味が変わる。バッファのクリアが無いRHIなので、
             // シェーダ側へ「履歴を読むな」と伝えるために倒す
-            void InvalidateHistory() { m_MegaLightsHistoryValid = false; }
-            void InvalidateDenoiseHistory() { m_MegaLightsDenoiseHistoryValid = false; }
+            // 【可視灯リストも一緒に無効化する】解像度やタイル数が変われば、前フレームの
+            // リストは別の格子のものになる。リストは提案分布にしか効かないので偏りはしないが、
+            // 中身が未定義のバッファを読ませない約束はここで守る
+            void InvalidateHistory()
+            {
+                m_MegaLightsHistoryValid = false;
+                m_MegaLightsVisibleListValid = false;
+            }
+            void InvalidateDenoiseHistory()
+            {
+                m_MegaLightsDenoiseHistoryValid = false;
+                // タイル勾配のラッチも一緒に捨てる。あちらは別のテクスチャなので、
+                // 履歴だけ捨てると「古い λ を持ち続ける」形で残る
+                m_MegaLightsDenoiseTileGradientValid = false;
+            }
             // 蓄積と書き出しを取り直す。解像度が変わったときに呼ぶ
             void ResetAccumulation();
             // 書き出し先。空なら書き出さない
@@ -83,6 +96,18 @@ namespace Kurenai
             void ResetAccumFrames() { m_MegaLightsAccumFrames = 0; }
             // 整定待ちが済んだか。摂動を効かせる判定にエンジンが使う
             uint32_t GetAccumWarmupFrames() const { return m_MegaLightsAccumWarmupFrames; }
+
+            // デノイザの履歴の**今フレームの書き込み先**の添字。ダンプの表が引く。
+            //
+            // 【「今フレームの書き込み先」で確定している】AdvanceDenoiseHistory() による反転は
+            // ResolveTextureDumps() より後に呼ばれる(KurenaiEngine3D.h の AdvanceFrameHistory の
+            // 規約と、KurenaiEngine3D.cpp の呼び出し順)。したがって TAAHistory / TAAHistoryPrev と
+            // まったく同じ扱いでよい。
+            //
+            // 【デノイザが走らなかったフレームは反転しない】AdvanceDenoiseHistory(false) は
+            // 添字を据え置く。-megalightsdenoise 0 では Moments と MomentsPrev が同じ絵を
+            // 指し続けるが、**これは正しい挙動であって配線のバグではない**
+            uint32_t GetDenoiseHistoryIndex() const { return m_MegaLightsDenoiseHistoryIndex; }
 
         private:
             IPassHost& m_Engine;
@@ -98,6 +123,11 @@ namespace Kurenai
             // リザーバを混ぜる時間再利用とは独立に効く
             uint32_t m_MegaLightsDenoiseHistoryIndex = 0u;
             bool m_MegaLightsDenoiseHistoryValid = false;
+            // タイル勾配テクスチャの中身が信用できるか。**デノイズ履歴の有効性とは別物**。
+            // 【分けないと未初期化を読む】勾配を無効(既定)のまま履歴だけ溜めてから、
+            // UI や CLI で勾配を有効にすると、ラッチが**一度も書かれていない λ**を読む。
+            // RHI に UAV のクリアが無いので中身は不定値で、無効化→再有効化でも古い λ が残る
+            bool m_MegaLightsDenoiseTileGradientValid = false;
 
             // --- 蓄積平均(計測専用) ---
             // これまでに足したフレーム数。表示側はこれで割る
@@ -147,6 +177,17 @@ namespace Kurenai
             std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTilePoolPipelineState;
             std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsTilePoolConstantBuffer;
 
+            // 可視灯リストの構築(MegaLightsVisibleLights.hlsl)。初期サンプリングの結果から
+            // 「このタイルで実際に可視だった灯」を集め、次フレームの提案分布の第3成分にする
+            std::unique_ptr<RHI::IRHIShader> m_MegaLightsVisibleListComputeShader;
+            std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsVisibleListPipelineState;
+            std::unique_ptr<RHI::IRHIBuffer> m_MegaLightsVisibleListConstantBuffer;
+            // ping-pong の書き込み側。前フレームが書いた側を候補プールが読む
+            uint32_t m_MegaLightsVisibleListIndex = 0u;
+            // 前フレームのリストが使えるか。解像度変更・機能の切り替え直後は中身が未定義なので、
+            // 1フレーム構築が走るまで読ませない(読むと前の残骸を可視灯として扱う)
+            bool m_MegaLightsVisibleListValid = false;
+
             // 確率的サンプリング本体。2パスに分かれる。
             //   Initial (MegaLightsInitialSample.hlsl) … 候補プールからM個引きRISで1灯へ絞り、
             //                                            結果を**リザーバ**として書く(色は作らない)
@@ -175,6 +216,8 @@ namespace Kurenai
             std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsTemporalPipelineState;
 
             // デノイズ(時間累積 → a-trous → 再変調)
+            std::unique_ptr<RHI::IRHIShader> m_MegaLightsDenoiseTileGradientShader;
+            std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsDenoiseTileGradientPSO;
             std::unique_ptr<RHI::IRHIShader> m_MegaLightsDenoiseTemporalShader;
             std::unique_ptr<RHI::IRHIPipelineState> m_MegaLightsDenoiseTemporalPSO;
             std::unique_ptr<RHI::IRHIShader> m_MegaLightsDenoiseAtrousShader;

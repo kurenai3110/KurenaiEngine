@@ -53,12 +53,24 @@ namespace Kurenai
         int32_t QuadDenoiseMaxFrames = Defaults::MegaLightsQuadDenoiseMaxFrames;
         float DenoiseSigmaLuminance = Defaults::MegaLightsDenoiseSigmaLuminance;
         float DenoiseFireflyClamp = Defaults::MegaLightsDenoiseFireflyClamp;
+        bool DenoiseHistory4Tap = Defaults::MegaLightsDenoiseHistory4Tap;
+        bool DenoiseMotionCompensatedDepth = Defaults::MegaLightsDenoiseMotionCompensatedDepth;
+        // --- 時間累積の履歴長を適応させる(根拠は EngineDefaults.h) ---
+        // **4つとも0にすると従来の指数移動平均へ厳密に戻る。**陽性対照はこれで取る
+        float DenoiseGeometryFalloff = Defaults::MegaLightsDenoiseGeometryFalloff;
+        float DenoiseGradientStrength = Defaults::MegaLightsDenoiseGradientStrength;
+        float DenoiseGradientRelStart = Defaults::MegaLightsDenoiseGradientRelStart;
+        float DenoiseGradientRelFull = Defaults::MegaLightsDenoiseGradientRelFull;
+        int32_t DenoiseGradientFastFrames = Defaults::MegaLightsDenoiseGradientFastFrames;
+        int32_t DenoiseGradientLatchFrames = Defaults::MegaLightsDenoiseGradientLatchFrames;
 
         bool TemporalEnabled = Defaults::MegaLightsTemporalEnabled;
         // 履歴のM(何個の候補から絞ったか)の上限。大きいほど収束は速いが、
         // 新しいサンプルが採用されにくくなり、灯を消しても明るさが残る(ゴースト)
         int32_t TemporalMClamp = Defaults::MegaLightsTemporalMClamp;
-        // 【検証専用】蓄積開始時に加える摂動(0=なし / 1=全ライトを消す / 2=露出を+2段跳ばす)。
+        // 【検証専用】蓄積開始時に加える摂動
+        // (0=なし / 1=全ライトを消す / 2=露出を+2段跳ばす / 3=ライトを1つおきに消す)。
+        // 3は局所的な変化で、**タイル単位で変化を探す時間勾配の見逃しを測るため**にある。
         // 静止した絵では測れない「追従」を測るための入口。SetMegaLightsPerturbのコメント参照
         int32_t PerturbMode = 0;
 
@@ -96,14 +108,42 @@ namespace Kurenai
         // 手法2の時間・空間再利用は「1画素1リザーバ」を前提に添字を組み立てているため。
         // 影レイの本数はそのままこの数になる(標本ごとに1本撃つ)
         int32_t QuadSamplesPerPixel = Defaults::MegaLightsQuadSamplesPerPixel;
+        // クアッド共有で標本を借りる範囲の半径。1 なら 2x2、2 なら 4x4 のブロックで共有する。
+        // **項の数は (2*半径)^2 × 1画素あたりの標本数**なので、半径を上げたぶん標本数を
+        // 下げれば項の数を保ったまま Initial の仕事だけが減る(レイの発射点はむしろ増える)。
+        // 代償は借りる距離で、V_j を V(x, y_j) の代用に使う近似の誤差が広がる
+        // (2x2 は対角 sqrt(2) 画素、4x4 は sqrt(18) 画素。根拠は EngineDefaults.h)
+        int32_t QuadShareRadius = Defaults::MegaLightsQuadShareRadius;
         // 候補プールが1タイルあたりに抽出する灯の数(K)。
         // **1画素あたりの標本数では減らないノイズがここで決まる** ―― プールはタイルに1つで、
         // タイル内の全画素が同じK個から引くので、プールの引き方のばらつきはタイル内で
         // 共通のオフセットとして乗る(根拠は EngineDefaults.h)
         int32_t TilePoolCapacity = Defaults::MegaLightsTilePoolCapacity;
-        // タイル格子を動かすと共通誤差が時間方向に別の画面位置へ移る。
-        // boolではなくモードなのは、+1タイルの経路を保ったままオフセットだけ0にする対照実験を行うため
-        int32_t TileJitterMode = Defaults::MegaLightsTileJitterEnabled ? 1 : 0;
+        // 候補プールを自分のタイル固定で引くか、最も近い4タイルから確率的バイリニアで引くか。
+        // 0=固定(従来)、1=2x2クアッドごとに1タイル、2=画素ごとに1タイル。
+        // **モードなのは粒度を実測で決めたため** ―― 画素ごとのほうがばらけるが、
+        // クアッド層化(QuadStratify)はクアッドの4画素が同じプールを引く前提なので、
+        // 画素ごとに違うタイルを選ぶと層化がクアッドを跨いで壊れる。指標は両者で有意に
+        // 違わなかったので、壊れないクアッドごとを既定にしてある。根拠は EngineDefaults.h
+        int32_t TilePoolBilinearMode = Defaults::MegaLightsTilePoolBilinearMode;
+
+        // 画素ごとの乱数位相の配り方。0=Interleaved Gradient Noise(従来)、
+        // 1=白色ハッシュ、2=void-and-cluster のブルーノイズマスク。
+        // 0 の枝の演算は従来のまま触っていない。
+        // IGN は「隣接画素が離れる」だけで位相の場は等方ではなく、初期候補数 M が
+        // 小さいときはデノイズ前の絵に 27.5度 の斜めの筋として出る。
+        // 既定を 0 のままにしている理由と実測は EngineDefaults.h
+        int32_t NoiseMode = Defaults::MegaLightsNoiseMode;
+
+        // 前フレームの可視灯リストを提案分布の第3成分として混ぜるか。
+        // 【OFFのとき出力はビット同一】混合率0で候補プールの抽選は1bitも変わらない
+        // (枝ごとに別の定数で種をハッシュしており、乱数の*列*ではないため)
+        bool VisibleListEnabled = Defaults::MegaLightsVisibleListEnabled;
+        // 1タイルあたりに覚える灯の数。上限は kMegaLightsVisibleListCapacityMax
+        int32_t VisibleListCapacity = Defaults::MegaLightsVisibleListCapacity;
+        // リスト枝へ回す割合 c。一様枝(0.25)は削らないので不偏性は c に依らない。
+        // 上げるほど可視灯へ寄るが、リストが1フレーム古いぶん遅れが増える
+        float VisibleListMix = Defaults::MegaLightsVisibleListMix;
 
         // 何フレーム足したら止めるか。0なら蓄積そのものを行わない。
         // **止めることに意味がある** ―― 止めれば表示が静止し、「ちょうどNサンプルの平均」を

@@ -25,6 +25,15 @@ namespace Kurenai::RHI
         // すべてnullディスクリプタへ戻す。
         void InvalidateShadowedDescriptors();
 
+        // NGX(DLSS)のように、コマンドリストへ直接コマンドを積む外部コードを呼んだ直後に呼ぶ。
+        // 外部コードは自前のディスクリプタヒープとルートシグネチャを束ね直すため、
+        // 戻ってきた時点でエンジンのバインドは失われている。
+        //
+        // 【呼び忘れるとクラッシュせずに絵が壊れる】ルート引数の張り直しはSetPipelineStateが
+        // 毎回行うので直るが、ディスクリプタヒープは誰も戻さない。ヒープが外部のものの
+        // ままだと、GPU側ハンドルが別のヒープを指したまま描画が続く
+        void RestoreBindingsAfterExternalCommands();
+
         void SetRenderTarget(IRHISwapChain* swapChain) override;
         void SetRenderTargets(
             IRHITexture* const* targets, uint32_t count, IRHITexture* depthTexture, uint32_t depthArraySlice = 0) override;

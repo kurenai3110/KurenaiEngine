@@ -88,11 +88,20 @@ namespace Kurenai::UI
         virtual void RequestGraphicsAPIChange(GraphicsAPI api) = 0;
         virtual void RequestPlanarReflectionResolutionScale(float scale) = 0;
         virtual void RequestSceneLoad(size_t sceneIndex) = 0;
-        virtual void RequestUpscaleSettings(bool enabled, UpscaleQualityMode mode, uint32_t outputWidth, uint32_t outputHeight) = 0;
+        // 超解像の「出すか(enabled)」「どの手法か(technique)」「どの倍率か(mode)」と出力解像度。
+        // 3つの問いを1つの関数で受けるが、**呼び出し側がそれぞれ独立に決めて渡す**
+        // (1つの既定値関数に兼ねさせない、というPostProcessSettingsの方針と矛盾しない)
+        virtual void RequestUpscaleSettings(
+            bool enabled, UpscaleTechnique technique, UpscaleQualityMode mode, uint32_t outputWidth,
+            uint32_t outputHeight) = 0;
         virtual void ResetSceneDependentParams() = 0;
+        virtual void SetMegaLightsNoiseMode(int mode) = 0;
         virtual void SetMegaLightsQuadSamples(int samples) = 0;
-        virtual void SetMegaLightsTileJitter(int mode) = 0;
+        virtual void SetMegaLightsQuadShareRadius(int radius) = 0;
+        virtual void SetMegaLightsTilePoolBilinear(int mode) = 0;
         virtual void SetMegaLightsTilePoolCapacity(int capacity) = 0;
+        // 可視灯リスト(提案分布の第3成分)。enabled<0 / capacity<=0 / mix<0 は「既定のまま」
+        virtual void SetMegaLightsVisibleList(int enabled, int capacity, float mix) = 0;
         virtual bool ShouldRunMegaLights() const = 0;
     };
 }

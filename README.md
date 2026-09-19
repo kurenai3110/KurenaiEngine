@@ -25,12 +25,20 @@ DirectX 11 / DirectX 12 の両方に対応した自作ゲームエンジンで�
 | ライト | ポイント・スポット(カンデラ / ルクス) / タイルベースのライトカリング / MegaLights / 自発光メッシュの光源化 |
 | ジオメトリ | メッシュレット描画(増幅シェーダー + Hi-Zオクルージョンカリング) / bindless / モデルLOD / インスタンシング / モデル・テクスチャのストリーミング |
 | 空と大気 | 手続き生成する空 / 雲 / 月光 / 昼夜サイクル(IBLの動的再ベイク) / 大気遠近 / 星空 / ドローンショー |
-| ポスト | トーンマッピング(AgX / ACES / Reinhard) / 自動露出 / ブルーム / TAA |
+| ポスト | トーンマッピング(AgX / ACES / Reinhard) / 自動露出 / ブルーム / TAA / FSR1相当 / NVIDIA DLSS Super Resolution・DLAA(DX12のみ) |
 
 **環境によって使えないものがあります。** レイトレーシング系(RT反射 / RTシャドウ / RTAO・RTGI)は
 **DX12 かつ DXR Tier 1.1 対応環境**、メッシュレット描画と bindless は
 **DX12 かつメッシュシェーダー Tier 1・シェーダーモデル6.6 対応環境**でのみ有効になります。
 非対応の環境では、UIに理由が表示されて従来の経路へ落ちます。
+
+### NVIDIA DLSS Super Resolution / DLAA
+
+DLSSは**DX12かつ対応GPU**でのみ選べます。超解像を有効にしたうえで、`-upscale 1 -upscaletech dlss`を指定してください。DLAAはDLSSの品質モードとして選べる等倍の経路です。既定の手法は、対応GPUでもFSR1相当のままです。
+
+NVIDIA DLSS SDKは`ThirdParty/DLSS`のGit submoduleです。通常のsubmodule取得手順で取得され、ビルド時に`nvngx_dlss.dll`が`KurenaiEngineLibrary`の出力先へ自動コピーされ、Sample3Dへも伝播します。SDKには数百MBのDLLが含まれるため`shallow = true`を指定しており、取得されるのは最新の1コミットだけです。
+
+利用時は[ThirdParty/DLSS/LICENSE.txt](ThirdParty/DLSS/LICENSE.txt)のNVIDIA DLSS SDKライセンスに従ってください。アプリを配布する場合は、NVIDIAが定めるアトリビューション表示要件も満たす必要があります。
 
 `.gltf` / `.fbx` / `.obj` 等のソースモデルは、付属のオフラインツール **KurenaiPacker.exe** で
 `.kmodel` へ事前変換してから使います(「[5. アセットの準備(KurenaiPacker)](#5-アセットの準備kurenaipacker)」)。
@@ -746,12 +754,25 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-megalightsfirefly <k>` | 時間累積前のファイアフライ抑制を指定する。根拠は docs/ImplementationDetail.md 61.7g.4節。 |
 | `-megalightsdenoiseframes <上限>` | デノイザの時間累積上限を指定する。根拠は docs/ImplementationDetail.md 61.7j.6節。 |
 | `-megalightsquadshare <0\|1>` | クアッド共有の有無を指定する。根拠は docs/ImplementationDetail.md 61.7j.3節。 |
+| `-megalightsquadsamples <1〜16>` | クアッド共有の画素あたり標本数を指定する。根拠は docs/ImplementationDetail.md 61.7l節。 |
+| `-megalightsquadradius <1\|2>` | クアッド共有で標本を借りる範囲の半径を指定する(`1` = 2x2、`2` = 4x4)。項の数は (2*半径)^2 x 標本数なので、**半径2・標本1は半径1・標本4と同じ16項のまま `MegaLightsInitial` だけが軽くなる**。**既定は1**。根拠は docs/ImplementationDetail.md 61.7y節。 |
+| `-megalightspool <8〜512>` | 候補プールのライト数を指定する。根拠は docs/ImplementationDetail.md 61.7m節。 |
 | `-megalightsquadsamples <1〜4>` | クアッド共有の画素あたり標本数を指定する。根拠は docs/ImplementationDetail.md 61.7l節。 |
 | `-megalightspool <8〜128>` | 候補プールのライト数を指定する。根拠は docs/ImplementationDetail.md 61.7m節。 |
+| `-megalightsvisiblelist <0\|1>` | 可視灯リストを候補プールの提案分布へ混ぜるか指定する。**既定は1**。根拠は docs/ImplementationDetail.md 61.7u節。 |
+| `-megalightsvisiblelistmix <0.0〜1.0>` | 可視灯リストを混ぜる割合 `c` を指定する。根拠は docs/ImplementationDetail.md 61.7u節。 |
+| `-megalightsvisiblelistcapacity <1〜16>` | タイルごとに保持する可視灯リストの容量を指定する。根拠は docs/ImplementationDetail.md 61.7u節。 |
 | `-megalightsquadstratify <0\|1>` | クアッド内の候補割り当てを層化するか指定する。 |
 | `-megalightsblockedcache <0\|1>` | 遮蔽済みライトのキャッシュを使うか指定する。 |
-| `-megalightstilejitter <0\|1\|2>` | 候補プールのタイル格子ジッターを指定する。根拠は docs/ImplementationDetail.md 61.7n節。 |
-| `-megalightsperturb <0\|1\|2>` | 蓄積開始時に検証用のシーン摂動を加える。 |
+| `-megalightsdenoise4tap <0\|1>` | デノイザの時間累積が履歴の妥当性を何タップで判定するかを指定する(`0` = 最近傍1タップ、`1` = バイリニア2x2の4タップ)。**既定は1**。根拠は docs/ImplementationDetail.md 61.7o.9節。 |
+| `-megalightsdenoisemotiondepth <0\|1>` | デノイザの履歴の妥当性判定で、カメラ自身の移動による深度変化を補正するか指定する(`0` = 従来どおり現在の ViewZ と直接比較、`1` = 現在のワールド位置を前フレームの VP で投影した期待 ViewZ と比較)。**既定は1**。補正しないと、毎秒5mの前進で視距離1.67m以内の画素が遮蔽が変わらなくても履歴を捨てられる。根拠は docs/ImplementationDetail.md 61.7v節。 |
+| `-megalightspoolbilinear <0\|1\|2>` | 候補プールを自分のタイル固定で引くか(0)、最も近い4タイルから確率的バイリニアで引くかを指定する(1=2x2クアッドごとに1タイル(既定)、2=画素ごとに1タイル)。タイル形のムラを画素ごとの乱数へ溶かす。根拠は docs/ImplementationDetail.md 61.7t節。 |
+| `-megalightsnoise <0\|1\|2>` | 画素ごとの乱数位相の配り方を指定する(0=Interleaved Gradient Noise(既定)、1=白色ハッシュ、2=ブルーノイズマスク 64x64)。IGN は等方でないため、初期候補数 M が小さくデノイザを切っていると斜めの筋が出る。根拠は docs/ImplementationDetail.md 61.7x節。 |
+| `-megalightsperturb <0\|1\|2\|3>` | 蓄積開始時に検証用のシーン摂動を加える(`-megalightsaccum` が 0 だと効かない)。`1` = 全ライトを消す / `2` = 露出を+2段跳ばす / `3` = ライトを1つおきに消す(局所的な変化)。 |
+| `-megalightsdenoisegrad <0.0〜1.0>` | デノイザの時間累積で、8x8タイル内の平均の相対変化が大きい場所だけ履歴を短くする強さ。`0` で無効(従来の指数移動平均と一致)。**上限フレーム数の引き上げと対で使う。**根拠は docs/ImplementationDetail.md 61.7w節。 |
+| `-megalightsdenoisegradt0 <値>` / `-megalightsdenoisegradt1 <値>` | 上の相対変化のしきい値(疑い始める値 / 履歴を捨てきる値)。負なら既定のまま。 |
+| `-megalightsdenoisegradfast <フレーム数>` | 相対変化を比べる前に現フレームの平均を均す「速いEMA」の長さ。`0` で無効。 |
+| `-megalightsdenoisegeomfalloff <0.0〜1.0>` | 履歴の妥当性判定を二値ではなく、不一致の度合いに応じて履歴長を連続的に縮める強さ。`0` で従来の二値のまま。根拠は docs/ImplementationDetail.md 61.7w節。 |
 | `-megalightsspatial <0\|1>` | 空間再利用の有無を指定する。根拠は docs/ImplementationDetail.md 61.7f節。 |
 | `-megalightsspatialmis <0\|1>` | 空間再利用の結合方式を指定する。 |
 | `-megalightsspatialneighbors <k>` | 借りる近傍数を指定する。 |
@@ -771,7 +792,11 @@ MegaLightsの手法、蓄積ダンプの測定方法、および既定値の根�
 | `-ddgilod <段数>` | DDGIのクリップマップLODの段数を`.kscene`の指定より優先して上書きする。正の整数でなければ警告を出して`.kscene`の指定のままにする。 |
 | `-ddgifollow` | DDGIの各LODの原点をカメラへ追従させる(`.kscene`の`FollowCamera`と同じ)。 |
 | `-upscale <0\|1>` | 超解像の有無を指定する。 |
+| `-upscaletech <fsr1\|dlss>` | 超解像の手法を指定する。DLSSを使うには`-upscale 1 -upscaletech dlss`の両方を指定する。 |
 | `-fixedstep <秒>` | 1フレームの時間を固定する。実時間に依らず同じフレームで同じ状態を作るためのもので、`-dumpframe`と組で使う。0以下や非有限値はエラーにして既定のまま続行する。 |
+| `-camerapath <名前>` | `.kscene`の`[CameraPath]`を1本選んで再生する。フレーム番号だけから姿勢が決まり、**再生中は視点の入力操作を受け付けない**。カメラを動かしたときの品質を測るには同じ軌跡を再現する必要があるが、通常の操作は移動量がΔtに比例し視点回転はPostMessageから駆動できないため、この口が要る。`-fixedstep`の指定が無ければ 1/60 を警告つきで自動設定する。根拠は docs/ImplementationDetail.md 61.7o節。 経路は検証用シーン`Scenes/MegaLightsMotionCheck.kscene`にあります。 |
+| `-camerapathstart <N>` | 経路の再生を始めるフレーム。それまでは先頭キーの姿勢で静止して整定を待つ。既定は`-dumpframe`の既定と同じ 180。根拠は docs/ImplementationDetail.md 61.7o.2節。 |
+| `-camerapathvalidate` | シーンが持つ`[CameraPath]`すべてについて、1フレームあたりの移動量・視線角差・見かけ速度をログへ出す。ほぼ動かないフレームがあれば警告する。根拠は docs/ImplementationDetail.md 61.7o.3節。 |
 | `-passmanifest <パス>` | RenderGraphの登録順と実行順をテキストへ書き出す。パスの構成が変わっていないことを比較するための物差し。根拠は docs/ImplementationDetail.md 64.7節。 |
 | `-passmanifestframes <N>` | `-passmanifest`を何フレームぶん書き出すか(既定 `1`、1未満は1へ丸める)。 |
 
@@ -1148,6 +1173,14 @@ Git管理対象外(`.gitignore`)にしています。`Assets/Source/`(入力)と
     影レイは`RAY_FLAG_FORCE_OPAQUE`なので、重心へ置くと器具自身のガラスと笠に遮られて
     1灯も光りません(絵が暗いだけで例外もログも出ないため、MegaLightsの不具合と誤診しやすい)。
     スクリプトは灯ごとに脱出率を測り、しきい値を超える位置まで下ろしてから採用します
+  - `MegaLightsMotionCheck.kscene` — **カメラを動かしたときの品質を測る用**(生成物)。
+    中身は`BistroExteriorNight.kscene`と**照明もモデルも同一**で、違うのは
+    `[CameraPath]`(決定的なカメラ経路)だけです。`-camerapath <名前>`で1本選んで
+    再生します。`python Tools/make_megalights_motion_scene.py`で生成し、
+    `--check`で最新かを判定できます。**元のシーンを直したら再生成してください。**
+    計測専用の経路を`BistroExteriorNight.kscene`側へ書き戻さないこと —
+    絵を見るためのシーンへ検証の仕掛けを混ぜると、使う側が何を見ているのか
+    分からなくなります。根拠は docs/ImplementationHistory.md 102章
   - `MegaLightsNoiseCheck.kscene` — ノイズ測定用(`docs/ImplementationDetail.md` 61.7f/61.7g が
     使っているシーン)。`BistroInteriorLit` から時刻0・GIVolume無し・露出2.0固定にしたもので、
     **測定を決定的にするために `-autoexposure 0` と組で使います**

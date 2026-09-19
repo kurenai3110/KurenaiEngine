@@ -253,23 +253,93 @@ namespace Kurenai::UI
                     "実測(標本数4・デノイザ切・1フレームの誤差): K=32でタイル間7.81・"
                     "タイル内10.27、K=128で4.03・8.30(8bit階調の中央値)。\n\n"
                     "【レイの本数は増えない】コストは候補プールのパスだけで、"
-                    "2560x1440・107灯で 0.273→0.321 ms、全体で+1.3%"))
+                    "2560x1440・107灯で 0.273→0.321 ms、全体で+1.3%。"
+                    "1タイルあたり (6 + 2K) uint の出力バッファだけが太る"
+                    "(確保サイズは起動ログに出る)"))
             {
                 m_Engine.SetMegaLightsTilePoolCapacity(poolCapacity);
             }
 
-            // CLIのモード2も有効として表示する。UIで一度切った後に戻す場合は通常のHalton列へ戻す
-            bool tileJitterEnabled = m_Engine.GetSettings().MegaLights.TileJitterMode != 0;
-            if (CheckboxEx(
-                    "タイル格子ジッター###MegaLightsTileJitter", &tileJitterEnabled,
-                    Defaults::MegaLightsTileJitterEnabled,
-                    "候補プールの16x16格子をフレームごとに画素単位でずらす。"
-                    "タイル内で共通する抽出誤差を時間方向に別の場所へ移し、時間累積後の"
-                    "ブロック状の残差を抑える。\n\n"
-                    "【1フレームのノイズ量は減らない】格子と誤差の位置を動かす機能であり、"
-                    "1枚だけの比較では改善を判定できない"))
+            // --- 可視灯リスト(提案分布の第3成分) ---
+            // 【目視A/B用につまみを出す】効きは「影の縁の暗黒点が減るか」と
+            // 「動いたときに遅れ(残像)が増えないか」の両方を見ないと決まらない
+            CheckboxEx(
+                "可視灯リスト###MegaLightsVisibleList",
+                &m_Engine.GetSettings().MegaLights.VisibleListEnabled,
+                Defaults::MegaLightsVisibleListEnabled,
+                "前フレームにそのタイルで実際に可視だった灯を覚えておき、"
+                "次フレームの提案分布へ混ぜる。\n\n"
+                "【何を直すためのものか】候補プールの重みは距離減衰だけで決まり、"
+                "可視性を一切見ていない。影の縁では目標関数を支配する灯が自分からは"
+                "遮蔽されていることがあり、RISは毎フレームその灯を選んでは殺される"
+                "(デノイズ前の暗黒点の主因)。\n\n"
+                "【混合率をいくつにしても不偏】一様枝(0.25)を削らないので、"
+                "そのタイルへ届くどの灯にも正の下限確率が残る。"
+                "リストが外れても「効率の悪い提案」になるだけで期待値は動かない。\n\n"
+                "【遅れは別の軸】リストは1フレーム古いので、前進(拡大)や"
+                "灯が消えた直後に残像として出うる。既定が無効なのはこのため");
+            if (m_Engine.GetSettings().MegaLights.VisibleListEnabled)
             {
-                m_Engine.SetMegaLightsTileJitter(tileJitterEnabled ? 1 : 0);
+                float visibleListMix = m_Engine.GetSettings().MegaLights.VisibleListMix;
+                if (SliderFloatEx(
+                        "リストの混合率 c###MegaLightsVisibleListMix", &visibleListMix, 0.0f, 1.0f,
+                        Defaults::MegaLightsVisibleListMix, "%.2f", 0,
+                        "一様枝(0.25)を除いた残りのうち、リスト枝へ回す割合 c。\n\n"
+                        "  q(y) = 0.25/R + 0.75 * [ (1-c)*w_y/SumW + c*count_y/L ]\n\n"
+                        "上げるほど標本が可視灯へ寄って分散が下がるが、リストは1フレーム"
+                        "古いので遅れが増える。0で従来どおり(ビット同一)"))
+                {
+                    m_Engine.SetMegaLightsVisibleList(-1, -1, visibleListMix);
+                }
+                int visibleListCapacity = m_Engine.GetSettings().MegaLights.VisibleListCapacity;
+                if (SliderIntEx(
+                        "リストの容量###MegaLightsVisibleListCapacity", &visibleListCapacity, 1,
+                        static_cast<int>(Passes::kMegaLightsVisibleListCapacityMax),
+                        Defaults::MegaLightsVisibleListCapacity,
+                        "1タイルあたりに覚える灯の数。\n\n"
+                        "リストの長さは本質的に「タイルあたりの可視標本数」で頭打ちになる。"
+                        "あふれた数は構築パスがヘッダへ残すので、実測で決め直せる"))
+                {
+                    m_Engine.SetMegaLightsVisibleList(-1, visibleListCapacity, -1.0f);
+                }
+            }
+
+            // CLIのモード2(画素ごと)も有効として表示する。UIで一度切った後に戻す場合は
+            // 既定の粒度(クアッドごと)へ戻す
+            bool poolBilinearEnabled = m_Engine.GetSettings().MegaLights.TilePoolBilinearMode != 0;
+            if (CheckboxEx(
+                    "候補プールのバイリニア参照###MegaLightsTilePoolBilinear", &poolBilinearEnabled,
+                    Defaults::MegaLightsTilePoolBilinearMode != 0,
+                    "候補プールを自分のタイル固定で引くのをやめ、最も近い4タイルの中から"
+                    "バイリニアの確率で1つ選ぶ。タイル境界の硬い割り当てを画素ごとの乱数へ溶かす。\n\n"
+                    "【不偏性は保たれる】選んだタイルではなく混合分布 q̄ = Σ b_j q_j で割り戻す。"
+                    "選んだタイルで割ると、そこへ届かない灯の定義域が欠けてバイアスになる"))
+            {
+                m_Engine.SetMegaLightsTilePoolBilinear(poolBilinearEnabled ? 1 : 0);
+            }
+
+            static const char* kNoiseModeNames[] = { "Interleaved Gradient Noise", "白色ハッシュ",
+                                                     "ブルーノイズ 64x64" };
+            int noiseModeIndex = m_Engine.GetSettings().MegaLights.NoiseMode;
+            if (ComboEx(
+                    "乱数位相の配り方###MegaLightsNoiseMode", &noiseModeIndex, kNoiseModeNames,
+                    IM_ARRAYSIZE(kNoiseModeNames), Defaults::MegaLightsNoiseMode,
+                    "画素ごとの位相をどう配るか。位相が決まると、その画素が候補プールの"
+                    "どのスロットを見に行くかまで決まる。\n\n"
+                    "【IGNは等方ではない】保証しているのは「隣接画素の値が離れる」ことだけで、"
+                    "等値線は直線になる。角度エネルギーの偏り"
+                    "(周期4〜32画素・5度ビンの最大比。等方は0.028):\n"
+                    "  IGN 0.36 / 白色 0.031 / ブルーノイズ 0.051\n\n"
+                    "【筋として見えるのは初期候補数Mが小さいときだけ】候補スロットは位相で"
+                    "決まるが、どれを採るかは白色の採用判定が決めるので、Mが大きいと洗い流される。"
+                    "M=1・デノイザ切で27.5度の筋が出る。\n\n"
+                    "【デノイザを通すと向きは消える】残るのはちらつきの差で、IGN比で"
+                    "白色 +5.4% / ブルーノイズ -7.4%(同一構成2回の下限は±0.22%)。"
+                    "時間累積の上限が既定(64)のままでは目視で分からず、下げると見えてくる。\n\n"
+                    "白色はIGNより悪く、既定の候補ではない。筋が位相から来ていることを"
+                    "示した対照として残してある"))
+            {
+                m_Engine.SetMegaLightsNoiseMode(noiseModeIndex);
             }
 
             CheckboxEx(
@@ -305,6 +375,84 @@ namespace Kurenai::UI
                     "(60Hzなら 32で1.2秒 / 64で2.5秒 / 128で4.9秒。実測が理論値と3桁一致)。\n\n"
                     "【クアッド共有では既定を長くしてある】あちらはリザーバを持ち回らないので、"
                     "デノイザだけが時間方向の記憶になる");
+
+                // 【履歴を捨てない】履歴の妥当性判定を切り替えても、履歴が持つ量
+                // (復調済みの色・モーメント)の意味は変わらないので InvalidateDenoiseHistory は呼ばない。
+                // 呼ぶと全画素の履歴長が1へ落ちて1フレームだけ全面にノイズが出るが、それは
+                // 切り替えの効果ではなく「捨てた」効果で、動かしながらの A/B を汚す
+                CheckboxEx(
+                    "履歴の妥当性を4タップで判定###MegaLightsDenoise4Tap",
+                    &m_Engine.GetSettings().MegaLights.DenoiseHistory4Tap,
+                    Defaults::MegaLightsDenoiseHistory4Tap,
+                    "履歴の色はバイリニアで2x2を混ぜているのに、その4タップが妥当かは最近傍1点でしか"
+                    "見ていなかった。1点がシルエットの向こう側だと履歴全体を棄却し、逆に1点が通れば"
+                    "別の面の色が3/4の重みで入る。4点それぞれを同じしきい値で判定し、通ったタップだけを"
+                    "混ぜる。\n\n"
+                    "移動中の棄却率 4.84% → 2.63%、誤差の中央値 -18%、鮮鋭さ +28%、総和比が1へ近づく"
+                    "(BistroExteriorNight / Strafe経路 / 2560x1440。分母は参照実装)。\n\n"
+                    "【既定は有効】");
+
+                CheckboxEx(
+                    "履歴深度のカメラ移動を補正###MegaLightsDenoiseMotionDepth",
+                    &m_Engine.GetSettings().MegaLights.DenoiseMotionCompensatedDepth,
+                    Defaults::MegaLightsDenoiseMotionCompensatedDepth,
+                    "現在のワールド位置を前フレームのViewProjectionで投影し、履歴ガイドのViewZと比較する。"
+                    "同じ面を見続けたままカメラが前後へ動いたとき、カメラ自身の移動による深度差で履歴を"
+                    "捨てるのを防ぐ。法線・材質・相対深度しきい値は従来のまま。\n\n"
+                    "【既定は無効】無効時は現在のViewZと履歴ViewZを直接比較する従来経路を使う");
+
+                // --- 履歴長の適応 ---
+                // 【ここも履歴を捨てない】上の4タップと同じ理由。履歴が持つ量の意味は
+                // 変わらないので、動かしながらのA/Bを汚さないために捨てない
+                SliderFloatEx(
+                    "幾何の部分減衰###MegaLightsDenoiseGeomFalloff",
+                    &m_Engine.GetSettings().MegaLights.DenoiseGeometryFalloff, 0.0f, 1.0f,
+                    Defaults::MegaLightsDenoiseGeometryFalloff, "%.2f", 0,
+                    "再投影先のタップは、しきい値の内側なら「通った」として同じ重みで長い履歴を"
+                    "主張する。しきい値で1になるよう正規化した不一致度に応じて、履歴長を連続的に"
+                    "縮める。通ったタップの被覆(バイリニア重みの和)も掛かる。\n\n"
+                    "【0で従来の二値のまま】0にすると乗じる係数が厳密に1.0になり、"
+                    "従来と画素単位で一致する(陽性対照)");
+                SliderFloatEx(
+                    "時間勾配で履歴を縮める###MegaLightsDenoiseGrad",
+                    &m_Engine.GetSettings().MegaLights.DenoiseGradientStrength, 0.0f, 1.0f,
+                    Defaults::MegaLightsDenoiseGradientStrength, "%.2f", 0,
+                    "8x8タイルの中で現フレームと履歴の平均を比べ、ノイズでは説明できない差が出た"
+                    "タイルだけ履歴を短くする。1画素の生入力は影レイ1本の1標本でノイズが支配的なので、"
+                    "画素単位では判定できない。\n\n"
+                    "【標準誤差で正規化する形は測って落とした】タイル内の画素の誤差は"
+                    "独立ではない(候補プールがタイルに1つ)ため、σ/√n では過小に見積もり、"
+                    "静止シーンでも撃ち続ける。明るさで割る相対変化に替えてある。\n\n"
+                    "狙いは「定常のノイズは長い窓のまま、変化への追従だけ速くする」こと。"
+                    "上限フレーム数を上げてもゴーストが伸びないなら、これが効いている。\n\n"
+                    "【0で無効。従来と画素単位で一致する(陽性対照)】");
+                SliderFloatEx(
+                    "相対変化のしきい値 T0###MegaLightsDenoiseGradT0",
+                    &m_Engine.GetSettings().MegaLights.DenoiseGradientRelStart, 0.0f, 1.0f,
+                    Defaults::MegaLightsDenoiseGradientRelStart, "%.2f", 0,
+                    "タイル平均の差を明るさで割った値がこれを超えたら疑い始める。\n\n"
+                    "【静止シーンの偽陽性率で決める値】むやみに下げると、何も変わっていない"
+                    "タイルが毎フレーム履歴を捨てて静止画のちらつきが増える");
+                SliderFloatEx(
+                    "相対変化の全リセット T1###MegaLightsDenoiseGradT1",
+                    &m_Engine.GetSettings().MegaLights.DenoiseGradientRelFull, 0.0f, 2.0f,
+                    Defaults::MegaLightsDenoiseGradientRelFull, "%.2f", 0,
+                    "ここまで来たら履歴を捨てきる。【追従の速さで決める値】");
+                // 【T0 < T1 を保つ】逆転させるとシェーダ側が T1 = T0 + 0.001 へ丸めるので、
+                // なめらかな減衰のつもりが段差になる。CLI のセッターは弾いているが、
+                // スライダは設定を直接書くので、ここで同じ不変条件を守る
+                if (m_Engine.GetSettings().MegaLights.DenoiseGradientRelFull <=
+                    m_Engine.GetSettings().MegaLights.DenoiseGradientRelStart)
+                {
+                    m_Engine.GetSettings().MegaLights.DenoiseGradientRelFull =
+                        m_Engine.GetSettings().MegaLights.DenoiseGradientRelStart + 0.05f;
+                }
+                SliderIntEx(
+                    "速いEMAの長さ###MegaLightsDenoiseGradFast",
+                    &m_Engine.GetSettings().MegaLights.DenoiseGradientFastFrames, 0, 32,
+                    Defaults::MegaLightsDenoiseGradientFastFrames,
+                    "相対変化を比べる前に現フレームの平均を均す長さ(フレーム数)。0で無効。"
+                    "1フレームの平均はまだノイジーで、そのまま比べると相対変化が揺れる");
             }
 
             if (megaLightsQuadUI)
@@ -323,9 +471,29 @@ namespace Kurenai::UI
                         "「どの灯を選ぶか」と「選んだ灯の可視性」で、後者が大きい ―― "
                         "参照実装を影レイ1本と32本で比べると|相対誤差|のp90が0.37あった。\n\n"
                         "【UE5も1本ではない】r.MegaLights.NumSamplesPerPixel は 2/4/16 から選ぶ形で、"
-                        "最小でも2である"))
+                        "最小でも2である。\n\n"
+                        "【層の数を超えるときの注意】クアッド層化の層は共有ブロックの画素数"
+                        "(半径1なら4、半径2なら16)なので、それを超えると層の割り当てが一巡する。"
+                        "リザーバは2560x1440で1標本あたり約59MB、同サイズを5本確保するので、"
+                        "16標本では4GB級になる(確保サイズと超過警告は起動ログに出る)"))
                 {
                     m_Engine.SetMegaLightsQuadSamples(quadSamples);
+                }
+
+                int quadShareRadius = m_Engine.GetSettings().MegaLights.QuadShareRadius;
+                if (SliderIntEx(
+                        "共有する範囲の半径###MegaLightsQuadShareRadius", &quadShareRadius, 1,
+                        Passes::kMegaLightsMaxQuadShareRadius,
+                        Defaults::MegaLightsQuadShareRadius,
+                        "標本を借りる範囲。1 なら 2x2、2 なら 4x4 のブロックで共有する。\n\n"
+                        "【項の数は (2*半径)^2 x 標本数】半径2・標本1は半径1・標本4と同じ16項で、"
+                        "しかも Initial の候補評価と影レイが 1/4 になる。"
+                        "レイの発射点は4点から16点へ増えるので、球光源の可視性の分散にはむしろ有利。\n\n"
+                        "【代償は借りる距離】可視性を仲間のレイで代用する近似の誤差が、"
+                        "対角 sqrt(2) 画素から sqrt(18) 画素へ広がる。箱フィルタなので総和比には出ず、"
+                        "硬い影の縁の |相対誤差| にだけ出る"))
+                {
+                    m_Engine.SetMegaLightsQuadShareRadius(quadShareRadius);
                 }
 
                 CheckboxEx(
