@@ -18,7 +18,11 @@
 // 【この段階の制約】docs/Architecture.html 25章にまとめてある。要点:
 //   - ヒット面のテクスチャを読めない(bindlessが要る)。色はマテリアルの定数値のみ
 //   - 1本の鏡面レイのみ。粗い面はSSRと同じくラフネスでフェードしてプローブ/IBLへ戻す
-//   - すべての三角形を不透明として扱う(RAY_FLAG_FORCE_OPAQUE)
+//   - 反射レイはすべての三角形を不透明として扱う(RAY_FLAG_FORCE_OPAQUE)。ガラスも
+//     アルファテスト付きの葉も、抜けずにそのまま映る
+//   - ただし**反射先の点に落ちる太陽の影**を求めるレイだけは影レイなので、半透明(BLEND)を
+//     遮蔽物にしない(TraceShadowRay)。直接見たときと反射に映ったときで影の出方が
+//     食い違わないようにするため
 #include "NormalEncoding.hlsli"
 #include "Samplers.hlsli"
 
@@ -101,7 +105,7 @@ float TraceSunShadow(float3 position, float3 normal, float3 toSun)
         return 1.0f;
     }
 
-    const bool occluded = TraceOcclusionRay(
+    const bool occluded = TraceShadowRay(
         SceneTLAS, position + normal * kRayOriginBias, toSun, kRayOriginBias, kShadowRayMaxDistance);
     return occluded ? 0.0f : 1.0f;
 }

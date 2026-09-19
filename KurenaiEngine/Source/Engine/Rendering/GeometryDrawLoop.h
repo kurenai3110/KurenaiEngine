@@ -187,9 +187,8 @@ namespace Kurenai
                     {
                         // 不透明のパスはBLEND(mesh.IsTransparent)を、半透明のパスはそれ以外を落とす。
                         // G-Bufferのアルファは常に1.0で半透明合成ができないため、BLENDだけは
-                        // 専用のフォワードパスへ回る。Allはシャドウパス専用(理由はGeometryMeshFilter)
-                        if (desc.MeshFilter != GeometryMeshFilter::All
-                            && mesh.IsTransparent != (desc.MeshFilter == GeometryMeshFilter::Transparent))
+                        // 専用のフォワードパスへ回る。
+                        if (mesh.IsTransparent != (desc.MeshFilter == GeometryMeshFilter::Transparent))
                         {
                             continue;
                         }

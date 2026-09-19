@@ -35,6 +35,7 @@
 //
 // DX12 かつ DXR Tier 1.1 のときだけ生成される(RayQuery は SM 6.5 の機能)。
 #include "NormalEncoding.hlsli"
+// 影レイは半透明(BLEND)を非不透明ジオメトリとして除外し、カットアウト(MASK)は遮蔽物にする。
 // Smith可視性項とスペキュラのエネルギー補正。BRDF積分LUTと同じ可視性項を使うことが
 // エネルギー補正の前提になるため、DirectLighting.hlsl と定義を共有する
 #include "SpecularEnergy.hlsli"
@@ -131,7 +132,8 @@ float TraceLightVisibility(float3 rayOrigin, float3 L, float originBias, float d
     ray.TMax = max(distanceToLight - originBias, originBias);
 
     // 遮蔽の有無だけが分かればよいので、最初のヒットで打ち切る
-    RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
+    // 半透明(BLEND)は非不透明として除外し、カットアウト(MASK)は遮蔽物として残す。
+    RayQuery<RAY_FLAG_CULL_NON_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> query;
     query.TraceRayInline(SceneTLAS, RAY_FLAG_NONE, 0xFFu, ray);
     query.Proceed();
 

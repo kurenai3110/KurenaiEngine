@@ -106,7 +106,10 @@ float TraceProbeSunShadow(float3 position, float3 normal, float3 toSun)
         return 1.0f;
     }
 
-    const bool occluded = TraceOcclusionRay(
+    // 【影レイなのでTraceShadowRayを使う】半透明(BLEND)は遮蔽物にしない。
+    // TraceOcclusionRayのままだと、ガラス窓の内側に落ちたプローブレイのヒット点が
+    // 「窓ガラスに遮られている」と判定され、屋内へ日が差し込まなくなる
+    const bool occluded = TraceShadowRay(
         SceneTLAS, position + normal * kRayOriginBias, toSun, kRayOriginBias, kProbeRayMaxDistance);
     return occluded ? 0.0f : 1.0f;
 }
@@ -201,6 +204,17 @@ void CSMain(uint3 dispatchThreadID : SV_DispatchThreadID)
     ray.TMax = kProbeRayMaxDistance;
 
     // アルファテスト付きのジオメトリも不透明として扱う(RTAO/RT反射と同じ扱い。25章の制約)。
+    //
+    // 【半透明も遮蔽物として扱う。透過させてはいけない】影レイ(TraceShadowRay)と違い、
+    // ここで半透明を通すと画面全体が暗くなり、しかも目的だった「窓の奥」は明るくならない。
+    // Bistro屋外の店先で実測(12時・GIボリューム有り・画面全体の平均輝度):
+    //   ガラスを遮蔽物のまま         9.96   ← 最も明るい(GIボリューム無しの 9.14 より明るい)
+    //   RAY_FLAG_CULL_NON_OPAQUEで素通し  4.29
+    //   透過率(1-alpha)を積算して通す     4.29   ← 素通しとほぼ同じ
+    // 素通しと透過率付きがほぼ同じ値になるのは、透過率を掛ける相手(屋内)が既にほぼ真っ黒で、
+    // 0.8倍しても0倍しても変わらないため。一方でガラスは「明るく照らされた面」として
+    // 周囲のプローブへ光を返していたので、通した瞬間にその光が失われて全体が暗くなる。
+    // プローブ密度(1.0m / 0.5m / 0.2m)とプローブ分類の有無を振っても結論は変わらなかった。
     // 裏面はカリングしない ―― 壁の内部に落ちたプローブを見分けられなくなるため
     RayQuery<RAY_FLAG_FORCE_OPAQUE> query;
     query.TraceRayInline(SceneTLAS, RAY_FLAG_NONE, 0xFFu, ray);

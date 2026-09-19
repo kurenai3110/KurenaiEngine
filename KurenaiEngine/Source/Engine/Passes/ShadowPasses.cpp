@@ -269,7 +269,7 @@ namespace Kurenai::Passes
                         Rendering::GeometryDrawLoopDesc shadowLoop;
                         shadowLoop.Frustum = &cascadeFrustum;
                         shadowLoop.LODMode = Rendering::GeometryLODMode::Coarsest;
-                        shadowLoop.MeshFilter = Rendering::GeometryMeshFilter::All;
+                        shadowLoop.MeshFilter = Rendering::GeometryMeshFilter::Opaque;
 
                         Rendering::ForEachGeometryDraw(
                 m_Engine.MakeGeometryDrawHost(),
@@ -280,10 +280,9 @@ namespace Kurenai::Passes
 
                                 // G-Bufferが1ドローで描くモデルは、シャドウも1ドローで描く。
                                 //
-                                // 【半透明は落とさない】このパスは従来から、BLENDのメッシュも
-                                // 実体のまま影を落としている。ここでふるい分けると影の出方が変わって
-                                // しまうため、意図的に何も落とさない(カットアウトの切り抜きだけは
-                                // 下で反映する ―― そちらは板ポリゴンの影が出る明確な不具合だった)。
+                                // 半透明(BLEND)は影を落とさない。頂点シェーダー経路は
+                                // MeshFilter=Opaqueで、メッシュレット経路は下のrejectMaskで同じことを行う。
+                                // カットアウト(MASK)だけは従来どおり切り抜きを反映して影を描く。
                                 //
                                 // 【カットアウトを持つモデルだけ2回に分ける】不透明ぶんは
                                 // ピクセルシェーダーを持たないPSOで描きたいので、
@@ -327,14 +326,17 @@ namespace Kurenai::Passes
                                 dispatchShadowMeshlets(
                                     instance.IsMirrored ? m_ShadowMeshletPipelineStateMirrored.get()
                                                         : m_ShadowMeshletPipelineState.get(),
-                                    splitCutout ? Assets::kGpuMaterialFlagCutout : 0u, 0u);
+                                    Assets::kGpuMaterialFlagTransparent
+                                        | (splitCutout ? Assets::kGpuMaterialFlagCutout : 0u),
+                                    0u);
 
                                 if (splitCutout)
                                 {
                                     dispatchShadowMeshlets(
                                         instance.IsMirrored ? m_ShadowMeshletCutoutPipelineStateMirrored.get()
                                                             : m_ShadowMeshletCutoutPipelineState.get(),
-                                        0u, Assets::kGpuMaterialFlagCutout);
+                                        Assets::kGpuMaterialFlagTransparent,
+                                        Assets::kGpuMaterialFlagCutout);
                                 }
                                 return true;
                             },
