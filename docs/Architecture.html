@@ -5694,7 +5694,33 @@ ImGuiはRenderGraphの外でバックバッファへ直接描かれるため、�
 移植時に参照実装から変えた点(定数の持ち方・ゼロ除算ガード・スレッドの割り当て)と実測は
 <a href="ImplementationHistory.md">ImplementationHistory.md</a> 41.23節。
 </p>
-<h3>33.5 ログファイルの追記</h3>
+<h3>33.5 NVIDIA DLSS Super Resolution / DLAA</h3>
+<p>
+NVIDIA DLSS SDK(NGX API 1.5.0)によるDLSS Super Resolution / DLAAは、FSR1相当と同じく内部レンダー解像度から出力解像度へ戻すが、
+<strong>TAAと排他的に、Tonemapの前のリニアHDRで評価する。</strong> DLSSは線形HDRの入力を前提に
+学習されている。一方33.4のEASU/RCASは値域[0,1]を式に埋め込んでいるためTonemapの後・LDRでなければならない。
+</p>
+<p>
+DLSSを通したフレームで<strong>実際に出力解像度で走るのは<code>Bloom</code>・<code>Tonemap</code>・
+<code>Present</code>の3パス</strong>である。<code>AutoExposure</code>は4つ目として解像度の
+二系統を意識しなければならないが、<strong>意識したうえでレンダー解像度のまま残す。</strong>
+測光は色と深度を同じ整数座標で引いており(<code>AutoExposure.hlsl</code>の
+<code>DepthTexture[dispatchThreadID.xy]</code>)、深度はレンダー解像度のままだからで、
+入力にもDLSS前の色を使う。それ以外のバッファは従来どおり内部レンダー解像度に留まるため、
+レンダー解像度と出力解像度の仕分けはこの4パスへ閉じる。
+</p>
+<p>
+RHIは<code>IRHIDLSSContext</code>という不透明ハンドルと<code>IRHIDevice::SupportsDLSS()</code> /
+<code>CreateDLSSContext()</code>でSDKを包む。ImGuiバックエンド・GPUプロファイラ・
+<code>IRHIAccelerationStructure</code>と同じく、外部依存はバックエンド実装側へ閉じ込める。
+DX12だけがNGXを実装し、DX11はDLSS非対応として従来のFSR1相当経路へフォールバックする。
+</p>
+<p>
+DLSSの時間履歴はTAAの<code>HistoryValid</code>と共有しない。TAAを無効にすると同フラグは毎フレーム
+falseへ落ちるため、流用するとNGXへ<code>InReset=1</code>が毎フレーム渡り、時間方向の蓄積が効かなくなる。
+そのため<code>FrameHistoryState::DLSSHistoryValid</code>を別に持つ。
+</p>
+<h3>33.6 ログファイルの追記</h3>
 <p>
 <code>Logger</code>はログファイルを「そのプロセスで初めて開く接尾辞なら<code>trunc</code>、
 2回目以降は<code>app</code>」で開く。常に<code>trunc</code>にすると
