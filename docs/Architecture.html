@@ -1122,7 +1122,17 @@ Morgan McGuire版OBJ配布(<a href="https://github.com/Graphify-Labs/awesome-3d-
 アーカイブを展開したもの)を<code>KurenaiPacker.exe</code>で直接パックしたものです。
 </p>
 <pre><code>KurenaiPacker.exe &lt;展開先&gt;/interior.obj -o Assets/Packed/BistroMcGuire/Interior.kmodel --scale 0.01
-KurenaiPacker.exe &lt;展開先&gt;/exterior.obj -o Assets/Packed/BistroMcGuire/Exterior.kmodel --scale 0.01</code></pre>
+KurenaiPacker.exe &lt;展開先&gt;/exterior.obj -o Assets/Packed/BistroMcGuire/Exterior.kmodel --scale 0.01 ^
+  --bake-occlusion --emissive &lt;材質名&gt;=&lt;R,G,B&gt; (11件)</code></pre>
+<div class="note">
+<p><b>屋外は<code>--bake-occlusion</code>と<code>--emissive</code>(11材質)付きで焼いてある。</b>
+遮蔽マップとbent normalが無いと間接光の遮蔽が一切効かず、<code>--emissive</code>が無いと
+街灯・ストリングライト・スクーターのヘッドライトが光らない
+(WavefrontMTLは<code>Ke</code>を持たず、132材質すべてが0で入ってくる)。
+<b>値は<code>exterior.mtl</code>の<code>newmtl</code>の並び順と材質番号が一対一である
+ことを使って<code>.kmodel</code>から復元できる</b> ――
+<code>Tools/extract_bistro_lights.py</code>が同じ対応に依存している。</p>
+</div>
 <p>
 OBJ/MTLはKurenaiPacker内部のassimpインポータで直接読む(glTF/FBXと同じ<code>ModelSource.cpp</code>の
 <code>LoadSourceModel</code>経路)。<strong>Blender等で一度glTFへ変換してから読み込む経路は使わない</strong> ――
@@ -4015,6 +4025,17 @@ TEXCOORD0はレンガや石畳をタイリングして貼るためのUVであり
 起こりうる</b>が、黙って三角形が減ると描画に穴が開く。
 <code>UnwrapMesh</code>は入力と出力の三角形数を突き合わせ、減っていれば件数と割合を警告する。
 </p>
+<h4>22.6.7 半透明(BLEND)は遮蔽物に入れない</h4>
+<p>レイキャストの相手になる遮蔽物のBVH(<code>BuildBvh</code>)からは、
+<b>半透明のメッシュ(<code>Assets::Mesh::IsTransparent</code>)を外す</b>。glTFの
+<code>alphaMode=BLEND</code>のほか、OBJで<code>d</code>/<code>Tr</code>/<code>Tf</code>から
+半透明と判定したものも含む。ガラスを遮蔽物として焼くと、
+ショーウィンドウの内側のような「窓が開いているだけの小空間」が完全密閉として扱われ、
+遮蔽が0に焼かれる。遮蔽マップとbent normalは間接光へ<b>乗算で</b>効くため、0に焼かれた面は
+グローバルIBLだろうがDDGI(31章)だろうが光を受け取れなくなり、窓の奥が真っ黒に潰れる。</p>
+<p>アルファカットアウト(<code>MASK</code>)は板ポリゴンのまま遮蔽物として残す ――
+影レイの扱い(29章)と揃えてある。外したメッシュ数と三角形数はパック時にログへ出る。
+実測は<a href="ImplementationDetail.md">ImplementationDetail.md</a> 67章。</p>
 <h3>22.7 既知の制約</h3>
 <ul>
   <li>glTFは<code>occlusionTexture</code>に<code>TEXCOORD_1</code>を指定できるが、
@@ -4916,7 +4937,8 @@ SSRと同じくラフネスでフェードしてプローブ/IBLへ戻す。
 影レイは<code>RAY_FLAG_CULL_NON_OPAQUE</code>を使い、半透明(<code>BLEND</code>)を遮蔽物にしない。アルファカットアウト(<code>MASK</code>)はBLASへ不透明として登録してあるため、従来どおり板ポリゴンのまま影を落とす。
 </p>
 <p>
-<strong>半透明を遮蔽物から外すのは「影レイ」だけである。</strong>
+<strong>レイトレーシングの中で半透明を遮蔽物から外すのは「影レイ」だけである。</strong>
+(遮蔽ベイクからも外すが、あれはオフラインの別経路である。22.6.7節)
 RT反射の<em>反射レイ</em>・RTAOの<em>遮蔽レイ</em>・DDGIの<em>プローブレイ</em>は従来どおり
 <code>RAY_FLAG_FORCE_OPAQUE</code>で、半透明も不透明として扱う(ガラスは反射にも映るし、AOも落とす)。
 一方、RT反射が<em>反射先の点に落ちる太陽の影</em>を求めるために撃つレイ
