@@ -146,6 +146,15 @@ namespace Kurenai::Passes
                 presentSourceWidth = targets->UpscaleTargetWidth;
                 presentSourceHeight = targets->UpscaleTargetHeight;
             }
+            else if (bb.DLSSActive)
+            {
+                // DLSSはTonemapより**前**に入るため、読む先はFSR1相当と違ってTonemapの出力
+                // そのままである(拡大はもう済んでいる)。変わるのは実寸だけ ――
+                // Tonemapが出力解像度で走っているので、レターボックスの基準もそちらにする
+                presentSourceTexture = targets->TonemapTexture.get();
+                presentSourceWidth = bb.DLSSOutputWidth;
+                presentSourceHeight = bb.DLSSOutputHeight;
+            }
             else
             {
                 presentSourceTexture = targets->TonemapTexture.get();

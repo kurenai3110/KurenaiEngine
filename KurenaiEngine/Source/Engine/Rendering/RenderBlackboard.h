@@ -36,6 +36,14 @@ namespace Kurenai::Rendering
         // デバッグ表示中は内部解像度のまま等倍で見たいので走らせない
         bool UpscaleActive = false;
 
+        // DLSSを今フレーム走らせたか。UpscaleActiveと**排他**。
+        // 同じくデバッグ表示中は走らせない(中間バッファを内部解像度のまま等倍で見たいため)。
+        // PresentPassはこれを見て、最終画の実寸を出力解像度へ差し替える
+        bool DLSSActive = false;
+        // 上がtrueのときの最終画(TonemapTexture)の実寸。falseのときは0
+        uint32_t DLSSOutputWidth = 0;
+        uint32_t DLSSOutputHeight = 0;
+
         // MegaLightsのデノイズを今フレーム走らせたか。
         // 後段の直接光パスが「生出力とデノイズ後のどちらを t7 へ張るか」をこれで決める
         bool MegaLightsDenoiseRuns = false;

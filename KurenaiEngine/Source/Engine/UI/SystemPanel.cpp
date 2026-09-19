@@ -291,10 +291,23 @@ namespace Kurenai::UI
 
         // 表示名と値の並びは UpscaleQualityMode の宣言順に一致させること。
         // 倍率の数値はGetUpscaleRatio()が持っているので、ここには表示名しか置かない
+        // 【並びはUpscaleQualityModeの宣言順に一致させること】DLAAとUltra Performanceは
+        // DLSS専用で、FSR1相当を選んでいる間はコンボに出さない(RequestUpscaleSettingsが
+        // 受けてもQualityへ落とすが、選べてしまうと落とされたことに気づけない)
         static const char* kUpscaleQualityNames[] =
         {
-            "Ultra Quality (1.3x)", "Quality (1.5x)", "Balanced (1.7x)", "Performance (2.0x)"
+            "DLAA (1.0x)", "Ultra Quality (1.3x)", "Quality (1.5x)", "Balanced (1.7x)", "Performance (2.0x)",
+            "Ultra Performance (3.0x)"
         };
+        static_assert(
+            IM_ARRAYSIZE(kUpscaleQualityNames) == static_cast<int>(UpscaleQualityMode::UltraPerformance) + 1,
+            "品質モードの表示名と列挙の段数を一致させること");
+
+        // 手法の表示名。並びはUpscaleTechniqueの宣言順
+        static const char* kUpscaleTechniqueNames[] = { "FSR1相当 (EASU + RCAS)", "DLSS / DLAA" };
+        static_assert(
+            IM_ARRAYSIZE(kUpscaleTechniqueNames) == static_cast<int>(UpscaleTechnique::DLSS) + 1,
+            "手法の表示名と列挙の段数を一致させること");
 
         // 超解像が有効なときComboが指すのは出力解像度、無効なときは内部レンダー解像度。
         // どちらもm_Settings.PostProcess.UpscaleOutputWidth/Heightが追いかけているのでこれを見ればよい
@@ -321,16 +334,17 @@ namespace Kurenai::UI
         // 出力解像度・品質モード・有効/無効のどれが変わっても内部レンダー解像度の導出をやり直す
         // 必要があり、経路を分けると片方だけ更新し忘れる
         bool upscaleEnabled = m_Engine.GetSettings().PostProcess.UpscaleEnabled;
+        int techniqueIndex = static_cast<int>(m_Engine.GetSettings().PostProcess.UpscaleTech);
         int qualityIndex = static_cast<int>(m_Engine.GetSettings().PostProcess.UpscaleQuality);
         uint32_t outputWidth = comboWidth;
         uint32_t outputHeight = comboHeight;
         bool settingsChanged = false;
 
         if (CheckboxEx(
-                "超解像(FSR1相当)###UpscaleEnabled", &upscaleEnabled, Defaults::UpscaleEnabled,
-                "低い内部解像度で描いた絵を、EASU(方向性エッジ再構成)とRCAS(シャープ化)で"
-                "出力解像度へ拡大する。単純な拡大より精細な絵をより短いフレーム時間で得られるが、"
-                "内部解像度が下がるので絵は変わる。ImGuiは出力解像度でそのまま描かれるためぼけない"))
+                "超解像###UpscaleEnabled", &upscaleEnabled, Defaults::UpscaleEnabled,
+                "低い内部解像度で描いた絵を出力解像度へ再構成する。単純な拡大より精細な絵を"
+                "より短いフレーム時間で得られるが、内部解像度が下がるので絵は変わる。"
+                "ImGuiは出力解像度でそのまま描かれるためぼけない"))
         {
             settingsChanged = true;
         }
@@ -348,29 +362,66 @@ namespace Kurenai::UI
 
         if (upscaleEnabled)
         {
+            // 【DLSS非対応環境では選択肢自体を出さない】RenderingPanelのSSR/AOの手法コンボと
+            // 同じ作法。選べてしまうと「選んだのに効かない」形でしか気づけない
+            if (m_Engine.GetRenderCapabilities().DLSSAvailable)
+            {
+                if (ComboEx(
+                        "手法###UpscaleTechnique", &techniqueIndex, kUpscaleTechniqueNames,
+                        IM_ARRAYSIZE(kUpscaleTechniqueNames),
+                        static_cast<int>(PostProcessSettings::DefaultUpscaleTechnique()),
+                        "FSR1相当はトーンマップ後のLDRに掛かる空間フィルタで、1フレームの情報しか使わない。"
+                        "DLSSはトーンマップ前のHDRで働く時間的アップスケーラで、TAAの位置に入って"
+                        "TAAを置き換える(同じ倍率なら精細だが、後段のブルームとトーンマップが"
+                        "出力解像度で走るぶん稼ぎが減る)"))
+                {
+                    settingsChanged = true;
+                }
+            }
+
+            // FSR1相当ではDLSS専用の2段(先頭のDLAAと末尾のUltra Performance)を出さない。
+            // 配列の途中を飛ばすのではなく、先頭をずらして段数を削る形にしてある
+            const bool dlssSelected = static_cast<UpscaleTechnique>(techniqueIndex) == UpscaleTechnique::DLSS;
+            const int qualityFirst = dlssSelected ? 0 : static_cast<int>(UpscaleQualityMode::UltraQuality);
+            const int qualityCount = dlssSelected
+                                         ? IM_ARRAYSIZE(kUpscaleQualityNames)
+                                         : static_cast<int>(UpscaleQualityMode::Performance) -
+                                               static_cast<int>(UpscaleQualityMode::UltraQuality) + 1;
+            // 選択中の段が表示範囲の外なら既定へ寄せる(FSR1へ切り替えた直後のDLAAなど)
+            int qualityDisplayIndex = qualityIndex - qualityFirst;
+            if (qualityDisplayIndex < 0 || qualityDisplayIndex >= qualityCount)
+            {
+                qualityDisplayIndex = static_cast<int>(PostProcessSettings::kDefaultUpscaleQualityMode) - qualityFirst;
+            }
             if (ComboEx(
-                    "品質モード###UpscaleQualityMode", &qualityIndex, kUpscaleQualityNames,
-                    IM_ARRAYSIZE(kUpscaleQualityNames),
-                    static_cast<int>(PostProcessSettings::kDefaultUpscaleQualityMode),
+                    "品質モード###UpscaleQualityMode", &qualityDisplayIndex, kUpscaleQualityNames + qualityFirst,
+                    qualityCount,
+                    static_cast<int>(PostProcessSettings::kDefaultUpscaleQualityMode) - qualityFirst,
                     "出力解像度を何倍に拡大するか。倍率が大きいほど内部解像度が下がって速くなるが、"
-                    "細部が失われる。内部解像度は8の倍数へ切り捨てられる"))
+                    "細部が失われる。内部解像度は8の倍数へ切り捨てられる"
+                    "(DLSSでは倍率ではなくNGXが返す推奨解像度を使う)"))
             {
                 settingsChanged = true;
             }
+            qualityIndex = qualityDisplayIndex + qualityFirst;
 
+            // RCASのシャープネスはFSR1相当専用。DLSSにRCASは無く、シャープ化はTonemap側が持つ
+            if (!dlssSelected)
+            {
             SliderFloatEx(
                 "シャープネス###UpscaleSharpness", &m_Engine.GetSettings().PostProcess.UpscaleSharpness, 0.0f, 1.0f,
                 Defaults::UpscaleSharpness, "%.2f", 0,
                 "RCASのシャープ化の強さ。0で無効。拡大後の出力解像度で効くため、"
                 "トーンマップ側のシャープネス(ポストプロセスパネルのTAAシャープネス)は"
-                "超解像が有効な間だけ自動的に0になる");
+                "FSR1相当が有効な間だけ自動的に0になる");
+            }
         }
 
         if (settingsChanged)
         {
             m_Engine.RequestUpscaleSettings(
-                upscaleEnabled, static_cast<UpscaleQualityMode>(qualityIndex), outputWidth,
-                outputHeight);
+                upscaleEnabled, static_cast<UpscaleTechnique>(techniqueIndex),
+                static_cast<UpscaleQualityMode>(qualityIndex), outputWidth, outputHeight);
         }
 
         EndParamGroup();
@@ -380,8 +431,8 @@ namespace Kurenai::UI
             // 押した時点の1回きり。以後ウィンドウをリサイズしても内部解像度は追従しない
             // (毎フレーム追従させると、ドラッグ中に何度もレンダーターゲットを作り直すことになる)
             m_Engine.RequestUpscaleSettings(
-                upscaleEnabled, static_cast<UpscaleQualityMode>(qualityIndex), m_Engine.GetWidth(),
-                m_Engine.GetHeight());
+                upscaleEnabled, static_cast<UpscaleTechnique>(techniqueIndex),
+                static_cast<UpscaleQualityMode>(qualityIndex), m_Engine.GetWidth(), m_Engine.GetHeight());
         }
         ItemHelp(
             "出力解像度をウィンドウのクライアント領域と同じにして、拡大縮小の無い等倍表示にする"

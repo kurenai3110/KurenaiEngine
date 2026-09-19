@@ -44,6 +44,8 @@ namespace Kurenai::Passes
         virtual const Assets::Scene& GetScene() const = 0;
         virtual Settings::EngineSettings& GetSettings() = 0;
         virtual std::atomic<bool>& GetTAAHistoryValid() = 0;
+        // DLSSの履歴が信用できるか。TAAのものとは別管理(FrameHistoryState.h参照)
+        virtual std::atomic<bool>& GetDLSSHistoryValid() = 0;
         virtual RHI::IRHITexture* GetWaterNormalMapTexture() const = 0;
         virtual bool IsMeshLightsEnabled() const = 0;
         virtual void IssueTextureDumps(Core::RenderGraph& graph) = 0;

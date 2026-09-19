@@ -21,6 +21,7 @@
 #include "RenderFrameContext.h"
 #include "SampleSequence.h"
 #include "SunLighting.h"
+#include "DLSSQualityMap.h"
 
 // BuildFrameContext から切り出した、フレームの値を組み立てる各段(段階7.5)。
 // KurenaiEngine3D のメンバ関数のまま、翻訳単位だけをここへ分けている
@@ -73,11 +74,41 @@ namespace Kurenai
         }
 
         DirectX::XMFLOAT2 jitterOffsetPixels{ 0.0f, 0.0f };
-        if (m_Settings.PostProcess.TAAEnabled)
+        // 【DLSSでもジッターが要る】DLSSは時間的アップスケーラで、毎フレームずらした
+        // サブピクセル位置のサンプルを蓄積することで出力解像度を再構成する。
+        // TAAと同じくジッターが無いと、蓄積しても情報が増えない
+        //
+        // 【デバッグ表示中はDLSSも走らないのでジッターも止める】PostProcessPassesは
+        // DebugView::Final以外のときDLSSパスを登録しない(中間バッファを内部解像度のまま
+        // 等倍で見たいため)。ここで止めないと、蓄積する先が無いのに画面が振動するだけになる
+        const bool dlssWillRun = ShouldRunDLSS();
+        const bool jitterRequired = m_Settings.PostProcess.TAAEnabled || dlssWillRun;
+        if (jitterRequired)
         {
+            // 位相数(Halton列を何サンプルで巡回させるか)。
+            //
+            // 【DLSSはTAAより多くの位相が要る】TAAは出力解像度=レンダー解像度で、1画素あたり
+            // 8サンプルあれば足りる。DLSSは出力解像度の画素数がレンダー解像度の倍率^2倍あるので、
+            // 同じ密度を保つには位相数も倍率^2倍必要になる(NVIDIAの推奨も 8 × 倍率^2)。
+            // 足りないと、出力解像度の一部の画素が一度もサンプルされないまま推定され続ける。
+            //
+            // 【m_History.FrameIndexそのものは触らない】この番号はMegaLightsのタイル格子ジッターとも
+            // 共有されている(下のDecideMegaLightsTileJitter)。変えるのは巡回の周期だけにする
+            uint32_t jitterPhaseCount = Rendering::kTAAJitterSampleCount;
+            if (IsDLSSActive() && m_RenderWidth > 0)
+            {
+                const float ratio =
+                    static_cast<float>(m_RenderTargets.DLSSTargetWidth) / static_cast<float>(m_RenderWidth);
+                const float scaled = static_cast<float>(Rendering::kTAAJitterSampleCount) * ratio * ratio;
+                // 上限は3倍(UltraPerformance)の72を含む値。際限なく増やすと収束が遅くなるだけになる
+                constexpr uint32_t kMaxJitterPhaseCount = 128u;
+                jitterPhaseCount = std::clamp(
+                    static_cast<uint32_t>(scaled + 0.5f), Rendering::kTAAJitterSampleCount, kMaxJitterPhaseCount);
+            }
+
             // Halton列の添字は1から始める。添字0はradical inverseの定義上どの基数でも0となり、
             // オフセットがピクセルの角(-0.5, -0.5)へ偏ってしまう
-            const uint32_t haltonIndex = (m_History.FrameIndex % Rendering::kTAAJitterSampleCount) + 1;
+            const uint32_t haltonIndex = (m_History.FrameIndex % jitterPhaseCount) + 1;
             jitterOffsetPixels.x =
                 (Rendering::RadicalInverse(haltonIndex, 2) - 0.5f) * m_Settings.PostProcess.TAAJitterScale;
             jitterOffsetPixels.y =
@@ -95,6 +126,8 @@ namespace Kurenai
             jitterOffsetPixels.x / static_cast<float>(m_RenderWidth),
             jitterOffsetPixels.y / static_cast<float>(m_RenderHeight),
         };
+        // DLSSへ渡すのはピクセル単位のまま(y反転もしない)。NDC/UVへ直す前の値
+        frameContext.JitterPixels = jitterOffsetPixels;
 
         // ビュー行列と「ジッター済み」射影行列をここで一度だけ確定させ、以降のカメラ由来の行列は
         // すべてこれらから作る。
@@ -1244,6 +1277,13 @@ namespace Kurenai
         frameContext.ActiveAORawTexture = GetActiveAORawTexture();
         frameContext.ActiveReflectionOutput = GetActiveReflectionOutput();
         frameContext.UpscaleAvailable = IsUpscaleActive();
+        // DLSSはFSR1相当と排他。IsDLSSActive()とIsUpscaleActive()は同時にtrueにならない
+        // (CreateUpscaleTargetsが使わない側のテクスチャを必ず解放するため)
+        frameContext.DLSSAvailable = IsDLSSActive();
+        frameContext.DLSSContext = m_DLSSContext.get();
+        frameContext.DLSSQuality = Rendering::ToRHIDLSSQuality(m_Settings.PostProcess.UpscaleQuality);
+        frameContext.DLSSOutputWidth = m_RenderTargets.DLSSTargetWidth;
+        frameContext.DLSSOutputHeight = m_RenderTargets.DLSSTargetHeight;
         frameContext.SwapChain = m_SwapChain.get();
         // 【遅延生成のためだけに渡す】使ってよいのはMegaLightsの読み戻しバッファだけ
         frameContext.Device = m_Device.get();
