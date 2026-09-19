@@ -199,12 +199,27 @@ namespace KurenaiPacker
 
         // モデル全体(全メッシュ)の三角形からBVHを構築する。
         // メッシュ単位ではなくモデル全体で作るのは、あるメッシュのAOに別のメッシュ
-        // (床に対する壁など)の遮蔽が要るため
+        // (床に対する壁など)の遮蔽が要るため。
+        //
+        // 【半透明(BLEND)は遮蔽物に入れない】ガラスを遮蔽物として焼くと、ショーウィンドウの
+        // 内側のように「窓が開いているだけの小空間」が完全密閉として扱われ、遮蔽が0に焼かれる。
+        // 遮蔽マップとbent normalは間接光へ乗算で効くため、0に焼かれた面はDDGIだろうが
+        // グローバルIBLだろうが光を受け取れなくなり、窓の奥が真っ黒に潰れる
+        // (Bistro屋外の店先で実測。実装詳細 67章)。
+        // カットアウト(MASK)は板ポリゴンのまま遮蔽物として残す ―― 影レイの扱いと揃えてある
         Bvh BuildBvh(const SourceModel& model)
         {
             std::vector<BvhBuildTriangle> build;
+            size_t skippedMeshes = 0;
+            size_t skippedTriangles = 0;
             for (const SourceMesh& mesh : model.Meshes)
             {
+                if (mesh.IsTransparent)
+                {
+                    ++skippedMeshes;
+                    skippedTriangles += mesh.Indices.size() / 3;
+                    continue;
+                }
                 for (size_t i = 0; i + 2 < mesh.Indices.size(); i += 3)
                 {
                     const Vertex& a = mesh.Vertices[mesh.Indices[i + 0]];
@@ -225,9 +240,20 @@ namespace KurenaiPacker
                 }
             }
 
+            if (skippedMeshes > 0)
+            {
+                Info("半透明(BLEND)のメッシュ" + std::to_string(skippedMeshes) + "個(三角形 " +
+                     std::to_string(skippedTriangles) + "個)を遮蔽物から外しました");
+            }
+
             Bvh bvh;
             if (build.empty())
             {
+                // 全メッシュが半透明だと遮蔽物が1つも無くなる。呼び出し側(BakeOcclusion)は
+                // 空のBVHを見た時点で打ち切るため、**遮蔽マップもbent normalも1枚も出力されない**。
+                // マテリアルはテクスチャ無し(遮蔽なし扱い)のまま焼かれるので絵は壊れないが、
+                // --bake-occlusion を指定した意味が無いので気づけるようにしておく
+                Warn("遮蔽物になる三角形が1つもありません。遮蔽マップとbent normalは出力されません");
                 return bvh;
             }
 
